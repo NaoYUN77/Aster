@@ -70,8 +70,16 @@
   - 从宽松权限的检出复制后，代码目录会被重置为 `755`，不再保留 `777`。
   - 必需键整行缺失或被注释时不再视为已配置（原先只匹配“键存在但值为空”）。
 
+## systemd 部署（新增路径，未取代 Docker）
+
+同一分支新增 `deploy/install-systemd.sh`、`deploy/personal-agent.service` 与 `deploy/README-systemd.md`，面向“主机已有 QQ bot 等容器”的共存场景；Docker 路径保持完整可用，本轮对它的改动只有显式卷名与内存上限说明的更正。
+
+- 单实例：`flock --nonblock` 包住 `ExecStart`。
+- 资源：`MemoryHigh=768M`、`MemoryMax=1G`、`TasksMax=64`，为 4 GB 主机上与其他服务共存收紧；单独使用可通过 `systemctl edit` 调高。
+- 隔离：`ProtectSystem=strict` + `ReadWritePaths=/var/lib/personal-agent`、`ProtectHome=true`、`NoNewPrivileges=true`、`UMask=0077`。
+- 配置位于 `/etc/personal-agent.env`（root 600），代码与数据目录分离。
+
 ## 待做
 
 1. **阶段 E：真实联调仍阻塞。** 缺少测试 bot 的 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_OWNER_ID`、受支持提供商的 `MODEL_PROVIDER`／`MODEL_ID`／API key 及联调授权。真实 Telegram 与真实模型路径、真实记忆文件、真实“发送已到达但确认丢失”窗口都还没有证据。
 2. **阶段 F：Linux 部署验收仍阻塞。** 缺少 4 核／4 GB 目标主机。需补测 Node 版本与权限、单实例约束、SIGTERM 与 45 秒停止宽限期配合、强杀恢复、Linux 进程组取消、内存与磁盘峰值、日志脱敏、卷备份还原、容器内 bash 可用性。安装脚本只在容器内以 `systemctl` 桩验证过，未在真实 systemd 下启动 unit。
-3. **推送与合并需人工执行。** 本会话 auto 模式不允许 `git push`。
