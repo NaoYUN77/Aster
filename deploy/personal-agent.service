@@ -1,0 +1,31 @@
+[Unit]
+Description=Personal Agent Telegram Bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=personal-agent
+Group=personal-agent
+WorkingDirectory=/opt/personal-agent
+EnvironmentFile=/etc/personal-agent.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/flock --no-fork --nonblock /var/lib/personal-agent/app.lock /usr/bin/node /opt/personal-agent/dist/src/main.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+StateDirectory=personal-agent
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/personal-agent
+MemoryHigh=2G
+MemoryMax=3G
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

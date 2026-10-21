@@ -1,0 +1,136 @@
+# MVP 验收记录
+
+状态：本地验证完成；真实 Telegram／模型联调与 Linux 部署待验收。
+
+## 环境与基线
+
+- 日期：2026-10-21。
+- 操作系统：Windows 11 Home China 10.0.26200（win32 x64）。本地结果不代表 Linux 信号与子进程行为，相关项见阶段 F。
+- 运行时：Node.js v24.19.0（`.node-version`）、npm 11.17.0。
+- 依赖：`package.json` 固定版本；`npm ls --depth=0` 退出 0，`npm ci --dry-run` 退出 0，无需重装。
+- 数据目录：测试使用操作系统临时目录（`mkdtemp`）并在结束时删除；仓库 `./data` 未被测试写入。
+- 外部服务：全部离线。模型使用 `@earendil-works/pi-ai/providers/faux`，Telegram 使用进程内替换客户端；未调用真实模型或 Telegram API。
+
+接手时基线命令：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run check` | 通过 |
+| `npm test` | 13 项通过，0 失败 |
+| `npm run build` | 通过 |
+
+本轮完成后的最终命令（在最终代码上）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run check` | 通过 |
+| `npm test` | 27 项通过，0 失败、0 取消、0 跳过（约 12 秒） |
+| `npm run build` | 通过 |
+
+## 阶段结果
+
+| 阶段／场景 | 状态 | 命令或步骤 | 结果与证据 | 剩余事项 |
+| --- | --- | --- | --- | --- |
+| A 可复现基线 | 通过 | `npm run check`／`npm test`／`npm run build` | 三项均通过；初始 13 项用例全部通过 | 无 |
+| B1 文档与实现对齐：顺序工具执行 | 通过 | 测试 `sequential tool execution prevents overlapping calls in one round` | 同一回合两个工具调用不重叠（最大并发 1，顺序为调用顺序）；`src/agent.ts:34` 已配置 | 无 |
+| B1 文档与实现对齐：`prune()` 保留策略 | 通过 | 测试 `prune retains the newest 100 sent requests and every unfinished request` | 修复前子查询取全部请求的最新 100 条，会误删较旧的已发送记录；修复后只保留最新 100 条 `sent`，未完成请求全部保留，级联删除投递与诊断 | 无 |
+| B2 工具边界与资源限制 | 通过 | 见“资源边界”；测试 `SQLite harness rejects invalid custom-tool arguments before execution`、`bash output is bounded…`、`read truncation names the offset…` | 非法参数经底座校验路径拒绝；bash／read 截断带可见诊断与继续路径 | 见“待办与阻塞”中的非阻塞限制 |
+| C 接收事务与重复请求 | 通过 | `inbox rejects identity and request-content conflicts without advancing offset`、`inbox keeps identical text under different request IDs as separate requests` | 同 ID 同内容幂等；同 ID 不同内容报错且 offset 不前移；同内容不同 ID 是两个请求 | 无 |
+| C 已提交但应用未记录结果 | 通过 | `agent memory tools survive reopening and completed requests are not executed again` | 重开数据库后同一 requestId 返回已提交答案，模型调用数为 0 | 无 |
+| C 回复已保存、尚未投递 | 通过 | `restart preserves confirmed segments and quarantines only the interrupted send`、`a crash while a segment is sending quarantines it and later sends only stored text` | 进程强杀后重开，保存的回复继续投递，不重跑 agent | 无 |
+| C 多段部分成功 | 通过 | `restart preserves confirmed segments…`、`reconciling partial delivery sends stored remainder without rerunning agent` | 已确认段保持 sent，只处理未确认段 | 无 |
+| C 发送明确失败与结果未知 | 通过 | `Telegram rejection is failed while a transport failure is uncertain, and neither resends` | 4xx 记为 `failed`（TELEGRAM_403），传输失败记为 `uncertain`；两者都不自动重发，后续独立请求继续处理 | 真实网络未知窗口需阶段 E |
+| C 人工核查补发 | 通过 | `reconciling partial delivery sends stored remainder without rerunning agent`、`manual confirmation marks only the named segment sent and continues with later parts`、崩溃投递测试 | `retry`／`sent` 只调整指定段；后续发送复用已保存文本，agent 执行次数不变 | 无 |
+| C 工具失败后修正 | 通过 | `SQLite harness rejects invalid custom-tool arguments before execution` | 非法参数不进入执行函数，模型收到错误结果并继续回合 | 无 |
+| C 工具中断重放 | 通过 | `an interrupted safe tool follows its replay policy after a process crash`、`…unsafe…` | 子进程在工具执行中被强杀；`safe` 工具恢复后重跑（副作用计数 2），`unsafe` 工具不再执行（计数 1），结果为 `isError: true` 且包含 “interrupted and may have partially run” | 无 |
+| C 实际执行取消 | 通过 | `aborting a run kills a running bash command and its child process`、`explicit cancellation reaches the model…` | 取消信号到达模型提供方与 bash 进程及其子进程；命令预设的 5 秒延迟写入在取消后未发生 | Linux 进程组行为留待阶段 F 复测 |
+| C 正常关闭与进程崩溃 | 通过 | `shutdown stops waiting while close preserves an unfinished request for reopening`、两个崩溃测试 | 正常关闭保留未完成请求；强杀后按契约恢复执行与投递 | 无 |
+| D 本地可运行版本 | 通过 | 见“最终交接” | 配置缺失时输出 `Missing configuration: TELEGRAM_OWNER_ID` 并以退出码 1 结束；文档与实现一致 | 无 |
+| E 真实 Telegram 与模型联调 | 阻塞 | 需要 bot token、owner ID、模型凭据及联调授权 | 未执行 | 见“待办与阻塞” |
+| F 4 核／4 GB Linux 部署验收 | 阻塞 | 需要目标主机与部署授权 | 未执行 | 见“待办与阻塞” |
+
+## 修复记录
+
+### 1. `prune()` 误删已发送记录
+
+- 触发条件：本地同时存在大量未完成请求时调用 `inbox.prune()`。
+- 原行为：子查询 `SELECT requestId FROM inbox ORDER BY rowid DESC LIMIT 100` 取全部请求的最新 100 条，再删除不在其中的 `sent` 请求。未完成请求占满这 100 条时会提前清理已发送历史；与 README 和契约文档“保留最近 100 条已完成请求”不一致。
+- 修复文件：`src/inbox.ts:149`。
+- 修复方式：子查询限定 `status = 'sent'`，只对 `sent` 记录按最新 100 条保留；未完成请求不参与清理。`deliveries`、`failures` 通过外键 `ON DELETE CASCADE` 随请求删除。
+- 验证方法：`prune retains the newest 100 sent requests and every unfinished request`，使用 120 条已发送请求与 4 种未完成状态混合，断言保留数量、级联清理与未完成请求存活。
+
+本轮未发现其他本地产品缺陷。既有实现与文档描述一致，测试仅补齐证据。
+
+## 资源边界
+
+| 资源 | 实际限制 | 执行位置 | 超限行为 | 验证证据 |
+| --- | --- | --- | --- | --- |
+| Telegram 更新批次 | 每次 `getUpdates` 最多 10 条，长轮询 25 秒 | `src/telegram.ts:39` | 更多消息留在 Telegram 远端；处理完本地待办后再轮询 | 代码与 README；本批次不构造本地无限队列 |
+| 用户输入 | Telegram 单条文本上限 4096 UTF-16 单元；应用对超过 16000 单元的已存请求返回明确提示 | `src/telegram.ts:84` | 不执行 agent，生成“消息过长，请拆分后再发送。”的待投递回复，不静默丢弃 | `oversized input is refused explicitly instead of being silently dropped` |
+| 单请求等待时间 | 300 秒 | `src/agent.ts:54` | 停止等待并调用 `root.abort()` 取消执行；回复提示已执行操作可能仍生效 | `request timeout cancels provider work before reporting AGENT_TIMEOUT` |
+| 工具参数 | TypeBox schema 在执行前校验；`current_time` 显式 `additionalProperties: false`，未知字段被拒绝。内置工具的 schema 未声明 `additionalProperties: false`，未知字段通过校验后被执行函数忽略 | pi-ai `validateToolArguments` → Harness `ToolTask` | 返回 `invalid_arguments` 错误结果，不执行工具，模型可修正参数 | `custom tool schemas reject unknown arguments before execution`、`SQLite harness rejects invalid custom-tool arguments before execution` |
+| bash 输出 | 保留末尾 2000 行或 50 KB（先到者为准）；完整输出溢出到临时文件 | pi-durable `createBashTool`／`OutputBuffer`／`spill` | 模型收到删减后的输出，并在结果中看到 `Output truncated to its end` 与 `Full output: <path>` 诊断 | `bash output is bounded and the model is told where the full output went` |
+| read 输出 | 返回头部 2000 行或 50 KB；支持 `offset`／`limit` | pi-durable `createReadTool`／`truncateHead` | 诊断给出 `Use offset=<n> to continue.`；超长单行给出行内截断与 bash 续读命令 | `read truncation names the offset that continues the file` |
+| write／edit 输出 | 面向模型的文本固定为简短确认；diff 与 patch 放在 `details`，不作为模型输出 | pi-durable `createWriteTool`／`createEditTool` | 不产生无上限的模型可见工具输出 | 已安装 1.3.0 源码核查 |
+| bash 执行时长 | 无每次命令默认超时；模型可传 `timeout`（秒）；整体受 300 秒请求上限约束 | pi-durable `createBashTool`；`src/agent.ts` | 请求超时触发取消，进程组被终止（Linux `detached` + `SIGKILL` 进程组；Windows `taskkill /T`） | `aborting a run kills a running bash command and its child process`；Linux 行为留待阶段 F |
+| 工具并发 | 全局 1 个用户请求；回合内工具顺序执行 | `src/agent.ts:34` | 不出现同一回合工具重叠 | `sequential tool execution prevents overlapping calls in one round` |
+| 本地待处理请求 | 每次轮询最多接收 10 条；本地待办清空后才继续轮询 | `src/telegram.ts` `serveTelegram` | 积压留在 Telegram；长期离线不在可靠收件保证内 | 代码与 README |
+| 本地历史 | 已发送请求保留最新 100 条；`pending`／`ready`／`failed`／`uncertain` 永不自动清理 | `src/inbox.ts:149` | 清理时级联删除投递与诊断记录 | `prune retains…` |
+| 回复长度 | 由所选模型的输出上限约束；按 4000 UTF-16 单元分段，不切开代理对 | `src/messages.ts` `splitReply` | 每段独立确认；未另设应用级总长度上限 | `reply chunking preserves text including Unicode surrogate pairs` |
+| 底座持久化 | `agent.sqlite`、`workspace/` 由底座和 agent 管理，无应用级保留策略 | pi-durable | 随会话增长；备份与磁盘监控见阶段 F | 安装版本源码核查 |
+
+已知非阻塞限制：最终回复没有应用级总长度上限，极端长回复会产生大量分段并可能触发 Telegram 频率限制；被阻塞的 `failed`／`uncertain` 请求与投递记录只在人工核查后转移状态，期间不会自动清理；底座数据库与会话历史未设置应用级清理策略。三者都不影响当前单用户 MVP 的正确性，但在阶段 F 的资源测量中需观察积压与磁盘增长。
+
+## 待办与阻塞
+
+### 阶段 E：真实联调（阻塞）
+
+缺少：可用测试 bot 的 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`、受支持提供商的 `MODEL_PROVIDER`／`MODEL_ID`／API key，以及用户对测试环境的联调授权。
+
+影响：`docs/mvp.md` 七条验收中与真实 Telegram、真实模型、真实记忆文件相关的结果尚未取得。离线测试已覆盖同一边界逻辑。
+
+下一步：配置隔离的 `DATA_DIR` 与测试凭据后，按阶段 E 六项逐条记录时间、请求标识与脱敏观察。
+
+### 阶段 F：Linux 部署验收（阻塞）
+
+缺少：4 核／4 GB 目标主机与部署授权。
+
+已准备：`Dockerfile`、`docker-compose.yml`（命名卷 `/data`、非 root 用户、3 GB 内存上限、`init`、45 秒停止宽限期）以及 README 的 Docker 部署、备份和投递核查步骤。镜像构建与容器运行尚未在目标主机验证。
+
+需补测：Node 版本与权限、单实例（systemd `flock` 或单容器约束）、SIGTERM 与 45 秒停止宽限期的配合、强杀恢复、Linux 进程组取消、内存与磁盘峰值、日志脱敏、停止后整目录／卷备份与还原演练、容器内 bash 工具可用性。
+
+### 平台覆盖说明
+
+本地为 Windows。取消测试通过 `taskkill /T` 证明 Windows 进程树终止；Linux 依赖 pi-durable 的 `detached` 子进程与进程组 `SIGKILL`，已核对 1.3.0 实现但未在 Linux 运行，阶段 F 必须复测，不能以本地通过代替。
+
+### 其他
+
+- 真实网络“发送已到达但确认丢失”的未知窗口无法稳定制造，当前由故障注入测试证明状态区分；与真实 Telegram 的差异需在阶段 E 注明。
+- 内置 `read`／`write`／`edit`／`bash` 未声明重放安全（默认 `unsafe`）：进程崩溃时中断的调用会得到“interrupted and may have partially run”错误结果，而不是自动重跑。这是当前实现的保守选择。
+
+## 最终交接
+
+### 本批变更文件
+
+- `src/inbox.ts`：修正 `prune()` 保留策略。
+- `test/boundaries.test.ts`：新增保留策略、相同文本不同 ID、发送失败分类、输入上限、配置错误及人工确认分段测试。
+- `test/durable.test.ts`：新增顺序工具执行与自定义工具未知字段测试。
+- `test/recovery.test.ts`：新增崩溃恢复、工具重放、取消 bash、工具输出截断测试。
+- `test/fixtures/crash-tool.ts`、`test/fixtures/crash-inbox.ts`：崩溃窗口子进程夹具。
+- `docs/contracts-and-lifecycle.md`：顺序执行与本地保留策略改为当前事实。
+- `README.md`：本地保留策略表述与实现一致；新增 Docker 部署、备份与投递核查步骤。
+- `Dockerfile`、`docker-compose.yml`、`.dockerignore`：容器部署配置。
+- `docs/mvp-verification.md`：本记录。
+
+### 检查结果
+
+- 类型检查通过；27 项测试全部通过；生产构建通过。
+- 配置缺失时启动失败且信息明确；未执行任何真实外部调用。
+
+### 真实联调与部署结果
+
+未执行。阶段 E、F 均为阻塞，当前状态是“本地验证完成，真实联调／部署待验收”，不等同于 MVP 已上线。
+
+### 启动入口
+
+见 README：`npm ci`、配置 `.env`、`npm run check && npm test && npm run build && npm start`。

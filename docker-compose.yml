@@ -1,0 +1,27 @@
+services:
+  personal-agent:
+    build: .
+    image: personal-agent:local
+    container_name: personal-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - personal-agent-data:/data
+    # 3 GB hard limit for the app and its tool subprocesses, matching the systemd example.
+    mem_limit: 3g
+    pids_limit: 128
+    init: true
+    stop_grace_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  personal-agent-data:
