@@ -110,7 +110,7 @@ systemctl daemon-reload
 systemctl enable personal-agent
 
 if [[ "$configured" == false ]]; then
-  log "configuration still has empty values; edit $ENV_FILE, then run: systemctl start personal-agent"
+  log "configuration is incomplete; edit $ENV_FILE, then run: systemctl start personal-agent"
   exit 0
 fi
 

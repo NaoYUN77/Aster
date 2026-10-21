@@ -145,7 +145,7 @@ docker compose logs -f
 sudo ./deploy/install-systemd.sh
 ```
 
-脚本会创建系统用户和目录、安装依赖并构建、生成 unit、启用服务；配置仍为空时只启用不启动。重复执行会更新代码和 unit，保留数据与配置。详细行为、路径约定和日常操作见 [deploy/README-systemd.md](deploy/README-systemd.md)。
+脚本会创建系统用户和目录、安装依赖并构建、生成 unit、启用服务；必需配置缺失或为空时只启用不启动。重复执行会更新代码和 unit，保留数据与配置。详细行为、路径约定和日常操作见 [deploy/README-systemd.md](deploy/README-systemd.md)。
 
 手动安装：
 
