@@ -74,8 +74,11 @@ validate_config() {
     openai) API_KEY=OPENAI_API_KEY ;;
     *) die "$ENV_FILE must set MODEL_PROVIDER to anthropic or openai" ;;
   esac
-  # Succeeds only when no placeholder credential remains; an empty value would restart-loop the unit.
-  ! grep -qE "^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_ID|${API_KEY})=[[:space:]]*\$" "$ENV_FILE"
+  # Every required key must be present with a non-empty value. A missing or commented-out line is
+  # as unusable as an empty one, and the unit would restart-loop on either.
+  for key in TELEGRAM_BOT_TOKEN TELEGRAM_OWNER_ID MODEL_ID "$API_KEY"; do
+    grep -qE "^${key}=[^[:space:]]" "$ENV_FILE" || return 1
+  done
 }
 if validate_config; then configured=true; else configured=false; fi
 

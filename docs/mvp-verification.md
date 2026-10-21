@@ -178,10 +178,11 @@
 - 配置为空：只执行 `daemon-reload` 与 `enable`，不 `start`。
 - 仅配置 `openai` 且 `ANTHROPIC_API_KEY` 为空：正常启动（修复前会误判为“配置仍为空”）。
 - 仅配置 `anthropic` 且 `ANTHROPIC_API_KEY` 为空：不启动。
+- 必需键整行缺失（`TELEGRAM_BOT_TOKEN`）、被注释（`# MODEL_ID=…`）、值为空（`MODEL_ID=`）、以及 `openai` 配置下缺少 `OPENAI_API_KEY`：均不启动。修复前只匹配“键存在但值为空”，前两种会被误判为已配置。
 - `DATA_DIR` 与 `ReadWritePaths` 不一致、`MODEL_PROVIDER` 非法、从 `/opt/personal-agent` 自身运行、Node 位于 `/root` 或 `/home`：均以 `error:` 退出，且前两者在触碰 systemd 之前终止。
 - 从 `777` 权限的检出安装后，`/opt/personal-agent` 为 `755`（修复前会保留 `777`）。
 
-以上验证暴露并修复了四个安装脚本缺陷：把所选提供商之外的 API key 当作必填、配置校验发生在 `systemctl` 之后、只拦截 `/home` 下的 Node 而未拦截 `/root` 与 `/run/user`（`ProtectHome=true` 同样隐藏这些路径）、从宽松权限检出复制后代码目录权限过宽。
+以上验证暴露并修复了五个安装脚本缺陷：把所选提供商之外的 API key 当作必填、配置校验发生在 `systemctl` 之后、只拦截 `/home` 下的 Node 而未拦截 `/root` 与 `/run/user`（`ProtectHome=true` 同样隐藏这些路径）、从宽松权限检出复制后代码目录权限过宽、必需键整行缺失或被注释时仍判定为已配置。
 
 仍需在真实 Linux 主机补测：Node 版本与权限、单实例（systemd `flock` 或单容器约束）、SIGTERM 与 45 秒停止宽限期的配合、强杀恢复、Linux 进程组取消、内存与磁盘峰值、日志脱敏、停止后整目录备份与还原演练、容器内 bash 工具可用性。
 
