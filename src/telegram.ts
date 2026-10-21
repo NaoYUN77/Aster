@@ -46,13 +46,29 @@ export class TelegramClient {
   }
 }
 
+function updateIdOf(update: Update): number | undefined {
+  const id = update.update_id;
+  return typeof id === "number" && Number.isSafeInteger(id) && id >= 0 ? id : undefined;
+}
+
+function numericId(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  if (typeof value === "string" && /^-?\d+$/.test(value) && Number.isSafeInteger(Number(value))) return String(Number(value));
+  return undefined;
+}
+
 export function toRequest(update: Update, ownerId: string, botId: string): TextRequest | undefined {
+  const updateId = updateIdOf(update);
   const message = update.message;
-  if (!message || message.chat.type !== "private" || String(message.from?.id) !== ownerId || !message.text) return;
+  if (updateId === undefined || !message || message.chat?.type !== "private"
+    || typeof message.text !== "string" || !message.text) return;
+  const conversationId = numericId(message.chat.id);
+  const senderId = numericId(message.from?.id);
+  if (!conversationId || !senderId || senderId !== ownerId) return;
   return {
-    requestId: `telegram:${botId}:${update.update_id}`,
-    conversationId: String(message.chat.id),
-    senderId: String(message.from.id),
+    requestId: `telegram:${botId}:${updateId}`,
+    conversationId,
+    senderId,
     text: message.text,
   };
 }
@@ -62,6 +78,10 @@ export function failureCode(error: unknown): string {
   if (error instanceof Error && "code" in error && typeof error.code === "string" && /^[A-Z][A-Z_]{0,63}$/.test(error.code)) return error.code;
   if (error instanceof Error && error.name === "TimeoutError") return "TIMEOUT";
   return "EXECUTION_ERROR";
+}
+
+function isFatal(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "AGENT_SESSION_FAILED";
 }
 
 export async function serveTelegram(
@@ -86,11 +106,17 @@ export async function serveTelegram(
             : await reply(job, signal);
         } catch (error) {
           if (signal.aborted) return;
+          // The Session will reject every later request; a failure notice would only hide that.
+          if (isFatal(error)) throw error;
           errorCode = failureCode(error);
           console.error(`Agent request failed: ${job.requestId} (${errorCode})`);
-          text = errorCode === "AGENT_TIMEOUT"
-            ? "本次处理超时，已请求停止执行。已执行的操作可能仍然生效，请先核对结果。"
-            : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
+          const partial = errorCode === "AGENT_TRUNCATED" && error instanceof Error && "partialReply" in error
+            && typeof error.partialReply === "string" ? error.partialReply.trim() : "";
+          text = partial
+            ? `${partial}\n\n（回复因长度限制被截断，内容不完整。请拆分请求后重试。）`
+            : errorCode === "AGENT_TIMEOUT"
+              ? "本次处理超时，已请求停止执行。已执行的操作可能仍然生效，请先核对结果。"
+              : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
         }
         inbox.saveReply(job.requestId, text, errorCode);
       }
@@ -98,9 +124,9 @@ export async function serveTelegram(
       let part = inbox.nextPart(job.requestId);
       while (part && !signal.aborted) {
         inbox.beginPart(job.requestId, part.part);
+        let messageId: string;
         try {
-          const messageId = await client.send(job.conversationId, part.text, signal);
-          inbox.confirmPart(job.requestId, part.part, messageId);
+          messageId = await client.send(job.conversationId, part.text, signal);
         } catch (error) {
           // Explicit Telegram 4xx rejection means not sent. Transport failures remain ambiguous.
           const status = error instanceof GrammyError && error.error_code >= 400 && error.error_code < 500 ? "failed" : "uncertain";
@@ -108,6 +134,8 @@ export async function serveTelegram(
           console.error(`Telegram delivery ${status}: ${job.requestId}, part ${part.part}`);
           break;
         }
+        // Local state is authoritative: a write failure must stop the process, not look like a send failure.
+        inbox.confirmPart(job.requestId, part.part, messageId);
         part = inbox.nextPart(job.requestId);
       }
       inbox.prune();
@@ -131,7 +159,13 @@ export async function serveTelegram(
       continue;
     }
     for (const update of updates) {
-      inbox.accept(update.update_id + 1, toRequest(update, config.ownerId, botId));
+      const updateId = updateIdOf(update);
+      if (updateId === undefined) {
+        // Without a usable id there is no checkpoint value to advance; skip instead of persisting NaN.
+        console.error("Skipping Telegram update without a valid update_id");
+        continue;
+      }
+      inbox.accept(updateId + 1, toRequest(update, config.ownerId, botId));
     }
   }
 }

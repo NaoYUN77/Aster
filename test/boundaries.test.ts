@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { SessionFailed } from "@earendil-works/pi-durable";
 import { GrammyError } from "grammy";
 import type { Update } from "grammy/types";
 import { Inbox } from "../src/inbox.js";
@@ -276,6 +277,179 @@ test("Telegram rejection is failed while a transport failure is uncertain, and n
       ["telegram:99:2", "uncertain", "EXECUTION_ERROR"],
     ]);
     assert.equal(sends, 3, "blocked parts are not retried automatically");
+  } finally {
+    inbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a truncated agent answer is delivered with an explicit incompleteness notice", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-truncated-"));
+  const inbox = new Inbox(join(directory, "inbox.sqlite"));
+  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  try {
+    inbox.accept(1, { ...request, requestId: "telegram:99:1" });
+    const sent: string[] = [];
+    const shutdown = new AbortController();
+    await serveTelegram(config, "99", inbox, async () => {
+      throw Object.assign(new Error("Agent reply was truncated"), { code: "AGENT_TRUNCATED", partialReply: "partial answer" });
+    }, shutdown.signal, {
+      updates: async () => { shutdown.abort(); return []; },
+      send: async (_chat, text) => { sent.push(text); return "1"; },
+    });
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]!, /partial answer/);
+    assert.match(sent[0]!, /截断/);
+    assert.deepEqual(inbox.diagnostics().map((row) => [row.requestId, row.code]), [["telegram:99:1", "AGENT_TRUNCATED"]]);
+    const db = new DatabaseSync(join(directory, "inbox.sqlite"));
+    try {
+      assert.match(String(db.prepare("SELECT reply FROM inbox WHERE requestId = ?").get("telegram:99:1")?.["reply"]), /截断/);
+    } finally {
+      db.close();
+    }
+  } finally {
+    inbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("malformed Telegram updates are rejected at the boundary", () => {
+  const message = update.message!;
+  const malformed = (candidate: unknown) => toRequest(candidate as Update, "42", "99");
+  assert.equal(malformed({ message }), undefined, "a missing update_id cannot form a request id");
+  assert.equal(malformed({ ...update, update_id: "12" }), undefined);
+  assert.equal(malformed({ ...update, message: { ...message, chat: { type: "private" } } }), undefined);
+  assert.equal(malformed({ ...update, message: { ...message, from: undefined } }), undefined);
+  assert.equal(malformed({ ...update, message: { ...message, text: { toString: () => "hello" } } }), undefined);
+  assert.equal(malformed({ ...update, message: { ...message, text: "" } }), undefined);
+  const stringIds = { ...update, message: { ...message, chat: { ...message.chat, id: "42" }, from: { ...message.from!, id: "42" } } };
+  assert.equal(malformed(stringIds)?.conversationId, "42", "numeric strings are normalized");
+  assert.equal(malformed(stringIds)?.senderId, "42");
+});
+
+test("invalid updates are skipped without writing an unusable checkpoint", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-invalid-update-"));
+  const inbox = new Inbox(join(directory, "inbox.sqlite"));
+  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  try {
+    const sent: string[] = [];
+    const shutdown = new AbortController();
+    let polls = 0;
+    await serveTelegram(config, "99", inbox, async () => "answer", shutdown.signal, {
+      updates: async () => {
+        polls++;
+        if (polls > 1) {
+          shutdown.abort();
+          return [];
+        }
+        return [
+          { message: update.message } as unknown as Update,
+          { ...update, update_id: 19 },
+          { ...update, update_id: 20, message: { ...update.message!, text: { bad: true } } } as unknown as Update,
+          // A well-formed update from someone other than the owner: skipped, but its id still advances the offset.
+          { ...update, update_id: 21, message: { ...update.message!, from: { ...update.message!.from!, id: 7 } } } as unknown as Update,
+        ];
+      },
+      send: async (_chat, text) => { sent.push(text); return "1"; },
+    });
+    assert.equal(inbox.offset, 22, "only valid update ids advance the checkpoint");
+    assert.deepEqual(sent, ["answer"], "the well-formed owner message is still processed");
+
+    const empty = new Inbox(join(directory, "empty.sqlite"));
+    try {
+      let polls = 0;
+      const stop = new AbortController();
+      await serveTelegram(config, "99", empty, async () => "unused", stop.signal, {
+        updates: async () => {
+          polls++;
+          if (polls === 1) return [{ message: update.message } as unknown as Update];
+          stop.abort();
+          return [];
+        },
+        send: async () => "1",
+      });
+      assert.equal(polls, 2, "an invalid update must not stall the poll loop");
+      assert.equal(empty.offset, 0, "the checkpoint never receives an invalid id");
+      assert.equal(empty.next(), undefined);
+    } finally {
+      empty.close();
+    }
+  } finally {
+    inbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed agent session stops polling and leaves the request pending", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-session-failure-"));
+  const inbox = new Inbox(join(directory, "inbox.sqlite"));
+  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  try {
+    inbox.accept(1, { ...request, requestId: "telegram:99:1" });
+    const fatal = Object.assign(
+      new Error("Agent session failed; restart the process to recover"),
+      { code: "AGENT_SESSION_FAILED", cause: new SessionFailed(new Error("simulated storage failure")) },
+    );
+    let sends = 0;
+    await assert.rejects(
+      serveTelegram(config, "99", inbox, async () => { throw fatal; }, new AbortController().signal, {
+        updates: async () => { throw new Error("must not keep polling after a fatal error"); },
+        send: async () => { sends++; return "1"; },
+      }),
+      (error: unknown) => error === fatal,
+    );
+    assert.equal(sends, 0, "a fatal error must not produce a delivery");
+    assert.equal(inbox.next()?.status, "pending", "the request stays available for recovery");
+    assert.equal(inbox.blocked().length, 0);
+    const db = new DatabaseSync(join(directory, "inbox.sqlite"));
+    try {
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM deliveries").get()?.["count"], 0);
+    } finally {
+      db.close();
+    }
+  } finally {
+    inbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a local storage failure while saving a reply is fatal", async () => {
+  const inbox = {
+    blocked: () => [],
+    next: () => ({ ...request, requestId: "telegram:99:1", status: "pending", reply: null }),
+    saveReply: () => { throw new Error("database is locked"); },
+  } as unknown as Inbox;
+  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: "unused" };
+  await assert.rejects(
+    serveTelegram(config, "99", inbox, async () => "reply", new AbortController().signal, {
+      updates: async () => [],
+      send: async () => "1",
+    }),
+    /database is locked/,
+  );
+});
+
+test("a model failure is delivered as a notice and later requests still run", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-model-failure-"));
+  const inbox = new Inbox(join(directory, "inbox.sqlite"));
+  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  try {
+    inbox.accept(1, { ...request, requestId: "telegram:99:1" });
+    inbox.accept(2, { ...request, requestId: "telegram:99:2" });
+    const sent: string[] = [];
+    const shutdown = new AbortController();
+    await serveTelegram(config, "99", inbox, async (job) => {
+      if (job.requestId === "telegram:99:1") throw Object.assign(new Error("model failed"), { code: "AGENT_UNANSWERED" });
+      return "second answer";
+    }, shutdown.signal, {
+      updates: async () => { shutdown.abort(); return []; },
+      send: async (_chat, text) => { sent.push(text); return String(sent.length); },
+    });
+    assert.equal(sent.length, 2);
+    assert.match(sent[0]!, /未能完成/);
+    assert.equal(sent[1], "second answer");
+    assert.deepEqual(inbox.diagnostics().map((row) => [row.requestId, row.code]), [["telegram:99:1", "AGENT_UNANSWERED"]]);
+    assert.equal(inbox.next(), undefined);
   } finally {
     inbox.close();
     await rm(directory, { recursive: true, force: true });

@@ -80,7 +80,7 @@ npm run deliveries -- retry telegram:123:456 1
 npm run deliveries -- sent telegram:123:456 1
 ```
 
-这些命令只修改本地投递状态，重新启动应用才会发送待投递内容。不会重新执行 agent 或工具。本地记录只清理已送达请求，保留最新 100 条；未完成或待核查请求不会被清理。底座会话的历史管理仍由底座负责。
+这些命令只修改本地投递状态，重新启动应用才会发送待投递内容。不会重新执行 agent 或工具。命令在列出或修改前会先执行恢复：进程在发送中被强杀的分段会转为 `uncertain` 并出现在列表中；`sending` 不会直接出现在输出里。本地记录只清理已送达请求，保留最新 100 条；未完成或待核查请求不会被清理。底座会话的历史管理仍由底座负责。
 
 ## Linux 云服务器
 
@@ -100,15 +100,32 @@ docker compose up -d
 docker compose logs -f
 ```
 
-- 持久化数据保存在命名卷 `personal-agent-data`（容器内 `/data`），`docker compose down` 不会删除；只有 `docker compose down -v` 会删除。
+- 持久化数据保存在命名卷 `personal-agent-data`（容器内 `/data`），`docker compose down` 不会删除；只有 `docker compose down -v` 会删除。卷名由 `docker-compose.yml` 顶层 `volumes` 的 `name: personal-agent-data` 显式指定，不随项目目录名变化。设置显式卷名之前创建的卷带项目前缀（如 `<目录名>_personal-agent-data`），升级时需先把其中的数据复制到新卷，否则应用会看到空数据目录。
 - `DATA_DIR` 在 compose 中固定为 `/data`，`.env` 里的 `DATA_DIR` 会被覆盖。
 - 容器以非 root 的 `node` 用户运行，内存上限 3 GB，`init: true` 回收工具子进程，停止宽限期 45 秒，与 systemd 示例一致。
 - 同一数据卷只允许一个容器使用；不要对同一卷启动多个副本。
-- 备份：先 `docker compose stop`，再备份卷内容：
+- 备份：先停止服务，再归档整个卷。归档后列出内容，确认三个持久化位置都在，不能只看命令退出码。
 
   ```sh
-  docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine tar czf /backup/personal-agent-data.tgz -C /data .
+  docker compose stop
+  docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine \
+    tar czf /backup/personal-agent-data.tgz -C /data .
+  tar tzf personal-agent-data.tgz | grep -E '(^|/)(inbox|agent)\.sqlite(-wal|-shm)?$|workspace/MEMORY\.md$'
   ```
+
+  输出应包含 `inbox.sqlite`、`agent.sqlite` 和 `workspace/MEMORY.md`；SQLite 的 `-wal`、`-shm` 文件可能同时存在。用 `ls -l personal-agent-data.tgz` 确认归档非空。备份完成后 `docker compose start`。
+
+- 还原：停服务后把归档解回同一卷。归档保留 `node` 用户（uid 1000）的文件所有权。
+
+  ```sh
+  docker compose down
+  docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine \
+    sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzf /backup/personal-agent-data.tgz -C /data'
+  docker compose up -d
+  docker compose logs --tail 20
+  ```
+
+  还原会覆盖卷内现有数据，只用于恢复演练或确实需要回到旧状态时。启动日志出现配置或身份错误时，先核对 `.env` 与归档是否来自同一个 bot。
 
 - 投递核查命令需在容器内执行（先停服务）：
 

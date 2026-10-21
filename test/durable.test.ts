@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -17,6 +18,8 @@ import {
   defineExtension,
   defineTool,
   Harness,
+  SessionFailed,
+  type Storage,
   ToolResultEntry,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -97,8 +100,139 @@ test("agent memory tools survive reopening and completed requests are not execut
   }
 });
 
-test("agent exposes safe failure codes while retaining durable failure details", { timeout: 15_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "personal-agent-failure-test-"));
+function failingStorage(storage: Storage) {
+  const state = { failing: false };
+  const proxy = new Proxy(storage, {
+    get(target, property) {
+      if (state.failing && property === "commit")
+        return async () => { throw new Error("simulated storage failure"); };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { storage: proxy, state };
+}
+
+test("a failed agent session is fatal and the same request recovers after restart", { timeout: 15_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-session-failure-test-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    const first = modelFixture("openai");
+    const wrapped = failingStorage(await openNodeSqliteStorage(join(directory, "agent.sqlite")));
+    app = await openAgent(appConfig(directory), first.models, wrapped.storage);
+    wrapped.state.failing = true;
+    await assert.rejects(app.reply(request, running), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { code?: string }).code, "AGENT_SESSION_FAILED");
+      assert.ok(error.cause instanceof SessionFailed);
+      assert.doesNotMatch(error.message, /simulated storage failure/);
+      return true;
+    });
+    assert.equal(first.faux.state.callCount, 0, "the failed session must not generate an answer");
+    await app.close();
+    app = undefined;
+
+    const second = modelFixture("openai");
+    second.faux.setResponses([fauxAssistantMessage("Recovered after session failure.")]);
+    app = await openAgent(appConfig(directory), second.models);
+    assert.equal(await app.reply(request, running), "Recovered after session failure.");
+    assert.equal(second.faux.state.callCount, 1);
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("a length-limited answer is reported as truncated with its partial text", { timeout: 15_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-truncated-test-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    const { faux, models } = modelFixture("openai");
+    faux.setResponses([fauxAssistantMessage("partial answer", { stopReason: "length" })]);
+    app = await openAgent(appConfig(directory), models);
+    await assert.rejects(app.reply(request, running), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { code?: string }).code, "AGENT_TRUNCATED");
+      assert.equal((error as Error & { partialReply?: string }).partialReply, "partial answer");
+      return true;
+    });
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+// Leaves a submitted request whose in-process generation was cancelled by close(), so a reopen must recover it.
+async function leaveUnfinishedRequest(directory: string): Promise<void> {
+  const first = modelFixture("openai");
+  const started = Promise.withResolvers<void>();
+  first.faux.setResponses([async (_transcript, options) => {
+    assert.ok(options?.signal);
+    started.resolve();
+    await new Promise<void>((resolve) => options.signal!.addEventListener("abort", () => resolve(), { once: true }));
+    return fauxAssistantMessage("", { stopReason: "aborted" });
+  }]);
+  const app = await openAgent(appConfig(directory), first.models);
+  const shutdown = new AbortController();
+  const reply = assert.rejects(app.reply(request, shutdown.signal));
+  await started.promise;
+  shutdown.abort();
+  await reply;
+  await app.close();
+}
+
+test("reopening does not start recovered work until a reply is waiting", { timeout: 20_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-resume-timing-test-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    await leaveUnfinishedRequest(directory);
+    const second = modelFixture("openai");
+    second.faux.setResponses([fauxAssistantMessage("Recovered inside reply.")]);
+    app = await openAgent(appConfig(directory), second.models);
+    await delay(200);
+    assert.equal(second.faux.state.callCount, 0, "opening must not run recovered work without a waiter");
+    assert.equal(await app.reply(request, running), "Recovered inside reply.");
+    assert.equal(second.faux.state.callCount, 1);
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("a recovered task is bounded by the waiting reply's timeout", { timeout: 20_000 }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-resume-timeout-test-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  const timeout = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (milliseconds: number) => {
+    assert.equal(milliseconds, 300_000);
+    return timeout.signal;
+  });
+  try {
+    await leaveUnfinishedRequest(directory);
+    const second = modelFixture("openai");
+    const started = Promise.withResolvers<void>();
+    let cancelled = false;
+    second.faux.setResponses([async (_transcript, options) => {
+      assert.ok(options?.signal);
+      started.resolve();
+      await new Promise<void>((resolve) => options.signal!.addEventListener("abort", () => { cancelled = true; resolve(); }, { once: true }));
+      return fauxAssistantMessage("", { stopReason: "aborted" });
+    }]);
+    app = await openAgent(appConfig(directory), second.models);
+    await delay(200);
+    assert.equal(second.faux.state.callCount, 0);
+    const reply = assert.rejects(app.reply(request, running), { code: "AGENT_TIMEOUT" });
+    await started.promise;
+    timeout.abort(new DOMException("Request timed out", "TimeoutError"));
+    await reply;
+    assert.equal(cancelled, true, "the timeout must cancel the recovered generation");
+    t.mock.restoreAll();
+    // The durable outcome is settled: retrying reports it instead of starting a second generation.
+    await assert.rejects(app.reply(request, running), { code: "AGENT_UNANSWERED", message: /aborted/ });
+    assert.equal(second.faux.state.callCount, 1);
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("agent exposes safe failure codes while retaining durable failure details", { timeout: 15_000 }, async () => {  const directory = await mkdtemp(join(tmpdir(), "personal-agent-failure-test-"));
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
     const { faux, models } = modelFixture("openai");

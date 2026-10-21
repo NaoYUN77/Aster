@@ -81,6 +81,72 @@
 
 已知非阻塞限制：最终回复没有应用级总长度上限，极端长回复会产生大量分段并可能触发 Telegram 频率限制；被阻塞的 `failed`／`uncertain` 请求与投递记录只在人工核查后转移状态，期间不会自动清理；底座数据库与会话历史未设置应用级清理策略。三者都不影响当前单用户 MVP 的正确性，但在阶段 F 的资源测量中需观察积压与磁盘增长。
 
+## 代码审查修复记录（2026-10-21）
+
+审查基线为提交 `57ef390`，修复范围见 [review-fix-plan.md](review-fix-plan.md)。按 F1–F7 顺序执行；每项先补回归用例再改实现。本轮 `npm run check`、`npm test`（38 项）、`npm run build` 全部通过。
+
+### F1 底座故障后停止接收
+
+- 触发条件：pi-durable Session 因 Storage 错误永久失败后，`serveTelegram` 仍把每次异常当作单次请求失败，继续轮询并保存失败提示。
+- 原行为：`SessionFailed` 被统一转换为“本次处理未能完成”的回复，进程保持运行，进程管理器不会重启；后续请求必然失败。
+- 修复文件：`src/agent.ts`、`src/telegram.ts`。
+- 修复方式：`reply()` 捕获 `SessionFailed` 后抛出带 `code: "AGENT_SESSION_FAILED"` 且保留 `cause` 的错误。首个 Storage 错误在 Session 锁存前会以原始错误形式抛出，因此持久化调用抛出的非请求级错误（超时、未回答、截断、空回复之外）同样按会话失效处理，`cause` 统一为 `SessionFailed`；宿主关闭信号仍按原样向上抛出。`serveTelegram` 对致命错误不写回复、不投递，直接向上抛出，请求保持 `pending`。`confirmPart` 移到发送 `try` 之外，本地写入失败不再被误记为 Telegram 投递失败。`src/main.ts` 顶层捕获在未收到关闭信号时设置退出码 1，配合 systemd `Restart=on-failure` 与 Compose `restart: unless-stopped`。
+- 验证用例：`a failed agent session stops polling and leaves the request pending`（注入 `SessionFailed`，断言向上抛出、无投递、请求仍 pending）、`a local storage failure while saving a reply is fatal`、`a model failure is delivered as a notice and later requests still run`（普通失败仍继续服务）、`a failed agent session is fatal and the same request recovers after restart`（重启后同一 requestId 取回答案，模型调用计数为 1）。
+
+### F2 长度截断不按完整成功处理
+
+- 触发条件：模型以 `stopReason: "length"` 结束。
+- 原行为：部分文本被当作完整答案保存并投递，用户与本地记录都没有截断标记。
+- 修复文件：`src/agent.ts`、`src/telegram.ts`。
+- 修复方式：取回答案后检查最后一条 assistant 消息的 `stopReason`；为 `length` 时抛出带 `code: "AGENT_TRUNCATED"` 与 `partialReply` 的错误。投递层保留部分文本并追加“回复因长度限制被截断，内容不完整。请拆分请求后重试。”，错误码写入 `failures`。不自动续写或重试；底座完整会话记录不变。
+- 验证用例：`a length-limited answer is reported as truncated with its partial text`、`a truncated agent answer is delivered with an explicit incompleteness notice`；原有 `stopReason: "stop"` 与 `EMPTY_REPLY` 用例保持通过。
+
+### F3 Docker 备份卷名
+
+- 触发条件：Compose 未设置显式卷名时实际卷名为 `<项目目录名>_personal-agent-data`，README 的备份命令挂载 `personal-agent-data` 会新建空卷并“成功”返回。
+- 修复文件：`docker-compose.yml`、`README.md`。
+- 修复方式：顶层 `volumes.personal-agent-data` 增加 `name: personal-agent-data`；README 写明卷名来源，备份步骤增加归档内容检查（`inbox.sqlite`、`agent.sqlite`、`workspace/MEMORY.md` 与 WAL/SHM），并补充还原步骤与启动后核对。
+- 验证：`docker compose config` 与备份／还原演练本轮未执行（命令执行被安全检查服务阻塞）；配置与文档已按上述方式修改，需在可用环境中补做并记录归档内容。
+
+### F4 恢复执行纳入请求超时
+
+- 触发条件：启动时 `openAgent` 立即调用 `harness.resume()`，恢复的任务不受任何 `reply()` 的 300 秒等待上限约束。
+- 原行为：恢复的遗留任务可能在补发其他回复期间长期占用唯一执行通道。
+- 修复文件：`src/agent.ts`。
+- 修复方式：移除 `openAgent` 中的 `harness.resume()`，改在 `reply()` 内创建 300 秒等待信号后、提交请求前调用。超时仍调用 `root.abort()`；关闭仍只停止等待并保留可恢复状态。
+- 验证用例：`reopening does not start recovered work until a reply is waiting`（打开后 200 ms 内模型调用数为 0，`reply` 后为 1）、`a recovered task is bounded by the waiting reply's timeout`（恢复任务在等待超时时被取消，再次提交不产生第二次模型调用）。
+
+### F5 投递 CLI 先执行恢复
+
+- 触发条件：进程在发送分段时被强杀，`deliveries` 记录停留在 `sending`；CLI 打开数据库后不调用 `recover()`。
+- 原行为：`list` 看不到该分段，`retry`／`sent` 报 “Part is not failed or uncertain”，人工核查无法进行。
+- 修复文件：`src/deliveries.ts`、`README.md`、`docs/contracts-and-lifecycle.md`。
+- 修复方式：CLI 打开数据库后先调用 `inbox.recover()`，再执行 `list`／`retry`／`sent`。文档说明 `sending` 不会直接出现在列表中，恢复后以 `uncertain` 出现。
+- 验证用例：`delivery CLI recovers an interrupted send before listing and resolving it`（用 `crash-inbox.ts` 制造 `sending` 残留，CLI `list` 可见、`retry` 成功、重复 `recover()` 幂等、未确认分段不自动发送）。
+
+### F6 复用底座文本提取
+
+- 修复文件：`src/agent.ts`。
+- 修复方式：用 pi-ai 导出的 `contentText` 替换手工 `flatMap`，保留只取 assistant 消息、`trim` 与空文本 `EMPTY_REPLY` 的行为。
+- 验证：原有回复、失败码与重启用例全部通过，断言未调整。
+
+### F7 Telegram 输入边界校验
+
+- 触发条件：`toRequest` 只检查私聊、owner 和 `message.text` 真值，不验证 `update_id`、`chat.id`、`from.id`、`text` 的类型；畸形数据会构造 `telegram:99:undefined` 或把对象写入 SQLite。
+- 修复文件：`src/telegram.ts`。
+- 修复方式：`update_id` 必须为非负安全整数；`chat.id`、`from.id` 接受安全整数或数字字符串并统一为字符串；`text` 必须为非空字符串。`serveTelegram` 只在 `update_id` 合法时推进消费位置，非法 update 记录不含内容的安全诊断后跳过，避免重复拉取同一批次或写入 `NaN`。
+- 验证用例：`malformed Telegram updates are rejected at the boundary`、`invalid updates are skipped without writing an unusable checkpoint`。
+
+### 本轮命令结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run check` | 通过（无输出） |
+| `npm test` | 通过：38 项，0 失败，0 取消，耗时约 14.2 s |
+| `npm run build` | 通过（无输出） |
+
+测试总数由 27 项增至 38 项，新增 11 项回归用例覆盖 F1、F2、F4、F5、F7；原 27 项全部保留且断言未放宽，其中 F6 未改动任何既有断言。首次检查时 `test/durable.test.ts` 的 `options` 可能为空导致两处 TS18048，已按既有用例写法补 `assert.ok(options?.signal)` 后通过。
+
 ## 待办与阻塞
 
 ### 阶段 E：真实联调（阻塞）
@@ -110,7 +176,16 @@
 
 ## 最终交接
 
-### 本批变更文件
+### 本批变更文件（代码审查修复）
+
+- `src/agent.ts`：F1 会话失效统一为 `AGENT_SESSION_FAILED`；F2 长度截断返回 `AGENT_TRUNCATED` 与部分文本；F4 `resume()` 移入 `reply()`；F6 改用 `contentText`。
+- `src/telegram.ts`：F1 致命错误直接上抛且不写回复；F2 截断提示；F7 输入边界校验与非法 update 跳过。
+- `src/deliveries.ts`：F5 操作前执行 `recover()`（保留原有的数据目录缺失提示）。
+- `docker-compose.yml`：F3 显式卷名。
+- `README.md`、`docs/contracts-and-lifecycle.md`：F2、F3、F5 行为与操作说明。
+- `test/boundaries.test.ts`、`test/durable.test.ts`、`test/recovery.test.ts`：新增 11 项回归用例。
+
+### 本批变更文件（此前本地验证）
 
 - `src/inbox.ts`：修正 `prune()` 保留策略。
 - `test/boundaries.test.ts`：新增保留策略、相同文本不同 ID、发送失败分类、输入上限、配置错误及人工确认分段测试。
@@ -124,7 +199,7 @@
 
 ### 检查结果
 
-- 类型检查通过；27 项测试全部通过；生产构建通过。
+- 类型检查通过；38 项测试全部通过；生产构建通过。
 - 配置缺失时启动失败且信息明确；未执行任何真实外部调用。
 
 ### 真实联调与部署结果

@@ -8,9 +8,16 @@ if (!action || !["list", "retry", "sent"].includes(action)) {
   process.exitCode = 1;
 } else {
   const path = join(resolve(process.env.DATA_DIR || "data"), "inbox.sqlite");
-  await access(path);
+  try {
+    await access(path);
+  } catch {
+    console.error(`No delivery database at ${path}. Point DATA_DIR at the application data directory.`);
+    process.exit(1);
+  }
   const inbox = new Inbox(path);
   try {
+    // A process killed mid-send leaves parts in `sending`; surface them for manual reconciliation first.
+    inbox.recover();
     if (action === "list") {
       console.log(JSON.stringify({ blocked: inbox.blocked(), failures: inbox.diagnostics() }, null, 2));
     } else {

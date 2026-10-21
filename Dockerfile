@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # Build stage: install every dependency, type-check inputs by compiling, then drop dev dependencies.
 FROM node:24.19.0-bookworm-slim AS build
 WORKDIR /app

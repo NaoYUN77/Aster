@@ -25,3 +25,5 @@ services:
 
 volumes:
   personal-agent-data:
+    # Fix the volume name so backup commands do not depend on the project directory name.
+    name: personal-agent-data
