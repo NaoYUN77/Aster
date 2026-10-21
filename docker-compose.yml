@@ -10,7 +10,8 @@ services:
       DATA_DIR: /data
     volumes:
       - personal-agent-data:/data
-    # 3 GB hard limit for the app and its tool subprocesses, matching the systemd example.
+    # 3 GB hard limit for the app and its tool subprocesses. The systemd example is tighter
+    # (1 GB) because it targets hosts shared with other containers; Docker suits a dedicated host.
     mem_limit: 3g
     pids_limit: 128
     init: true

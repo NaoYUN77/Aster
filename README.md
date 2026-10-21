@@ -102,7 +102,7 @@ docker compose logs -f
 
 - 持久化数据保存在命名卷 `personal-agent-data`（容器内 `/data`），`docker compose down` 不会删除；只有 `docker compose down -v` 会删除。卷名由 `docker-compose.yml` 顶层 `volumes` 的 `name: personal-agent-data` 显式指定，不随项目目录名变化。设置显式卷名之前创建的卷带项目前缀（如 `<目录名>_personal-agent-data`），升级时需先把其中的数据复制到新卷，否则应用会看到空数据目录。
 - `DATA_DIR` 在 compose 中固定为 `/data`，`.env` 里的 `DATA_DIR` 会被覆盖。
-- 容器以非 root 的 `node` 用户运行，内存上限 3 GB，`init: true` 回收工具子进程，停止宽限期 45 秒，与 systemd 示例一致。
+- 容器以非 root 的 `node` 用户运行，内存上限 3 GB，`init: true` 回收工具子进程，停止宽限期 45 秒。systemd 示例默认更紧（`MemoryMax=1G`），用于与 QQ bot 等容器共存；Docker 方式适合独占主机。
 - 同一数据卷只允许一个容器使用；不要对同一卷启动多个副本。
 - 备份：先停止服务，再归档整个卷。归档后列出内容，确认三个持久化位置都在，不能只看命令退出码。
 
@@ -139,7 +139,15 @@ docker compose logs -f
 
 ### systemd
 
-提供 [systemd 服务示例](deploy/personal-agent.service)，假设代码位于 `/opt/personal-agent`，Node 位于 `/usr/bin/node`，数据位于 `/var/lib/personal-agent`。按实际安装路径调整。
+提供 [systemd 服务示例](deploy/personal-agent.service) 和安装脚本，默认代码位于 `/opt/personal-agent`，数据位于 `/var/lib/personal-agent`，配置位于 `/etc/personal-agent.env`。
+
+```sh
+sudo ./deploy/install-systemd.sh
+```
+
+脚本会创建系统用户和目录、安装依赖并构建、生成 unit、启用服务；配置仍为空时只启用不启动。重复执行会更新代码和 unit，保留数据与配置。详细行为、路径约定和日常操作见 [deploy/README-systemd.md](deploy/README-systemd.md)。
+
+手动安装：
 
 1. 在服务器安装 Node.js 24.19.0、npm、bash，以及提供 `flock` 的 util-linux；创建 `personal-agent` 系统用户。
 2. 将项目部署到 `/opt/personal-agent`，执行 `npm ci && npm run build && npm prune --omit=dev`。
@@ -147,7 +155,7 @@ docker compose logs -f
 4. 将服务文件安装到 `/etc/systemd/system/personal-agent.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now personal-agent`。
 5. 使用 `journalctl -u personal-agent -f` 查看运行情况。
 
-服务采用 `flock` 避免重复实例，应用与工具共享 3 GB 内存硬上限，为系统预留内存；该上限是保护措施，不是性能保证。实际云端内存、取消和重启行为仍需上线环境验收。工具子进程继承宿主环境，部署账户和所配置凭据均属于受信任执行环境，不用于执行敌对代码。
+服务采用 `flock` 避免重复实例，应用与工具共享 1 GB 内存硬上限（`MemoryHigh` 768 MB、`TasksMax` 64），适合与其他服务共存于 4 GB 主机。单独使用时可通过 `systemctl edit personal-agent` 调高。该上限是保护措施，不是性能保证。实际云端内存、取消和重启行为仍需上线环境验收。工具子进程继承宿主环境，部署账户和所配置凭据均属于受信任执行环境，不用于执行敌对代码。
 
 生产环境使用投递管理命令时，要以同一服务用户和同一个 `DATA_DIR` 运行，例如：
 

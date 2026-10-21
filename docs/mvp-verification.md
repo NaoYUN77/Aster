@@ -161,7 +161,7 @@
 
 缺少：4 核／4 GB 目标主机与部署授权。
 
-已准备：`Dockerfile`、`docker-compose.yml`（命名卷 `/data`、非 root 用户、3 GB 内存上限、`init`、45 秒停止宽限期）以及 README 的 Docker 部署、备份和投递核查步骤。镜像构建与容器运行尚未在目标主机验证。
+已准备：`Dockerfile`、`docker-compose.yml`（命名卷 `/data`、非 root 用户、3 GB 内存上限、`init`、45 秒停止宽限期），`deploy/personal-agent.service`、`deploy/install-systemd.sh` 与 `deploy/README-systemd.md`（`flock` 单实例、`MemoryMax=1G`、`TasksMax=64`、`ProtectSystem=strict` 下只写数据目录），以及 README 和 [deployment-test-guide.md](deployment-test-guide.md) 的两种部署、备份和投递核查步骤。镜像构建、容器运行和安装脚本均未在 Linux 主机执行过；脚本只做了 `bash -n` 语法检查。
 
 需补测：Node 版本与权限、单实例（systemd `flock` 或单容器约束）、SIGTERM 与 45 秒停止宽限期的配合、强杀恢复、Linux 进程组取消、内存与磁盘峰值、日志脱敏、停止后整目录／卷备份与还原演练、容器内 bash 工具可用性。
 
