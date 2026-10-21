@@ -197,6 +197,19 @@
 
 ## 最终交接
 
+### 本批变更文件（提供商注册表）
+
+- `src/providers.ts`（新）：`PROVIDERS` 注册表是支持范围的唯一来源，登记 12 个显式 API-key 提供商（`anthropic`、`openai`、`deepseek`、`google`、`xai`、`mistral`、`groq`、`moonshotai`、`moonshotai-cn`、`minimax`、`zai`、`openrouter`），每项只保存工厂、展示名与 key 变量名。`createProviderModels()` 按 id 建模型集，`requireModel()` 在启动前校验 `MODEL_ID` 是否在目录中。
+- `src/errors.ts`（新）：`ConfigurationError` 独立成模块，供配置与提供商注册表共用，避免循环依赖。
+- `src/config.ts`：`MODEL_PROVIDER` 从注册表派生合法值，只要求所选提供商的 key；错误信息列出全部合法 id。
+- `src/agent.ts`：删除 `anthropic`／`openai` 的 if/else，改用注册表；对注入的离线模型集同样执行 `requireModel()`。
+- `src/check-config.ts`（新）：不联网的配置检查入口，供安装脚本与手动排查使用；只输出变量名，不回显凭据。
+- `deploy/install-systemd.sh`：删除 shell 内硬编码的提供商/key 映射，改为构建后调用 `check-config.js`；检查在 `enable` 之后、`start` 之前执行。
+- `.env.example`、`README.md`、`deploy/README-systemd.md`、`docs/deployment-test-guide.md`：支持矩阵、key 变量、新的错误信息与检查命令。
+- `test/boundaries.test.ts`：新增注册表与 pi-ai 内置提供商一致性、所选提供商只需自身 key、未知 `MODEL_ID` 报错三项用例；配置错误断言更新为新的提示文本。
+
+未包含：OAuth／订阅登录、Bedrock／Vertex 等环境凭据提供商、需要额外端点参数的提供商（Azure、Cloudflare 等），以及自定义 base URL。这些路径无法只靠一个 key 从环境文件完成配置，因此不进入注册表。
+
 ### 本批变更文件（Docker 与安装脚本验证）
 
 - `deploy/install-systemd.sh`：配置校验（`DATA_DIR`、`MODEL_PROVIDER`、当前提供商的 API key）改为在构建前和触碰 systemd 前各执行一次；Node 路径检查覆盖 `/root`、`/run/user`；复制后把代码目录重置为 `755`。
@@ -225,7 +238,7 @@
 
 ### 检查结果
 
-- 类型检查通过；38 项测试全部通过；生产构建通过。
+- 类型检查通过；41 项测试全部通过；生产构建通过。
 - Docker 镜像构建成功；无配置启动以退出码 1 结束并打印明确的缺失项。
 - Docker 命名卷的备份、内容核对、还原与投递 CLI 恢复已在容器中实际执行。
 - systemd 安装脚本在容器中完成安装、重复执行与失败路径验证；`systemctl` 为桩，unit 未实际启动。

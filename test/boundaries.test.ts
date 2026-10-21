@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { SessionFailed } from "@earendil-works/pi-durable";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { GrammyError } from "grammy";
 import type { Update } from "grammy/types";
 import { Inbox } from "../src/inbox.js";
 import { readConfig } from "../src/config.js";
+import { createProviderModels, PROVIDERS, requireModel } from "../src/providers.js";
 import { splitReply } from "../src/messages.js";
 import { serveTelegram, toRequest } from "../src/telegram.js";
 
@@ -92,7 +94,7 @@ test("restart preserves confirmed segments and quarantines only the interrupted 
 test("reconciling partial delivery sends stored remainder without rerunning agent", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-delivery-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
   let executions = 0;
   const firstShutdown = new AbortController();
   const sent: string[] = [];
@@ -144,17 +146,46 @@ test("configuration failures name the missing or invalid setting", () => {
   assert.throws(() => readConfig({}), /Missing configuration: TELEGRAM_OWNER_ID/);
   assert.throws(() => readConfig({ TELEGRAM_OWNER_ID: "not-a-number" }), /positive numeric user ID/);
   assert.throws(() => readConfig({ TELEGRAM_OWNER_ID: "42" }), /Missing configuration: MODEL_PROVIDER/);
-  assert.throws(() => readConfig({ TELEGRAM_OWNER_ID: "42", MODEL_PROVIDER: "other" }), /anthropic or openai/);
+  assert.throws(() => readConfig({ TELEGRAM_OWNER_ID: "42", MODEL_PROVIDER: "other" }), /MODEL_PROVIDER must be one of: anthropic, openai/);
   assert.throws(() => readConfig({ TELEGRAM_OWNER_ID: "42", MODEL_PROVIDER: "openai" }), /Missing configuration: OPENAI_API_KEY/);
   assert.throws(() => readConfig({
     TELEGRAM_OWNER_ID: "42", MODEL_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "key",
   }), /Missing configuration: TELEGRAM_BOT_TOKEN/);
 });
 
+test("the provider registry only names providers shipped with pi-ai", () => {
+  const builtin = new Set(builtinProviders().map((provider) => provider.id));
+  for (const [id, entry] of Object.entries(PROVIDERS)) {
+    assert.ok(builtin.has(id), `registered provider ${id} is not built into pi-ai`);
+    assert.match(entry.apiKeyEnv, /^[A-Z0-9_]+_API_KEY$/, `${id} must name an API-key variable`);
+  }
+});
+
+test("a registered provider requires only its own API key", () => {
+  const config = readConfig({
+    TELEGRAM_BOT_TOKEN: "token",
+    TELEGRAM_OWNER_ID: "42",
+    MODEL_PROVIDER: "deepseek",
+    MODEL_ID: "deepseek-flash",
+    DEEPSEEK_API_KEY: "secret",
+  });
+  assert.equal(config.provider, "deepseek");
+  assert.throws(() => readConfig({
+    TELEGRAM_BOT_TOKEN: "token", TELEGRAM_OWNER_ID: "42", MODEL_PROVIDER: "deepseek", MODEL_ID: "deepseek-flash",
+  }), /Missing configuration: DEEPSEEK_API_KEY/);
+});
+
+test("an unknown model id is rejected with provider examples", () => {
+  assert.throws(
+    () => requireModel(createProviderModels("deepseek"), "deepseek", "not-a-model"),
+    /Unknown MODEL_ID "not-a-model" for MODEL_PROVIDER=deepseek; examples: /,
+  );
+});
+
 test("oversized input is refused explicitly instead of being silently dropped", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-input-limit-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
   try {
     inbox.accept(1, { ...request, text: "x".repeat(16_001) });
     const shutdown = new AbortController();
@@ -250,7 +281,7 @@ test("prune retains the newest 100 sent requests and every unfinished request", 
 test("Telegram rejection is failed while a transport failure is uncertain, and neither resends", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-send-errors-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
   try {
     inbox.accept(1, { ...request, requestId: "telegram:99:1" });
     inbox.accept(2, { ...request, requestId: "telegram:99:2" });
@@ -286,7 +317,7 @@ test("Telegram rejection is failed while a transport failure is uncertain, and n
 test("a truncated agent answer is delivered with an explicit incompleteness notice", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-truncated-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
   try {
     inbox.accept(1, { ...request, requestId: "telegram:99:1" });
     const sent: string[] = [];
@@ -330,7 +361,7 @@ test("malformed Telegram updates are rejected at the boundary", () => {
 test("invalid updates are skipped without writing an unusable checkpoint", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-invalid-update-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
   try {
     const sent: string[] = [];
     const shutdown = new AbortController();
@@ -383,7 +414,7 @@ test("invalid updates are skipped without writing an unusable checkpoint", async
 test("a failed agent session stops polling and leaves the request pending", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-session-failure-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
   try {
     inbox.accept(1, { ...request, requestId: "telegram:99:1" });
     const fatal = Object.assign(
@@ -419,7 +450,7 @@ test("a local storage failure while saving a reply is fatal", async () => {
     next: () => ({ ...request, requestId: "telegram:99:1", status: "pending", reply: null }),
     saveReply: () => { throw new Error("database is locked"); },
   } as unknown as Inbox;
-  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: "unused" };
+  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: "unused" };
   await assert.rejects(
     serveTelegram(config, "99", inbox, async () => "reply", new AbortController().signal, {
       updates: async () => [],
@@ -432,7 +463,7 @@ test("a local storage failure while saving a reply is fatal", async () => {
 test("a model failure is delivered as a notice and later requests still run", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-model-failure-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
+  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory };
   try {
     inbox.accept(1, { ...request, requestId: "telegram:99:1" });
     inbox.accept(2, { ...request, requestId: "telegram:99:2" });

@@ -15,12 +15,28 @@ cp .env.example .env
 
 - `TELEGRAM_BOT_TOKEN`：BotFather 创建的 bot token。
 - `TELEGRAM_OWNER_ID`：允许使用 bot 的个人 Telegram 数字用户 ID。
-- `MODEL_PROVIDER`：`anthropic` 或 `openai`。
-- `MODEL_ID`：该账户和 pi-ai 1.3.0 支持的模型 ID；不自动替换模型。
-- 对应的 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`。
+- `MODEL_PROVIDER`：注册表内的提供商 id，见下表。
+- `MODEL_ID`：该提供商在 pi-ai 1.3.0 模型目录中的 id；不自动替换，写错时启动前报错并列出示例。
+- 所选提供商对应的 API key 环境变量，见下表。
 - `DATA_DIR`：持久化数据目录，默认 `./data`。
 
-本应用采用上述显式 API key 配置。提供商连接由 pi-ai 负责，不承诺支持任意 OpenAI 兼容地址或自定义 base URL。
+| `MODEL_PROVIDER` | API key 变量 |
+| --- | --- |
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` | `OPENAI_API_KEY` |
+| `deepseek` | `DEEPSEEK_API_KEY` |
+| `google` | `GEMINI_API_KEY` |
+| `xai` | `XAI_API_KEY` |
+| `mistral` | `MISTRAL_API_KEY` |
+| `groq` | `GROQ_API_KEY` |
+| `moonshotai`、`moonshotai-cn` | `MOONSHOT_API_KEY` |
+| `minimax` | `MINIMAX_API_KEY` |
+| `zai` | `ZAI_API_KEY` |
+| `openrouter` | `OPENROUTER_API_KEY` |
+
+只要求**当前所选提供商**的 key；其他 key 留空不算缺项。注册表定义在 `src/providers.ts`，是支持范围的唯一来源。
+
+本应用只支持显式 API key 的提供商，不包含 OAuth／订阅登录、云厂商环境凭据（如 Bedrock、Vertex）以及需要额外端点参数的提供商。提供商连接由 pi-ai 负责，不承诺支持任意 OpenAI 兼容地址或自定义 base URL。
 
 ```sh
 npm run check

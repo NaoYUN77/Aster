@@ -60,27 +60,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
   sed -i "s#^DATA_DIR=.*#DATA_DIR=$DATA_DIR#" "$ENV_FILE"
 fi
 
-# Validate before the expensive build, and again before systemd is touched: an unusable config
-# would otherwise leave the unit in a restart loop. Trailing whitespace is tolerated because the
-# application trims environment values.
-validate_config() {
-  grep -qE "^DATA_DIR=${DATA_DIR}[[:space:]]*\$" "$ENV_FILE" \
-    || die "$ENV_FILE must set DATA_DIR=$DATA_DIR to match ReadWritePaths"
-  # Only the configured provider's key is required; the other one stays empty on purpose.
-  provider=$(sed -n 's/^MODEL_PROVIDER=//p' "$ENV_FILE" | tail -n 1)
-  provider=${provider//[[:space:]]/}
-  case "$provider" in
-    anthropic) API_KEY=ANTHROPIC_API_KEY ;;
-    openai) API_KEY=OPENAI_API_KEY ;;
-    *) die "$ENV_FILE must set MODEL_PROVIDER to anthropic or openai" ;;
-  esac
-  # Every required key must be present with a non-empty value. A missing or commented-out line is
-  # as unusable as an empty one, and the unit would restart-loop on either.
-  for key in TELEGRAM_BOT_TOKEN TELEGRAM_OWNER_ID MODEL_ID "$API_KEY"; do
-    grep -qE "^${key}=[^[:space:]]" "$ENV_FILE" || return 1
-  done
-}
-if validate_config; then configured=true; else configured=false; fi
+grep -qE "^DATA_DIR=${DATA_DIR}[[:space:]]*\$" "$ENV_FILE" \
+  || die "$ENV_FILE must set DATA_DIR=$DATA_DIR to match ReadWritePaths"
 
 log "installing dependencies and building"
 # Build as the service user with a writable HOME and npm cache: runuser keeps root's HOME otherwise.
@@ -103,14 +84,15 @@ sed -e "s#/usr/bin/flock#${escaped_flock}#" \
   deploy/personal-agent.service > "$UNIT_FILE"
 chmod 644 "$UNIT_FILE"
 
-if validate_config; then configured=true; else configured=false; fi
-
 log "enabling service"
 systemctl daemon-reload
 systemctl enable personal-agent
 
-if [[ "$configured" == false ]]; then
-  log "configuration is incomplete; edit $ENV_FILE, then run: systemctl start personal-agent"
+log "validating configuration"
+# The application owns the provider list and model catalog; asking it avoids a second copy in shell.
+# A clean environment proves the values come from the unit's EnvironmentFile, not the caller's shell.
+if ! env -i HOME="$HOME" PATH="$PATH" bash -c "set -a; . '$ENV_FILE'; set +a; exec '$NODE_BIN' '$APP_DIR/dist/src/check-config.js'"; then
+  log "configuration is incomplete or invalid; edit $ENV_FILE, then run: systemctl start personal-agent"
   exit 0
 fi
 
