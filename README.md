@@ -84,7 +84,7 @@ npm run deliveries -- sent telegram:123:456 1
 
 ## Linux 云服务器
 
-提供两种部署方式：Docker Compose（推荐，无需在主机安装 Node）和 systemd 直接托管。
+提供两种部署方式：Docker Compose（无需在主机安装 Node）和 systemd 直接托管。主机只有这一个服务时 Docker 更省运维；主机已有其他 Docker 服务（如 QQ bot）时用 systemd，资源账更好算。两种方式都没有取代另一种，选择依据见 [部署指南](docs/deployment-test-guide.md) 第 1.5 节。
 
 ### Docker
 
