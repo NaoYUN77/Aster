@@ -183,7 +183,7 @@ journalctl -u personal-agent -f
 
 失败排查：
 
-- `status=203/EXEC`：`ExecStart` 里的 Node 或 `flock` 路径不对，用 `command -v node`、`command -v flock` 确认并替换；脚本会自动替换为实际路径。Node 装在 `/home` 下时会被 `ProtectHome=true` 挡住，必须用系统级安装。
+- `status=203/EXEC`：`ExecStart` 里的 Node 或 `flock` 路径不对，用 `command -v node`、`command -v flock` 确认并替换；脚本会自动替换为实际路径。Node 装在 `/home`、`/root` 或 `/run/user` 下时会被 `ProtectHome=true` 挡住，必须用系统级安装。
 - `status=200/CHDIR`：`WorkingDirectory` 不存在或权限不足。
 - `status=226/NAMESPACE`：`ReadWritePaths` 指向的目录不存在；先创建 `/var/lib/personal-agent`。
 - 启动即退出且日志有 `Missing configuration`：检查 `/etc/personal-agent.env` 权限与内容。
@@ -191,6 +191,7 @@ journalctl -u personal-agent -f
 - `flock` 报错：说明已有实例在跑，`ps aux | grep main.js` 确认。
 - 脚本报 `run from the repository root`：在包含 `package.json` 的目录执行。
 - 脚本报 `must set DATA_DIR=/var/lib/personal-agent`：配置文件里的 `DATA_DIR` 与 unit 的 `ReadWritePaths` 不一致。
+- 脚本报 `must set MODEL_PROVIDER to anthropic or openai`：`/etc/personal-agent.env` 里的提供商拼写不对或为空。
 
 数据目录权限必须允许服务用户读写；`ProtectSystem=strict` 下只有 `ReadWritePaths` 指定的路径可写。服务文件默认限制为 `MemoryHigh=768M`、`MemoryMax=1G`、`TasksMax=64`，与 QQ bot 共存；单独使用时可 `sudo systemctl edit personal-agent` 调高。
 

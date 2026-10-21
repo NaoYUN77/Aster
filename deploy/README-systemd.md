@@ -12,14 +12,15 @@ sudo ./deploy/install-systemd.sh
 
 脚本执行顺序：
 
-1. 检查 root、Node 24.x、`npm`、`flock`、`runuser`、`bash` 和仓库根目录；Node 装在 `/home` 下会因 `ProtectHome=true` 不可见而拒绝继续。
+1. 检查 root、Node 24.x、`npm`、`flock`、`runuser`、`bash` 和仓库根目录；Node 装在 `/home`、`/root` 或 `/run/user` 下会因 `ProtectHome=true` 不可见而拒绝继续。
 2. 创建系统用户 `personal-agent`（无登录 shell）。
-3. 创建 `/opt/personal-agent`（代码）与 `/var/lib/personal-agent`（数据），数据目录权限 `700`。
+3. 创建 `/opt/personal-agent`（代码）与 `/var/lib/personal-agent`（数据），数据目录权限 `700`；代码目录重置为 `755`，避免从宽松权限的检出复制后留下可写目录。
 4. 复制应用文件，排除 `.git`、`node_modules`、`dist`、`data`、`.env`。
 5. 首次运行时从 `.env.example` 创建 `/etc/personal-agent.env`（root 所有，`600`），并写入 `DATA_DIR=/var/lib/personal-agent`。
-6. 以服务用户执行 `npm ci && npm run build && npm prune --omit=dev`，`HOME` 与 npm 缓存指向 `/opt/personal-agent`，构建后删除缓存。
-7. 按实际路径（含 Node 与 `flock`）生成 unit 文件并启用服务。
-8. 配置仍为空时只启用不启动，避免带着占位凭据进入重启循环；已有配置时校验 `DATA_DIR` 与 unit 的 `ReadWritePaths` 一致后启动。
+6. 在构建前校验配置：`DATA_DIR` 必须与 unit 的 `ReadWritePaths` 一致，`MODEL_PROVIDER` 必须是 `anthropic` 或 `openai`。
+7. 以服务用户执行 `npm ci && npm run build && npm prune --omit=dev`，`HOME` 与 npm 缓存指向 `/opt/personal-agent`，构建后删除缓存。
+8. 按实际路径（含 Node 与 `flock`）生成 unit 文件，再次校验配置后启用服务。
+9. 只检查**当前所选提供商**的 API key：使用 `openai` 时留空的 `ANTHROPIC_API_KEY` 不算缺项。任一必填值为空时只启用不启动，避免带着占位凭据进入重启循环；校验在触碰 systemd 之前完成。
 
 可重复执行：代码和 unit 会被替换，数据目录与已有配置不会被覆盖。
 

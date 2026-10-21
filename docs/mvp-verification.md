@@ -1,6 +1,6 @@
 # MVP 验收记录
 
-状态：本地验证完成；真实 Telegram／模型联调与 Linux 部署待验收。
+状态：本地验证完成；Docker 镜像构建、命名卷备份／还原与 systemd 安装脚本已在容器中演练；真实 Telegram／模型联调与真实 Linux 主机部署待验收。
 
 ## 环境与基线
 
@@ -106,7 +106,15 @@
 - 触发条件：Compose 未设置显式卷名时实际卷名为 `<项目目录名>_personal-agent-data`，README 的备份命令挂载 `personal-agent-data` 会新建空卷并“成功”返回。
 - 修复文件：`docker-compose.yml`、`README.md`。
 - 修复方式：顶层 `volumes.personal-agent-data` 增加 `name: personal-agent-data`；README 写明卷名来源，备份步骤增加归档内容检查（`inbox.sqlite`、`agent.sqlite`、`workspace/MEMORY.md` 与 WAL/SHM），并补充还原步骤与启动后核对。
-- 验证：`docker compose config` 与备份／还原演练本轮未执行（命令执行被安全检查服务阻塞）；配置与文档已按上述方式修改，需在可用环境中补做并记录归档内容。
+- 验证（2026-10-21，Windows + Docker 29.7.2 / Compose v5.3.1）：
+  - `docker build -t personal-agent:local .` 成功，镜像 468 MB。
+  - `docker compose config` 显示 `volumes.personal-agent-data.name: personal-agent-data`，与项目目录名无关。
+  - 备份：向卷写入 `agent.sqlite`、`inbox.sqlite`、`workspace/MEMORY.md` 后执行 README 的 `alpine tar czf` 命令，退出码 0；`tar tzf | grep` 列出三个文件，归档 3964 字节。
+  - 还原：先删掉 `inbox.sqlite` 并追加 `MEMORY.md`，再执行 README 的 `rm -rf /data/* … && tar xzf`，文件恢复为备份时内容，属主仍为 `node`（uid 1000）。用应用自己的 `Inbox` 打开还原后的库，读到 `offset 10` 与原请求；`openNodeSqliteStorage` 能打开 `agent.sqlite`。
+  - 投递 CLI：容器内 `node dist/src/deliveries.js list` 输出 `{"blocked":[],"failures":[]}`；人工制造 `sending` 残留后再次 `list`，该分段以 `uncertain` / `PROCESS_INTERRUPTED` 出现，与 F5 的恢复行为一致。
+  - 无配置启动：容器打印 `Personal agent stopped: Missing configuration: TELEGRAM_OWNER_ID` 并以 1 退出。
+  - 镜像内 `/bin/bash` 存在（Debian bookworm slim），`flock` 可用，`runuser`／`useradd` 不可用（运行时不需要）。
+  - 未覆盖：真实容器内的 Telegram 轮询与模型调用（无凭据），以及 Linux 主机上的内存、停止宽限期与 OOM 行为（阶段 F）。
 
 ### F4 恢复执行纳入请求超时
 
@@ -161,9 +169,21 @@
 
 缺少：4 核／4 GB 目标主机与部署授权。
 
-已准备：`Dockerfile`、`docker-compose.yml`（命名卷 `/data`、非 root 用户、3 GB 内存上限、`init`、45 秒停止宽限期），`deploy/personal-agent.service`、`deploy/install-systemd.sh` 与 `deploy/README-systemd.md`（`flock` 单实例、`MemoryMax=1G`、`TasksMax=64`、`ProtectSystem=strict` 下只写数据目录），以及 README 和 [deployment-test-guide.md](deployment-test-guide.md) 的两种部署、备份和投递核查步骤。镜像构建、容器运行和安装脚本均未在 Linux 主机执行过；脚本只做了 `bash -n` 语法检查。
+已准备：`Dockerfile`、`docker-compose.yml`（命名卷 `/data`、非 root 用户、3 GB 内存上限、`init`、45 秒停止宽限期），`deploy/personal-agent.service`、`deploy/install-systemd.sh` 与 `deploy/README-systemd.md`（`flock` 单实例、`MemoryMax=1G`、`TasksMax=64`、`ProtectSystem=strict` 下只写数据目录），以及 README 和 [deployment-test-guide.md](deployment-test-guide.md) 的两种部署、备份和投递核查步骤。
 
-需补测：Node 版本与权限、单实例（systemd `flock` 或单容器约束）、SIGTERM 与 45 秒停止宽限期的配合、强杀恢复、Linux 进程组取消、内存与磁盘峰值、日志脱敏、停止后整目录／卷备份与还原演练、容器内 bash 工具可用性。
+2026-10-21 在容器内补充验证（Windows Docker Desktop，`node:24.19.0-bookworm-slim` 承载安装脚本，`systemctl` 用桩记录调用，不实际启动 unit）：
+
+- 首次安装：创建用户、目录、`/etc/personal-agent.env`（root 600，`DATA_DIR` 已替换），`npm ci && build && prune` 成功，`dist/src/*.js` 齐全，devDependencies 已裁剪；生成 unit 的 `ExecStart` 指向实际 Node 路径与 `flock`。
+- 重复执行：代码与 unit 被替换，`/var/lib/personal-agent` 的既有文件与已有配置未被覆盖。
+- 配置为空：只执行 `daemon-reload` 与 `enable`，不 `start`。
+- 仅配置 `openai` 且 `ANTHROPIC_API_KEY` 为空：正常启动（修复前会误判为“配置仍为空”）。
+- 仅配置 `anthropic` 且 `ANTHROPIC_API_KEY` 为空：不启动。
+- `DATA_DIR` 与 `ReadWritePaths` 不一致、`MODEL_PROVIDER` 非法、从 `/opt/personal-agent` 自身运行、Node 位于 `/root` 或 `/home`：均以 `error:` 退出，且前两者在触碰 systemd 之前终止。
+- 从 `777` 权限的检出安装后，`/opt/personal-agent` 为 `755`（修复前会保留 `777`）。
+
+以上验证暴露并修复了四个安装脚本缺陷：把所选提供商之外的 API key 当作必填、配置校验发生在 `systemctl` 之后、只拦截 `/home` 下的 Node 而未拦截 `/root` 与 `/run/user`（`ProtectHome=true` 同样隐藏这些路径）、从宽松权限检出复制后代码目录权限过宽。
+
+仍需在真实 Linux 主机补测：Node 版本与权限、单实例（systemd `flock` 或单容器约束）、SIGTERM 与 45 秒停止宽限期的配合、强杀恢复、Linux 进程组取消、内存与磁盘峰值、日志脱敏、停止后整目录备份与还原演练、容器内 bash 工具可用性。
 
 ### 平台覆盖说明
 
@@ -175,6 +195,11 @@
 - 内置 `read`／`write`／`edit`／`bash` 未声明重放安全（默认 `unsafe`）：进程崩溃时中断的调用会得到“interrupted and may have partially run”错误结果，而不是自动重跑。这是当前实现的保守选择。
 
 ## 最终交接
+
+### 本批变更文件（Docker 与安装脚本验证）
+
+- `deploy/install-systemd.sh`：配置校验（`DATA_DIR`、`MODEL_PROVIDER`、当前提供商的 API key）改为在构建前和触碰 systemd 前各执行一次；Node 路径检查覆盖 `/root`、`/run/user`；复制后把代码目录重置为 `755`。
+- `deploy/README-systemd.md`、`docs/deployment-test-guide.md`：同步脚本行为、失败信息与 `ProtectHome` 覆盖范围。
 
 ### 本批变更文件（代码审查修复）
 
@@ -200,11 +225,14 @@
 ### 检查结果
 
 - 类型检查通过；38 项测试全部通过；生产构建通过。
-- 配置缺失时启动失败且信息明确；未执行任何真实外部调用。
+- Docker 镜像构建成功；无配置启动以退出码 1 结束并打印明确的缺失项。
+- Docker 命名卷的备份、内容核对、还原与投递 CLI 恢复已在容器中实际执行。
+- systemd 安装脚本在容器中完成安装、重复执行与失败路径验证；`systemctl` 为桩，unit 未实际启动。
+- 未执行任何真实外部调用（Telegram、模型提供商）。
 
 ### 真实联调与部署结果
 
-未执行。阶段 E、F 均为阻塞，当前状态是“本地验证完成，真实联调／部署待验收”，不等同于 MVP 已上线。
+未执行。阶段 E、F 仍为阻塞，当前状态是“本地验证与容器演练完成，真实联调／Linux 主机部署待验收”，不等同于 MVP 已上线。
 
 ### 启动入口
 

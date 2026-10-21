@@ -23,8 +23,12 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 [[ -x "$NODE_BIN" ]] || die "NODE_BIN is not executable: $NODE_BIN"
 node_version=$("$NODE_BIN" --version)
 [[ "$node_version" =~ ^v24\. ]] || die "Node.js 24.x required, found $node_version"
-# The unit sets ProtectHome=true, so a Node installed under /home is not visible to the service.
-[[ "$NODE_BIN" != /home/* ]] || die "Node is installed under /home and hidden by ProtectHome=true; install a system-wide Node.js"
+# ProtectHome=true hides /home, /root and /run/user, so a Node installed there is not visible to the service.
+case "$NODE_BIN" in
+  /home/*|/root/*|/run/user/*)
+    die "Node is installed under a home directory and hidden by ProtectHome=true; install a system-wide Node.js"
+    ;;
+esac
 [[ -f package.json && -f deploy/personal-agent.service ]] || die "run from the repository root"
 command -v flock >/dev/null || die "flock not found; install util-linux"
 command -v runuser >/dev/null || die "runuser not found; install util-linux"
@@ -47,13 +51,33 @@ log "installing application files"
 tar -cf - --exclude=.git --exclude=node_modules --exclude=dist --exclude=data --exclude=.env . \
   | tar -xf - -C "$APP_DIR"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
+# tar preserves the checkout's modes, which need not be restrictive; only the service user writes code.
+chmod 755 "$APP_DIR"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   log "creating $ENV_FILE from .env.example (fill in the values)"
   install -o root -g root -m 600 .env.example "$ENV_FILE"
   sed -i "s#^DATA_DIR=.*#DATA_DIR=$DATA_DIR#" "$ENV_FILE"
 fi
-grep -qE "^DATA_DIR=$DATA_DIR\$" "$ENV_FILE" || die "$ENV_FILE must set DATA_DIR=$DATA_DIR"
+
+# Validate before the expensive build, and again before systemd is touched: an unusable config
+# would otherwise leave the unit in a restart loop. Trailing whitespace is tolerated because the
+# application trims environment values.
+validate_config() {
+  grep -qE "^DATA_DIR=${DATA_DIR}[[:space:]]*\$" "$ENV_FILE" \
+    || die "$ENV_FILE must set DATA_DIR=$DATA_DIR to match ReadWritePaths"
+  # Only the configured provider's key is required; the other one stays empty on purpose.
+  provider=$(sed -n 's/^MODEL_PROVIDER=//p' "$ENV_FILE" | tail -n 1)
+  provider=${provider//[[:space:]]/}
+  case "$provider" in
+    anthropic) API_KEY=ANTHROPIC_API_KEY ;;
+    openai) API_KEY=OPENAI_API_KEY ;;
+    *) die "$ENV_FILE must set MODEL_PROVIDER to anthropic or openai" ;;
+  esac
+  # Succeeds only when no placeholder credential remains; an empty value would restart-loop the unit.
+  ! grep -qE "^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_ID|${API_KEY})=[[:space:]]*\$" "$ENV_FILE"
+}
+if validate_config; then configured=true; else configured=false; fi
 
 log "installing dependencies and building"
 # Build as the service user with a writable HOME and npm cache: runuser keeps root's HOME otherwise.
@@ -76,18 +100,16 @@ sed -e "s#/usr/bin/flock#${escaped_flock}#" \
   deploy/personal-agent.service > "$UNIT_FILE"
 chmod 644 "$UNIT_FILE"
 
+if validate_config; then configured=true; else configured=false; fi
+
 log "enabling service"
 systemctl daemon-reload
 systemctl enable personal-agent
 
-# Do not start with placeholder credentials: the unit would restart-loop.
-if grep -qE '^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_ID|(ANTHROPIC|OPENAI)_API_KEY)=$' "$ENV_FILE"; then
+if [[ "$configured" == false ]]; then
   log "configuration still has empty values; edit $ENV_FILE, then run: systemctl start personal-agent"
   exit 0
 fi
-# An explicit DATA_DIR must match the unit's ReadWritePaths.
-grep -qE "^DATA_DIR=${DATA_DIR}\$" "$ENV_FILE" \
-  || die "$ENV_FILE must set DATA_DIR=$DATA_DIR to match ReadWritePaths"
 
 log "starting service"
 systemctl restart personal-agent
