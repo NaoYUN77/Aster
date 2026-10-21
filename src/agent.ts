@@ -2,14 +2,13 @@ import { mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
-import { createModels, type Models } from "@earendil-works/pi-ai/models";
-import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import type { Models } from "@earendil-works/pi-ai/models";
 import { AssistantEntry, Harness, SessionFailed, type Storage } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { readConfig } from "./config.js";
 import type { TextRequest } from "./messages.js";
+import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry } from "./tools.js";
 
 const context = BACKGROUND_CONTEXT;
@@ -28,13 +27,9 @@ export async function openAgent(config: ReturnType<typeof readConfig>, models?: 
   const file = await open(join(workspace, "MEMORY.md"), "a");
   await file.close();
 
-  if (!models) {
-    const configured = createModels();
-    if (config.provider === "anthropic") configured.setProvider(anthropicProvider());
-    else if (config.provider === "openai") configured.setProvider(openaiProvider());
-    else throw new Error(`Unsupported MODEL_PROVIDER: ${config.provider}`);
-    models = configured;
-  }
+  if (!models) models = createProviderModels(config.provider);
+  // Both the real and the injected (offline test) registries must know the configured model.
+  requireModel(models, config.provider, config.model);
 
   const registry = createToolRegistry();
   const harness = await Harness.open(storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite")), {

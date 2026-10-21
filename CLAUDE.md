@@ -30,6 +30,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 构建、检查、测试与启动命令以 package.json 为准，使用方法见 README.md。接口与恢复设计见 [docs/contracts-and-lifecycle.md](docs/contracts-and-lifecycle.md)。
 
+支持的模型提供商以 `src/providers.ts` 的注册表为唯一来源：只登记可用单个显式 API key 配置的提供商，不包含 OAuth／订阅登录、云厂商环境凭据或需要额外端点参数的提供商。文档与部署脚本引用该注册表，不另行维护一份名单。
+
 ## 数据边界
 
 外部协议拥有外部格式，系统拥有内部契约。接入外部数据时，在边界完成校验、语义解释和格式转换；向外发送时，在对应出口转换为对方协议。

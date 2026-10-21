@@ -27,22 +27,30 @@ vi .env
 
 - `TELEGRAM_BOT_TOKEN`：bot token。
 - `TELEGRAM_OWNER_ID`：纯数字，不接受用户名。
-- `MODEL_PROVIDER`：只能是 `anthropic` 或 `openai`。
-- `MODEL_ID`：该账户实际可用的模型 ID，写错不会自动替换。
-- 对应提供商的 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`。
+- `MODEL_PROVIDER`：`src/providers.ts` 注册表内的 id，常用 `anthropic`、`openai`、`deepseek`、`google`、`moonshotai`、`zai` 等。
+- `MODEL_ID`：该提供商在 pi-ai 1.3.0 目录中的 id，写错不会自动替换；启动前报错并列出示例。
+- 所选提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`）；其他提供商的 key 留空即可。
 - Docker 部署时 `DATA_DIR` 会被 compose 固定为 `/data`，`.env` 里的值不生效。
 - systemd 部署时配置放在 `/etc/personal-agent.env`，其中必须设置 `DATA_DIR=/var/lib/personal-agent`。
 
 ```sh
 # 不要在日志或终端里回显 token；只检查键是否存在
 # Docker 用项目目录下的 .env；systemd 用 /etc/personal-agent.env
-grep -cE '^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_PROVIDER|MODEL_ID|(ANTHROPIC|OPENAI)_API_KEY)=.+' .env
+grep -cE '^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # 预期 4
+grep -cE '^[A-Z0-9_]*_API_KEY=.+' .env                                            # 至少 1
 chmod 600 .env
 ```
 
-预期：输出 `5`。少于 5 说明有项为空。systemd 部署时对 `/etc/personal-agent.env` 执行同样的检查（文件应已由 `install -m 600` 创建为 root 所有）。
+systemd 部署时对 `/etc/personal-agent.env` 执行同样的检查（文件应已由 `install -m 600` 创建为 root 所有）。更可靠的判定是让应用自己检查：
 
-缺失或非法配置时应用会直接退出并打印 `Missing configuration: <KEY>` 或 `MODEL_PROVIDER must be anthropic or openai`。看到这类错误先修配置，不要反复重启。
+```sh
+# systemd：脚本已自动执行；手动安装时可单独运行
+sudo env -i HOME="$HOME" PATH="$PATH" bash -c "set -a; . /etc/personal-agent.env; set +a; exec $(command -v node) /opt/personal-agent/dist/src/check-config.js"
+```
+
+预期输出 `Configuration OK: MODEL_PROVIDER=... MODEL_ID=...`。该检查不联网，也不回显任何凭据。
+
+缺失或非法配置时应用会直接退出并打印 `Missing configuration: <KEY>`、`MODEL_PROVIDER must be one of: ...` 或 `Unknown MODEL_ID ...`。看到这类错误先修配置，不要反复重启。
 
 **bot 已配置 webhook 会拒绝启动**，错误为 `Telegram webhook is active; remove it before starting long polling`。先在原部署里停用 webhook。
 
@@ -191,7 +199,8 @@ journalctl -u personal-agent -f
 - `flock` 报错：说明已有实例在跑，`ps aux | grep main.js` 确认。
 - 脚本报 `run from the repository root`：在包含 `package.json` 的目录执行。
 - 脚本报 `must set DATA_DIR=/var/lib/personal-agent`：配置文件里的 `DATA_DIR` 与 unit 的 `ReadWritePaths` 不一致。
-- 脚本报 `must set MODEL_PROVIDER to anthropic or openai`：`/etc/personal-agent.env` 里的提供商拼写不对或为空。
+- 脚本报 `MODEL_PROVIDER must be one of: ...`：提供商 id 不在注册表内，按提示选择。
+- 脚本报 `Unknown MODEL_ID ...`：`MODEL_ID` 不在该提供商的 pi-ai 模型目录中，按提示里的示例选择。
 
 数据目录权限必须允许服务用户读写；`ProtectSystem=strict` 下只有 `ReadWritePaths` 指定的路径可写。服务文件默认限制为 `MemoryHigh=768M`、`MemoryMax=1G`、`TasksMax=64`，与 QQ bot 共存；单独使用时可 `sudo systemctl edit personal-agent` 调高。
 
@@ -478,4 +487,4 @@ npm test
 npm run build
 ```
 
-三项都通过才继续部署。当前基线为 38 项测试通过；服务器上运行测试需要 Node.js 24.19.0 与完整开发依赖。
+三项都通过才继续部署。当前基线为 41 项测试通过；服务器上运行测试需要 Node.js 24.19.0 与完整开发依赖。

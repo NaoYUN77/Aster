@@ -14,6 +14,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { createRegistry, defineExtension, defineTool, Harness, ToolResultEntry } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import type { readConfig } from "../src/config.js";
 import { Inbox } from "../src/inbox.js";
 import { createToolRegistry } from "../src/tools.js";
 import { serveTelegram } from "../src/telegram.js";
@@ -149,7 +150,7 @@ test("a crash while a segment is sending quarantines it and later sends only sto
       const shutdown = new AbortController();
       let executions = 0;
       await serveTelegram(
-        { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory },
+        { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory } satisfies ReturnType<typeof readConfig>,
         "99",
         inbox,
         async () => { executions++; throw new Error("must not rerun the agent"); },

@@ -15,14 +15,14 @@ sudo ./deploy/install-systemd.sh
 1. 检查 root、Node 24.x、`npm`、`flock`、`runuser`、`bash` 和仓库根目录；Node 装在 `/home`、`/root` 或 `/run/user` 下会因 `ProtectHome=true` 不可见而拒绝继续。
 2. 创建系统用户 `personal-agent`（无登录 shell）。
 3. 创建 `/opt/personal-agent`（代码）与 `/var/lib/personal-agent`（数据），数据目录权限 `700`；代码目录重置为 `755`，避免从宽松权限的检出复制后留下可写目录。
-4. 复制应用文件，排除 `.git`、`node_modules`、`dist`、`data`、`.env`。
+4. 清空 `/opt/personal-agent` 后重新复制应用文件，排除 `.git`、`node_modules`、`dist`、`data`、`.env`。整树替换而非合并，源码中删除的模块不会残留成旧代码；`/etc/personal-agent.env` 与 `/var/lib/personal-agent` 不受影响。
 5. 首次运行时从 `.env.example` 创建 `/etc/personal-agent.env`（root 所有，`600`），并写入 `DATA_DIR=/var/lib/personal-agent`。
-6. 在构建前校验配置：`DATA_DIR` 必须与 unit 的 `ReadWritePaths` 一致，`MODEL_PROVIDER` 必须是 `anthropic` 或 `openai`。
+6. 复制完成后校验 `DATA_DIR` 与 unit 的 `ReadWritePaths` 一致。
 7. 以服务用户执行 `npm ci && npm run build && npm prune --omit=dev`，`HOME` 与 npm 缓存指向 `/opt/personal-agent`，构建后删除缓存。
-8. 按实际路径（含 Node 与 `flock`）生成 unit 文件，再次校验配置后启用服务。
-9. 只检查**当前所选提供商**的 API key：使用 `openai` 时留空的 `ANTHROPIC_API_KEY` 不算缺项。必需键整行缺失、被注释或值为空都视为未配置，此时只启用不启动，避免带着占位凭据进入重启循环；校验在触碰 systemd 之前完成。
+8. 按实际路径（含 Node 与 `flock`）生成 unit 文件并启用服务。
+9. 启用后用 `node dist/src/check-config.js` 做离线配置检查：提供商必须是注册表内的 id，`MODEL_ID` 必须在该提供商的模型目录中，且只需**当前所选提供商**的 API key（使用 `openai` 时留空的 `ANTHROPIC_API_KEY` 不算缺项）。检查失败时只启用不启动，避免带着占位凭据进入重启循环。
 
-可重复执行：代码和 unit 会被替换，数据目录与已有配置不会被覆盖。
+可重复执行：代码目录会被清空重建，unit 会被替换，数据目录与已有配置不会被覆盖。
 
 ## 路径约定
 
