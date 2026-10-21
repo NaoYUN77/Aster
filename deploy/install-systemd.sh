@@ -35,9 +35,6 @@ command -v runuser >/dev/null || die "runuser not found; install util-linux"
 command -v bash >/dev/null || die "bash not found; the bash tool requires it"
 command -v npm >/dev/null || die "npm not found; install it alongside Node.js"
 
-# Copying the tree onto itself would corrupt the source checkout.
-[[ "$(realpath .)" != "$(realpath -m "$APP_DIR")" ]] || die "run from a checkout outside $APP_DIR"
-
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   log "creating system user $SERVICE_USER"
   useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
@@ -47,6 +44,11 @@ log "creating directories"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$APP_DIR" "$DATA_DIR"
 
 log "installing application files"
+# Copying the tree onto itself would corrupt the source checkout.
+[[ "$(realpath .)" != "$(realpath -m "$APP_DIR")" ]] || die "run from a checkout outside $APP_DIR"
+# Replace the tree instead of merging: files deleted from the source must not linger as stale code.
+[[ "$APP_DIR" != "/" && "$APP_DIR" != "/opt" ]] || die "refusing to clean $APP_DIR"
+find "$APP_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 # Keep data and configuration out of the code directory.
 tar -cf - --exclude=.git --exclude=node_modules --exclude=dist --exclude=data --exclude=.env . \
   | tar -xf - -C "$APP_DIR"
