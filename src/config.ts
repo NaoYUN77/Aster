@@ -1,8 +1,23 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
 import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
 
 export { ConfigurationError };
+
+/**
+ * MCP paths without the bot's own requirements, so the authorization CLI resolves the same file as the
+ * running service. The default path is optional: a missing file just means no MCP servers. An explicitly
+ * configured path must exist.
+ */
+export function resolveMcpConfigPaths(env: NodeJS.ProcessEnv = process.env) {
+  const dataDir = resolve(env.DATA_DIR || "data");
+  const mcpConfig = env.MCP_CONFIG?.trim();
+  return {
+    dataDir,
+    mcpConfigPath: mcpConfig ? resolve(mcpConfig) : join(dataDir, "mcp.json"),
+    mcpConfigExplicit: Boolean(mcpConfig),
+  };
+}
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   const required = (key: string) => {
@@ -22,6 +37,6 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     ownerId,
     provider,
     model: required("MODEL_ID"),
-    dataDir: resolve(env.DATA_DIR || "data"),
+    ...resolveMcpConfigPaths(env),
   };
 }

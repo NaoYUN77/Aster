@@ -48,7 +48,9 @@ systemd 部署时对 `/etc/personal-agent.env` 执行同样的检查（文件应
 sudo env -i HOME="$HOME" PATH="$PATH" bash -c "set -a; . /etc/personal-agent.env; set +a; exec $(command -v node) /opt/personal-agent/dist/src/check-config.js"
 ```
 
-预期输出 `Configuration OK: MODEL_PROVIDER=... MODEL_ID=...`。该检查不联网，也不回显任何凭据。
+预期输出 `Configuration OK: MODEL_PROVIDER=... MODEL_ID=... MCP_SERVERS=...`。该检查不联网，也不回显任何凭据。
+
+MCP server 是可选功能：默认路径 `DATA_DIR/mcp.json` 不存在即关闭；该文件存在但有文件级错误时，运行时禁用 MCP，检查也只在输出中告警而不失败。用 `MCP_CONFIG` 显式指定时，文件缺失或非法会使检查失败。配置格式与接入说明见 [README.md](../README.md#mcp-服务器可选)。
 
 缺失或非法配置时应用会直接退出并打印 `Missing configuration: <KEY>`、`MODEL_PROVIDER must be one of: ...` 或 `Unknown MODEL_ID ...`。看到这类错误先修配置，不要反复重启。
 
@@ -433,6 +435,10 @@ journalctl -u personal-agent -n 20 --no-pager
 | 日志反复 `polling retry` | 网络或 Telegram 限流 | 应用有退避；持续失败检查出网与 token |
 | 进程反复重启 | 底座 Session 失效（`AGENT_SESSION_FAILED`） | 属设计行为，重启恢复；若持续出现，检查磁盘与 SQLite 文件权限 |
 | 备份归档为空 | 挂载了错误卷名 | 用 `docker volume ls` 确认真实卷名 |
+| 启动日志 `MCP server <name> unavailable (MCP_TIMEOUT)` | server 启动慢、命令不存在或网络不通 | 检查 `command`/`cwd` 与网络；单独运行该命令验证 |
+| 出现 `MCP_AUTH_REQUIRED` | 远程 server 未授权或 refresh token 失效 | 停服务后运行 `mcp:auth`，再重启 |
+| `npx` server 启动报 `EACCES`／`ENOENT` | `ProtectHome`/`ProtectSystem` 下 npm 缓存不可写 | 设置 `NPM_CONFIG_CACHE=/var/lib/personal-agent/.npm` 或预装 server |
+| 模型说找不到某 MCP 工具 | 工具未通过 `tool_search` 加载，或 server 未连上 | 让模型先 `tool_search`；对照启动日志中的 server 状态 |
 
 ## 9. 上线判定
 
