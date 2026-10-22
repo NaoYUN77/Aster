@@ -7,6 +7,9 @@ import { AssistantEntry, Harness, SessionFailed, type Storage } from "@earendil-
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { readConfig } from "./config.js";
+import { ConfigurationError } from "./errors.js";
+import { connectMcp, type McpHost } from "./mcp.js";
+import { readMcpConfig } from "./mcp-config.js";
 import type { TextRequest } from "./messages.js";
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry } from "./tools.js";
@@ -21,7 +24,19 @@ function sessionFailure(cause: unknown): Error {
   return Object.assign(new Error("Agent session failed; restart the process to recover", { cause: failure }), { code: "AGENT_SESSION_FAILED" });
 }
 
-export async function openAgent(config: ReturnType<typeof readConfig>, models?: Models, storage?: Storage) {
+export type OpenAgentOptions = {
+  /** Already-connected MCP host; the agent owns and closes it. Startup config is skipped. */
+  readonly mcp?: McpHost;
+  /** Stops MCP connection attempts during shutdown. */
+  readonly signal?: AbortSignal;
+};
+
+export async function openAgent(
+  config: ReturnType<typeof readConfig>,
+  models?: Models,
+  storage?: Storage,
+  options: OpenAgentOptions = {},
+) {
   const workspace = join(config.dataDir, "workspace");
   await mkdir(workspace, { recursive: true });
   const file = await open(join(workspace, "MEMORY.md"), "a");
@@ -32,12 +47,21 @@ export async function openAgent(config: ReturnType<typeof readConfig>, models?: 
   requireModel(models, config.provider, config.model);
 
   const registry = createToolRegistry();
-  const harness = await Harness.open(storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite")), {
-    models,
-    registry,
-    settings: { toolExecution: "sequential" },
-    env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? workspace }),
-  }, context);
+  const mcp = options.mcp ?? await openMcpHost(config, registry, options.signal);
+  for (const extension of mcp.extensions) registry.install(extension);
+
+  let harness: Awaited<ReturnType<typeof Harness.open>>;
+  try {
+    harness = await Harness.open(storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite")), {
+      models,
+      registry,
+      settings: { toolExecution: "sequential" },
+      env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? workspace }),
+    }, context);
+  } catch (error) {
+    await mcp.close().catch(() => {});
+    throw error;
+  }
 
   try {
     const root = await harness.root(context);
@@ -93,10 +117,46 @@ Your final response will be delivered to Telegram as plain text. Do not claim an
       },
       // Conversation-wide cancellation waits for ordinary tasks to become terminal.
       abort: () => root.abort(context),
-      close: () => harness.close(context),
+      async close() {
+        // Closing the harness first cancels tool contexts, so MCP shutdown is not recorded as tool failure.
+        try {
+          await harness.close(context);
+        } finally {
+          await mcp.close();
+        }
+      },
     };
   } catch (error) {
-    await harness.close(context);
+    // A rejecting harness close must not leave MCP children running; they keep the process alive.
+    try {
+      await harness.close(context);
+    } finally {
+      await mcp.close().catch(() => {});
+    }
     throw error;
   }
+}
+
+/**
+ * Connect configured MCP servers and install their extensions. A broken default file disables MCP;
+ * an explicitly configured file that cannot be read or parsed fails startup, like other config.
+ */
+async function openMcpHost(
+  config: ReturnType<typeof readConfig>,
+  registry: ReturnType<typeof createToolRegistry>,
+  signal: AbortSignal | undefined,
+): Promise<McpHost> {
+  const read = await readMcpConfig(config.mcpConfigPath, config.mcpConfigExplicit);
+  for (const warning of read.warnings) console.error(`MCP config: ${warning}`);
+  if (read.error !== undefined) {
+    if (config.mcpConfigExplicit) throw new ConfigurationError(read.error);
+    console.error(`MCP disabled (MCP_CONFIG_INVALID): ${read.error}`);
+    return { extensions: [], close: async () => {} };
+  }
+  return connectMcp(read.config, {
+    dataDir: config.dataDir,
+    reserved: new Set(registry.snapshot().tools().map(({ tool }) => tool.name)),
+    ...(signal === undefined ? {} : { signal }),
+    log: (line) => console.error(line),
+  });
 }

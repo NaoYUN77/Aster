@@ -22,6 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | --- | --- | --- |
 | Node.js | 24.19.0，见 .node-version | 开发与部署运行时，含内置 SQLite |
 | @earendil-works/pi-durable / pi-ai / chord | 1.3.0 | agent 底座、模型适配与执行上下文 |
+| @earendil-works/pi-mcp | 1.3.0 | MCP 客户端、传输与 OAuth |
 | Telegram 客户端 grammY | 1.46.0 | Telegram 协议适配 |
 | TypeBox | 1.3.27 | 工具参数 schema，与底座版本对齐 |
 | TypeScript / tsx | 7.0.2 / 4.23.15 | 类型检查、构建与开发执行 |

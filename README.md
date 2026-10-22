@@ -61,6 +61,8 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 | `workspace/` | agent 的任务文件 |
 | `agent.sqlite` 及其 WAL 文件 | 底座会话与执行恢复状态 |
 | `inbox.sqlite` 及其 WAL 文件 | 请求消费位置、身份绑定和投递状态 |
+| `mcp.json`（可选） | MCP server 配置；默认路径，可用 `MCP_CONFIG` 覆盖 |
+| `mcp-oauth/<server>.json`（可选） | 远程 MCP server 的 OAuth token，仅属主可读 |
 
 同一个数据目录只允许一个应用进程使用。数据目录绑定 bot 和 owner，不能直接更换身份后继续使用原会话。部署更新保留整个目录；备份时先停止服务，再复制数据目录，包含 SQLite 相关文件。
 
@@ -75,6 +77,66 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 内置工具为 `read/write/edit/bash`，由 pi durable 提供。文件记忆通过这些工具维护，不另建记忆数据库。工具并非文件系统沙箱，生产环境使用独立的低权限系统用户；部署示例约束写入持久化目录。
 
 工具契约、错误语义、重放与升级兼容性见 [设计文档](docs/contracts-and-lifecycle.md)。仓库级约束见 [CLAUDE.md](CLAUDE.md)，MVP 范围见 [docs/mvp.md](docs/mvp.md)。
+
+## MCP 服务器（可选）
+
+通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG` 指定的路径）接入 MCP server，无需改代码。默认文件不存在表示不启用；显式指定的文件缺失、不是合法 JSON 或顶层结构错误时启动失败，默认路径上的文件级错误只禁用 MCP 并记录原因。离线校验该文件、不连接 server 的命令是 `npm run build && node dist/src/check-config.js`（`npm run check` 只做类型检查）。
+
+```json
+{
+  "servers": [
+    {
+      "name": "github",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "cwd": "/var/lib/personal-agent/workspace",
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
+      "timeoutMs": 60000,
+      "connectTimeoutMs": 10000
+    },
+    {
+      "name": "calendar",
+      "transport": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "X-Client": "personal-agent" },
+      "auth": { "type": "oauth", "scope": "calendar.read", "redirectPort": 8765 }
+    }
+  ]
+}
+```
+
+- `name` 唯一，匹配 `^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$`；最多 8 个 server，其中 stdio 最多 4 个。超出数量的条目被忽略并记录告警，其余条目照常生效。
+- stdio：`command` 必填；`args`、`env` 为字符串数组／映射；`cwd` 必须是存在的绝对路径。默认 `inheritEnv: false`，子进程只得到 `PATH` 等运行所需变量加 `env` 中的条目，bot 的模型与 Telegram 凭据不会传入 server。
+- http：必须是 `https`，仅回环地址允许 `http`；`headers` 键不得含控制字符，值在 `${NAME}` 解析后必须只含制表符、可见 ASCII 或 Latin-1 字符（Fetch 不接受其他字符，如换行或中文）；`auth.type` 目前只支持 `oauth`。
+- `args`、env 值、header 值和 `clientSecret` 中的 `${NAME}` 从应用环境解析，缺失变量只禁用该条目并只报告变量名。
+- 单条无效、重名、超出数量或缺失变量只跳过该条目并记录告警，不影响其他 server。顶层结构错误、未知顶层键、不是合法 JSON 属于文件级错误。文件可带 UTF-8 BOM。
+- 配置文件含凭据引用，部署时设为 `600`，不要提交仓库。
+
+工具以 `mcp__<server>__<tool>` 命名，默认**不直接提供给模型**。系统提示只列出已连接的 server 和工具数量；模型先调用 `tool_search` 加载需要的工具，之后才能调用，已加载的工具随该会话保存。server 返回的参数 schema 必须能表示为 object 且有界（16 KiB、深度 12、属性 256 个、无 `$ref`），否则跳过该工具；名称冲突时用固定哈希后缀避免与内置工具重名，同一 server 的工具按原始名称排序后分配，重启不会改变归属。每个 server 最多登记 100 个工具、10 页，且整次工具发现限时 30 秒；发生截断时日志会记录。图片结果超过 4 MiB 时替换为文字说明，不进入会话记录。
+
+MCP 调用一律按不可重放处理（`replay: "unsafe"`）：进程中断后不会自动重跑，避免重复外部副作用。启动时某个 server 不可用只记录安全错误码（如 `MCP_TIMEOUT`、`MCP_HTTP_401`）并跳过；运行中掉线的工具保留，调用返回 `MCP_CLOSED`，重启进程后重连，不做自动重连。
+
+`auth.authorizationServerMetadataUrl` 可指定授权服务器的 metadata 文档，用于 MCP server 公布的授权服务器有误或不可达时；`mcp:auth` 与 bot 的刷新路径使用同一配置。
+
+OAuth：bot 只使用和刷新 `DATA_DIR/mcp-oauth/<server>.json` 中的 token，不在 bot 进程内开回调端口。首次授权或需要重新授权时，先停止 bot（避免两个进程竞争 token 文件），再执行：
+
+```sh
+npm run build
+DATA_DIR=./data npm run mcp:auth -- calendar
+```
+
+`mcp:auth` 与 bot 读取同一组 `DATA_DIR`、`MCP_CONFIG` 环境变量；用 `MCP_CONFIG` 指定过路径时，授权命令也要带上同样的值（systemd 部署见 [deploy/README-systemd.md](deploy/README-systemd.md)）。
+
+打开命令打印的 URL 完成授权，回到终端等待回调。服务器没有入站端口时，先建立到配置端口的 SSH 端口转发，例如 `ssh -L 8765:127.0.0.1:8765 user@host`。命令只打印 server 名和工具数量，不打印 token。运行中需要重新授权时，该工具调用返回 `MCP_AUTH_REQUIRED`，按上述步骤处理后重启。
+
+MCP server 与应用使用同一系统用户，不构成安全边界；stdio server 的代码和配置应视为受信任组件。不要把无关凭据放进 `env` 或 `headers`。远程 HTTP + OAuth 的隔离更强，优先选用。
+
+部署注意：
+
+- systemd 的 `ProtectHome`/`ProtectSystem` 使默认 npm 缓存不可写。用 `npx` 启动 stdio server 时，在 `/etc/personal-agent.env` 设置 `NPM_CONFIG_CACHE=/var/lib/personal-agent/.npm`（位于 `ReadWritePaths` 内），或构建时预装 server 并改用绝对路径。`TasksMax=64` 需同时容纳 stdio server 进程。
+- Docker 镜像自带 npm；把 MCP 配置放在数据卷内，不要把含 secret 的配置写进镜像。
+- 每个 stdio server 都会增加常驻进程和内存占用；4 GB 主机上优先少而稳的 server。
 
 ## 投递核查与补发
 

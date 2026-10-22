@@ -20,7 +20,7 @@ sudo ./deploy/install-systemd.sh
 6. 复制完成后校验 `DATA_DIR` 与 unit 的 `ReadWritePaths` 一致。
 7. 以服务用户执行 `npm ci && npm run build && npm prune --omit=dev`，`HOME` 与 npm 缓存指向 `/opt/personal-agent`，构建后删除缓存。
 8. 按实际路径（含 Node 与 `flock`）生成 unit 文件并启用服务。
-9. 启用后用 `node dist/src/check-config.js` 做离线配置检查：提供商必须是注册表内的 id，`MODEL_ID` 必须在该提供商的模型目录中，且只需**当前所选提供商**的 API key（使用 `openai` 时留空的 `ANTHROPIC_API_KEY` 不算缺项）。检查失败时只启用不启动，避免带着占位凭据进入重启循环。
+9. 启用后用 `node dist/src/check-config.js` 做离线配置检查：提供商必须是注册表内的 id，`MODEL_ID` 必须在该提供商的模型目录中，且只需**当前所选提供商**的 API key（使用 `openai` 时留空的 `ANTHROPIC_API_KEY` 不算缺项）；同时校验 MCP 配置文件。必需配置缺失时只启用不启动，避免带着占位凭据进入重启循环。
 
 可重复执行：代码目录会被清空重建，unit 会被替换，数据目录与已有配置不会被覆盖。
 
@@ -33,6 +33,32 @@ sudo ./deploy/install-systemd.sh
 | `/etc/personal-agent.env` | 配置与凭据 | `root`，权限 `600` |
 
 要换路径时，修改脚本顶部变量并同步调整 unit 文件。数据目录必须与 `DATA_DIR` 一致。
+
+## MCP server（可选）
+
+MCP 配置默认位于 `/var/lib/personal-agent/mcp.json`，与代码分开保存，升级和重装不会覆盖；属主应为 `personal-agent`，权限 `600`。也可以在 `/etc/personal-agent.env` 用 `MCP_CONFIG` 指向其他位置。`check-config` 会离线校验该文件：默认路径上的文件级错误只输出告警（与运行时一样禁用 MCP），`MCP_CONFIG` 显式指定的文件有错则使检查失败。
+
+用 `npx` 启动 stdio server 时，`ProtectHome=true` 和 `ProtectSystem=strict` 会让默认 npm 缓存不可写。在 `/etc/personal-agent.env` 增加：
+
+```sh
+NPM_CONFIG_CACHE=/var/lib/personal-agent/.npm
+```
+
+该目录位于 `ReadWritePaths` 内。也可以在构建阶段把 server 装进 `/opt/personal-agent` 并用绝对路径启动。`TasksMax=64` 和 `MemoryMax=1G` 需要同时容纳 server 子进程，数量多时相应调高。
+
+远程 server 首次授权（先停服务，授权完再启动）。授权命令与 bot 一样读取 `DATA_DIR`、`MCP_CONFIG` 和 `mcp.json` 里 `${NAME}` 引用的变量，因此必须从同一份配置加载它们。`/etc/personal-agent.env` 是 root 所有、`600`，由 root 读取后把进程降权到服务用户，token 文件才归 `personal-agent` 所有：
+
+```sh
+sudo systemctl stop personal-agent
+sudo bash -c 'set -a; . /etc/personal-agent.env; set +a; \
+  exec runuser -u personal-agent -- env HOME=/var/lib/personal-agent \
+  /opt/personal-agent/dist/src/mcp-auth.js calendar'
+sudo systemctl start personal-agent
+```
+
+用 `MCP_CONFIG` 指向其他路径时，这条命令自动带上同一个值，不需要重复填写。
+
+服务器没有入站端口时，先建立 `ssh -L 8765:127.0.0.1:8765 user@host` 再打开授权 URL。命令只打印 server 名和工具数量。
 
 ## 资源限制
 

@@ -18,7 +18,7 @@ try {
   try {
     inbox.bindIdentity(botId, config.ownerId);
     inbox.recover();
-    const agent = await openAgent(config);
+    const agent = await openAgent(config, undefined, undefined, { signal: shutdown.signal });
     try {
       console.info("Personal agent starting; single-owner private Telegram messages enabled.");
       await serveTelegram(config, botId, inbox, agent.reply, shutdown.signal, client);

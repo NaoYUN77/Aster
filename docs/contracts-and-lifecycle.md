@@ -36,6 +36,28 @@
 
 对同一文件的写入需要明确的顺序或互斥机制，不能仅凭应用层只运行一个用户请求，就推断同一回合里的工具一定顺序执行。
 
+### MCP 工具
+
+MCP 工具由入口配置声明，不由模型注册。`src/mcp-config.ts` 在边界校验文件、解析 `${ENV}` 并返回纯配置；`src/mcp.ts` 负责连接、发现工具和适配到底座原生工具契约。
+
+- 启动时按配置并行连接 server。单个 server 失败只记录安全错误码并跳过，不阻止 bot 启动。`connectTimeoutMs` 默认 10s；超时以 `MCP_TIMEOUT` 记录，并关闭客户端以回收子进程或请求。
+- 每个 server 安装一个 extension，名称为 `mcp-server-<server>`；汇总 section 的 extension 名为 `mcp-servers`，两者不会因 server 命名而重名（同名 extension 是替换语义）。
+- 工具名为 `mcp__<server>__<tool>`，清洗为 `[A-Za-z0-9_-]`、总长 ≤64；截断和冲突后缀只由 server 名与原始工具名决定，因此重启后能定位同一工具。同一 server 的工具按原始名称排序后分配，清洗后重名的两个工具不会因 server 的列举顺序而互换名称。
+- 所有工具 `deferred: true`。系统提示只渲染已连接 server 与工具数量，模型通过 `tool_search` 加载；至少有一个工具时才安装 `tool_search`。工具描述来自外部 server，视为不可信数据，不能作为放宽权限的依据。
+- 参数 schema 必须缺省或为 `type: "object"`、深度 ≤12、属性总数 ≤256、不含 `$ref`，并通过 TypeBox 编译；深度检查先于字节检查，因为序列化本身是递归的。序列化 ≤16 KiB；不满足则跳过该工具。执行前的参数校验仍由底座完成。
+- `replay: "unsafe"`；`outputLimits` 为 32 KiB、1000 行、保留头部。`execute` 把 `context.abortSignal` 传给 MCP 请求，结果经 `toLlmContent` 转为底座内容类型；底座只约束文本，因此单张图片超过 4 MiB 时替换为文字说明，避免不受限的数据进入持久化会话。`isError` 保留为工具结果失败。异常映射为 `MCP_TIMEOUT`、`MCP_CLOSED`、`MCP_PROTOCOL`、`MCP_AUTH_REQUIRED`、`MCP_HTTP_<status>` 或 `MCP_FAILED`，不携带 header、args、env、stderr 或 server 消息。
+- stdio 子进程使用 `inheritEnv: false` 加允许列表（`PATH` 等运行所需变量），再合并配置的 `env`；stderr 只保留有界缓冲，不写日志。日志只有 server 名、工具数量和错误码。
+- 列工具自行翻页，每 server 100 个工具、10 页，且整次发现限时 30 秒；不调用会跟随全部分页的 `listTools()`。发生截断时记录日志，不静默丢弃。
+- HTTP 响应体按 1 MiB 上限读取（传输层只约束 SSE 事件，JSON 响应整体读取）。
+
+关闭顺序：先关闭底座（取消工具上下文），再关闭 MCP 连接（stdio 先关 stdin，超时后终止进程组）。顺序反过来会让正常停机被记录成工具失败。
+
+恢复：MCP 工具永不自动重放。启动时不可用的 server 不安装工具，遗留调用在恢复中表现为工具不可用；运行中断开的调用以 `MCP_CLOSED` 失败。改名、改 schema 或删除 server 都是不兼容变更，需要先收敛未完成调用。
+
+OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、临时文件后原子替换），不进入模型上下文、工具参数或日志。一次写入失败只影响该次调用，不使后续读写持续失败。bot 只读取和刷新；交互授权由 `npm run mcp:auth` 在独立进程完成，bot 不监听回调端口。`mcp:auth` 与 bot 通过同一函数解析 `DATA_DIR` 和 `MCP_CONFIG`；配置的 `authorizationServerMetadataUrl` 同时用于 CLI 流程与运行时 401 后的重新授权，避免两者落在不同授权服务器。
+
+边界：MCP server 与应用同 uid，不构成安全边界；模型可通过 bash 读取进程环境与数据目录。真正的隔离需要独立用户、容器或远端 server。
+
 ## 请求生命周期
 
 区分三种标识：
@@ -94,6 +116,13 @@ Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不�
 - 请求去重键是 `(底座 conversationId, requestId)`。相同键与相同提交类型返回旧请求，即使文本已改变，也不会检查内容冲突；接入层必须保证请求标识稳定且不被复用。
 - 输入提交状态为 `queued → placed → done | unanswered`，其中排队请求也可能直接成为 unanswered。`done` 带最终答案引用；`unanswered` 带原因。应用必须显式区分。
 - 取消 `wait()` 只取消等待。取消已开始的执行需使用底座执行取消机制；会话级 abort 会影响该会话的普通任务范围，不能假定它只影响一条请求。
+
+`@earendil-works/pi-mcp` 1.3.0 中与本实现相关的行为：
+
+- `McpClient.connect()` 不接受取消信号。连接超时由宿主用 `Promise.race` 截止，随后必须 `close()`，否则可能遗留子进程或请求。
+- `StdioTransport` 在 `inheritEnv: false` 时传给子进程的环境恰好是 `env` 选项；`close()` 按关闭 stdin、SIGTERM、SIGKILL 的顺序回收进程组。
+- `StreamableHttpTransport` 把 401 交给 `adaptOAuthProvider`；无法用已存 token 或 refresh token 恢复时抛 `McpOAuthAuthorizationRequiredError`。
+- `toLlmContent()` 把文本、图片、嵌入资源和结构化结果转换为 pi-ai 的 text/image 内容，可直接作为工具 `output`。
 
 ## 应用状态与投递实现
 
