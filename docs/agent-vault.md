@@ -58,13 +58,36 @@ openAgent
 | 配置 | 含义 |
 | --- | --- |
 | `AGENT_VAULT_ENABLED=1` | 启用应用侧代理检查与 MCP 凭证配置约束；缺省/`0` 保留原运行方式。启用后要求 Bot token 与所有已设置的注册表提供商 key 为占位值，owner ID 从文件读取 |
-| `HTTP_PROXY` / `HTTPS_PROXY` | 必须完全相同，格式 `http://<proxy-token>:<vault>@<broker>:14322`；也接受 HTTPS 代理 URL |
+| `HTTP_PROXY` / `HTTPS_PROXY` | 必须完全相同。单 vault 时格式 `http://<proxy-token>:<vault>@<broker>:14322`；多 vault 时指向本地 egress router，如 `http://app:<router-password>@127.0.0.1:14323`。也接受 HTTPS 代理 URL |
 | `NODE_USE_ENV_PROXY=1` | 在启动 Node 前设置；应用还调用 Node 24 的 `setGlobalProxyFromEnv` 覆盖默认网络客户端 |
 | `NODE_EXTRA_CA_CERTS` | 启动 Node 前指定绝对路径；证书必须可读，在线入口会验证 Node 已加载它 |
 | `NO_PROXY` | 仅允许为空或精确 loopback 主机列表，不允许 `*`、域名后缀或外部主机 |
 | `TELEGRAM_OWNER_ID_FILE` | 可选的绝对路径；启用 Vault 时必填，从 Infisical 导出的 owner ID。与 `TELEGRAM_OWNER_ID` 互斥，文件必须可读且内容为正整数 |
 
 只采用大写 proxy 配置，拒绝有值的小写版本及 `ALL_PROXY`，避免库选择不同出口。禁止关闭 TLS 验证。子进程会获得对应的 `SSL_CERT_FILE`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`，而不继承 Infisical 身份或宿主其他环境。
+
+### 多 vault 与 host 路由
+
+一个 Agent Vault vault 绑定一个 Infisical project / environment / secret path，并且只同步该路径下的直接 key，不递归子文件夹。因此“不同基建放不同文件夹”对应多个 vault，而不是一个 vault 的多个路径。
+
+应用进程只有一组全局 `HTTP_PROXY` / `HTTPS_PROXY`，无法按目标 host 选择不同 vault。多 vault 部署在应用与 broker 之间增加 `agent-egress-router`：应用把代理指向路由器的回环端口，路由器按 CONNECT 的 `host:port` 从精确路由表选择 vault 与对应的 agent token，再转发到 `127.0.0.1:14322`。
+
+```text
+app ── HTTP_PROXY → 127.0.0.1:14323 (router, app password)
+                         ├─ api.telegram.org:443 → vault telegram + token A
+                         ├─ api.deepseek.com:443 → vault deepseek + token B
+                         └─ api.github.com:443   → vault tools    + token C
+                         ▼
+                    127.0.0.1:14322 (one broker, many vaults)
+```
+
+- 每个 vault 配一个只授予该 vault `proxy` 角色的 agent token；token 是数据库记录，不增加常驻进程。
+- 仍然只运行一个 broker；只有需要独立故障域或独立信任边界时才拆多个 broker。
+- 路由器只监听回环，不解析 DNS，不持有 Infisical 凭据或真实 API key。
+- 应用只持有路由器客户端密码，不持有 agent token。
+- 未列入路由表的 host 默认拒绝（`403`）；Agent Vault 的 `407`/`403` 原样透传。
+
+构建、配置、systemd 单元和验收命令见 [router/README.md](../router/README.md)、[示例配置](../deploy/agent-vault/egress-router.example.json) 与 [设计文档](agent-vault-router-plan.md)。
 
 MCP 中 `${vault:KEY}` 转换为字符串 `__vault_KEY__`，**不是取密接口**。KEY 必须使用 UPPER_SNAKE_CASE；未启用 Vault 时使用引用会禁用对应 server。比如：
 
@@ -116,7 +139,7 @@ chmod 600 deploy/agent-vault/private/*.env
 `private/` 已同时加入 gitignore 和 dockerignore。不要在聊天、命令行参数、工具结果或日志中粘贴真实凭证。配置中的代理 token 本身具有访问权限，也需要保密。
 
 1. 在 Infisical 项目中创建对应环境和路径，例如 `prod`、`/personal-agent/tools`。把实际需要的 `GITHUB_TOKEN`、`EXAMPLE_USERNAME`、`EXAMPLE_PASSWORD`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID` 以及当前模型提供商的 API key 放入此路径。未使用的示例 key 不需要创建。
-2. 创建只读 Machine Identity，权限仅覆盖该项目、环境、路径。将 Universal Auth client ID/secret 填入 `private/vault.env`，并设置强 Vault master password。不要把此文件挂载到应用。
+2. 创建只读 Machine Identity，权限仅覆盖该项目、环境、路径。将 Universal Auth client ID/secret 填入 `private/vault.env`，并设置强 Vault master password。该密码用于包装本地数据密钥，保护 Vault 数据卷中的凭据和 CA 私钥；它不是 Infisical 密码，也不传给应用。丢失后原数据卷无法解密，只能用 `agent-vault master-password change` 在知道当前密码时轮换。不要把此文件挂载到应用。
 3. 仅启动 broker：
 
    ```sh

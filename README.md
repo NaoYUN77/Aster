@@ -84,6 +84,8 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 
 使用独立 `docker-compose.agent-vault.yml` 启动这一模式，不与默认 Compose 合并。普通本地/systemd 运行仅设置代理变量不会自动获得网络隔离；应用继续用 systemd、只把 broker 放入容器的混合部署见 [systemd 应用 + 容器 broker](docs/agent-vault-systemd.md)。真实 Infisical 联调与容器出口验收尚需在目标机完成。
 
+不同基础设施的密钥按 Infisical 文件夹拆分时，每个文件夹对应一个 vault。应用只有一组全局代理变量，无法直接选择 vault；仓库内提供 `agent-egress-router`，按目标 `host:port` 路由到一个 broker 下的不同 vault。构建和配置见 [router/README.md](router/README.md)，systemd 单元与示例配置在 [`deploy/agent-vault/`](deploy/agent-vault/)，设计见 [host 路由方案](docs/agent-vault-router-plan.md)。
+
 ## MCP 服务器（可选）
 
 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG` 指定的路径）接入 MCP server，无需改代码。默认文件不存在表示不启用；显式指定的文件缺失、不是合法 JSON 或顶层结构错误时启动失败，默认路径上的文件级错误只禁用 MCP 并记录原因。离线校验该文件、不连接 server 的命令是 `npm run build && node dist/src/check-config.js`（`npm run check` 只做类型检查）。

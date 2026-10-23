@@ -30,6 +30,8 @@ systemd: node /opt/personal-agent/dist/src/main.js
 
 管理端口 `14321` 只绑定回环，用于配置和取 CA；代理端口 `14322` 只绑定回环，供 systemd 应用使用。
 
+如果不同基础设施的密钥放在不同 Infisical 文件夹，需要为每个文件夹建一个 vault。应用只有一组全局代理变量，此时在应用和 broker 之间加一个 `agent-egress-router`，按目标 host 选择 vault；仍然只运行一个 broker。见本文第 2.1 节和 [router/README.md](../router/README.md)。
+
 ## 前置条件
 
 - 应用已按 [systemd 部署说明](../deploy/README-systemd.md) 安装，代码在 `/opt/personal-agent`，数据在 `/var/lib/personal-agent`。
@@ -56,6 +58,8 @@ INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=<只读 Machine Identity client id>
 INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=<只读 Machine Identity client secret>
 AGENT_VAULT_ADDR=http://localhost:14321
 ```
+
+`AGENT_VAULT_MASTER_PASSWORD` 用于包装 broker 的本地数据密钥（DEK），保护数据卷中的凭据和 CA 私钥；它不是 Infisical 密码，也不传给应用。丢失后原数据卷无法解密。首次启动前设置；已有实例改用 CLI `agent-vault master-password set|change`，不要只改环境变量。
 
 自建 Infisical 时修改 `docker-compose.agent-vault.yml` 的 `INFISICAL_URL`（Compose 的 `environment` 优先于 `env_file`）。
 
@@ -136,6 +140,41 @@ services:
 
 HTTP MCP 使用 `headers: { "Authorization": "Bearer ${vault:API_TOKEN}" }`；Basic auth 不需要占位值，由 Vault 规则生成 Authorization。MCP OAuth 继续使用 `DATA_DIR/mcp-oauth`，对应 endpoint 配置为 `passthrough`。
 
+### 2.1 多个 Infisical 文件夹：每文件夹一个 vault
+
+一个 vault 只绑定一个 project / environment / secret path，并且只同步该路径下的直接 key，不递归子文件夹。不要为了“只建一个 vault”把不同基础设施的密钥合并到同一文件夹。推荐的拆分：
+
+| vault | Infisical path | 示例 key | Agent Vault 服务规则 |
+| --- | --- | --- | --- |
+| `telegram` | `/personal-agent/telegram` | `TELEGRAM_BOT_TOKEN` | `api.telegram.org:443/bot__vault_TELEGRAM_BOT_TOKEN__/*` |
+| `deepseek` | `/personal-agent/deepseek` | `DEEPSEEK_API_KEY` | `api.deepseek.com:443/*` |
+| `tools` | `/personal-agent/tools` | `GITHUB_TOKEN` 等 | `api.github.com:443/*` 等 |
+
+每个 vault 使用同一个只读 Machine Identity，但分别创建**只授予该 vault `proxy` 角色**的 agent token。每个 vault 单独设置 `unmatched_host_policy=deny` 和该 vault 需要的服务规则；导入 service 文件只影响当前 vault。
+
+然后部署路由器：
+
+1. 按 [router/README.md](../router/README.md) 构建并安装 `agent-egress-router`：
+   ```sh
+   go build -trimpath -o agent-egress-router ./cmd/agent-egress-router
+   sudo install -m 0755 agent-egress-router /usr/local/bin/agent-egress-router
+   sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin agent-router
+   ```
+2. 以 [egress-router.example.json](../deploy/agent-vault/egress-router.example.json) 为基础，建立 `/etc/personal-agent/egress-router.json`，每条路由写一个 host、vault 和 token 文件。
+3. 创建 `/etc/personal-agent/egress-router/`，写入 `client-password` 和每个 vault 的 agent token 文件；目录 `0750 root:agent-router`，文件 `0640 root:agent-router`。客户端密码使用十六进制可避免 URL 编码：
+   ```sh
+   openssl rand -hex 32 > client-password
+   sudo install -d -m 0750 -o root -g agent-router /etc/personal-agent/egress-router
+   sudo install -m 0640 -o root -g agent-router egress-router.json /etc/personal-agent/egress-router.json
+   sudo install -m 0640 -o root -g agent-router client-password /etc/personal-agent/egress-router/client-password
+   sudo install -m 0640 -o root -g agent-router agent-token-telegram /etc/personal-agent/egress-router/agent-token-telegram
+   sudo install -m 0640 -o root -g agent-router agent-token-deepseek /etc/personal-agent/egress-router/agent-token-deepseek
+   ```
+4. 安装 [agent-egress-router.service](../deploy/agent-vault/agent-egress-router.service) 到 `/etc/systemd/system/`，执行 `sudo -u agent-router agent-egress-router check -config /etc/personal-agent/egress-router.json`，再 `sudo systemctl enable --now agent-egress-router`。
+5. 应用代理改为 `http://app:<router-password>@127.0.0.1:14323`；应用不再持有 agent token。
+
+路由器只绑定回环，未知 host 返回 `403`；Agent Vault 的 `407`/`403` 会原样返回。路由器日志只记录 host、vault、状态和字节数，不记录请求头或正文。
+
 ## 3. 取 CA 并导出 owner ID
 
 ```sh
@@ -199,6 +238,15 @@ OPENAI_API_KEY=sk-__vault_OPENAI_API_KEY__
 - 未使用的 provider key 留空；如果设置了真实值，`AGENT_VAULT_ENABLED=1` 会在启动时拒绝。
 - 不要同时设置 `TELEGRAM_OWNER_ID` 和 `TELEGRAM_OWNER_ID_FILE`。
 - `NODE_EXTRA_CA_CERTS` 必须在 Node 启动前生效；`EnvironmentFile` 满足这一点。
+
+使用多 vault 路由器时，只替换代理两行，其余不变：
+
+```env
+HTTP_PROXY=http://app:<URL编码的router密码>@127.0.0.1:14323
+HTTPS_PROXY=http://app:<URL编码的router密码>@127.0.0.1:14323
+```
+
+`app` 是路由器配置中的 `client_auth.username`；密码来自 `/etc/personal-agent/egress-router/client-password`，不是 Agent Vault agent token。`NO_PROXY` 仍只允许 loopback。
 
 ## 5. 检查并启动
 
@@ -298,7 +346,39 @@ sudo systemctl start personal-agent
 - 模型 key：在 Infisical 修改，等待轮询周期后直接发消息；不需要重启。
 - owner ID：重新导出到 `/etc/personal-agent/telegram-owner-id`，`systemctl restart personal-agent`。
 - proxy token：修改 `/etc/personal-agent.env`，重启应用。
+- 路由器 agent token：替换 `/etc/personal-agent/egress-router/agent-token-*`，`systemctl reload agent-egress-router`（`SIGHUP` 重新读取路由和 token）；旧 tunnel 不受影响。
+- 路由器客户端密码：在配置的 `client_auth.password_files` 中同时列出 `client-password` 和 `client-password.next`，写入新密码到 `.next`，`systemctl reload agent-egress-router`；更新应用并重启后，从配置和磁盘删除旧文件，再 reload。
 - CA：重新获取并安装，重启应用。
+
+### 6.7 多 vault 路由器验收
+
+在服务器上以应用用户或 root 执行，密码和 token 不要出现在 shell history 中：
+
+```sh
+ROUTER_PASSWORD=$(sudo cat /etc/personal-agent/egress-router/client-password)
+PROXY="http://app:${ROUTER_PASSWORD}@127.0.0.1:14323"
+
+# Telegram：路径中的占位值由 vault telegram 替换
+curl --proxy "$PROXY" --cacert /etc/personal-agent/ca.pem \
+  "https://api.telegram.org/bot__vault_TELEGRAM_BOT_TOKEN__/getMe"
+
+# 模型：Bearer 占位值由 vault deepseek 替换
+curl --proxy "$PROXY" --cacert /etc/personal-agent/ca.pem \
+  -H "Authorization: Bearer __vault_DEEPSEEK_API_KEY__" \
+  "https://api.deepseek.com/models"
+
+# 未配置的 host：路由器返回 403
+curl --proxy "$PROXY" --cacert /etc/personal-agent/ca.pem \
+  -o /dev/null -w '%{http_code}\n' "https://example.com"
+
+# 错误的 router 密码：路由器返回 407
+curl --proxy "http://app:wrong@127.0.0.1:14323" --cacert /etc/personal-agent/ca.pem \
+  -o /dev/null -w '%{http_code}\n' "https://api.deepseek.com/models"
+
+sudo journalctl -u agent-egress-router -n 50 -o cat
+```
+
+通过标准：Telegram 和模型请求返回 `200`；未配置 host 返回 `403`；错误密码返回 `407`；路由器日志包含 `route`、`vault`、`status`、`bytes_in`/`bytes_out`，但不包含 agent token、router 密码、真实 API key 或请求正文。Agent Vault 自身返回 `407`/`403` 时，路由器应透传相同状态码和 `Proxy-Authenticate`。
 
 ## 7. 备份、更新、回滚
 
