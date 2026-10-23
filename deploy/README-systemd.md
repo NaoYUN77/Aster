@@ -38,6 +38,16 @@ sudo ./deploy/install-systemd.sh
 
 MCP 配置默认位于 `/var/lib/personal-agent/mcp.json`，与代码分开保存，升级和重装不会覆盖；属主应为 `personal-agent`，权限 `600`。也可以在 `/etc/personal-agent.env` 用 `MCP_CONFIG` 指向其他位置。`check-config` 会离线校验该文件：默认路径上的文件级错误只输出告警（与运行时一样禁用 MCP），`MCP_CONFIG` 显式指定的文件有错则使检查失败。
 
+配置改完后先停 bot，再做连接测试，避免并发刷新 OAuth 状态。下列命令使用服务用户和环境，验证文件权限与连接；它不在 systemd unit 内运行，不能验证 unit 的沙箱限制：
+
+```sh
+sudo bash -c 'set -a; . /etc/personal-agent.env; set +a; \
+  exec runuser -u personal-agent -- env HOME=/var/lib/personal-agent \
+  node /opt/personal-agent/dist/src/mcp-check.js'
+```
+
+每个 server 打印工具数量与工具名，失败的打印安全错误码；任一失败时退出码为 1。它不经过 Telegram 和模型，可以在停服状态下反复执行。
+
 用 `npx` 启动 stdio server 时，`ProtectHome=true` 和 `ProtectSystem=strict` 会让默认 npm 缓存不可写。在 `/etc/personal-agent.env` 增加：
 
 ```sh
@@ -59,6 +69,10 @@ sudo systemctl start personal-agent
 用 `MCP_CONFIG` 指向其他路径时，这条命令自动带上同一个值，不需要重复填写。
 
 服务器没有入站端口时，先建立 `ssh -L 8765:127.0.0.1:8765 user@host` 再打开授权 URL。命令只打印 server 名和工具数量。
+
+## Agent Vault（可选）
+
+如果工具和入口凭据由 Infisical 管理，可以保持应用由 systemd 运行，只把 Agent Vault broker 放入容器。这样比完整 Compose 模式省一层应用容器开销，但没有 `tool-network` 的强制出网限制。代理地址使用 `127.0.0.1:14322`，broker 通过 `deploy/agent-vault/compose.systemd.yml` 叠加发布该端口。完整步骤、环境变量、CA/owner ID 安装和验收见 [systemd 应用 + 容器 broker](../docs/agent-vault-systemd.md)。
 
 ## 资源限制
 

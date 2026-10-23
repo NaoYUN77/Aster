@@ -6,3 +6,4 @@ data
 .git
 docs
 test
+deploy/agent-vault/private

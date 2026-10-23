@@ -241,6 +241,62 @@ sudo ls -la /var/lib/personal-agent /var/lib/personal-agent/workspace
 
 应看到 `inbox.sqlite`、`agent.sqlite`、`workspace/MEMORY.md`。
 
+## 3.5 MCP server 冒烟测试（可选，仅配置了 MCP 时）
+
+没有 `mcp.json` 时跳过本节。配置好 server 后，先单独验证连接，再让模型调用；这一步不经过 Telegram 和模型，失败原因不会被 agent 的错误提示掩盖。
+
+```sh
+# Docker：配置放在数据卷内的 /data/mcp.json
+docker compose stop personal-agent
+docker compose run --rm personal-agent node dist/src/mcp-check.js
+docker compose start personal-agent
+
+# systemd：以服务用户和环境验证权限与连接，不验证 unit 沙箱
+sudo systemctl stop personal-agent
+sudo bash -c 'set -a; . /etc/personal-agent.env; set +a; \
+  exec runuser -u personal-agent -- env HOME=/var/lib/personal-agent \
+  node /opt/personal-agent/dist/src/mcp-check.js'
+sudo systemctl start personal-agent
+```
+
+预期每个 server 一行工具数量，随后逐行列出工具名，退出码为 0：
+
+```text
+github (stdio): 12 tools
+  create_issue
+  search_repositories
+```
+
+失败时该 server 打印 `unavailable (<CODE>)`，其他 server 照常输出，退出码为 1。使用 OAuth 的 server 会读写 `DATA_DIR/mcp-oauth/`，验证时先停服务，避免与运行中的刷新竞争 token 文件。按错误码处理：
+
+| 错误码 | 含义 | 先查什么 |
+| --- | --- | --- |
+| `MCP_CONNECT_FAILED` | 进程起不来、URL 不可达或初始化失败 | 单独执行 `command`／`args`；`curl` 目标 URL；确认 `cwd` 存在 |
+| `MCP_TIMEOUT` | 超过 `connectTimeoutMs` | 首次 `npx` 下载慢；调大超时或预装 server |
+| `MCP_AUTH_REQUIRED` | 远程 server 未授权、refresh token 失效（如 Notion 的 180 天／30 天不活动上限）或授权被撤销 | 停服务后运行 `mcp:auth`（见下）；这是预期行为，不是故障 |
+| `MCP_HTTP_401` / `MCP_HTTP_403` | 鉴权头或 OAuth token 不被接受 | 检查 `headers` 引用与授权状态 |
+| `MCP_PROTOCOL` | 对端返回不符合 MCP 的内容 | 确认 URL 指向 MCP 端点，而不是普通网页 |
+
+远程 OAuth server 的首次授权（先停服务，避免与运行中的刷新竞争 token 文件）：
+
+```sh
+# Docker
+docker compose stop
+docker compose run --rm personal-agent node dist/src/mcp-auth.js calendar
+docker compose start
+
+# systemd
+sudo systemctl stop personal-agent
+sudo bash -c 'set -a; . /etc/personal-agent.env; set +a; \
+  exec runuser -u personal-agent -- env HOME=/var/lib/personal-agent \
+  /opt/personal-agent/dist/src/mcp-auth.js calendar'
+sudo systemctl start personal-agent
+```
+
+授权命令会打印一个 URL 并等待回调；服务器没有入站端口时，先在本机建立 `ssh -L 8765:127.0.0.1:8765 user@host`（端口与 `auth.redirectPort` 一致）。完成后 `DATA_DIR/mcp-oauth/<server>.json` 应为属主 `600`，再次运行 `mcp-check` 应显示工具数量。
+
+最后在 Telegram 里让 agent 完成一次真实调用：发“用 MCP 工具列出仓库 issue”（或该 server 对应的任务）。预期模型先调用 `tool_search` 加载工具，再调用 `mcp__<server>__<tool>`；日志中该 server 无 `unavailable`。工具名、schema 与 server 的差异、`tool_search` 的行为见 [README.md](../README.md#mcp-服务器可选)。
+
 ## 4. 功能验收（对应 MVP 七条）
 
 逐条执行并记录结果。表格里的“通过标准”就是判定依据，不要用“看起来正常”代替。
@@ -436,7 +492,7 @@ journalctl -u personal-agent -n 20 --no-pager
 | 进程反复重启 | 底座 Session 失效（`AGENT_SESSION_FAILED`） | 属设计行为，重启恢复；若持续出现，检查磁盘与 SQLite 文件权限 |
 | 备份归档为空 | 挂载了错误卷名 | 用 `docker volume ls` 确认真实卷名 |
 | 启动日志 `MCP server <name> unavailable (MCP_TIMEOUT)` | server 启动慢、命令不存在或网络不通 | 检查 `command`/`cwd` 与网络；单独运行该命令验证 |
-| 出现 `MCP_AUTH_REQUIRED` | 远程 server 未授权或 refresh token 失效 | 停服务后运行 `mcp:auth`，再重启 |
+| 出现 `MCP_AUTH_REQUIRED` | 远程 server 未授权、refresh token 失效或授权被撤销 | 停服务后运行 `mcp:auth`，再重启；不要删除 `mcp-oauth/<server>.json` 里的 client 注册信息 |
 | `npx` server 启动报 `EACCES`／`ENOENT` | `ProtectHome`/`ProtectSystem` 下 npm 缓存不可写 | 设置 `NPM_CONFIG_CACHE=/var/lib/personal-agent/.npm` 或预装 server |
 | 模型说找不到某 MCP 工具 | 工具未通过 `tool_search` 加载，或 server 未连上 | 让模型先 `tool_search`；对照启动日志中的 server 状态 |
 
@@ -445,6 +501,7 @@ journalctl -u personal-agent -n 20 --no-pager
 全部满足才算部署验收完成：
 
 - [ ] 第 4 节九项功能验收通过，并有记录。
+- [ ] 配置了 MCP 时，第 3.5 节连接测试与一次真实工具调用通过。
 - [ ] 正常重启、执行中断、强杀三种场景通过。
 - [ ] 投递核查命令可用，`list` 输出可读。
 - [ ] 内存未触发 OOM，重启次数稳定。
@@ -493,4 +550,4 @@ npm test
 npm run build
 ```
 
-三项都通过才继续部署。当前基线为 41 项测试通过；服务器上运行测试需要 Node.js 24.19.0 与完整开发依赖。
+三项都通过才继续部署。服务器上运行测试需要 Node.js 24.19.0 与完整开发依赖；Agent Vault TLS 测试还需要 `openssl`。MCP 与代理测试使用本地 fixture，不访问外网。

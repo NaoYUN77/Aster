@@ -14,7 +14,7 @@ cp .env.example .env
 在 `.env` 中填写：
 
 - `TELEGRAM_BOT_TOKEN`：BotFather 创建的 bot token。
-- `TELEGRAM_OWNER_ID`：允许使用 bot 的个人 Telegram 数字用户 ID。
+- `TELEGRAM_OWNER_ID`：允许使用 bot 的个人 Telegram 数字用户 ID；也可用 `TELEGRAM_OWNER_ID_FILE` 指向只读文件，二者只能设置一个。
 - `MODEL_PROVIDER`：注册表内的提供商 id，见下表。
 - `MODEL_ID`：该提供商在 pi-ai 1.3.0 模型目录中的 id；不自动替换，写错时启动前报错并列出示例。
 - 所选提供商对应的 API key 环境变量，见下表。
@@ -78,9 +78,26 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 
 工具契约、错误语义、重放与升级兼容性见 [设计文档](docs/contracts-and-lifecycle.md)。仓库级约束见 [CLAUDE.md](CLAUDE.md)，MVP 范围见 [docs/mvp.md](docs/mvp.md)。
 
+## 工具凭证与 Agent Vault
+
+工具的 API token、API key、用户名和密码可由开源 Agent Vault 从 Infisical Secret Management 同步，再在 HTTP(S) 出口注入；应用只持有占位值。启用方式、`${vault:KEY}` 引用、Basic/Bearer 配置及独立隔离部署见 [Agent Vault 运行说明](docs/agent-vault.md)。模型提供商的 API key、Telegram Bot token 和 owner ID 的存放方式也在该文档中说明；`MODEL_PROVIDER`、`MODEL_ID` 等非秘密配置仍留在应用环境。MCP 外部 OAuth 保留现有授权流程和本地 token 状态，不要求迁入 Vault。
+
+使用独立 `docker-compose.agent-vault.yml` 启动这一模式，不与默认 Compose 合并。普通本地/systemd 运行仅设置代理变量不会自动获得网络隔离；应用继续用 systemd、只把 broker 放入容器的混合部署见 [systemd 应用 + 容器 broker](docs/agent-vault-systemd.md)。真实 Infisical 联调与容器出口验收尚需在目标机完成。
+
 ## MCP 服务器（可选）
 
 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG` 指定的路径）接入 MCP server，无需改代码。默认文件不存在表示不启用；显式指定的文件缺失、不是合法 JSON 或顶层结构错误时启动失败，默认路径上的文件级错误只禁用 MCP 并记录原因。离线校验该文件、不连接 server 的命令是 `npm run build && node dist/src/check-config.js`（`npm run check` 只做类型检查）。
+
+配置好之后用 `npm run build && npm run mcp:check` 做一次连接冒烟测试：它按 bot 相同的方式读取配置和环境变量，逐个连接 server、列出工具名后关闭，不启动 Telegram 和模型。输出示例：
+
+```text
+github (stdio): 12 tools
+  create_issue
+  search_repositories
+calendar: unavailable (MCP_AUTH_REQUIRED)
+```
+
+任一 server 失败时退出码为 1；单个 server 失败不影响其他 server 的输出。它打印的是 server 自报的工具，包含 agent 之后会因 schema 或重名跳过的工具；它不打印 URL、header、env 或 token。
 
 ```json
 {
@@ -129,6 +146,27 @@ DATA_DIR=./data npm run mcp:auth -- calendar
 `mcp:auth` 与 bot 读取同一组 `DATA_DIR`、`MCP_CONFIG` 环境变量；用 `MCP_CONFIG` 指定过路径时，授权命令也要带上同样的值（systemd 部署见 [deploy/README-systemd.md](deploy/README-systemd.md)）。
 
 打开命令打印的 URL 完成授权，回到终端等待回调。服务器没有入站端口时，先建立到配置端口的 SSH 端口转发，例如 `ssh -L 8765:127.0.0.1:8765 user@host`。命令只打印 server 名和工具数量，不打印 token。运行中需要重新授权时，该工具调用返回 `MCP_AUTH_REQUIRED`，按上述步骤处理后重启。
+
+### 需要浏览器登录账号的 server（如 Notion）
+
+这类 server 的 OAuth 就是普通网页登录：授权 URL 打开后，用户在浏览器里登录自己的账号并点击同意，回调带回授权码。客户端侧无需预注册，配置里只写 URL 和 `auth`：
+
+```json
+{
+  "name": "notion",
+  "transport": "http",
+  "url": "https://mcp.notion.com/mcp",
+  "auth": { "type": "oauth" }
+}
+```
+
+流程与上一节相同：`npm run mcp:auth -- notion` 打印授权 URL，浏览器打开、登录并同意，回到终端等待回调，最后打印工具数量。具体行为：
+
+- **客户端注册**：授权服务器支持 RFC 7591 动态注册时自动完成（Notion 支持），回调地址固定为 `http://127.0.0.1:<redirectPort>/callback`。注册得到的 `client_id` 与 token 一起保存在 `DATA_DIR/mcp-oauth/<server>.json`，再次授权会复用；**不要删除该文件**，重新注册会让已有授权失效。
+- **登录范围**：授权以点击同意的那个账号为界，能访问的内容就是该账号在 Notion 里的权限。换账号或换 workspace 需要重新授权。
+- **token 生命周期**：访问令牌约 8 小时，401 后自动用 refresh token 刷新；refresh token 每次刷新都会轮换，同一授权文件不能被两个进程同时刷新（所以授权和排查前先停 bot）。refresh token 在首次授权后 180 天、或连续 30 天未使用时失效，下一次刷新返回 `invalid_grant`，应用清除旧 token 并把工具调用报为 `MCP_AUTH_REQUIRED`。**这是预期行为**，重新执行 `mcp:auth` 即可，不要反复重启。
+- **headless 服务器**：授权 URL 在操作者的电脑上打开，回调需要到达服务器，因此先 `ssh -L <redirectPort>:127.0.0.1:<redirectPort> user@host`。授权服务器只接受 loopback 回调，不能用公网地址替代。
+- **企业策略**：若 workspace 强制由管理员预配（Notion 的 enterprise-managed authorization），动态注册会被拒绝；此时需要管理员提供 `clientId`／`clientSecret` 并在其后台登记上面的回调地址。
 
 MCP server 与应用使用同一系统用户，不构成安全边界；stdio server 的代码和配置应视为受信任组件。不要把无关凭据放进 `env` 或 `headers`。远程 HTTP + OAuth 的隔离更强，优先选用。
 

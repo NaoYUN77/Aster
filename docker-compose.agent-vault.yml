@@ -1,0 +1,102 @@
+# Standalone file: do not merge with docker-compose.yml (which grants direct network access).
+services:
+  agent-vault:
+    image: infisical/agent-vault:0.40.0
+    restart: unless-stopped
+    env_file: ./deploy/agent-vault/private/vault.env
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        : "$${AGENT_VAULT_MASTER_PASSWORD:?Set the Vault master password}"
+        : "$${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:?Set the Infisical client ID}"
+        : "$${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:?Set the Infisical client secret}"
+        exec /usr/local/bin/docker-entrypoint.sh server --host 0.0.0.0 --port 14321
+    environment:
+      INFISICAL_URL: https://app.infisical.com
+      AGENT_VAULT_TELEMETRY: "false"
+    ports:
+      - "127.0.0.1:14321:14321"
+    volumes:
+      - agent-vault-data:/data
+    networks:
+      vault:
+        ipv4_address: 172.30.82.2
+    mem_limit: 512m
+    pids_limit: 64
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  tool-network:
+    build:
+      context: ./deploy/agent-vault
+      dockerfile: network.Dockerfile
+    # A fixed, non-restarting namespace: recreate app and network together after a failure.
+    restart: "no"
+    cap_drop: ["ALL"]
+    cap_add: ["NET_ADMIN"]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=1m"]
+    networks: ["vault"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 1s
+      retries: 5
+    mem_limit: 32m
+    pids_limit: 16
+
+  personal-agent:
+    build: .
+    image: personal-agent:local
+    restart: unless-stopped
+    user: "1000:1000"
+    env_file: ./deploy/agent-vault/private/app.env
+    environment:
+      DATA_DIR: /data
+      AGENT_VAULT_ENABLED: "1"
+      NODE_USE_ENV_PROXY: "1"
+      NODE_EXTRA_CA_CERTS: /etc/agent-vault/ca.pem
+      NO_PROXY: localhost,127.0.0.1,::1
+    network_mode: "service:tool-network"
+    depends_on:
+      tool-network: { condition: service_healthy }
+      agent-vault: { condition: service_healthy }
+    volumes:
+      - personal-agent-data:/data
+      - ./deploy/agent-vault/private/ca.pem:/etc/agent-vault/ca.pem:ro
+    # Exported from Infisical at deploy time; the running process never holds the Infisical identity.
+    # File secrets are bind-mounted with the source permissions, so keep this file readable by uid 1000.
+    secrets:
+      - telegram-owner-id
+    read_only: true
+    tmpfs: ["/tmp:size=128m,uid=1000,gid=1000"]
+    mem_limit: 2g
+    pids_limit: 128
+    init: true
+    stop_grace_period: 45s
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  vault:
+    ipam:
+      config:
+        - subnet: 172.30.82.0/24
+
+volumes:
+  personal-agent-data:
+    name: personal-agent-data
+  agent-vault-data:
+    name: personal-agent-vault-data
+
+secrets:
+  telegram-owner-id:
+    file: ./deploy/agent-vault/private/telegram-owner-id
