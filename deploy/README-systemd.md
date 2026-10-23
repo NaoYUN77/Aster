@@ -70,6 +70,10 @@ sudo systemctl start personal-agent
 
 服务器没有入站端口时，先建立 `ssh -L 8765:127.0.0.1:8765 user@host` 再打开授权 URL。命令只打印 server 名和工具数量。
 
+## Agent Vault（可选）
+
+如果工具和入口凭据由 Infisical 管理，可以保持应用由 systemd 运行，只把 Agent Vault broker 放入容器。这样比完整 Compose 模式省一层应用容器开销，但没有 `tool-network` 的强制出网限制。代理地址使用 `127.0.0.1:14322`，broker 通过 `deploy/agent-vault/compose.systemd.yml` 叠加发布该端口。完整步骤、环境变量、CA/owner ID 安装和验收见 [systemd 应用 + 容器 broker](../docs/agent-vault-systemd.md)。
+
 ## 资源限制
 
 与 QQ bot 共存时，unit 默认限制已按共享主机收紧：

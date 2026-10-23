@@ -6,7 +6,7 @@
 
 MCP 的网页登录 OAuth 保留现有 `mcp:auth`、动态注册、token 文件和刷新流程。OAuth endpoint 与 MCP endpoint 在 Vault 配置为 `passthrough`，避免代理覆盖 OAuth Authorization header。**OAuth token 仍保存在 `DATA_DIR/mcp-oauth`，没有迁入 Infisical；不要将此版本称为所有凭证均不落应用主机。** 同 uid 的文件/bash 工具仍能访问该文件，这是此次范围保留的边界。
 
-部署使用独立的 `docker-compose.agent-vault.yml`，包含 Vault、拥有网络命名空间的防火墙容器和应用。不要与原 Compose 文件合并；后者的默认网络允许直连。systemd 直接运行可使用同样的代理配置，但不自动获得容器网络隔离。
+部署使用独立的 `docker-compose.agent-vault.yml`，包含 Vault、拥有网络命名空间的防火墙容器和应用。不要与原 Compose 文件合并；后者的默认网络允许直连。systemd 直接运行可使用同样的代理配置，但不自动获得容器网络隔离。应用继续由 systemd 托管、只把 broker 放入容器的混合部署见 [systemd 应用 + 容器 broker](agent-vault-systemd.md)。
 
 原生数据库、SSH、私钥签名、mTLS 以及不支持代理的 SDK 不在本版支持范围。需要这些协议的工具不得靠明文 env/password 降级，应先增加相应可信适配。
 

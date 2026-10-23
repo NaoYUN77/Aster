@@ -82,7 +82,7 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 
 工具的 API token、API key、用户名和密码可由开源 Agent Vault 从 Infisical Secret Management 同步，再在 HTTP(S) 出口注入；应用只持有占位值。启用方式、`${vault:KEY}` 引用、Basic/Bearer 配置及独立隔离部署见 [Agent Vault 运行说明](docs/agent-vault.md)。模型提供商的 API key、Telegram Bot token 和 owner ID 的存放方式也在该文档中说明；`MODEL_PROVIDER`、`MODEL_ID` 等非秘密配置仍留在应用环境。MCP 外部 OAuth 保留现有授权流程和本地 token 状态，不要求迁入 Vault。
 
-使用独立 `docker-compose.agent-vault.yml` 启动这一模式，不与默认 Compose 合并。普通本地/systemd 运行仅设置代理变量不会自动获得网络隔离。真实 Infisical 联调与容器出口验收尚需在目标机完成。
+使用独立 `docker-compose.agent-vault.yml` 启动这一模式，不与默认 Compose 合并。普通本地/systemd 运行仅设置代理变量不会自动获得网络隔离；应用继续用 systemd、只把 broker 放入容器的混合部署见 [systemd 应用 + 容器 broker](docs/agent-vault-systemd.md)。真实 Infisical 联调与容器出口验收尚需在目标机完成。
 
 ## MCP 服务器（可选）
 
