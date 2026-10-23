@@ -38,7 +38,7 @@
 
 ### 工具凭证代理
 
-启用 Agent Vault 时，工具静态凭证由 Infisical 提供，真实值只在 broker 侧注入。应用仅解析 `${vault:KEY}` 为 `__vault_KEY__`，不将秘密写入工具参数或 durable 状态。代理检查、允许的配置、隔离部署及目前限制以 [Agent Vault 运行说明](agent-vault.md) 为权威来源。
+启用 Agent Vault 时，工具静态凭证由 Infisical 提供，真实值只在 broker 侧注入。应用仅解析 `${vault:KEY}` 为 `__vault_KEY__`，不将秘密写入工具参数或 durable 状态。Bot token 与模型 API key 使用同一代理路径；owner ID 不经过 HTTP，由部署从 Infisical 导出为文件。代理检查、允许的配置、隔离部署及目前限制以 [Agent Vault 运行说明](agent-vault.md) 为权威来源。
 
 代理错误不改变业务重放语义；刷新或轮换凭证不能成为重放未知写入的理由。MCP 外部 OAuth 继续使用下文的宿主 token 状态，属于本轮接入保留的独立认证流程。
 

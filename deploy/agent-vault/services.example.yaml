@@ -31,11 +31,84 @@ services:
         placeholder: __vault_TELEGRAM_BOT_TOKEN__
         in: [path]
 
+  # Model providers: keep the rule for the selected MODEL_PROVIDER; delete the rest.
+  # The app sends its normal auth header with a placeholder value, and the rule replaces it.
+  # OpenAI-compatible SDKs use an Authorization bearer header.
   - name: openai
     host: api.openai.com:443/v1/*
     auth:
       type: bearer
       token: OPENAI_API_KEY
+
+  - name: deepseek
+    host: api.deepseek.com:443/*
+    auth:
+      type: bearer
+      token: DEEPSEEK_API_KEY
+
+  - name: groq
+    host: api.groq.com:443/openai/v1/*
+    auth:
+      type: bearer
+      token: GROQ_API_KEY
+
+  - name: xai
+    host: api.x.ai:443/v1/*
+    auth:
+      type: bearer
+      token: XAI_API_KEY
+
+  - name: moonshotai
+    host: api.moonshot.ai:443/v1/*
+    auth:
+      type: bearer
+      token: MOONSHOT_API_KEY
+
+  - name: moonshotai-cn
+    host: api.moonshot.cn:443/v1/*
+    auth:
+      type: bearer
+      token: MOONSHOT_API_KEY
+
+  - name: zai
+    host: api.z.ai:443/api/coding/paas/v4/*
+    auth:
+      type: bearer
+      token: ZAI_API_KEY
+
+  - name: openrouter
+    host: openrouter.ai:443/api/v1/*
+    auth:
+      type: bearer
+      token: OPENROUTER_API_KEY
+
+  - name: mistral
+    host: api.mistral.ai:443/*
+    auth:
+      type: bearer
+      token: MISTRAL_API_KEY
+
+  # Anthropic-style APIs use x-api-key; Gemini uses x-goog-api-key.
+  - name: anthropic
+    host: api.anthropic.com:443/v1/*
+    auth:
+      type: api-key
+      header: x-api-key
+      key: ANTHROPIC_API_KEY
+
+  - name: minimax
+    host: api.minimax.io:443/anthropic/v1/*
+    auth:
+      type: api-key
+      header: x-api-key
+      key: MINIMAX_API_KEY
+
+  - name: google
+    host: generativelanguage.googleapis.com:443/v1beta/*
+    auth:
+      type: api-key
+      header: x-goog-api-key
+      key: GEMINI_API_KEY
 
   # MCP OAuth is handled by the existing client. Do not overwrite its Authorization header.
   # Add separate exact-host rules for the provider's discovered metadata/registration/token endpoints.

@@ -69,6 +69,9 @@ services:
     volumes:
       - personal-agent-data:/data
       - ./deploy/agent-vault/private/ca.pem:/etc/agent-vault/ca.pem:ro
+    # Exported from Infisical at deploy time; the running process never holds the Infisical identity.
+    secrets:
+      - telegram-owner-id
     read_only: true
     tmpfs: ["/tmp:size=128m,uid=1000,gid=1000"]
     mem_limit: 2g
@@ -92,3 +95,7 @@ volumes:
     name: personal-agent-data
   agent-vault-data:
     name: personal-agent-vault-data
+
+secrets:
+  telegram-owner-id:
+    file: ./deploy/agent-vault/private/telegram-owner-id

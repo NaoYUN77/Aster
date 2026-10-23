@@ -12,29 +12,57 @@ MCP 的网页登录 OAuth 保留现有 `mcp:auth`、动态注册、token 文件�
 
 ## 入口基础设施配置放在哪里
 
-Bot token 和 LLM API key 属于宿主基础设施凭证，Telegram owner ID 属于访问控制配置。当前 Vault 部署示例也代理入口请求，使通用 bash/文件工具不必接触这两项真实秘密。
+Bot token、Telegram owner ID 和 LLM API key 都存放在 Infisical。前两者中，Bot token 是请求路径的一部分，可由 Vault 注入；owner ID 只在本地比较 Telegram 消息来源，不经过 HTTP，因此需要部署时从 Infisical 导出到文件。模型提供商和 `MODEL_ID` 是公开的选择配置，不需要进入秘密管理。
 
-| 项目 | Vault 部署的存放位置 | 应用侧内容 |
+| 项目 | 权威存放位置 | 应用侧内容 |
 | --- | --- | --- |
-| Telegram Bot token | Infisical，key 为 `TELEGRAM_BOT_TOKEN` | `private/app.env` 放 `__vault_TELEGRAM_BOT_TOKEN__`；代理在请求路径中替换 |
-| LLM API key | Infisical，key 按实际服务规则定义 | `private/app.env` 的 provider API-key 变量放占位值；代理注入认证 |
-| Telegram owner user ID | `private/app.env` 的 `TELEGRAM_OWNER_ID` | 真实数字 ID；它不是秘密，但必须防止未授权修改 |
+| Telegram Bot token | Infisical，key 为 `TELEGRAM_BOT_TOKEN` | `private/app.env` 放 `__vault_TELEGRAM_BOT_TOKEN__`；Vault 在请求路径中替换 |
+| Telegram owner user ID | Infisical，key 为 `TELEGRAM_OWNER_ID` | 部署时导出到 `private/telegram-owner-id`，挂载为 Compose secret；`private/app.env` 的 `TELEGRAM_OWNER_ID_FILE` 只放路径 |
+| LLM API key | Infisical，key 名按使用中的提供商规则 | `private/app.env` 的 provider API-key 变量放占位值；Vault 规则注入认证 |
+| `MODEL_PROVIDER`、`MODEL_ID` | 不进入秘密管理 | `private/app.env` 的真实值；启动时用于离线模型目录校验 |
 | Vault proxy 身份 | `private/app.env` 的 proxy URL | 启动信任凭证，仅 proxy 权限，不具备读取真实秘密的权限 |
 | Infisical Machine Identity / Vault 主密码 | `private/vault.env`，仅传给 Vault 容器 | 不传给应用或工具 |
 
-应用没有强制入口凭证必须通过 Vault；未启用 Vault 的既有部署仍从 `.env` 或 `/etc/personal-agent.env` 读取真实 Bot token 与模型 key。但在当前共享进程/uid 的 CodingTools 环境中，宿主环境里的真实秘密可能被 bash 读取，因此 Vault 部署示例使用占位值。owner ID 不能用 secret 占位值代替，它需要在 Telegram 输入边界本地比较。
+owner ID 不是请求凭证，所以不能用占位值让代理替换。应用只读取导出文件，不持有 Infisical 身份；在 Infisical 中修改后，重新导出该文件并重启应用。该文件属于访问控制配置，不是可公开的运行参数，保持 `600` 并放在 git/docker 构建上下文之外。未启用 Vault 时仍可直接在 `.env` 或 `/etc/personal-agent.env` 设置 `TELEGRAM_OWNER_ID`；两种来源不能同时设置。
 
 入口 token/key 与工具凭证目前共用一个工作负载的代理身份；这不代表按工具或进程隔离了各自权限。拆成独立权限域需要进一步拆分执行环境和代理身份。
+
+## 模型提供商如何接入
+
+模型请求同样走 Agent Vault，应用不保存真实 API key。`src/providers.ts` 的注册表只声明每个提供商读取哪个环境变量；pi-ai 在请求时读取该变量，把它放进 SDK 原本使用的认证 header，再由 Vault 服务规则按 host/path 替换为 Infisical 中的真实值：
+
+```text
+openAgent
+  createProviderModels(MODEL_PROVIDER)
+    pi-ai 读取 PROVIDERS[provider].apiKeyEnv  ← app.env 中的占位值
+      SDK 发出正常认证 header               ← 占位值
+        HTTPS_PROXY → Agent Vault
+          匹配 host/path，注入真实 key      ← Infisical
+            目标模型 API
+```
+
+| 提供商类别 | 注册表中的 id | 应用侧变量 | SDK 发出的位置 | Vault 规则 |
+| --- | --- | --- | --- | --- |
+| OpenAI 兼容 | `openai`、`deepseek`、`groq`、`xai`、`mistral`、`moonshotai`、`moonshotai-cn`、`zai`、`openrouter` | 各自的 `*_API_KEY` | `Authorization: Bearer <占位值>` | `auth.type: bearer`，`token` 指向同名或对应 key |
+| Anthropic 风格 | `anthropic`、`minimax` | `ANTHROPIC_API_KEY`、`MINIMAX_API_KEY` | `x-api-key: <占位值>` | `auth.type: api-key`，`header: x-api-key` |
+| Gemini | `google` | `GEMINI_API_KEY` | `x-goog-api-key: <占位值>` | `auth.type: api-key`，`header: x-goog-api-key` |
+
+完整 host 与规则见 `deploy/agent-vault/services.example.yaml`，只保留当前 `MODEL_PROVIDER` 对应的规则。OpenAI 的占位值需要以 `sk-` 开头：已安装的 pi-ai 1.3.0 会把发往 `api.openai.com` 且不以 `sk-` 开头的 key 当作 ChatGPT 登录 token，从而省略部分请求参数。示例使用 `sk-__vault_OPENAI_API_KEY__`，真实 key 仍只存在于 Infisical。
+
+本地测试覆盖 Node 全局 fetch 与 grammY 的代理路径；各提供商 SDK 的完整流式请求仍需在部署验收中逐个确认，不能仅凭配置规则推断已联调。
+
+`MODEL_PROVIDER` 和 `MODEL_ID` 保留在应用配置中，因为启动时的模型目录校验是离线完成的，二者也不是秘密。切换提供商时同时修改 `MODEL_PROVIDER`、`MODEL_ID`、对应 API-key 占位值和 Vault 服务规则；只改其中一处会导致认证失败或启动校验失败。
 
 ## 配置契约
 
 | 配置 | 含义 |
 | --- | --- |
-| `AGENT_VAULT_ENABLED=1` | 启用应用侧代理检查与 MCP 凭证配置约束；缺省/`0` 保留原运行方式 |
+| `AGENT_VAULT_ENABLED=1` | 启用应用侧代理检查与 MCP 凭证配置约束；缺省/`0` 保留原运行方式。启用后要求 Bot token 与所有已设置的注册表提供商 key 为占位值，owner ID 从文件读取 |
 | `HTTP_PROXY` / `HTTPS_PROXY` | 必须完全相同，格式 `http://<proxy-token>:<vault>@<broker>:14322`；也接受 HTTPS 代理 URL |
 | `NODE_USE_ENV_PROXY=1` | 在启动 Node 前设置；应用还调用 Node 24 的 `setGlobalProxyFromEnv` 覆盖默认网络客户端 |
 | `NODE_EXTRA_CA_CERTS` | 启动 Node 前指定绝对路径；证书必须可读，在线入口会验证 Node 已加载它 |
 | `NO_PROXY` | 仅允许为空或精确 loopback 主机列表，不允许 `*`、域名后缀或外部主机 |
+| `TELEGRAM_OWNER_ID_FILE` | 可选的绝对路径；启用 Vault 时必填，从 Infisical 导出的 owner ID。与 `TELEGRAM_OWNER_ID` 互斥，文件必须可读且内容为正整数 |
 
 只采用大写 proxy 配置，拒绝有值的小写版本及 `ALL_PROXY`，避免库选择不同出口。禁止关闭 TLS 验证。子进程会获得对应的 `SSL_CERT_FILE`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`，而不继承 Infisical 身份或宿主其他环境。
 
@@ -87,7 +115,7 @@ chmod 600 deploy/agent-vault/private/*.env
 
 `private/` 已同时加入 gitignore 和 dockerignore。不要在聊天、命令行参数、工具结果或日志中粘贴真实凭证。配置中的代理 token 本身具有访问权限，也需要保密。
 
-1. 在 Infisical 项目中创建对应环境和路径，例如 `prod`、`/personal-agent/tools`。把实际需要的 `GITHUB_TOKEN`、`EXAMPLE_USERNAME`、`EXAMPLE_PASSWORD` 等放入此路径；如代理模型和 Telegram，一并放入其 key。未使用的示例 key 不需要创建。
+1. 在 Infisical 项目中创建对应环境和路径，例如 `prod`、`/personal-agent/tools`。把实际需要的 `GITHUB_TOKEN`、`EXAMPLE_USERNAME`、`EXAMPLE_PASSWORD`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID` 以及当前模型提供商的 API key 放入此路径。未使用的示例 key 不需要创建。
 2. 创建只读 Machine Identity，权限仅覆盖该项目、环境、路径。将 Universal Auth client ID/secret 填入 `private/vault.env`，并设置强 Vault master password。不要把此文件挂载到应用。
 3. 仅启动 broker：
 
@@ -106,7 +134,17 @@ chmod 600 deploy/agent-vault/private/*.env
    ```
 
    只把 CA 公钥挂载给应用。首次启动必须已有有效 PEM，不能让缺失文件变成目录挂载。
-8. 在 `app.env` 填 owner/model 等非敏感配置。示例模型为 OpenAI，切换时按 `src/providers.ts` 选择变量并配置相应 Vault 服务。示例 Telegram token 是占位值，Vault 在 `/bot__vault_TELEGRAM_BOT_TOKEN__/...` 路径中替换。
+8. 在 `app.env` 填 `MODEL_PROVIDER`、`MODEL_ID` 等非敏感配置。示例模型为 OpenAI，切换时按 `src/providers.ts` 选择变量并配置相应 Vault 服务。provider key 和 Telegram token 用占位值；Vault 分别在认证 header 与 `/bot__vault_TELEGRAM_BOT_TOKEN__/...` 路径中替换。
+
+   从 Infisical 导出 owner ID，供应用读取：
+
+   ```sh
+   # 先用只读 Machine Identity 登录 Infisical CLI；参数按项目和 CLI 版本调整。
+   infisical secrets get TELEGRAM_OWNER_ID --plain > deploy/agent-vault/private/telegram-owner-id
+   chmod 600 deploy/agent-vault/private/telegram-owner-id
+   ```
+
+   该文件必须在 `up` 前存在，Compose secret 的源文件缺失会阻止启动。在 Infisical 修改 owner ID 后重新导出并重启应用；应用进程不持有 Infisical 身份。
 9. 先停原 bot，保持整个持久化卷；再启动新部署：
 
    ```sh
@@ -133,7 +171,8 @@ loopback 允许应用与可信本地 MCP 通信，不能在该命名空间增加
 
 ## 轮换、失败与验收
 
-- 修改 Infisical 后按轮询周期传播；需要立即更新时由运维手动 sync。不要将每个代理请求描述为实时读取 Infisical。
+- 修改 Infisical 后按轮询周期传播；需要立即更新时由运维手动 sync。不要将每个代理请求描述为实时读取 Infisical。模型 API key 轮换后应用无需重启，因为请求只携带占位值。
+- owner ID 不经过代理，修改 Infisical 后必须重新导出 `private/telegram-owner-id` 并重启应用；它不会随 Vault 轮询自动更新。
 - 原生 Agent Vault 同步失败会继续用最后一次缓存，没有自动最大缓存年龄限制。本版保留该行为；监控同步失败并由运维阻断/吊销，**尚未实现规划中的五分钟超时关断**。紧急撤销应在目标服务吊销凭证并停用 Vault 服务/代理身份。
 - 代理不可用、CA 不可信、服务未授权或 key 缺失时请求失败。应用不回退真实环境变量或直连；外部写操作超时结果未知时仍按原 durable 契约处理。
 - 本地测试覆盖引用不解析真实 secret、代理配置拒绝、stdio 环境传递以及真实 TLS CONNECT 下 Node fetch/grammY 的代理路径。TLS 测试需要 `openssl` 可执行文件，用临时自签证书，不访问外网。

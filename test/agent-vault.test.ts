@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { rootCertificates } from "node:tls";
 import test from "node:test";
 import { readAgentVaultEnvironment, vaultPlaceholder } from "../src/agent-vault.js";
+import { readConfig } from "../src/config.js";
 import { validateMcpConfig } from "../src/mcp-config.js";
 import { openMcpConnection } from "../src/mcp.js";
 
@@ -71,6 +72,43 @@ test("proxy configuration fails closed without printing proxy authentication", a
         return true;
       });
     }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("brokered config keeps entry credentials in Infisical and reads the owner ID from a file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-vault-config-"));
+  try {
+    const ca = join(directory, "ca.pem");
+    const owner = join(directory, "owner-id");
+    await writeFile(ca, rootCertificates[0]!);
+    await writeFile(owner, "42\n");
+    const proxy = "http://test-token:test-vault@127.0.0.1:14322";
+    const base = {
+      AGENT_VAULT_ENABLED: "1", HTTP_PROXY: proxy, HTTPS_PROXY: proxy, NODE_USE_ENV_PROXY: "1",
+      NODE_EXTRA_CA_CERTS: ca, TELEGRAM_OWNER_ID_FILE: owner, MODEL_PROVIDER: "openai", MODEL_ID: "m",
+    };
+    const placeholders = { TELEGRAM_BOT_TOKEN: "__vault_TELEGRAM_BOT_TOKEN__", OPENAI_API_KEY: "sk-__vault_OPENAI_API_KEY__" };
+    assert.throws(
+      () => readConfig({ ...base, ...placeholders, TELEGRAM_BOT_TOKEN: "real-token" }),
+      /TELEGRAM_BOT_TOKEN must be an Agent Vault placeholder/,
+    );
+    assert.throws(
+      () => readConfig({ ...base, ...placeholders, OPENAI_API_KEY: "sk-real-key" }),
+      /OPENAI_API_KEY must be an Agent Vault placeholder/,
+    );
+    assert.throws(
+      () => readConfig({ ...base, ...placeholders, ANTHROPIC_API_KEY: "sk-real-leftover" }),
+      /ANTHROPIC_API_KEY must be an Agent Vault placeholder/,
+    );
+    assert.throws(
+      () => readConfig({ ...base, ...placeholders, TELEGRAM_OWNER_ID: "42", TELEGRAM_OWNER_ID_FILE: undefined }),
+      /requires TELEGRAM_OWNER_ID_FILE/,
+    );
+    const config = readConfig({ ...base, ...placeholders });
+    assert.equal(config.token, "__vault_TELEGRAM_BOT_TOKEN__");
+    assert.equal(config.ownerId, "42");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

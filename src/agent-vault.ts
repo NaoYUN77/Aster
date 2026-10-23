@@ -30,6 +30,14 @@ export function isVaultPlaceholder(value: string): boolean {
   return PLACEHOLDER.test(value);
 }
 
+/**
+ * OpenAI's SDK path treats a non-`sk-` value sent to api.openai.com as a ChatGPT sign-in token.
+ * Accept the `sk-` prefix on a placeholder so a brokered OpenAI key keeps the API-key request shape.
+ */
+export function isBrokeredValue(value: string): boolean {
+  return isVaultPlaceholder(value) || (value.startsWith("sk-") && isVaultPlaceholder(value.slice(3)));
+}
+
 /** Offline validation; does not contact the broker or print proxy credentials. */
 export function readAgentVaultEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> | undefined {
   if (!agentVaultEnabled(env)) return undefined;
