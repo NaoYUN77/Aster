@@ -74,6 +74,8 @@ sudo systemctl start personal-agent
 
 如果工具和入口凭据由 Infisical 管理，可以保持应用由 systemd 运行，只把 Agent Vault broker 放入容器。这样比完整 Compose 模式省一层应用容器开销，但没有 `tool-network` 的强制出网限制。代理地址使用 `127.0.0.1:14322`，broker 通过 `deploy/agent-vault/compose.systemd.yml` 叠加发布该端口。完整步骤、环境变量、CA/owner ID 安装和验收见 [systemd 应用 + 容器 broker](../docs/agent-vault-systemd.md)。
 
+如果密钥按基础设施分散在多个 Infisical 文件夹，每个文件夹需要一个 vault，应用不能只靠一组代理变量选择 vault。此时运行仓库内的 `agent-egress-router`，应用代理改为 `http://app:<router-password>@127.0.0.1:14323`；路由器按 `host:port` 选择 vault。示例配置和 systemd 单元在 [`deploy/agent-vault/`](agent-vault/)，构建与配置说明见 [`router/README.md`](../router/README.md)。
+
 ## 资源限制
 
 与 QQ bot 共存时，unit 默认限制已按共享主机收紧：

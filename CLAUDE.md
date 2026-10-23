@@ -25,6 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | @earendil-works/pi-mcp | 1.3.0 | MCP 客户端、传输与 OAuth |
 | Telegram 客户端 grammY | 1.46.0 | Telegram 协议适配 |
 | TypeBox | 1.3.27 | 工具参数 schema，与底座版本对齐 |
+| Go | 1.25.6，见 router/go.mod | 多 vault egress router，仅标准库 |
 | TypeScript / tsx | 7.0.2 / 4.23.15 | 类型检查、构建与开发执行 |
 
 直接依赖采用精确版本，传递依赖由提交的 lockfile 固定。运行时版本写入对应版本文件。安装后的版本以依赖清单、版本文件和 lockfile 为准；升级组件时同步更新本表中的基线，避免文档与配置相互矛盾。
