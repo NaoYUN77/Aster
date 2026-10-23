@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { agentVaultEnabled, isVaultPlaceholder, VAULT_PROXY_VARIABLES, vaultPlaceholder } from "./agent-vault.js";
 
 const MAX_SERVERS = 8;
 const MAX_STDIO_SERVERS = 4;
@@ -16,6 +17,8 @@ const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 // failing the connection later, where the error would only surface as a generic connect failure.
 const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
 const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+const VAULT_REFERENCE = /\$\{vault:([^}]+)\}/g;
+const CREDENTIAL_ENV = /(?:TOKEN|PASSWORD|PASSWD|SECRET|API_?KEY|USERNAME|USER_NAME|AUTHORIZATION|CREDENTIAL)/i;
 
 export class McpConfigError extends Error {
   constructor(message: string) {
@@ -65,8 +68,8 @@ export type McpConfigReadResult = {
 
 /**
  * Read and validate the optional MCP configuration. A missing default file means the feature is
- * off; an explicitly configured path must exist. Values are resolved from `${NAME}` references
- * here so a later secret-manager CLI can replace this one function without touching tool code.
+ * off; an explicitly configured path must exist. `${NAME}` reads configuration from the environment;
+ * `${vault:KEY}` produces a non-secret placeholder for server-side credential injection.
  */
 export async function readMcpConfig(
   path: string,
@@ -151,6 +154,7 @@ function parseServer(value: unknown, env: NodeJS.ProcessEnv): McpServerConfig {
   if (typeof name !== "string" || !SERVER_NAME.test(name)) {
     throw new McpConfigError("name must match [A-Za-z0-9][A-Za-z0-9_-]{0,23}");
   }
+  const brokered = agentVaultEnabled(env);
   const transport = value.transport;
   if (transport !== "stdio" && transport !== "http") {
     throw new McpConfigError(`${name}: transport must be "stdio" or "http"`);
@@ -184,10 +188,22 @@ function parseServer(value: unknown, env: NodeJS.ProcessEnv): McpServerConfig {
     const resolvedEnv: Record<string, string> = {};
     for (const [key, entry] of Object.entries(envEntries)) {
       if (!ENV_KEY.test(key)) throw new McpConfigError(`${name}: invalid environment variable name ${key}`);
-      resolvedEnv[key] = resolveReferences(entry, env, `${name}.env.${key}`);
+      const resolved = resolveReferences(entry, env, `${name}.env.${key}`);
+      if (brokered) {
+        if ((VAULT_PROXY_VARIABLES as readonly string[]).includes(key) || /^(?:https?_proxy|no_proxy|all_proxy|NODE_OPTIONS|NODE_TLS_REJECT_UNAUTHORIZED|AGENT_VAULT_.*|INFISICAL_.*)$/i.test(key)) {
+          throw new McpConfigError(`${name}: env.${key} is controlled by the host in Agent Vault mode`);
+        }
+        if (CREDENTIAL_ENV.test(key) && !isVaultPlaceholder(resolved)) {
+          throw new McpConfigError(`${name}: env.${key} must use a vault reference in Agent Vault mode`);
+        }
+      }
+      resolvedEnv[key] = resolved;
     }
     if (value.inheritEnv !== undefined && typeof value.inheritEnv !== "boolean") {
       throw new McpConfigError(`${name}: inheritEnv must be a boolean`);
+    }
+    if (brokered && value.inheritEnv === true) {
+      throw new McpConfigError(`${name}: inheritEnv is not allowed in Agent Vault mode`);
     }
     return {
       name,
@@ -205,6 +221,9 @@ function parseServer(value: unknown, env: NodeJS.ProcessEnv): McpServerConfig {
   if (typeof value.url !== "string" || !isSafeHttpUrl(value.url)) {
     throw new McpConfigError(`${name}: url must be an https URL (http is allowed only on loopback)`);
   }
+  if (brokered && new URL(value.url).search) {
+    throw new McpConfigError(`${name}: query strings are not allowed in MCP URLs in Agent Vault mode`);
+  }
   const headers = readStringRecord(value.headers, `${name}.headers`);
   const resolvedHeaders: Record<string, string> = {};
   for (const [key, entry] of Object.entries(headers)) {
@@ -212,6 +231,10 @@ function parseServer(value: unknown, env: NodeJS.ProcessEnv): McpServerConfig {
     // Validate the resolved value: an environment variable can carry the newline or non-Latin-1 character.
     const resolved = resolveReferences(entry, env, `${name}.headers.${key}`);
     if (!HEADER_VALUE.test(resolved)) throw new McpConfigError(`${name}: header ${key} contains a character not allowed in an HTTP header`);
+    if (brokered && !["accept", "content-type", "x-client"].includes(key.toLowerCase())
+      && !isVaultPlaceholder(resolved) && !/^Bearer __vault_[A-Z][A-Z0-9_]*__$/.test(resolved)) {
+      throw new McpConfigError(`${name}: header ${key} must use a vault reference or be injected by Agent Vault`);
+    }
     resolvedHeaders[key] = resolved;
   }
   const auth = value.auth === undefined ? undefined : parseAuth(value.auth, name, env);
@@ -253,9 +276,18 @@ function parseAuth(value: unknown, serverName: string, env: NodeJS.ProcessEnv): 
   };
 }
 
-/** The single place that turns `${NAME}` references into values; replace this for a secret-manager CLI. */
+/** Vault references stay non-secret; a disabled broker must never send them upstream directly. */
 export function resolveReferences(value: string, env: NodeJS.ProcessEnv, field: string): string {
-  return value.replace(ENV_REFERENCE, (_match, name: string) => {
+  const referenced = value.replace(VAULT_REFERENCE, (_match, key: string) => {
+    if (!agentVaultEnabled(env)) throw new McpConfigError(`${field} requires AGENT_VAULT_ENABLED=1`);
+    try {
+      return vaultPlaceholder(key);
+    } catch {
+      throw new McpConfigError(`${field} contains an invalid Agent Vault credential key`);
+    }
+  });
+  if (referenced.includes("${vault:")) throw new McpConfigError(`${field} contains an invalid Agent Vault reference`);
+  return referenced.replace(ENV_REFERENCE, (_match, name: string) => {
     const resolved = env[name];
     if (resolved === undefined) throw new McpConfigError(`${field} references missing environment variable ${name}`);
     return resolved;

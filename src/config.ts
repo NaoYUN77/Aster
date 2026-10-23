@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
+import { readAgentVaultEnvironment } from "./agent-vault.js";
 import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
 
 export { ConfigurationError };
@@ -20,6 +21,7 @@ export function resolveMcpConfigPaths(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env) {
+  readAgentVaultEnvironment(env);
   const required = (key: string) => {
     const value = env[key]?.trim();
     if (!value) throw new ConfigurationError(`Missing configuration: ${key}`);

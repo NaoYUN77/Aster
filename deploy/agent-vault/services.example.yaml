@@ -1,0 +1,45 @@
+# Adapt before applying: every credential key must exist in the Infisical-backed vault.
+# Applying a service file replaces the complete set; preserve existing required rules.
+services:
+  - name: github
+    host: api.github.com:443/*
+    auth:
+      type: bearer
+      token: GITHUB_TOKEN
+
+  - name: example-api-key
+    host: api.example.com:443/v1/*
+    auth:
+      type: api-key
+      header: X-API-Key
+      key: EXAMPLE_API_KEY
+
+  - name: example-basic
+    host: account.example.com:443/api/*
+    auth:
+      type: basic
+      username: EXAMPLE_USERNAME
+      password: EXAMPLE_PASSWORD
+
+  # Match only the placeholder path; a different real bot token is not accepted by this rule.
+  - name: telegram
+    host: api.telegram.org:443/bot__vault_TELEGRAM_BOT_TOKEN__/*
+    auth:
+      type: passthrough
+    substitutions:
+      - key: TELEGRAM_BOT_TOKEN
+        placeholder: __vault_TELEGRAM_BOT_TOKEN__
+        in: [path]
+
+  - name: openai
+    host: api.openai.com:443/v1/*
+    auth:
+      type: bearer
+      token: OPENAI_API_KEY
+
+  # MCP OAuth is handled by the existing client. Do not overwrite its Authorization header.
+  # Add separate exact-host rules for the provider's discovered metadata/registration/token endpoints.
+  - name: notion-mcp
+    host: mcp.notion.com:443/*
+    auth:
+      type: passthrough

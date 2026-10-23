@@ -38,6 +38,16 @@ sudo ./deploy/install-systemd.sh
 
 MCP 配置默认位于 `/var/lib/personal-agent/mcp.json`，与代码分开保存，升级和重装不会覆盖；属主应为 `personal-agent`，权限 `600`。也可以在 `/etc/personal-agent.env` 用 `MCP_CONFIG` 指向其他位置。`check-config` 会离线校验该文件：默认路径上的文件级错误只输出告警（与运行时一样禁用 MCP），`MCP_CONFIG` 显式指定的文件有错则使检查失败。
 
+配置改完后先停 bot，再做连接测试，避免并发刷新 OAuth 状态。下列命令使用服务用户和环境，验证文件权限与连接；它不在 systemd unit 内运行，不能验证 unit 的沙箱限制：
+
+```sh
+sudo bash -c 'set -a; . /etc/personal-agent.env; set +a; \
+  exec runuser -u personal-agent -- env HOME=/var/lib/personal-agent \
+  node /opt/personal-agent/dist/src/mcp-check.js'
+```
+
+每个 server 打印工具数量与工具名，失败的打印安全错误码；任一失败时退出码为 1。它不经过 Telegram 和模型，可以在停服状态下反复执行。
+
 用 `npx` 启动 stdio server 时，`ProtectHome=true` 和 `ProtectSystem=strict` 会让默认 npm 缓存不可写。在 `/etc/personal-agent.env` 增加：
 
 ```sh

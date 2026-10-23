@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { openAgent } from "./agent.js";
+import { initializeAgentVault } from "./agent-vault.js";
 import { ConfigurationError, readConfig } from "./config.js";
 import { Inbox } from "./inbox.js";
 import { failureCode, serveTelegram, TelegramClient } from "./telegram.js";
@@ -10,6 +11,7 @@ process.once("SIGINT", () => shutdown.abort());
 process.once("SIGTERM", () => shutdown.abort());
 
 try {
+  initializeAgentVault();
   const config = readConfig();
   const client = new TelegramClient(config.token);
   const botId = await client.identity(shutdown.signal);

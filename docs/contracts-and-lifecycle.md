@@ -36,6 +36,12 @@
 
 对同一文件的写入需要明确的顺序或互斥机制，不能仅凭应用层只运行一个用户请求，就推断同一回合里的工具一定顺序执行。
 
+### 工具凭证代理
+
+启用 Agent Vault 时，工具静态凭证由 Infisical 提供，真实值只在 broker 侧注入。应用仅解析 `${vault:KEY}` 为 `__vault_KEY__`，不将秘密写入工具参数或 durable 状态。代理检查、允许的配置、隔离部署及目前限制以 [Agent Vault 运行说明](agent-vault.md) 为权威来源。
+
+代理错误不改变业务重放语义；刷新或轮换凭证不能成为重放未知写入的理由。MCP 外部 OAuth 继续使用下文的宿主 token 状态，属于本轮接入保留的独立认证流程。
+
 ### MCP 工具
 
 MCP 工具由入口配置声明，不由模型注册。`src/mcp-config.ts` 在边界校验文件、解析 `${ENV}` 并返回纯配置；`src/mcp.ts` 负责连接、发现工具和适配到底座原生工具契约。
@@ -55,6 +61,10 @@ MCP 工具由入口配置声明，不由模型注册。`src/mcp-config.ts` 在�
 恢复：MCP 工具永不自动重放。启动时不可用的 server 不安装工具，遗留调用在恢复中表现为工具不可用；运行中断开的调用以 `MCP_CLOSED` 失败。改名、改 schema 或删除 server 都是不兼容变更，需要先收敛未完成调用。
 
 OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、临时文件后原子替换），不进入模型上下文、工具参数或日志。一次写入失败只影响该次调用，不使后续读写持续失败。bot 只读取和刷新；交互授权由 `npm run mcp:auth` 在独立进程完成，bot 不监听回调端口。`mcp:auth` 与 bot 通过同一函数解析 `DATA_DIR` 和 `MCP_CONFIG`；配置的 `authorizationServerMetadataUrl` 同时用于 CLI 流程与运行时 401 后的重新授权，避免两者落在不同授权服务器。
+
+该文件同时保存动态注册得到的 `client_id`／`client_secret` 与授权码交换用的 `codeVerifier`。重新注册会让已有授权失效，因此授权流程复用已存客户端信息，不得靠删除文件“重置”状态；只有 `invalid_grant` 或需要换账号时才重新走完整授权。refresh token 轮换要求同一授权只被一个进程刷新：CLI 与 bot 不并发运行，并发 401 在进程内共享一次刷新。
+
+`invalid_grant`（例如授权服务器规定的绝对或闲置期限已到）是终态：清除已存 token，把工具调用报为 `MCP_AUTH_REQUIRED`，由操作者重新授权；不重试同一 refresh token，避免被当作令牌重放而撤销整个授权。
 
 边界：MCP server 与应用同 uid，不构成安全边界；模型可通过 bash 读取进程环境与数据目录。真正的隔离需要独立用户、容器或远端 server。
 

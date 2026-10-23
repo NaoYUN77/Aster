@@ -4,6 +4,7 @@ import {
   OAuthError,
 } from "@earendil-works/pi-mcp/oauth";
 import { resolveMcpConfigPaths } from "./config.js";
+import { initializeAgentVault } from "./agent-vault.js";
 import { createOAuthProvider, mcpAuthFlowOptions, openMcpConnection } from "./mcp.js";
 import { readMcpConfig, type McpAuthConfig, type McpServerConfig } from "./mcp-config.js";
 
@@ -100,15 +101,18 @@ function isOAuthServer(server: McpServerConfig): server is OAuthServer {
 }
 
 try {
+  initializeAgentVault();
   await main();
 } catch (error) {
   // Errors can carry URLs and server responses; print the kind, not the payload.
   if (error instanceof OAuthError) {
     console.error(`MCP authorization failed: ${error.code}`);
-  } else if (error instanceof Error && error.name !== "Error") {
-    console.error(`MCP authorization failed: ${error.name}`);
   } else {
-    console.error("MCP authorization failed.");
+    // A network failure is the common cause and its message is opaque ("fetch failed"); the syscall code
+    // (ECONNRESET, ENOTFOUND) says what to check without exposing any endpoint or response body.
+    const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+    const code = typeof cause?.code === "string" && /^[A-Z0-9_]{2,32}$/.test(cause.code) ? cause.code : undefined;
+    console.error(code === undefined ? "MCP authorization failed." : `MCP authorization failed: network error (${code})`);
   }
   process.exitCode = 1;
 }

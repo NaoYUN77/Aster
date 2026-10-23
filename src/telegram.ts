@@ -1,5 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { Api, GrammyError } from "grammy";
+import { Agent as HttpsAgent } from "node:https";
+import { readAgentVaultEnvironment } from "./agent-vault.js";
 import { AbortController as TelegramAbortController, type AbortSignal as TelegramSignal } from "abort-controller";
 import type { Update } from "grammy/types";
 import type { readConfig } from "./config.js";
@@ -23,7 +25,11 @@ export class TelegramClient {
   private readonly api: Api;
 
   constructor(token: string) {
-    this.api = new Api(token);
+    const proxyEnv = readAgentVaultEnvironment();
+    // grammY supplies its own agent, so replacing Node's global agent alone is insufficient.
+    this.api = new Api(token, proxyEnv ? {
+      baseFetchConfig: { agent: new HttpsAgent({ keepAlive: true, proxyEnv }) },
+    } : undefined);
   }
 
   async identity(signal: AbortSignal): Promise<string> {
