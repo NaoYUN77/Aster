@@ -57,6 +57,8 @@ INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=<只读 Machine Identity client secret>
 AGENT_VAULT_ADDR=http://localhost:14321
 ```
 
+`AGENT_VAULT_MASTER_PASSWORD` 用于包装 broker 的本地数据密钥（DEK），保护数据卷中的凭据和 CA 私钥；它不是 Infisical 密码，也不传给应用。丢失后原数据卷无法解密。首次启动前设置；已有实例改用 CLI `agent-vault master-password set|change`，不要只改环境变量。
+
 自建 Infisical 时修改 `docker-compose.agent-vault.yml` 的 `INFISICAL_URL`（Compose 的 `environment` 优先于 `env_file`）。
 
 只启动 broker，并叠加回环代理端口：
