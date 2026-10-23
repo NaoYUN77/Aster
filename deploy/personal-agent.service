@@ -14,7 +14,10 @@ EnvironmentFile=/etc/personal-agent.env
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/flock --no-fork --nonblock /var/lib/personal-agent/app.lock /usr/bin/node /opt/personal-agent/dist/src/main.js
 Restart=on-failure
-RestartSec=10
+# Credential rotation reaches Agent Vault on its polling interval (60 s by default). A shorter
+# retry budget lets StartLimitBurst trip before the new token is available, leaving the service
+# failed with no further attempt. 5 x 30 s exceeds StartLimitIntervalSec.
+RestartSec=30
 TimeoutStopSec=45
 UMask=0077
 NoNewPrivileges=true

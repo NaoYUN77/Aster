@@ -9,6 +9,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { GrammyError } from "grammy";
 import type { Update } from "grammy/types";
 import { Inbox } from "../src/inbox.js";
+import { StateError } from "../src/errors.js";
 import { readConfig } from "../src/config.js";
 import { createProviderModels, PROVIDERS, requireModel } from "../src/providers.js";
 import { splitReply } from "../src/messages.js";
@@ -45,8 +46,9 @@ test("inbox rejects identity and request-content conflicts without advancing off
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
   try {
     inbox.bindIdentity("99", "42");
-    assert.throws(() => inbox.bindIdentity("100", "42"));
-    assert.throws(() => inbox.bindIdentity("99", "43"));
+    // Operator-facing: the startup log prints this message instead of a generic failure code.
+    assert.throws(() => inbox.bindIdentity("100", "42"), StateError);
+    assert.throws(() => inbox.bindIdentity("99", "43"), StateError);
     inbox.accept(13, request);
     inbox.accept(13, request);
     assert.throws(() => inbox.accept(14, { ...request, text: "different" }));
@@ -237,6 +239,81 @@ test("manual confirmation marks only the named segment sent and continues with l
     assert.equal(inbox.blocked().length, 0);
   } finally {
     inbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("inbox timestamps record when a request arrived, was answered, and was last attempted", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-timestamps-"));
+  const inbox = new Inbox(join(directory, "inbox.sqlite"));
+  try {
+    inbox.accept(1, request);
+    const received = inbox.next();
+    assert.ok(received?.receivedAt, "receivedAt is set when the request is accepted");
+    assert.equal(received.repliedAt, null);
+    assert.ok(!Number.isNaN(Date.parse(received.receivedAt!)));
+
+    inbox.saveReply(request.requestId, "hello back");
+    const replied = inbox.next();
+    assert.equal(replied?.repliedAt?.startsWith(received.receivedAt!.slice(0, 10)), true);
+    assert.ok(Date.parse(replied.repliedAt!) >= Date.parse(received.receivedAt!));
+
+    const part = inbox.nextPart(request.requestId);
+    assert.ok(part?.createdAt, "delivery parts carry their creation time");
+    assert.ok(part.updatedAt);
+    inbox.beginPart(request.requestId, 0);
+    const sending = inbox.nextPart(request.requestId);
+    assert.equal(sending, undefined, "beginPart moved the part out of pending");
+    inbox.failPart(request.requestId, 0, "failed", "TELEGRAM_400");
+    const [blocked] = inbox.blocked() as { receivedAt: string; updatedAt: string }[];
+    assert.ok(blocked?.updatedAt, "the attempt time survives on a blocked delivery");
+    assert.ok(Date.parse(blocked.updatedAt) >= Date.parse(part.updatedAt!));
+  } finally {
+    inbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("opening a database written before timestamps keeps the old rows unknown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-migrate-"));
+  const path = join(directory, "inbox.sqlite");
+  // The schema as shipped before timestamps existed, including one already-delivered request.
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE checkpoint (id INTEGER PRIMARY KEY CHECK (id = 1), offset INTEGER NOT NULL);
+    INSERT INTO checkpoint VALUES (1, 5);
+    CREATE TABLE identity (id INTEGER PRIMARY KEY CHECK (id = 1), botId TEXT NOT NULL, ownerId TEXT NOT NULL);
+    CREATE TABLE inbox (requestId TEXT PRIMARY KEY, conversationId TEXT NOT NULL, senderId TEXT NOT NULL,
+      text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', reply TEXT);
+    CREATE TABLE deliveries (requestId TEXT NOT NULL REFERENCES inbox(requestId) ON DELETE CASCADE,
+      part INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', messageId TEXT, error TEXT,
+      PRIMARY KEY (requestId, part));
+    CREATE TABLE failures (requestId TEXT PRIMARY KEY REFERENCES inbox(requestId) ON DELETE CASCADE, code TEXT NOT NULL);
+    INSERT INTO inbox VALUES ('telegram:99:4', '42', '42', 'old question', 'sent', 'old answer');
+    INSERT INTO deliveries VALUES ('telegram:99:4', 0, 'old answer', 'sent', '77', NULL);
+  `);
+  legacy.close();
+
+  const inbox = new Inbox(path);
+  let current: Inbox | undefined = inbox;
+  try {
+    // Migration must not invent a time for a row the process never saw arrive.
+    assert.equal(inbox.offset, 5);
+    inbox.accept(6, { ...request, requestId: "telegram:99:5" });
+    const rows = new DatabaseSync(path);
+    try {
+      assert.equal(rows.prepare("SELECT receivedAt FROM inbox WHERE requestId = ?").get("telegram:99:4")?.["receivedAt"], null);
+      assert.equal(rows.prepare("SELECT createdAt FROM deliveries WHERE requestId = ?").get("telegram:99:4")?.["createdAt"], null);
+      assert.ok(rows.prepare("SELECT receivedAt FROM inbox WHERE requestId = ?").get("telegram:99:5")?.["receivedAt"]);
+    } finally {
+      rows.close();
+    }
+    // Reopening an already-migrated database must stay a no-op.
+    inbox.close();
+    current = new Inbox(path);
+    assert.equal(current.offset, 6);
+  } finally {
+    current?.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

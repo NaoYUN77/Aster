@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { openAgent } from "./agent.js";
 import { initializeAgentVault } from "./agent-vault.js";
 import { ConfigurationError, readConfig } from "./config.js";
+import { StateError } from "./errors.js";
 import { Inbox } from "./inbox.js";
 import { failureCode, serveTelegram, TelegramClient } from "./telegram.js";
 
@@ -32,8 +33,10 @@ try {
   }
 } catch (error) {
   if (!shutdown.signal.aborted) {
-    // SDK error objects can contain credentials and message content.
-    console.error("Personal agent stopped:", error instanceof ConfigurationError ? error.message : failureCode(error));
+    // SDK error objects can contain credentials and message content, so only messages this
+    // application wrote are logged verbatim.
+    console.error("Personal agent stopped:",
+      error instanceof ConfigurationError || error instanceof StateError ? error.message : failureCode(error));
     process.exitCode = 1;
   }
 }
