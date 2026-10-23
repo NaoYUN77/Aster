@@ -23,7 +23,7 @@ Bot token、Telegram owner ID 和 LLM API key 都存放在 Infisical。前两者
 | Vault proxy 身份 | `private/app.env` 的 proxy URL | 启动信任凭证，仅 proxy 权限，不具备读取真实秘密的权限 |
 | Infisical Machine Identity / Vault 主密码 | `private/vault.env`，仅传给 Vault 容器 | 不传给应用或工具 |
 
-owner ID 不是请求凭证，所以不能用占位值让代理替换。应用只读取导出文件，不持有 Infisical 身份；在 Infisical 中修改后，重新导出该文件并重启应用。该文件属于访问控制配置，不是可公开的运行参数，保持 `600` 并放在 git/docker 构建上下文之外。未启用 Vault 时仍可直接在 `.env` 或 `/etc/personal-agent.env` 设置 `TELEGRAM_OWNER_ID`；两种来源不能同时设置。
+owner ID 不是请求凭证，所以不能用占位值让代理替换。应用只读取导出文件，不持有 Infisical 身份；在 Infisical 中修改后，重新导出该文件并重启应用。该文件属于访问控制配置，不是可公开的运行参数，放在 git/docker 构建上下文之外。Compose 的 file secret 以 bind mount 方式挂载，`uid`/`gid`/`mode` 不生效，容器内看到的仍是源文件权限；应用以 uid 1000 运行，因此该文件需设为 `644`（只含数字 ID，且所在 `private/` 目录为 `700`）。未启用 Vault 时仍可直接在 `.env` 或 `/etc/personal-agent.env` 设置 `TELEGRAM_OWNER_ID`；两种来源不能同时设置。
 
 入口 token/key 与工具凭证目前共用一个工作负载的代理身份；这不代表按工具或进程隔离了各自权限。拆成独立权限域需要进一步拆分执行环境和代理身份。
 
@@ -141,10 +141,10 @@ chmod 600 deploy/agent-vault/private/*.env
    ```sh
    # 先用只读 Machine Identity 登录 Infisical CLI；参数按项目和 CLI 版本调整。
    infisical secrets get TELEGRAM_OWNER_ID --plain > deploy/agent-vault/private/telegram-owner-id
-   chmod 600 deploy/agent-vault/private/telegram-owner-id
+   chmod 644 deploy/agent-vault/private/telegram-owner-id
    ```
 
-   该文件必须在 `up` 前存在，Compose secret 的源文件缺失会阻止启动。在 Infisical 修改 owner ID 后重新导出并重启应用；应用进程不持有 Infisical 身份。
+   该文件必须在 `up` 前存在，Compose secret 的源文件缺失会阻止启动。应用以 uid 1000 读取；file secret 是 bind mount，不能靠 Compose 的 `mode` 改权限，所以用 `644`。文件只含数字 owner ID，`private/` 目录保持 `700`。在 Infisical 修改 owner ID 后重新导出并重启应用；应用进程不持有 Infisical 身份。若导出工具用重命名方式替换文件，重启后仍可能看到旧 inode，此时用 `docker compose -f docker-compose.agent-vault.yml up -d --force-recreate personal-agent` 重新挂载。
 9. 先停原 bot，保持整个持久化卷；再启动新部署：
 
    ```sh

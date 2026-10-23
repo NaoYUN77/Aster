@@ -70,6 +70,7 @@ services:
       - personal-agent-data:/data
       - ./deploy/agent-vault/private/ca.pem:/etc/agent-vault/ca.pem:ro
     # Exported from Infisical at deploy time; the running process never holds the Infisical identity.
+    # File secrets are bind-mounted with the source permissions, so keep this file readable by uid 1000.
     secrets:
       - telegram-owner-id
     read_only: true
