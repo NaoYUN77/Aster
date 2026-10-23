@@ -138,13 +138,14 @@ Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不�
 
 - 本地请求使用 `telegram:<botId>:<updateId>`，数据目录绑定 bot ID 与 owner ID。单用户 Telegram 私聊映射到一个底座 root 会话；未来多会话需另行保存路由关系。
 - `inbox` 保存请求，`checkpoint` 保存消费位置，两者在同一 SQLite 事务中写入。重复 ID 的不同内容直接报错，不推进 offset。本地历史只清理已完成的 `sent` 请求，保留最新 100 条；`pending`、`ready`、`failed`、`uncertain` 请求永不自动清理，关联投递与诊断记录随请求级联删除。长期执行去重仍依赖底座。
+- `inbox.receivedAt`／`repliedAt` 与 `deliveries.createdAt`／`updatedAt` 记录 ISO 8601 UTC 时间，用于区分"已接收但未处理"和"已处理但投递失败"。升级前写入的行保持 `null`（未知），不以迁移时刻回填；迁移只追加可空列，可重复执行。
 - 应用请求状态为 `pending → ready → sent`；agent 执行属于底座，本地 pending 不复制 queued/placed。普通 agent 失败生成待投递的失败提示，错误码另存。若底座 Session 已永久失败（`SessionFailed`），应用不写失败提示、请求保持 `pending`，由 `serveTelegram` 向上抛出 `AGENT_SESSION_FAILED`；进程以退出码 1 结束，交给进程管理器重启。本地 SQLite 写入失败同样按致命错误处理。
 - 模型以 `stopReason: "length"` 结束时，可见文本不完整。应用保留已生成的部分文本，以 `AGENT_TRUNCATED` 记录并通过投递提示明确说明截断，不把该文本当作完整成功，也不自动续写或重试。完整会话记录仍由底座保存。
 - `deliveries` 按 `(requestId, part)` 保存文本，分段状态为 `pending → sending → sent`；失败分为 `failed` 与 `uncertain`。确认时记录 Telegram message ID。每段最多 4000 个 UTF-16 code units，不切开代理对，使用纯文本发送。
 - Telegram 明确 4xx 拒绝记录为 failed；网络失败和其他无法排除送达的情况记录为 uncertain。重启将遗留 sending 转为 uncertain。阻塞请求不自动重发，但允许处理后续独立请求。
 - 投递管理 CLI 支持列出、重试该段、人工确认该段已送达。操作前停止应用，核对实际 Telegram 消息；重试仅发送已有结果，不重新运行 agent。CLI 打开数据库后先执行恢复，因此进程发送中被强杀时遗留的 `sending` 段以 `uncertain` 出现在列表中，`sending` 本身不会直接暴露给操作者。先前版本没有逐段记录的 uncertain 请求保留原记录，需人工核对。
 - 轮询遇到网络故障或服务端错误采用有界退避，明确配置/认证错误退出交给进程管理器处理。每次最多接收 10 条，先处理本地待办再继续轮询；长期离线或积压不在本 MVP 的可靠收件保证内。
-- 操作失败只记录安全错误码，不向日志输出 SDK 请求对象或凭据。工具的详细执行记录仍归底座管理。
+- 操作失败只记录安全错误码，不向日志输出 SDK 请求对象或凭据。工具的详细执行记录仍归底座管理。启动失败时，`ConfigurationError` 与 `StateError`（数据目录已绑定其他 bot／owner 等）打印应用自己写的 message；其余异常只打印错误码，避免 SDK 错误对象带出凭据或消息内容。
 
 具体启动、投递管理及部署命令见 README.md。
 

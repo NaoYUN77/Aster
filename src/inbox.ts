@@ -1,9 +1,13 @@
 import { DatabaseSync } from "node:sqlite";
+import { StateError } from "./errors.js";
 import { splitReply, type TextRequest } from "./messages.js";
 
 export interface Job extends TextRequest {
   status: "pending" | "ready" | "sent" | "failed" | "uncertain";
   reply: string | null;
+  /** ISO 8601 UTC; null only for rows written before timestamps existed. */
+  receivedAt: string | null;
+  repliedAt: string | null;
 }
 
 export interface Delivery {
@@ -13,6 +17,12 @@ export interface Delivery {
   status: "pending" | "sending" | "sent" | "failed" | "uncertain";
   messageId: string | null;
   error: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+function timestamp(): string {
+  return new Date().toISOString();
 }
 
 export class Inbox {
@@ -32,7 +42,9 @@ export class Inbox {
         senderId TEXT NOT NULL,
         text TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
-        reply TEXT
+        reply TEXT,
+        receivedAt TEXT,
+        repliedAt TEXT
       );
       CREATE TABLE IF NOT EXISTS deliveries (
         requestId TEXT NOT NULL REFERENCES inbox(requestId) ON DELETE CASCADE,
@@ -41,6 +53,8 @@ export class Inbox {
         status TEXT NOT NULL DEFAULT 'pending',
         messageId TEXT,
         error TEXT,
+        createdAt TEXT,
+        updatedAt TEXT,
         PRIMARY KEY (requestId, part)
       );
       CREATE TABLE IF NOT EXISTS failures (
@@ -48,12 +62,18 @@ export class Inbox {
         code TEXT NOT NULL
       );
     `);
+    // Existing databases predate the timestamps. Adding a nullable column leaves those rows unknown
+    // instead of backfilling them with a time the process never observed.
+    addColumn(this.db, "inbox", "receivedAt", "TEXT");
+    addColumn(this.db, "inbox", "repliedAt", "TEXT");
+    addColumn(this.db, "deliveries", "createdAt", "TEXT");
+    addColumn(this.db, "deliveries", "updatedAt", "TEXT");
   }
 
   bindIdentity(botId: string, ownerId: string): void {
     const previous = this.db.prepare("SELECT botId, ownerId FROM identity WHERE id = 1").get();
     if (previous && (previous.botId !== botId || previous.ownerId !== ownerId)) {
-      throw new Error("Data directory belongs to another Telegram bot or owner; use a separate DATA_DIR");
+      throw new StateError("Data directory belongs to another Telegram bot or owner; use a separate DATA_DIR");
     }
     this.db.prepare("INSERT OR IGNORE INTO identity VALUES (1, ?, ?)").run(botId, ownerId);
   }
@@ -81,8 +101,8 @@ export class Inbox {
         if (existing && (existing.text !== request.text || existing.conversationId !== request.conversationId || existing.senderId !== request.senderId)) {
           throw new Error("Request ID reused with different content");
         }
-        this.db.prepare(`INSERT OR IGNORE INTO inbox (requestId, conversationId, senderId, text)
-          VALUES (?, ?, ?, ?)`).run(request.requestId, request.conversationId, request.senderId, request.text);
+        this.db.prepare(`INSERT OR IGNORE INTO inbox (requestId, conversationId, senderId, text, receivedAt)
+          VALUES (?, ?, ?, ?, ?)`).run(request.requestId, request.conversationId, request.senderId, request.text, timestamp());
       }
       // Telegram can randomize update IDs after an idle week; do not use MAX(offset).
       this.db.prepare("UPDATE checkpoint SET offset = ? WHERE id = 1").run(nextOffset);
@@ -96,7 +116,7 @@ export class Inbox {
   saveReply(requestId: string, reply: string, errorCode?: string): void {
     if (!reply.trim()) throw new Error("Cannot deliver an empty reply");
     this.transaction(() => {
-      const changed = this.db.prepare("UPDATE inbox SET reply = ?, status = 'ready' WHERE requestId = ? AND status = 'pending'").run(reply, requestId);
+      const changed = this.db.prepare("UPDATE inbox SET reply = ?, status = 'ready', repliedAt = ? WHERE requestId = ? AND status = 'pending'").run(reply, timestamp(), requestId);
       if (changed.changes !== 1) throw new Error("Reply already saved or request missing");
       this.insertParts(requestId, reply);
       if (errorCode) this.db.prepare("INSERT INTO failures VALUES (?, ?)").run(requestId, errorCode);
@@ -108,26 +128,27 @@ export class Inbox {
   }
 
   beginPart(requestId: string, part: number): void {
-    const changed = this.db.prepare("UPDATE deliveries SET status = 'sending', error = NULL WHERE requestId = ? AND part = ? AND status = 'pending'").run(requestId, part);
+    const now = timestamp();
+    const changed = this.db.prepare("UPDATE deliveries SET status = 'sending', error = NULL, updatedAt = ? WHERE requestId = ? AND part = ? AND status = 'pending'").run(now, requestId, part);
     if (changed.changes !== 1) throw new Error("Delivery part is not pending");
   }
 
   confirmPart(requestId: string, part: number, messageId: string): void {
     this.transaction(() => {
-      this.db.prepare("UPDATE deliveries SET status = 'sent', messageId = ?, error = NULL WHERE requestId = ? AND part = ?").run(messageId, requestId, part);
+      this.db.prepare("UPDATE deliveries SET status = 'sent', messageId = ?, error = NULL, updatedAt = ? WHERE requestId = ? AND part = ?").run(messageId, timestamp(), requestId, part);
       this.finishIfDelivered(requestId);
     });
   }
 
   failPart(requestId: string, part: number, status: "failed" | "uncertain", error: string): void {
     this.transaction(() => {
-      this.db.prepare("UPDATE deliveries SET status = ?, error = ? WHERE requestId = ? AND part = ?").run(status, error, requestId, part);
+      this.db.prepare("UPDATE deliveries SET status = ?, error = ?, updatedAt = ? WHERE requestId = ? AND part = ?").run(status, error, timestamp(), requestId, part);
       this.db.prepare("UPDATE inbox SET status = ? WHERE requestId = ?").run(status, requestId);
     });
   }
 
   blocked() {
-    return this.db.prepare(`SELECT i.requestId, i.status, d.part, d.messageId, d.error
+    return this.db.prepare(`SELECT i.requestId, i.status, d.part, d.messageId, d.error, i.receivedAt, d.updatedAt
       FROM inbox i LEFT JOIN deliveries d ON d.requestId = i.requestId AND d.status IN ('failed', 'uncertain')
       WHERE i.status IN ('failed', 'uncertain') ORDER BY i.rowid, d.part`).all();
   }
@@ -140,7 +161,7 @@ export class Inbox {
     this.transaction(() => {
       const row = this.db.prepare("SELECT status FROM deliveries WHERE requestId = ? AND part = ?").get(requestId, part);
       if (!row || !["failed", "uncertain"].includes(String(row.status))) throw new Error("Part is not failed or uncertain");
-      this.db.prepare("UPDATE deliveries SET status = ?, error = NULL WHERE requestId = ? AND part = ?").run(action === "retry" ? "pending" : "sent", requestId, part);
+      this.db.prepare("UPDATE deliveries SET status = ?, error = NULL, updatedAt = ? WHERE requestId = ? AND part = ?").run(action === "retry" ? "pending" : "sent", timestamp(), requestId, part);
       this.db.prepare("UPDATE inbox SET status = 'ready' WHERE requestId = ?").run(requestId);
       this.finishIfDelivered(requestId);
     });
@@ -158,8 +179,9 @@ export class Inbox {
   }
 
   private insertParts(requestId: string, reply: string): void {
-    const insert = this.db.prepare("INSERT INTO deliveries (requestId, part, text) VALUES (?, ?, ?)");
-    splitReply(reply).forEach((text, part) => insert.run(requestId, part, text));
+    const now = timestamp();
+    const insert = this.db.prepare("INSERT INTO deliveries (requestId, part, text, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)");
+    splitReply(reply).forEach((text, part) => insert.run(requestId, part, text, now, now));
   }
 
   private finishIfDelivered(requestId: string): void {
@@ -177,4 +199,10 @@ export class Inbox {
       throw error;
     }
   }
+}
+
+/** SQLite has no `ADD COLUMN IF NOT EXISTS`; re-running the migration must stay a no-op. */
+function addColumn(db: DatabaseSync, table: string, column: string, type: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!columns.some((entry) => entry.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }

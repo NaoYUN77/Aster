@@ -3,3 +3,9 @@
 export class ConfigurationError extends Error {
   override name = "ConfigurationError";
 }
+
+// Startup state that blocks service without being a configuration mistake, such as a data directory
+// bound to another identity. Its message is operator-facing and safe to log.
+export class StateError extends Error {
+  override name = "StateError";
+}
