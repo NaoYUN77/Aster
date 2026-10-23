@@ -344,7 +344,7 @@ sudo systemctl start personal-agent
 ### 6.6 轮换
 
 - 模型 key：在 Infisical 修改，等待轮询周期后直接发消息；不需要重启。
-- Telegram bot token：在 BotFather revoke 后旧值立即失效，而 Vault 要等一个轮询周期才拿到新值。先确认 Vault 已同步（用占位路径请求 `getMe` 得到 200），再 `systemctl restart personal-agent`；否则重启后的 `getMe` 会拿到已吊销的 token 而返回 401。unit 的 `RestartSec=30` 让 5 次重试覆盖 150 秒，超过默认 60 秒轮询周期，避免重试预算在同步完成前耗尽。
+- Telegram bot token：在 BotFather revoke 后旧值立即失效，而 Vault 要等一个轮询周期才拿到新值。先确认 Vault 已同步（用占位路径请求 `getMe` 得到 200），再 `systemctl restart personal-agent`。unit 设置 `StartLimitIntervalSec=0`，重试次数不设上限：在同步完成前重启只会得到 401，Vault 收敛后下一次重试自动成功，不需要人工 `systemctl reset-failed`。
 - owner ID：重新导出到 `/etc/personal-agent/telegram-owner-id`，`systemctl restart personal-agent`。该文件不走代理，改 Infisical 后必须重新导出；应用启动时会把 owner ID 与数据目录中记录的绑定比对，不一致时以 `StateError` 退出（日志打印完整 message），需按 `docs/agent-vault.md` 决定迁移还是换用新的数据目录。
 - proxy token：修改 `/etc/personal-agent.env`，重启应用。
 - 路由器 agent token：替换 `/etc/personal-agent/egress-router/agent-token-*`，`systemctl reload agent-egress-router`（`SIGHUP` 重新读取路由和 token）；旧 tunnel 不受影响。

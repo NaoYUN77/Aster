@@ -2,8 +2,12 @@
 Description=Personal Agent Telegram Bot
 Wants=network-online.target
 After=network-online.target
-StartLimitIntervalSec=120
-StartLimitBurst=5
+# Do not latch into `failed`. Credential rotation revokes the old Telegram token immediately while
+# Agent Vault learns the new one on its polling interval (60 s by default), so a restart inside that
+# window fails with 401 through no fault of the operator. Rate limiting would stop retrying before the
+# value arrives and require a manual `systemctl reset-failed`. Unlimited attempts recover on their own
+# once the dependency converges; a genuinely broken config keeps logging the same error code.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -14,10 +18,8 @@ EnvironmentFile=/etc/personal-agent.env
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/flock --no-fork --nonblock /var/lib/personal-agent/app.lock /usr/bin/node /opt/personal-agent/dist/src/main.js
 Restart=on-failure
-# Credential rotation reaches Agent Vault on its polling interval (60 s by default). A shorter
-# retry budget lets StartLimitBurst trip before the new token is available, leaving the service
-# failed with no further attempt. 5 x 30 s exceeds StartLimitIntervalSec.
-RestartSec=30
+# Short enough that a transient dependency failure recovers quickly, since attempts are not capped.
+RestartSec=10
 TimeoutStopSec=45
 UMask=0077
 NoNewPrivileges=true
