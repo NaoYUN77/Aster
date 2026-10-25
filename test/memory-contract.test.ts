@@ -30,6 +30,7 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import {
   assertSchema,
+  baselineOf,
   CYCLE_BLOCK_CLOSE,
   CYCLE_BLOCK_OPEN,
   CycleSnapshotSchema,
@@ -655,11 +656,13 @@ test("01-F: frozen formats, ranges, calendar rules and error mapping", () => {
   assert.equal(rangeCovers(range, id(21)), false);
   assert.equal(isEmptyRange({ ...range, after: null }), false);
 
+  // The baseline is a boundary projection of the state: no `updatedAt`, because a rendered snapshot
+  // must not carry the time of a write.
   const snapshot: CycleSnapshot = {
     version: MEMORY_SCHEMA_VERSION,
     cycleId: "cycle-1",
     narrative: "Goal: ship the fix.",
-    baseline: { ...working, revision: 3, task: { status: "active", goal: "ship", scope: null, constraints: ["no deps"], progress: [], blockers: [], nextStep: "test", notes: null, sources: [{ conversationId, entryId: id(7) }] } },
+    baseline: baselineOf({ ...working, revision: 3, task: { status: "active", goal: "ship", scope: null, constraints: ["no deps"], progress: [], blockers: [], nextStep: "test", notes: null, sources: [{ conversationId, entryId: id(7) }] } }),
     boundary: { kind: "compaction", firstKept: id(12), anchor: id(9) },
     sources: { conversationId, after: id(3), through: id(12) },
     facts: { instructionsDigest: null, memoryDigest: "abc" },

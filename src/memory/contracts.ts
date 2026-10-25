@@ -46,6 +46,9 @@ export const WORKING_RECEIPT_KIND = "personal.working.receipt";
 export const CYCLE_SNAPSHOT_KIND = "personal.cycle";
 export const CYCLE_BLOCK_OPEN = "<cycle-snapshot>";
 export const CYCLE_BLOCK_CLOSE = "</cycle-snapshot>";
+/** A revision the active context lacks; carried in C so the model reads the current state. */
+export const REVISION_BLOCK_OPEN = "<working-revision>";
+export const REVISION_BLOCK_CLOSE = "</working-revision>";
 export const DAILY_DIRECTORY = "memory/daily";
 export const DAILY_MAX_PAGES = 9;
 export const UNKNOWN_DATE = "unknown";
@@ -64,6 +67,8 @@ export const MEMORY_LIMITS = {
   changes: 32,
   segments: 200,
   narrative: 12_000,
+  instructions: 32_000,
+  snapshotText: 24_000,
 } as const;
 
 const Version = Type.Literal(MEMORY_SCHEMA_VERSION);
@@ -154,7 +159,7 @@ const ActiveTaskDraftSchema = Type.Object(
 );
 
 /** A preference needs a user source, a scope, and an optional expiry; task completion never clears it. */
-const PreferenceSchema = Type.Object(
+export const PreferenceSchema = Type.Object(
   {
     id: Identifier,
     text: Text(MEMORY_LIMITS.text),
@@ -164,6 +169,7 @@ const PreferenceSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+export type Preference = Static<typeof PreferenceSchema>;
 
 /** Model-visible preference: the source is an entry id, resolved to a `SourceRef` by the host. */
 const PreferenceDraftSchema = Type.Object(
@@ -193,6 +199,35 @@ export const WorkingStateSchema = Type.Object(
   { additionalProperties: false },
 );
 export type WorkingState = Static<typeof WorkingStateSchema>;
+
+/**
+ * A boundary projection of `WorkingState`: everything a snapshot renders, without `updatedAt`.
+ * The write time belongs to the state's own history, not to the cycle snapshot — the boundary anchor
+ * already pins when the value was true, and a rendered snapshot must not carry a per-write timestamp.
+ */
+export const WorkingBaselineSchema = Type.Object(
+  {
+    version: Version,
+    revision: Type.Integer({ minimum: 1 }),
+    task: WorkingStateSchema.properties.task,
+    preferences: WorkingStateSchema.properties.preferences,
+  },
+  { additionalProperties: false },
+);
+export type WorkingBaseline = Static<typeof WorkingBaselineSchema>;
+
+export function baselineOf(state: WorkingState): WorkingBaseline {
+  return { version: state.version, revision: state.revision, task: state.task, preferences: state.preferences };
+}
+
+/**
+ * Render a baseline as the model reads it. This is the text a within-cycle revision carries into C, and
+ * the same text a snapshot's baseline renders to, so a revision never restates a fact in another shape.
+ * Deterministic: no clock, no `updatedAt`, keys in a fixed order.
+ */
+export function renderBaseline(baseline: WorkingBaseline): string {
+  return canonicalJson(baseline);
+}
 
 export function initialWorkingState(): WorkingState {
   return { version: MEMORY_SCHEMA_VERSION, revision: 1, task: { status: "none" }, preferences: [], updatedAt: 0 };
@@ -336,7 +371,11 @@ const CycleBoundarySchema = Type.Union([
   Type.Object(
     {
       kind: Type.Literal("initial"),
-      anchor: EntryIdSchema,
+      /**
+       * The working anchor the baseline was read at, or `null` when the projection starts the
+       * conversation and no anchor exists yet. Never a placeholder entry id.
+       */
+      anchor: Type.Union([EntryIdSchema, Type.Null()]),
     },
     { additionalProperties: false },
   ),
@@ -350,6 +389,7 @@ const CycleBoundarySchema = Type.Union([
     { additionalProperties: false },
   ),
 ]);
+export type CycleBoundary = Static<typeof CycleBoundarySchema>;
 
 /** Versions of the inputs a snapshot was built from; a change invalidates the prefix, not the data. */
 const SnapshotFactsSchema = Type.Object(
@@ -359,14 +399,18 @@ const SnapshotFactsSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+export type SnapshotFacts = Static<typeof SnapshotFactsSchema>;
 
-/** Structured half of a cycle snapshot; encoded into the compaction body. */
+/**
+ * Structured half of a cycle snapshot; encoded into the compaction body. `sources` is `null` only for
+ * an initial projection that predates every entry, where there is no range to cover yet.
+ */
 const cycleFields = {
   version: Version,
   cycleId: Identifier,
-  baseline: WorkingStateSchema,
+  baseline: WorkingBaselineSchema,
   boundary: CycleBoundarySchema,
-  sources: SourceRangeSchema,
+  sources: Type.Union([SourceRangeSchema, Type.Null()]),
   facts: SnapshotFactsSchema,
 };
 const CycleSnapshotBodySchema = Type.Object(cycleFields, { additionalProperties: false });
@@ -522,7 +566,8 @@ export const MEMORY_ERROR_CODES = [
 ] as const;
 export type MemoryErrorCode = (typeof MEMORY_ERROR_CODES)[number];
 
-export const MemoryErrorCodeSchema = Type.Union(MEMORY_ERROR_CODES.map((code) => Type.Literal(code)));
+/** Typed as the code union: `Type.Union` over a mapped array would infer `never`. */
+export const MemoryErrorCodeSchema = Type.Unsafe<MemoryErrorCode>(Type.String({ enum: [...MEMORY_ERROR_CODES] }));
 
 export const MemoryErrorSchema = Type.Object(
   {
@@ -564,6 +609,10 @@ export class MemoryError extends Error {
   }
   get appCode(): string {
     return MEMORY_ERROR_MAPPING[this.code].appCode;
+  }
+  /** The serializable form a plan carries; the message is operator-facing and holds no memory text. */
+  toJSON(): Static<typeof MemoryErrorSchema> {
+    return { code: this.code, message: this.message.slice(0, 500), detail: this.detail };
   }
 }
 
@@ -612,7 +661,11 @@ export const ContextPlanSchema = Type.Object(
         { additionalProperties: false },
       ),
       Type.Object(
-        { kind: Type.Literal("compact"), reason: Type.Union([Type.Literal("budget"), Type.Literal("rounds")]) },
+        {
+          kind: Type.Literal("compact"),
+          /** `facts` is a changed block A or memory version: the cycle must end to adopt it. */
+          reason: Type.Union([Type.Literal("budget"), Type.Literal("rounds"), Type.Literal("facts")]),
+        },
         { additionalProperties: false },
       ),
       Type.Object({ kind: Type.Literal("error"), error: MemoryErrorSchema }, { additionalProperties: false }),

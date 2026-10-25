@@ -1,6 +1,6 @@
 # Memory 与 Context：实施 issues 和验收
 
-状态：MEM-01、MEM-02 已完成，其余待领取实施。编制日期：2026-10-25。架构与 Interface 语义以 [实施方案](memory-and-context-design.md) 为唯一来源；本文负责拆分任务、依赖、交接产物和完成条件。
+状态：MEM-01、MEM-02、MEM-03 的 module 已实现并通过各自验收；MEM-04 起待领取，全部能力尚未接入运行中的 agent（MEM-07 负责组合）。编制日期：2026-10-25。架构与 Interface 语义以 [实施方案](memory-and-context-design.md) 为唯一来源；本文负责拆分任务、依赖、交接产物和完成条件。
 
 ## 接手方式
 
@@ -25,7 +25,7 @@
 | MEM-07 | [#14](https://github.com/NaoYUN77/personal-agent-base-durable/issues/14) |
 | MEM-08 | [#15](https://github.com/NaoYUN77/personal-agent-base-durable/issues/15) |
 
-只先领取 MEM-01。依赖未满足时不要提前实现下游 module 的接入部分；本表与各 issue 的「依赖」一节一致，改动时两处同步。MEM-01 已于 2026-10-25 完成（交接记录见本节末），MEM-02 同批完成（交接记录见其小节末）。MEM-03、MEM-04、MEM-05 可立即并行；MEM-06 在 MEM-03 完成后即可开始（MEM-02 已满足其另一半依赖）。
+只先领取 MEM-01。依赖未满足时不要提前实现下游 module 的接入部分；本表与各 issue 的「依赖」一节一致，改动时两处同步。MEM-01 已于 2026-10-25 完成（交接记录见本节末），MEM-02 与 MEM-03 同批完成（交接记录分别见其小节末）。MEM-04、MEM-05 可立即开始；MEM-06 的两半依赖（MEM-02、MEM-03）已满足，可开始。
 
 ## 依赖与并行安排
 
@@ -95,7 +95,7 @@ MEM-01 验证失败的接入点必须有具体替代方案和对应验收后才�
 
 未通过或未执行项（均不属于本 issue 验收，已写入实施方案 12.6）：自定义归档 Task 的 `abort` 阶段与恢复（MEM-05）；hook 运行时对象上未声明的 `commit()` 未作为契约使用；真实模型窗口预算与缓存命中（MEM-06、MEM-08）；每日文件发布的文件级恢复窗口（MEM-04）。
 
-对下游的解锁条件：MEM-02～MEM-05 可立即开始，共享 `src/memory/contracts.ts`，不得另建近似类型；MEM-06 在 MEM-02、MEM-03 完成后开始，接入顺序按实施方案 12.4 执行（先 reset 再写 B；以 submission `done` 作为发布观察点）。
+对下游的解锁条件：MEM-02～MEM-05 可立即开始，共享 `src/memory/contracts.ts`，不得另建近似类型；MEM-06 在 MEM-02、MEM-03 完成后开始，接入顺序按实施方案 12.4 执行（先 reset 再写 B）。发布观察点有两条路径：经 submission 的压缩看 `done`，阻塞压缩看 `entryId` 是否成为活跃 head（详见 12.3、14.5）。
 
 ## MEM-02：Working 状态与版本化更新
 
@@ -128,7 +128,7 @@ MEM-01 验证失败的接入点必须有具体替代方案和对应验收后才�
 - `src/memory/contracts.ts`（增量）：`WORKING_COMPLETED_KIND`／`WorkingCompletedSchema`／`WorkingCompletedEntry`；锚点与回执的 `completedEntryId`；模型可见 `ProgressItemDraftSchema`、`ActiveTaskDraftSchema`、`PreferenceDraftSchema`，使模型只传 `EntryId`，不传 `conversationId`。
 - `test/memory-working.test.ts`：02-A～02-F，另加 02-G（存储值 schema 不符显式报错）。
 - `test/fixtures/crash-working.ts`：真实子进程，在“已提交、未写工具结果”处阻塞，由父进程 `SIGKILL`。
-- `docs/memory-and-context-design.md`：新增第 13 节（冻结位置、身份与幂等、一次 commit 写什么、崩溃窗口、错误与模型可见输出），原第 13 节改为第 14 节。
+- `docs/memory-and-context-design.md`：新增第 13 节（冻结位置、身份与幂等、一次 commit 写什么、崩溃窗口、错误与模型可见输出）；MEM-03 加入第 14 节后，原第 13 节之后的实施入口节顺延为第 15 节。
 
 执行命令与结果：
 
@@ -161,7 +161,7 @@ MEM-01 验证失败的接入点必须有具体替代方案和对应验收后才�
 
 **目标**：给定已固定输入，输出确定的加载／压缩计划与有界快照，保持 B 和既有 C 稳定。
 
-**依赖**：MEM-01。**阅读入口**：实施方案第 1、4、6、7、10 节及第 12 节；`src/memory/contracts.ts`。
+**依赖**：MEM-01。**阅读入口**：实施方案第 1、4、6、7、10 节及第 12、14 节；`src/memory/contracts.ts`、`src/memory/context.ts`（已实现）。
 
 **工作与交付**：
 
@@ -172,12 +172,56 @@ MEM-01 验证失败的接入点必须有具体替代方案和对应验收后才�
 
 **验收**：
 
-- [ ] 03-A：相同输入得到字节一致的渲染与计划；重复构建不会产生重复记忆投影。
-- [ ] 03-B：working revision 更新时，输出需要进入 C 的修订，不重渲染现有 B；下次周期才输出新 B。
-- [ ] 03-C：带旧快照、近期修订和新偏好撤销的样本，不把旧值重新当作当前约定。
-- [ ] 03-D：空白 system prompt、必要状态损坏、超预算且无可安全压缩内容时返回明确错误；所有输入块及缓存 token 均计入预算。
-- [ ] 03-E：测试无需启动 Harness、打开文件或调用模型；module 无这些运行时依赖。
-- [ ] 03-F：不创建 SDK 消息类型副本、不裁断工具关联、不生成新 agent loop。短对话达到轮数但无足够可压缩内容时不反复要求压缩。
+- [x] 03-A：相同输入得到字节一致的渲染与计划；重复构建不会产生重复记忆投影。
+- [x] 03-B：working revision 更新时，输出需要进入 C 的修订，不重渲染现有 B；下次周期才输出新 B。
+- [x] 03-C：带旧快照、近期修订和新偏好撤销的样本，不把旧值重新当作当前约定。
+- [x] 03-D：空白 system prompt、必要状态损坏、超预算且无可安全压缩内容时返回明确错误；所有输入块及缓存 token 均计入预算。
+- [x] 03-E：测试无需启动 Harness、打开文件或调用模型；module 无这些运行时依赖。
+- [x] 03-F：不创建 SDK 消息类型副本、不裁断工具关联、不生成新 agent loop。短对话达到轮数但无足够可压缩内容时不反复要求压缩。
+
+**交接记录（2026-10-25，2026-10-25 复核后修订）**
+
+初版把投影写成 `model: []` 的展示条目，与第 12.4 节“首次请求已含 B”冲突，也使 03-B／03-C 只证明了“能生成当前状态的数据”，没证明“能进入模型上下文”。复核后改为两种都带模型消息的写入，并补上分项预算与 facts 变化的判定。修订内容见本记录末尾。
+
+交付物：
+
+- `src/memory/context.ts`：Context Module Interface——`planRequest`、`boundaryWrite`（建立 B，携带原生摘要形状的模型消息）、`revisionWrite`（周期内补入 C，携带 `<working-revision>` 包裹的精确 baseline）、`reuseWrite`、`digestOf`、`sameFacts`、`blockUsage`、`buildSnapshot`、`renderSnapshot`、`snapshotFromHead`、`snapshotOfProjection`、`snapshotTextFor`、`measureRequest`、`validateWorking`、`isStale`、`initialBoundary`。文件头写明输入、输出、错误与“无 I/O／无 Harness／无模型”的约束。
+- `src/memory/contracts.ts`（增量）：`WorkingBaselineSchema`／`baselineOf`／`renderBaseline`（去掉 `updatedAt` 的边界投影与确定性渲染）、`CycleBoundary` 类型与可为 `null` 的 initial 锚点、`sources` 可为 `null`、`SnapshotFacts` 类型导出、`Preference` 类型、`MEMORY_LIMITS.instructions`／`snapshotText`、`REVISION_BLOCK_OPEN`／`REVISION_BLOCK_CLOSE`、`ContextPlan` 的 `compact.reason` 增加 `facts`、`MemoryErrorCodeSchema` 改为 `Type.Unsafe`（`Type.Union` 推断为 `never`）、`MemoryError.toJSON()`。
+- `test/memory-context.test.ts`：03-A～03-F 共 10 个用例，纯值测试；唯一一次文件读取用于断言模块的 import 列表，不启动 Harness、不打开数据库、不调用模型。
+- `docs/memory-and-context-design.md`：新增第 14 节（冻结位置、输入输出与优先级、B/C 边界、预算、与 MEM-02／MEM-06 的接缝），原第 14 节改为第 15 节；第 2、6、7、10 节同步状态与实现结论。
+
+执行命令与结果：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run check` | 通过，无输出 |
+| `npx tsx --test test/memory-context.test.ts` | 10/10 通过 |
+| `npm test` | 112/112 通过（MEM-02 基线 102 项未回归） |
+
+逐项结论：
+
+- 03-A：同输入的计划 `JSON.stringify` 完全一致；同一快照的重复渲染与键顺序重排后的渲染字节相同，且能解码回原值；只改 `updatedAt` 的两次渲染与 digest 相同。boundary 写入本身也逐字节一致，`snapshotOfProjection` 取回的就是它渲染的那份快照。同一 revision＋同一 facts 的重复写入 digest 相同，`reuseWrite` 原样返回已提交写入；C 已含该 revision 后计划为 `none`。
+- 03-B：`workingInContext: false` 且 revision 落后时计划产出一个 `revision` 写入；该写入的 `model` 恰有 1 条 user 消息，含 `<working-revision>` 标记与 `renderBaseline` 的精确内容，因此不调用 `working_read` 也能读到当前值；写入不含旧叙事，也不被 `snapshotOfProjection` 当成 B；已提交 B 的渲染字节不变；换周期后 `snapshotTextFor` 返回新文本，活跃周期返回 `undefined`。
+- 03-C：旧快照含 `lang` 偏好、当前 revision 撤销它时，`isStale` 为真，写入的 `baseline.preferences` 只有 `tone`，模型消息里也只有 `tone`、没有 `lang`；旧 B 不被改写；新周期的 B 不再含 `lang`；C 已含修订后不再逐轮投影。
+- 03-D：空串与纯空白 A 返回 `invalid-input`，超长 A 返回 `budget-exceeded`；`revision: 0`、缺字段的 working 与结构不完整的 B 均返回 `corrupt-state`（且 schema 校验先于分项测量，损坏的 B 不会在计量时抛异常）；任一分项超过自己的额度返回 `budget-exceeded` 且 `detail.block` 指明块名，把该块额度放宽后同一输入即通过；超过阻塞阈值且 `compactableTokens === 0` 返回 `budget-exceeded`，有可压缩内容时改为 `compact`／`budget`；恰好等于阈值仍可放行。`measureRequest` 对 `input+output+cacheRead+cacheWrite` 求和，去掉缓存后差额恰为缓存量，尾随消息计入；用该实测值驱动计划时请求超限。
+- 03-D（渲染上限）：结构合法但渲染文本超过 `MEMORY_LIMITS.snapshotText` 的 B 由 `renderSnapshot` 直接调用时抛 `budget-exceeded`，经 `planRequest` 时返回同码的错误计划，不截断、不以异常穿出。
+- 03-D（写入额度）：在合法的 256 token 快照份额下，已提交 B 通过分项检查，但该计划将要生成的写入（首次 B 与修订写入）各为 392／276 token，均超出份额，`planRequest` 返回 `budget-exceeded` 且 `detail` 为 `{block: "snapshot", kind, tokens, limit}`；换成默认份额后同样输入返回 `project`，说明拒绝因素是份额而非其他条件。
+- 03-D（facts 变化）：`facts` 一致走常规路径；`memoryDigest` 变化、revision 不变时返回 `compact`／`facts`，无可压缩内容时返回 `budget-exceeded`，周期内不重写前缀。
+- 03-E：断言 `context.ts` 的 import 列表恰为 `./contracts.js`、`@earendil-works/chord`、`@earendil-works/pi-ai`、`@earendil-works/pi-ai/utils/estimate`、`@earendil-works/pi-durable`、`node:crypto`；pi-durable 与 chord 都只以 `import type` 出现；不含 `node:fs`／`node:child_process`／`node:sqlite`／`Harness`／`openNodeSqliteStorage`／`createModels`。`planRequest` 同步返回，两次调用互不共享对象，输入不被修改。
+- 03-F：轮数超过阈值但 `compactableTokens === 0` 时连续三轮都是 `none`；有可压缩内容时返回 `compact`／`rounds`；少一轮不触发。`measureRequest` 不修改 transcript，工具调用与其结果的关联保持，工具参数计入大小。
+- 变异检查：初版 7 个变异（去掉 `compactableTokens` 守卫、忽略 `workingInContext`、digest 不含 facts、阈值不含 `reserveTokens`、`snapshotTextFor` 不去重、baseline 保留 `updatedAt`、允许空白 A）全部被捕获。修订后新增 7 个（revision 写入改为空 model、boundary 写入改为空 model、去掉分项额度检查、忽略 facts 变化、把分项测量移到 schema 校验之前、去掉写入生成后的额度检查、去掉 `planRequest` 的异常转换），也全部被捕获；其中“boundary 写入改为空 model”在补上断言前未被捕获，说明该缺口原先确实没有证据。
+
+未覆盖／受限：
+
+- 真实模型窗口下的预算标定与缓存命中不在本 issue 范围（MEM-06、MEM-08）。
+- `planRequest` 只做决策，不写任何东西；两种写入的持久化、submission 排队与周期切换由 MEM-06 的 Durable Adapter 完成。
+- `measureRequest` 的数值依赖底座 usage 上报；faux provider 不产生真实缓存计量，本项只验证口径而非真实计费。
+- 缺失资料投影未实现：模块不接收待补资料正文，因此“已有 B、revision 不变、只缺某份资料”时计划为 `none`。该输入需要由 MEM-04（检索）与 MEM-07（接线）定义，见实施方案第 6 节。
+- 写入额度按快照份额检查，是“单次写入不超过该块容量”的上界；它与请求总预算的相互作用（写入后请求整体是否仍装得下）由 MEM-06 在真实请求上标定。
+- `budget.narrativeTokens`、`searchResultTokens`、`requestSearchTokens` 当前不被本模块消费，对应的超额判定分别属于 MEM-06 的摘要调用与 MEM-05／MEM-07 的检索预算，本项没有假装已判定。
+- 尚未在组合入口注册（MEM-07）。
+
+对下游的解锁条件：MEM-06 可开始。压缩侧只通过 `buildSnapshot`／`renderSnapshot` 产出 B，边界状态一律由 `readWorkingAt` 按锚点读取后传入，不传最新状态。周期切换有两条确认路径，缺一不可：经 submission 发布的压缩看 `requestId = "compaction:<taskId>"` 落到 `done`；generation 拥有的阻塞压缩直接 append，只返回 `{ entryId }`、没有 submission，须以该 Entry 成为活跃 head 为判据（详见实施方案 14.5）。MEM-07 接线时 `workingInContext` 由活跃上下文的实际内容决定，不能默认 `true`；两种写入都用 `root.submit({type: "write", entry})` 提交，不得改回 `model: []`。
 
 ## MEM-04：每日 Markdown 的发布与检索
 
@@ -228,7 +272,7 @@ MEM-01 验证失败的接入点必须有具体替代方案和对应验收后才�
 
 **目标**：用底座压缩发布 B，保留合法 C，并解决长 run 中的状态连续性。
 
-**依赖**：MEM-02、MEM-03。**阅读入口**：实施方案第 6、7、10 节及第 12.3、12.4、12.5、13 节；`src/memory/contracts.ts` 的 `CycleSnapshot` 编解码与 `workingAtBoundary`，`src/memory/working.ts` 的边界读取。
+**依赖**：MEM-02、MEM-03。**阅读入口**：实施方案第 6、7、10 节及第 12.3、12.4、12.5、13、14 节；`src/memory/contracts.ts` 的 `CycleSnapshot` 编解码与 `workingAtBoundary`，`src/memory/working.ts` 的边界读取，`src/memory/context.ts` 的 `buildSnapshot`／`renderSnapshot`／`snapshotTextFor`。
 
 **工作与交付**：
 

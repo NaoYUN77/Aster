@@ -1,6 +1,6 @@
 # Memory 与 Context 实施方案
 
-状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节）；其余模块待实现。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
+状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节）；其余模块待实现。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
 
 本轮是当前 MVP 之后的增量工作，不表示这些能力已经上线。现有运行范围见 [mvp.md](mvp.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.3.0 为准。
 
@@ -32,7 +32,9 @@
 
 当前应用通过 `root.configure({ instructions })` 设置系统提示，将原文提交给 root Conversation；底座派生消息、执行工具并自动压缩。`workspace/MEMORY.md` 仍由模型通过文件工具读取和按用户明确要求更新。
 
-尚未实现：宿主记忆投影、working Document、应用 context planner、自定义周期快照、每日记忆及其归档和查询工具。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`，其余名字仍是拟议应用接口，不是底座现有 API。
+尚未实现：宿主记忆投影、每日记忆及其归档和查询工具。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`，其余未落地的名字仍是拟议应用接口，不是底座现有 API。
+
+按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）。这三项都还没有接入运行中的 agent：组合入口、原生检索工具、自定义周期快照与每日记忆仍待 MEM-04～MEM-07 完成。
 
 底座现有接入能力：
 
@@ -113,6 +115,8 @@ MEM-02 已按本协议实现（`src/memory/working.ts`、`working-tools.ts`）�
 
 拟议 Interface 的输入是：有效系统配置标识、当前 head/cutoff、已提交周期快照及来源版本、当前预算估算，以及明确缺失的记忆或修订。输出是：无需动作、一个有界待提交投影、压缩意图，或明确的超限／配置错误；同样输入必须产生同样输出。
 
+MEM-03 已按本节实现（`src/memory/context.ts`），判定顺序、输入字段与 B/C 边界的最终表述见第 14 节；本节仍是设计意图的表述。其中“缺失资料投影”尚未实现：模块不接收待补资料的正文，因此已有 B、revision 不变而只缺某份资料时计划为 `none`。该路径需要由承载资料读取的一方（MEM-04 的检索与 MEM-07 的接线）定义输入后再补，MEM-03 不凭空造一种没有来源的投影。
+
 ### 首次与新用户请求
 
 先用原 requestId 查已存在的执行；已存在则复用。对新输入，在空闲边界判断是否需要初始化 B 或补充资料，通过原生 write submission 保存固定内容，再提交未经改写的用户原文。派生 requestId 同时绑定载荷摘要；投影已写但输入未提交时复用旧投影，不能重算覆盖。
@@ -133,7 +137,7 @@ MEM-02 已按本协议实现（`src/memory/working.ts`、`working-tools.ts`）�
 
 ## 7. B 的生成：摘要与精确状态分别处理
 
-B 使用版本化的应用格式保存：连续性摘要、结构化基线、来源边界、working revision、所用配置／事实版本。记录来源的 Entry ID 使用原生类型；序列化排序固定，不加入每次渲染都会变化的时间。
+B 使用版本化的应用格式保存：连续性摘要、结构化基线、来源边界、working revision、所用配置／事实版本。记录来源的 Entry ID 使用原生类型；序列化排序固定，不加入每次渲染都会变化的时间。渲染实现与字节格式见第 14.3 节。
 
 压缩过程：
 
@@ -142,7 +146,7 @@ B 使用版本化的应用格式保存：连续性摘要、结构化基线、来
 3. working 基线从切分边界的历史版本读取，并确定性渲染；配置与已载入事实也使用可定位的固定版本，不由摘要模型重新解释。
 4. 原生 compaction 发布新的 B，C 保留 `firstKept` 起的原文及后续修订。只有结果正式进入当前活跃上下文，周期才切换。
 
-已验证的发布语义：generation 拥有的阻塞压缩直接 append，结果 `{ entryId }`；conversation 拥有的压缩经 `admitSubmission` 以 `requestId = "compaction:<taskId>"` 入队，结果 `{ submissionId }`，在下一个合法边界才进入上下文。任务终结、入队成功与正式发布是三件不同的事实：只有 submission 落到 `done` 且 head 变为该 `pi.compaction` 时才切换周期；被 reset 越过而落为 `unanswered`／`stale` 的写入不切换。重启后按 `compaction:<taskId>` 重查该 submission 与任务终态即可补扫，无需重算摘要。详见第 12.3 节。
+已验证的发布语义：generation 拥有的阻塞压缩直接 append，结果 `{ entryId }`；conversation 拥有的压缩经 `admitSubmission` 以 `requestId = "compaction:<taskId>"` 入队，结果 `{ submissionId }`，在下一个合法边界才进入上下文。任务终结、入队成功与正式发布是三件不同的事实：经 submission 的路径只有落到 `done` 且 head 变为该 `pi.compaction` 时才切换周期，被 reset 越过而落为 `unanswered`／`stale` 的写入不切换；阻塞压缩没有 submission，须以它返回的 `entryId` 已成为活跃 head 为判据。重启后经 submission 的压缩按 `compaction:<taskId>` 重查，阻塞压缩按任务 `outcome.result.entryId` 与 head 比对，两者都不需重算摘要。详见第 12.3 节。
 
 边界状态必须对应 `firstKept` 之前的可见来源 Entry，不能使用“当前最新 working”。不能用 `firstKept - 1` 或所有被压缩 Entries 的最大 ID 猜测边界：fork、head marker 和资料投影需要 Adapter 按实际可见历史定位。已验证的做法是写入 working 时在同一 commit 追加一个应用锚点 Entry，之后用 `snapshotAsOf(WorkingDoc, …, anchor)` 取该边界值；head marker 的 ID 大于保留原文时仍按锚点读取，不受其影响。锚点不在当前 conversation 的可见祖先内（未覆盖的 fork、锚点早于首条可见 Entry）时 `snapshotAsOf` 抛错，应用映射为 `not-covered` 并显式拒绝，不返回旧值或默认值。
 
@@ -197,7 +201,7 @@ B 使用版本化的应用格式保存：连续性摘要、结构化基线、来
 
 ## 10. 压缩策略、预算和缓存
 
-每个 generation 准备请求时检查输入 token；缓存 token 仍占上下文窗口。底座自动阈值为 `C - R - B`（后台）与 `C - R`（阻塞），`keepRecentTokens` 控制近似保留原文。
+每个 generation 准备请求时检查输入 token；缓存 token 仍占上下文窗口。底座自动阈值为 `C - R - B`（后台）与 `C - R`（阻塞），`keepRecentTokens` 控制近似保留原文。Context Module 直接复用底座的 `estimateContextTokens`，缓存 token 因此天然计入输入；阈值也从同一个窗口派生，不在第二处配置（见第 14.4 节）。
 
 初始实验值：后台目标 48 Ki token，近期原文约 16 Ki token，B 合计目标不超过 6 Ki token，其中叙事摘要目标不超过 3 Ki；A 约 8 Ki 内。单次记忆检索返回约 4 Ki，一次用户请求新增检索约 8 Ki。这里 Ki = 1024，均为待测量的预算；最终参数由配置 schema 定义，不在多个模块复制常量。
 
@@ -263,12 +267,13 @@ B 格式、working schema、归档批次和已持久化工具参数均是跨版�
 | --- | --- | --- |
 | 压缩任务终结 | `getTask()` 的 `state.status === "terminal"` | 否 |
 | 摘要写入入队 | `submissionByRequest(conversationId, "compaction:<taskId>")` 的 `status === "queued"` | 否 |
-| 正式发布 | 该 submission `status === "done"` 且 `context().head` 为该 `pi.compaction` | 是 |
+| 正式发布（经 submission） | 该 submission `status === "done"` 且 `context().head` 为该 `pi.compaction` | 是 |
+| 正式发布（阻塞压缩） | 任务 `outcome.result` 为 `{ entryId }`，且该 Entry 已成为 `context().head` | 是 |
 | 被越过 | submission `status === "unanswered"`、`reason === "stale"` | 否 |
 
-阻塞（generation 拥有）的压缩直接 append，终态结果是 `{ result: { entryId } }`（01-A 中已验证 `entryId` 就是新的 `pi.compaction` head）；conversation 拥有的压缩入队，结果是 `{ result: { submissionId } }`（01-C）。两者都不应被当作“已发布”的同义词。
+阻塞（generation 拥有）的压缩直接 append，终态结果是 `{ result: { entryId } }`（01-A 中已验证 `entryId` 就是新的 `pi.compaction` head），**没有 submission 可查**；conversation 拥有的压缩入队，结果是 `{ result: { submissionId } }`（01-C）。两者都不应被当作“已发布”的同义词，也都不能用同一种观察方式确认：只查 submission 会漏掉阻塞压缩，只查任务终态会漏掉排队失败。
 
-重启补扫：按 `compaction:<taskId>` 重新查询 submission 即可找回已发布事实，测试在关闭并重新 `Harness.open` 后仍读到 `done` 与相同的 head。因此归档触发应以该 submission 的 `done` 为观察点，而不是任务终态或内存通知。
+重启补扫：经 submission 的压缩按 `compaction:<taskId>` 重新查询即可找回已发布事实，测试在关闭并重新 `Harness.open` 后仍读到 `done` 与相同的 head。因此归档触发与周期切换都应以「新 Entry 已成为活跃 head」为最终判据，而不是任务终态或内存通知；阻塞压缩没有 submission，只能按 `outcome.result.entryId` 与 head 比对。
 
 ### 12.4 接入顺序（首次 B、重置后 B、长 run 压缩）
 
@@ -336,7 +341,71 @@ B 格式、working schema、归档批次和已持久化工具参数均是跨版�
 - 参数级拒绝（未知字段、空 changes、超界）由底座 schema 校验在 `execute` 之前拦下，同样是可修正的错误结果。
 - 工具结果只含 revision、任务与偏好的文本视图和有界 `structuredOutput`，不含 `conversationId`、锚点或来源 ID；这些只出现在应用内部契约里。
 
-## 14. 实施入口与发布判定
+## 14. MEM-03 实现结论与 Context 规划语义
+
+本节把第 6、7、10 节写成可执行的 Interface。证据为 `test/memory-context.test.ts`（03-A～03-F），该文件不启动 Harness、不打开数据库、不调用模型。
+
+### 14.1 冻结位置
+
+| 内容 | 权威来源 |
+| --- | --- |
+| Context Interface（`planRequest`／`boundaryWrite`／`revisionWrite`／`reuseWrite`／`buildSnapshot`／`renderSnapshot`／`snapshotFromHead`／`snapshotOfProjection`／`measureRequest`／`blockUsage`／`validateWorking`）、`PlanInput`、错误与纯函数约束 | `src/memory/context.ts` 文件头 |
+| `ContextPlan`、`CycleSnapshot`（含 `WorkingBaseline`、`CycleBoundary`、`SnapshotFacts`）、`MemoryBudget`、`MEMORY_LIMITS`、`renderBaseline`、修订块标记 | `src/memory/contracts.ts` |
+| 验收 03-A～03-F | `test/memory-context.test.ts` |
+
+### 14.2 输入、输出与优先级
+
+输入全是调用方已读出的值：预算、已渲染的 A 文本、已提交的 B（或没有）、当前 working、C 是否已含当前 revision、请求的实测大小、窗口与保留量、自周期开始以来的独立用户轮数、可压缩内容量、B 的输入摘要。模块不读文档、不持客户端、不做 I/O；需要副作用时由 Durable Adapter 执行。
+
+判定顺序固定，同一输入字节一致：
+
+1. A 为空或只有空白 → `invalid-input`；A 超过 `MEMORY_LIMITS.instructions` → `budget-exceeded`。两者都拒绝执行，不截断、不用空 prompt 继续。
+2. working 或已提交的 B 不符合 schema → `corrupt-state`。正常缺省状态与损坏状态分开：没有 B 是正常的，B 不合 schema 是错误。这一步必须先于分项预算测量，因为后者要渲染 B 才能计量。
+3. 任一分项超出自己的额度（A 对 `instructionsTokens`，B 对 `snapshotTokens`）→ `budget-exceeded`，`detail.block` 指明是哪一块。分项额度是各自的上限，不是总额的切分，因此一块不能借用另一块的余量。
+4. 超过阻塞阈值（`contextWindow - reserveTokens`）且 `compactableTokens <= 0` → `budget-exceeded`；有可压缩内容 → `compact`／`budget`。
+5. 没有 B → `project` 一个 `boundary` 写入（首次建立周期）。
+6. B 存在但 `facts` 与当前不符（A 或记忆版本变了）→ 有可压缩内容时 `compact`／`facts`，否则 `budget-exceeded`。周期内不重写前缀，变更只能由下一次压缩采纳。
+7. B 存在、facts 一致，但 C 未含当前 revision，且 `working.revision !== snapshot.baseline.revision` → `project` 一个 `revision` 写入。
+8. 用户轮数达到 `evaluateAfterUserTurns` **且** `compactableTokens > 0` → `compact`／`rounds`。
+9. 其余 → `none`。
+
+第 5、7 步的写入在返回前还要过第 3 步的同一份额：`planRequest` 测量即将写入的模型可见内容对 `snapshotTokens` 的占用，超出时返回 `budget-exceeded` 而不是 `project`（见 14.4）。
+
+数据条件一律作为 `action.kind === "error"` 的计划返回，调用方记录一个决定而不必 catch。`planRequest` 内部的渲染与计量若抛出 `MemoryError`（例如 B 合法但渲染文本超过上限），同样转换成错误计划；`renderSnapshot` 等直接调用的函数保留抛错语义。
+
+### 14.3 B 与 C 的边界
+
+两种写入都必须模型可见。投影的目的是让模型读到状态；如果写成 `model: []` 的展示条目，首次 B 和周期内修订都不会进入请求，等于承诺了文档却不兑现。
+
+- **boundary 写入（建立 B）**：`boundaryWrite` 返回 `kind: "personal.cycle"` 的条目，携带一个 user 消息，内容是原生摘要的包装形状（`...compacted into the following summary:\n\n<summary>\n…\n</summary>`）。条目 `data` 里另存 `snapshot`（`snapshotOfProjection` 取回）、`baseline`、`facts` 与 `digest`。用原生摘要的形状而不是新形状，是因为模型已按这种方式读 B；条目 kind 仍是应用自己的，因此应用侧仍可区分投影与真正的压缩。首个周期的 `boundary.anchor` 为 `null`（投影先于它会指名的锚点），`sources` 为 `null`（没有替换任何范围），叙事是固定的“会话起点”说明而非模型写的摘要。
+- **revision 写入（补入 C）**：`revisionWrite` 返回 `kind: "personal.context.projection"` 的条目，携带一个 user 消息，内容是 `<working-revision>` 包裹的精确 baseline（`renderBaseline` 的规范 JSON）。模型即使从不调用 `working_read` 也能读到当前值，这正是 03-B／03-C 要证明的行为。它不含叙事，也不含快照体，因此不会被误认作 B。
+- 两种写入都带稳定 `digest`（`sha256(canonicalJson({baseline, facts}))` 前 16 位），`reuseWrite` 对同一 digest 的已提交写入原样复用：写入可能已落库但输入尚未提交，重算会用新内容覆盖旧写入。
+- 周期内绝不重渲染 B。`snapshotTextFor` 在快照已是活跃周期时返回 `undefined`，从调用侧就排除了重复投影 B 的可能。
+- 新 B 只由压缩产生，且必须用切分边界处的状态：`buildSnapshot` 接受的是调用方按锚点读出的 `baseline`，不是最新状态。
+- 渲染确定性：叙事在前，随后是键排序的规范 JSON；不含时钟、不含 `updatedAt`。`WorkingBaseline` 就是去掉 `updatedAt` 的 `WorkingState`——写入时间属于状态自身历史，渲染出的快照不带每次写入的时间。渲染后的整体文本受 `MEMORY_LIMITS.snapshotText` 约束：叙事与基线共用这一个上限，超限抛 `budget-exceeded`，不截断（截断的基线等于断言错误的状态）。`renderSnapshot` 对直接调用者保持抛错语义；规划层捕获并转换成错误计划，数据条件不会以异常形式穿出 `planRequest`。
+
+### 14.4 预算
+
+`measureRequest` 直接使用底座的 `estimateContextTokens`：取最新可用 assistant usage（`input + output + cacheRead + cacheWrite`，或 `totalTokens`），再加上其后消息的估算。缓存 token 占据上下文窗口，因此计入输入；这不是自建的估算口径。阈值由同一个窗口派生：阻塞 `contextWindow - reserveTokens`，后台再减去 `backgroundTargetTokens`，不在多处配置常量。
+
+分项预算另由 `blockUsage` 判定：A 对 `budget.instructionsTokens`，B 对 `budget.snapshotTokens`，各自是独立上限，超出即拒绝并指明是哪一块。这是各块的容量上限，与下面第 10 节的实验目标值同源；`narrativeTokens`、`searchResultTokens`、`requestSearchTokens` 属于尚未落地的部分（叙事由 MEM-06 的摘要调用约束，检索由 MEM-05／MEM-07 约束），当前模块不消费它们，因此也不假装已经判定。
+
+即将生成的写入同样要过这一关：只检查输入里已有的 B 不够，投影本身是新增内容，比所属块还大就等于用预算去装预算要限制的东西。`planRequest` 在返回 `project` 前测量该写入的模型可见消息（`estimateContextTokens(draft.model)`，固定信封文本一并计入）对 `budget.snapshotTokens` 的占用；首次 B 与修订写入都记在快照份额上，因为修订携带的就是 B 所载的那份状态，只是晚一步送达。超出时返回 `budget-exceeded` 错误计划，`detail` 指明 `block: "snapshot"`、写入种类与实际 token 数。
+
+轮数只是评估条件，不是压缩命令：没有足够可压缩内容时计划保持 `none`，短对话不会每轮都要求压缩。
+
+### 14.5 与 MEM-02／MEM-06 的接缝
+
+写入侧：`boundaryWrite` 建立首个周期（`boundary.anchor` 为 `null`，投影先于它会指名的锚点），`revisionWrite` 补入周期内的状态更新。两者都通过 `root.submit({type: "write", entry})` 发布，顺序按第 12.4 节。压缩侧由 MEM-06 在 `beforeCompact` 中用 `readWorkingAt` 读出的边界状态调用 `buildSnapshot`／`renderSnapshot`。
+
+**周期切换有两条确认路径，不能只看 submission**：
+
+- **经 submission 发布**（conversation 拥有的后台压缩）：任务终结时以 `requestId = "compaction:<taskId>"` 入队，结果是 `{ submissionId }`。只有该 submission 落到 `done` 且 head 变为它对应的 `pi.compaction` 时才切换周期；被 reset 越过而落为 `unanswered`／`stale` 的写入不切换。
+- **直接发布**（generation 拥有的阻塞压缩）：任务终结时直接 `appendEntry`，结果只有 `{ entryId }`，**没有 submission 可查**。此时以任务 `outcome.status === "completed"` 且 `outcome.result.entryId` 对应的 Entry 已成为 head 作为切换条件；只等 submission 会永远等不到，长 run 的周期切换和归档触发都会漏掉。01-A 已实测该路径的返回形状为 `{ entryId }`。
+
+两条路径都以「新 Entry 真的成为活跃 head」为最终判据；任务终态本身不足以证明已发布，内存通知更不足。
+
+## 15. 实施入口与发布判定
 
 按 [实施 issues](memory-implementation-issues.md) 的依赖顺序执行。先完成公开 API 可行性和 Interface 契约，再并行实现 Working、Context、Daily Memory；最后接入底座与应用并做故障恢复验收。
 
