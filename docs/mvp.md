@@ -8,6 +8,8 @@
 
 本文件记录当前 MVP 的范围和设计，具体功能决策不写入仓库级 CLAUDE.md。
 
+后续的三块上下文、working memory 和每日记忆归档见 [Memory 与 Context 实施方案](memory-and-context-design.md)，任务拆分见 [实施 issues](memory-implementation-issues.md)。这些能力尚未接入运行中的 agent；MEM-01 冻结了数据契约，MEM-02 实现了 Working Module 与原生工具，但尚未在组合入口注册。本文仍描述当前 MVP。
+
 ## 当前范围
 
 - 单用户、Telegram 私聊、文本消息。
