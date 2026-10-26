@@ -2,11 +2,33 @@ import http from "node:http";
 import https from "node:https";
 import { readFile } from "node:fs/promises";
 
-const credentials = JSON.parse(await readFile("/fixtures/credentials.json", "utf8"));
-const tls = {
-  key: await readFile("/fixtures/key.pem"),
-  cert: await readFile("/fixtures/ca.pem"),
+// Exit codes are the only diagnostic this fixture may emit: they are fixed
+// values that cannot carry a synthetic credential. 0 is success.
+const FAILURES = { credentials: 20, key: 21, certificate: 22, listen: 23, other: 24 };
+const fail = (kind) => {
+  process.exitCode = FAILURES[kind] ?? FAILURES.other;
+  process.exit(process.exitCode);
 };
+process.on("uncaughtException", () => fail("other"));
+process.on("unhandledRejection", () => fail("other"));
+
+let credentials;
+try {
+  credentials = JSON.parse(await readFile("/fixtures/credentials.json", "utf8"));
+} catch {
+  fail("credentials");
+}
+const tls = { key: undefined, cert: undefined };
+try {
+  tls.key = await readFile("/fixtures/key.pem");
+} catch {
+  fail("key");
+}
+try {
+  tls.cert = await readFile("/fixtures/ca.pem");
+} catch {
+  fail("certificate");
+}
 let scenario = {};
 let calls = { login: 0, secrets: 0, redirected: 0, authenticated: 0 };
 
@@ -75,12 +97,21 @@ async function handler(request, response) {
   }
 }
 
-http.createServer((request, response) => {
-  handler(request, response).catch(() => send(response, 500, { message: "fixture failure" }));
-}).listen(18080, "0.0.0.0");
-https.createServer(tls, (request, response) => {
-  handler(request, response).catch(() => send(response, 500, { message: "fixture failure" }));
-}).listen(18888, "0.0.0.0");
-https.createServer(tls, (request, response) => {
-  handler(request, response).catch(() => send(response, 500, { message: "fixture failure" }));
-}).listen(18890, "0.0.0.0");
+// createServer throws synchronously on an unusable key/cert pair, and listen
+// reports bind failures asynchronously. Both become a fixed exit code.
+function start(server, port) {
+  server.on("error", () => fail("listen"));
+  try {
+    server.listen(port, "0.0.0.0");
+  } catch {
+    fail("certificate");
+  }
+}
+const handle = (request, response) => handler(request, response).catch(() => send(response, 500, { message: "fixture failure" }));
+try {
+  start(http.createServer(handle), 18080);
+  start(https.createServer(tls, handle), 18888);
+  start(https.createServer(tls, handle), 18890);
+} catch {
+  fail("certificate");
+}

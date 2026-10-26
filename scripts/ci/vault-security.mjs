@@ -121,8 +121,10 @@ try {
     const state = await docker("inspect", id, "--format", "{{.State.Status}}/{{.State.ExitCode}}/{{.State.OOMKilled}}")
       .catch(() => "inspect-failed");
     const exitCode = state.trim().split("/")[1] ?? "unknown";
-    // Node exits 1 for an uncaught exception and 12 for a host-level syntax error.
-    const cause = /^[0-9]+$/.test(exitCode) ? `node-exit-${exitCode}` : "state-unknown";
+    // The fixture maps its own failures to fixed codes (20 credentials,
+    // 21 key, 22 certificate, 23 listen, 24 uncaught). Anything else means
+    // the process never reached that logic.
+    const cause = /^2[0-4]$/.test(exitCode) ? `fixture-exit-${exitCode}` : "fixture-not-started";
     throw new Error(`command failed during ${current} (${cause})`);
   }
   const normal = `${id}-normal`;
