@@ -113,8 +113,18 @@ try {
     "--mount", `type=bind,source=${resolve(directory)},target=/fixtures,readonly`,
     fixtureImage, "node", "/fixtures/vault-fixture.mjs");
   // A bounded command waits until the fixture can accept control requests.
-  await docker("exec", id, "node", "--input-type=module", "-e",
-    "const end=Date.now()+10000;for(;;){try{await fetch('http://127.0.0.1:18080/control');break}catch{if(Date.now()>end)process.exit(1);await new Promise(r=>setTimeout(r,100))}}");
+  // Classify the failure instead of printing anything the container emitted.
+  try {
+    await docker("exec", id, "node", "--input-type=module", "-e",
+      "const end=Date.now()+10000;for(;;){try{await fetch('http://127.0.0.1:18080/control');break}catch{if(Date.now()>end)process.exit(1);await new Promise(r=>setTimeout(r,100))}}");
+  } catch (error) {
+    const state = await docker("inspect", id, "--format", "{{.State.Status}}/{{.State.ExitCode}}/{{.State.OOMKilled}}")
+      .catch(() => "inspect-failed");
+    const exitCode = state.trim().split("/")[1] ?? "unknown";
+    // Node exits 1 for an uncaught exception and 12 for a host-level syntax error.
+    const cause = /^[0-9]+$/.test(exitCode) ? `node-exit-${exitCode}` : "state-unknown";
+    throw new Error(`command failed during ${current} (${cause})`);
+  }
   const normal = `${id}-normal`;
   await check("https-sync-and-proxy-authorization", async () => {
     await startBroker(normal, "https://infisical.ci.test:18888");
