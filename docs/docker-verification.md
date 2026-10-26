@@ -20,10 +20,10 @@
 
 ## 阻塞与待验收
 
-- `aster-router:local` 与 `aster-network:local` 的首次 Docker 构建在下载基础镜像元数据阶段失败：`auth.docker.io` 连接超时。改用本机已有的同 digest 基础镜像后，两个镜像及完整拓扑已于 2026-10-27 本地通过，见 [CI/CD 实施计划](ci-cd-implementation-plan.md)；这是本机取镜像路径受限，托管 runner 的网络条件尚未执行。
-- `go test -race` 未能执行：当前 Windows Go 环境未启用 CGO。普通测试及 vet 已通过；Linux Go 1.25.6 容器中 `go test -race ./...` 与 `go vet ./...` 已另行通过，见 [CI/CD 实施计划](ci-cd-implementation-plan.md)。
+- `aster-router:local` 与 `aster-network:local` 的首次 Docker 构建在下载基础镜像元数据阶段失败：`auth.docker.io` 连接超时。改用本机已有的同 digest 基础镜像后，两个镜像及完整拓扑已于 2026-10-27 本地通过；托管 runner 随后在无镜像替代的正常网络条件下构建同一 Dockerfile 并通过，见 [CI/CD 实施计划](ci-cd-implementation-plan.md)。
+- `go test -race` 未能执行：当前 Windows Go 环境未启用 CGO。普通测试及 vet 已通过；Linux Go 1.25.6 容器与 GitHub 托管 runner 中 `go test -race ./...` 与 `go vet ./...` 均已通过，见 [CI/CD 实施计划](ci-cd-implementation-plan.md)。
 - 未在 Linux 容器中执行全部 137 项 Node 测试。每日文件只读替换失败的测试假设存在平台差异，需要单独处理；该用例已改为真实临时路径冲突，Windows 与 Linux 均通过，Linux 全量 137/137 已在独立 Node 24.19.0 容器中执行。
 - 未执行真实 Telegram、模型、Infisical、OAuth 和流式响应验收；未在 4 核／4 GB Linux 主机测量资源峰值。
 - systemd 数据导入步骤已提供，但未操作真实服务器。切换前须停用旧实例并备份全部数据；不能因镜像改名而重建空状态。
 - 没有应用就绪探针；容器运行或离线配置检查成功不等于真实业务已就绪。
-- 本次未建立 GitHub Actions、发布镜像仓库或更改 GitHub 合并规则。后续 CI/CD 应使用受检镜像摘要，兼容性允许时才能回退旧代码。PR CI 工作流现已加入仓库，但尚未触发托管执行；发布、签名与部署关卡仍待实现。
+- 本次未建立 GitHub Actions、发布镜像仓库或更改 GitHub 合并规则。PR CI 工作流现已加入仓库，并在托管 runner 上通过（Node、Go race/vet、四个最终镜像与 27 项容器验收），见 [CI/CD 实施计划](ci-cd-implementation-plan.md)；发布、签名与部署关卡仍待实现。

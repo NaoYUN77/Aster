@@ -87,8 +87,8 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 | --- | --- | --- | --- |
 | CI-01 | 方案保存、来源及验收边界 | 本文、README 入口 | 已完成 |
 | CI-02 | broker 固定来源与补丁 | 真实客户端重定向／错误日志回归通过 | 已完成 |
-| CI-03 | Linux 基础 CI | Node check/test/build，Go race/vet，文件失败测试修正 | 本地 Linux 已通过，托管工作流待执行 |
-| CI-04 | 完整最终镜像拓扑 | 临时资源、业务链路、恢复及内核网络拒绝用例 | 本地 11 项运行验收通过；托管执行待完成 |
+| CI-03 | Linux 基础 CI | Node check/test/build，Go race/vet，文件失败测试修正 | 已完成（本地与托管均通过） |
+| CI-04 | 完整最终镜像拓扑 | 临时资源、业务链路、恢复及内核网络拒绝用例 | 已完成（本地与托管均为 11/11） |
 | CI-05 | API 策略执行 | schema、正式执行路径及正反用例 | 待实现 |
 | CI-06 | 发布与供应链验证 | 同产物扫描、签名、发布清单 | 待实现 |
 | CI-07 | 部署预检与 CD | 真实最小权限、卷保护、备份更新与业务检查 | 待实现 |
@@ -107,3 +107,11 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 - 本机构建 `aster-router:ci` 与 `aster-network:ci` 时，Docker Hub 匿名 token 服务连接超时。改用本地已有的同 digest 基础镜像（`debian:bookworm-slim`、`alpine:3.24.1@sha256:28bd5fe8…`）后构建成功；仓库 Dockerfile 的固定引用未改动，因此产物与固定基础镜像一致，但这只说明本机取镜像路径受限，不代表托管 runner 的网络条件已验收。
 - 拓扑脚本修正了两处验收层错误：CONNECT 隧道由 broker 用自签发 CA 终结，未匹配主机策略在隧道内判定，原先对 CONNECT 响应断言 403 属错误层级；fixture 控制请求需要显式 JSON Content-Type。诊断只输出步骤名，不输出容器日志、环境或断言值。
 - 脚本目前覆盖完成请求的重启去重，不代替执行中／投递中崩溃点验收；IPv6 无可达正控时不计为已覆盖；API 方法与路径限制、凭据回显预防仍待 CI-05。未完成的安全关卡不以基础测试成功替代。
+
+### 2026-10-27 托管执行记录
+
+- `ci.yml` 已推送到 `feat/memory-archive` 并由 PR 触发托管执行。运行 40376404907 三个 job 全部通过：Node.js（`npm ci`、`check`、137/137 测试、`build`）、Go router（`go test -race ./...`、`go vet ./...`，补齐了本机 Windows 无 CGO 的缺口）、Final images and credential boundaries（受审 broker 构建含构建期客户端测试、16/16 密钥边界回归、三个正式镜像构建、11/11 完整拓扑）。
+- 托管 runner 上的实际检查输出为 `Vault image regression passed: 16 checks` 与 `Topology acceptance passed: 11 checks`，与本机结果一致；因此四个最终镜像在托管 runner 上同样构建成功，先前记录的取镜像受限只是本机网络条件。
+- 托管执行暴露了一个本机无法复现的缺陷：fixture 容器以 root 加 `--cap-drop ALL` 运行，没有 `CAP_DAC_OVERRIDE`，而 `openssl` 以调用者身份写出 0600 的 `key.pem`；runner 上调用者既非 root 也不在文件组内，读失败导致 fixture 退出 21。Windows bind mount 不保留真实 mode，所以本机一直通过。修复方式是在 fixture 启动前把合成 `key.pem` 放宽到 0644（与 `ca.pem` 一致），不为此给 fixture 容器增加特权；本机用 1001 属主的 0600 key 复现了退出 21，改权限后恢复正常。
+- 诊断仍只输出固定标识。fixture 自身的启动失败改为固定退出码（20 凭据、21 key、22 证书、23 监听、24 未捕获），编排脚本据此报告失败类别，不输出容器 stderr、日志、环境或断言值。拓扑 fixture 以 `user: "0:0"` 运行并显式保留 `DAC_OVERRIDE`，不存在同一问题，未改动。
+- 本次托管执行不发布镜像、不签名、不部署，也没有使用真实 Infisical、Telegram 或模型凭据。`release.yml` 与 `deploy.yml` 仍未实现，CI-05 至 CI-07 保持待办。

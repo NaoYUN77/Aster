@@ -42,7 +42,7 @@ docker build -t aster-vault:local deploy/agent-vault/broker
 npm run test:vault-security
 ```
 
-`npm run test:vault-security` 默认使用 `aster-vault:ci`，可用 `VAULT_CI_IMAGE` 指定。回归覆盖真实镜像的取密、权限、错误日志、重定向与 TLS 行为；当前受审构建 16/16 通过。完整拓扑另需 `npm run test:topology`，见 [CI 运行入口](../../../scripts/ci/README.md)。
+`npm run test:vault-security` 默认使用 `aster-vault:ci`，可用 `VAULT_CI_IMAGE` 指定。回归覆盖真实镜像的取密、权限、错误日志、重定向与 TLS 行为；当前受审构建 16/16 通过（本机与 GitHub 托管 runner）。完整拓扑另需 `npm run test:topology`，见 [CI 运行入口](../../../scripts/ci/README.md)。
 
 尚未完成：
 
