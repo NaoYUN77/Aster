@@ -25,13 +25,31 @@ const values = {
 let current = "setup";
 let checks = 0;
 
+// Child output may contain a secret, so failures are reduced to a fixed code.
+// The list below is exhaustive: anything unrecognised reports "other", and the
+// raw stream is never printed.
+function classify(stderr) {
+  const text = String(stderr ?? "").toLowerCase();
+  if (text.includes("conflicting options")) return "CONFLICTING_OPTIONS";
+  if (text.includes("no such image") || text.includes("pull access denied")) return "IMAGE_UNAVAILABLE";
+  if (text.includes("permission denied")) return "PERMISSION_DENIED";
+  if (text.includes("invalid reference") || text.includes("invalid mount")) return "INVALID_REFERENCE";
+  if (text.includes("is already in use") || text.includes("already exists")) return "NAME_CONFLICT";
+  if (text.includes("cannot connect") || text.includes("is the docker daemon running")) return "DAEMON_UNAVAILABLE";
+  if (text.includes("no such file or directory")) return "PATH_MISSING";
+  if (text.includes("operation not permitted")) return "OPERATION_NOT_PERMITTED";
+  if (text.includes("unable to find user")) return "USER_MISSING";
+  return "other";
+}
+
 async function command(program, args, timeout = 120_000) {
   try {
     const output = await exec(program, args, { encoding: "utf8", timeout, maxBuffer: 16 * 1024 * 1024 });
     return output.stdout + (program === "docker" && args[0] === "logs" ? output.stderr : "");
-  } catch {
-    // Child output may contain a secret. Report only the step identifier.
-    throw new Error(`command failed during ${current}`);
+  } catch (error) {
+    // Child output may contain a secret. Report only the step identifier and a
+    // classification derived from the fixed list above.
+    throw new Error(`command failed during ${current} (${classify(error?.stderr)})`);
   }
 }
 const docker = (...args) => command("docker", args);
@@ -136,8 +154,8 @@ try {
     });
   }
   console.info(`Vault image regression passed: ${checks} checks; synthetic credentials; no production volumes.`);
-} catch {
-  console.error(`Vault image regression FAILED: ${current}`);
+} catch (error) {
+  console.error(`Vault image regression FAILED: ${current}${typeof error?.message === "string" && error.message.includes("(") ? ` ${error.message.slice(error.message.lastIndexOf("("))}` : ""}`);
   process.exitCode = 1;
 } finally {
   let cleaned = true;
