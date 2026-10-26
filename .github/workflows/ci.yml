@@ -2,8 +2,21 @@ name: CI
 
 on:
   pull_request:
+    # Documentation and repository metadata cannot change a build input: the
+    # Dockerfiles exclude docs/ and never copy markdown. Path filters stay off
+    # for anything that can affect an image, test or workflow.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
   workflow_dispatch:
 
 permissions:
