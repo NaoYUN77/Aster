@@ -100,9 +100,14 @@ try {
     "-subj", "/CN=infisical.ci.test", "-addext", "subjectAltName=DNS:infisical.ci.test,DNS:redirect.ci.test",
   ]);
   current = "start-isolated-fixture";
-  // The broker's uid 65532 reads only this synthetic CA through the bind mount.
+  // Both readers sit outside the file owner: the broker reads the CA as uid
+  // 65532, and the fixture container runs as root with --cap-drop ALL, so it has
+  // no CAP_DAC_OVERRIDE. openssl writes key.pem 0600 for the invoking user, which
+  // neither can open. These are synthetic, single-run files in a temp directory,
+  // so widening them is preferable to granting the fixture container privileges.
   await chmod(directory, 0o755);
   await chmod(join(directory, "ca.pem"), 0o644);
+  await chmod(join(directory, "key.pem"), 0o644);
   await writeFile(join(directory, "credentials.json"), JSON.stringify(values));
   await Promise.all(["vault-fixture.mjs", "vault-probe.mjs"].map((name) => copyFile(join(source, name), join(directory, name))));
   containers.add(id);
