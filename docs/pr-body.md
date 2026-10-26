@@ -1,5 +1,7 @@
 # 修复代码审查问题 F1–F7，并补充回归用例
 
+历史 PR 正文草稿：保留当时的实现与验证描述，其中 systemd 部署已退役。当前 Aster 镜像交付以 [部署指南](deployment-test-guide.md) 为准。
+
 基线：`57ef390`。执行范围与要求见 [docs/review-fix-plan.md](docs/review-fix-plan.md)，逐项记录见 [docs/mvp-verification.md](docs/mvp-verification.md)。
 
 ## 已完成

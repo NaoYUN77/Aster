@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,12 +129,14 @@ test("04-B: a failed replace leaves the whole old file, and the retry publishes 
     assert.equal((await readSegment(daily, { id: "b2", date: "2026-10-23" })).found, false);
     await rm(`${file}.tmp`, { recursive: true, force: true });
 
-    // Fail at the rename: the target is read-only, so the replace is refused after the temp write.
-    await chmod(file, 0o444);
+    // A temp path linked to a directory also refuses the write on Windows and Linux, including root.
+    // Unlike a real directory blocker, the link can be removed by the failed write's cleanup.
+    const tempDirectory = join(daily.root, "temp-directory");
+    await mkdir(tempDirectory);
+    await symlink(tempDirectory, `${file}.tmp`, "junction");
     assert.equal(await errorCode(() => publishSegments(daily, [second])), "io-failure");
     assert.equal(await readFile(file, "utf8"), before, "the old file is still whole");
-    await assert.rejects(readFile(`${file}.tmp`), /ENOENT/, "no temp file is left behind");
-    await chmod(file, 0o644);
+    await assert.rejects(readFile(`${file}.tmp`), { code: "ENOENT" }, "no temp link is left behind");
 
     // The retry succeeds with the same content the failed attempt would have published, so the
     // receipt is stable across the failure rather than a new fact.
@@ -636,7 +638,8 @@ test("04-E: a superseded fact is not returned as current, and history keeps the 
     await publishSegments(daily, [blocker]);
     const blockerFile = join(daily.root, DAILY_DIRECTORY, "2026-10-21.md");
     const blockerBefore = await readFile(blockerFile, "utf8");
-    await chmod(blockerFile, 0o444);
+    // Blocking the temp path fails independently of permissions and leaves the target readable.
+    await mkdir(`${blockerFile}.tmp`);
     const successor = segment({ id: "e6", date: "2026-10-21", kind: "user-requirement", text: "Use spaces.", supersedes: ["e5"] });
     assert.equal(await errorCode(() => publishSegments(daily, [successor])), "io-failure");
     const afterFailure = await readSegment(daily, { id: "e5", date: "2026-10-20" });
@@ -645,7 +648,7 @@ test("04-E: a superseded fact is not returned as current, and history keeps the 
     assert.equal(await readFile(blockerFile, "utf8"), blockerBefore, "the target file is unchanged");
 
     // The retry lands the replacement and keeps the old one retired: one current requirement.
-    await chmod(blockerFile, 0o644);
+    await rm(`${blockerFile}.tmp`, { recursive: true });
     await publishSegments(daily, [successor]);
     const settled = await searchDaily(daily, { text: "use ", kinds: ["user-requirement"] });
     assert.deepEqual(settled.hits.map((hit) => hit.segment.id), ["e6"]);
@@ -665,17 +668,19 @@ test("04-E: a superseded fact is not returned as current, and history keeps the 
     // Across two files the ordering holds even when the *replacement* file is the one that fails.
     // Every mark is written before any replacement, so a fact is never published while the fact it
     // replaces still reads as current. Here A lives in file one, B in file two; C replaces B (file
-    // one) and D replaces A (file two). File two is writable, file one is not.
+    // one) and D replaces A (file two). File two can be replaced; file one's temp path is blocked.
     const markedA = segment({ id: "mA", date: "2026-12-01", text: "old A" });
     const markedB = segment({ id: "mB", date: "2026-12-02", text: "old B" });
     await publishSegments(daily, [markedA, markedB]);
     const fileOne = join(daily.root, DAILY_DIRECTORY, "2026-12-01.md");
     const fileTwo = join(daily.root, DAILY_DIRECTORY, "2026-12-02.md");
-    await chmod(fileOne, 0o444);
+    const fileOneBefore = await readFile(fileOne, "utf8");
+    await mkdir(`${fileOne}.tmp`);
     const replacesB = segment({ id: "mC", date: "2026-12-01", text: "new C", supersedes: ["mB"] });
     const replacesA = segment({ id: "mD", date: "2026-12-02", text: "new D", supersedes: ["mA"] });
     assert.equal(await errorCode(() => publishSegments(daily, [replacesB, replacesA])), "io-failure");
-    await chmod(fileOne, 0o644);
+    assert.equal(await readFile(fileOne, "utf8"), fileOneBefore, "the failed mark leaves the whole old file");
+    await rm(`${fileOne}.tmp`, { recursive: true });
     const aAfter = await readSegment(daily, { id: "mA", date: "2026-12-01" });
     const bAfter = await readSegment(daily, { id: "mB", date: "2026-12-02" });
     assert.equal(bAfter.found && bAfter.record.segment.supersededBy, "mC", "B was retired in the phase that succeeded");

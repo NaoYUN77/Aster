@@ -1,7 +1,7 @@
 # Standalone file: do not merge with docker-compose.yml (which grants direct network access).
 services:
   agent-vault:
-    image: infisical/agent-vault:0.40.0
+    image: ${ASTER_VAULT_IMAGE:-aster-vault:local}
     restart: unless-stopped
     env_file: ./deploy/agent-vault/private/vault.env
     entrypoint:
@@ -31,9 +31,7 @@ services:
       options: { max-size: "10m", max-file: "3" }
 
   tool-network:
-    build:
-      context: ./deploy/agent-vault
-      dockerfile: network.Dockerfile
+    image: ${ASTER_NETWORK_IMAGE:-aster-network:local}
     # A fixed, non-restarting namespace: recreate app and network together after a failure.
     restart: "no"
     cap_drop: ["ALL"]
@@ -51,8 +49,7 @@ services:
     pids_limit: 16
 
   personal-agent:
-    build: .
-    image: personal-agent:local
+    image: ${ASTER_IMAGE:-aster:local}
     restart: unless-stopped
     user: "1000:1000"
     env_file: ./deploy/agent-vault/private/app.env
@@ -75,7 +72,7 @@ services:
       - telegram-owner-id
     read_only: true
     tmpfs: ["/tmp:size=128m,uid=1000,gid=1000"]
-    mem_limit: 2g
+    mem_limit: 1g
     pids_limit: 128
     init: true
     stop_grace_period: 45s

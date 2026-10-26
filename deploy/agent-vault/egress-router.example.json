@@ -1,10 +1,10 @@
 {
   "listen": "127.0.0.1:14323",
-  "upstream_proxy": "127.0.0.1:14322",
+  "upstream_proxy": "172.30.82.2:14322",
   "client_auth": {
     "username": "app",
     "password_files": [
-      "/etc/personal-agent/egress-router/client-password"
+      "/etc/aster-router/client-password"
     ]
   },
   "routes": [
@@ -13,21 +13,21 @@
       "host": "api.telegram.org",
       "port": 443,
       "vault": "telegram",
-      "agent_token_file": "/etc/personal-agent/egress-router/agent-token-telegram"
+      "agent_token_file": "/etc/aster-router/agent-token-telegram"
     },
     {
       "name": "deepseek",
       "host": "api.deepseek.com",
       "port": 443,
       "vault": "deepseek",
-      "agent_token_file": "/etc/personal-agent/egress-router/agent-token-deepseek"
+      "agent_token_file": "/etc/aster-router/agent-token-deepseek"
     },
     {
       "name": "github",
       "host": "api.github.com",
       "port": 443,
       "vault": "tools",
-      "agent_token_file": "/etc/personal-agent/egress-router/agent-token-tools"
+      "agent_token_file": "/etc/aster-router/agent-token-tools"
     }
   ],
   "allowed_ports": [

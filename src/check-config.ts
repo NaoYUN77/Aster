@@ -2,14 +2,14 @@ import { ConfigurationError, readConfig } from "./config.js";
 import { readMcpConfig } from "./mcp-config.js";
 import { createProviderModels, requireModel } from "./providers.js";
 
-// Offline configuration check used by the systemd installer. Exits non-zero when a required
+// Offline configuration check for an Aster image. Exits non-zero when a required
 // setting is missing, the provider is unknown, or MODEL_ID is absent from the provider catalog.
 try {
   const config = readConfig();
   requireModel(createProviderModels(config.provider), config.provider, config.model);
   const mcp = await readMcpConfig(config.mcpConfigPath, config.mcpConfigExplicit);
   // Match the runtime: a broken optional default file disables MCP instead of blocking startup, so it
-  // must not block the installer's preflight either. Only an explicitly configured file is required.
+  // must not block deployment preflight either. Only an explicitly configured file is required.
   if (mcp.error !== undefined) {
     if (config.mcpConfigExplicit) throw new ConfigurationError(mcp.error);
     console.error(`MCP config invalid; MCP would be disabled: ${mcp.error}`);

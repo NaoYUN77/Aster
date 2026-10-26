@@ -1,6 +1,6 @@
 # Agent Vault 多 vault 出口路由层（规划）
 
-状态：阶段 1（CONNECT 路由核心）已实现，包含 Go 模块、配置校验、CONNECT 路由、双层认证、错误透传、半关闭、空闲超时、连接上限、结构化日志、`SIGHUP` 重载、systemd 单元和示例配置。假上游测试通过；真实 Agent Vault 的 Telegram/DeepSeek 验收仍需在目标服务器执行。阶段 2 的明文 HTTP、指标和错误日志限速尚未实现。
+状态：阶段 1（CONNECT 路由核心）已实现。本文保留最初宿主部署方案的设计过程，其中 systemd 单元、路径和回环上游限制已由 Aster Docker 部署替代；当前配置与操作以 [router 运行说明](../router/README.md) 和 [Agent Vault 运行说明](agent-vault.md) 为准。假上游测试通过；真实 Agent Vault 的 Telegram/DeepSeek 验收仍需在目标服务器执行。阶段 2 的明文 HTTP、指标和错误日志限速尚未实现。
 
 ## 1. 要解决的问题
 

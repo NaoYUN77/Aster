@@ -2,6 +2,8 @@
 
 编制日期：2026-10-21。执行对象：接手本项目的 DeepSeek 编码代理。
 
+历史任务说明：本文保留当时的执行步骤；systemd 安装入口已退役，当前 Aster 镜像部署与验收以 [部署指南](deployment-test-guide.md) 为准。
+
 目标：在现有实现上完成验证、必要修复和部署验收，使授权用户能够通过 Telegram 稳定使用个人助手。按阶段推进，以实际执行结果判定完成。本文是任务文档；工程规范以根目录 `CLAUDE.md` 为准。
 
 ## 1. 接手状态与范围
@@ -37,7 +39,7 @@ PREFERENCE、情感人格、多用户、多模态、计划任务、主动推送�
 | 收件记录、消费位置、分段确认与补发 | `src/inbox.ts`、`src/deliveries.ts` |
 | 会话、最终回复、超时和关闭 | `src/agent.ts`、`src/main.ts` |
 | 工具注册、schema、记忆工具 | `src/tools.ts`、`src/agent.ts` |
-| 配置和部署 | `src/config.ts`、`.env.example`、`deploy/personal-agent.service` |
+| 配置和部署 | `src/config.ts`、`.env.example`、`Dockerfile`、`docker-compose.yml` |
 | 既有行为证据 | `test/boundaries.test.ts`、`test/durable.test.ts` |
 
 采用“复现或核实 → 最小修改 → 对应验证 → 记录”的循环。已实现且验证通过的能力直接复用。底座接口以已安装版本为准；新增抽象须对应实际共享需求。

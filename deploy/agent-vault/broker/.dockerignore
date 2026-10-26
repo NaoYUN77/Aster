@@ -1,0 +1,6 @@
+**
+!Dockerfile
+!prepare.mjs
+!upstream.patch
+!infisical_security.go.in
+!infisical_security_test.go.in

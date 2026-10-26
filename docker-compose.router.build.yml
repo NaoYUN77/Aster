@@ -1,0 +1,4 @@
+# Add after the Vault base, router override and Vault build override.
+services:
+  egress-router:
+    build: ./router

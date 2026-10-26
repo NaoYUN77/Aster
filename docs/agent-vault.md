@@ -6,7 +6,7 @@
 
 MCP 的网页登录 OAuth 保留现有 `mcp:auth`、动态注册、token 文件和刷新流程。OAuth endpoint 与 MCP endpoint 在 Vault 配置为 `passthrough`，避免代理覆盖 OAuth Authorization header。**OAuth token 仍保存在 `DATA_DIR/mcp-oauth`，没有迁入 Infisical；不要将此版本称为所有凭证均不落应用主机。** 同 uid 的文件/bash 工具仍能访问该文件，这是此次范围保留的边界。
 
-部署使用独立的 `docker-compose.agent-vault.yml`，包含 Vault、拥有网络命名空间的防火墙容器和应用。不要与原 Compose 文件合并；后者的默认网络允许直连。systemd 直接运行可使用同样的代理配置，但不自动获得容器网络隔离。应用继续由 systemd 托管、只把 broker 放入容器的混合部署见 [systemd 应用 + 容器 broker](agent-vault-systemd.md)。
+部署使用独立的 `docker-compose.agent-vault.yml`，包含 Vault、拥有网络命名空间的防火墙容器和应用。不要与原 Compose 文件合并；后者的默认网络允许直连。生产只支持 Docker 部署；应用镜像由 `${ASTER_IMAGE:-aster:local}` 提供，网络命名空间镜像由 `${ASTER_NETWORK_IMAGE:-aster-network:local}` 提供。旧的 systemd 混合部署已停止支持，只保留[迁移说明](agent-vault-systemd.md)。
 
 原生数据库、SSH、私钥签名、mTLS 以及不支持代理的 SDK 不在本版支持范围。需要这些协议的工具不得靠明文 env/password 降级，应先增加相应可信适配。
 
@@ -23,7 +23,7 @@ Bot token、Telegram owner ID 和 LLM API key 都存放在 Infisical。前两者
 | Vault proxy 身份 | `private/app.env` 的 proxy URL | 启动信任凭证，仅 proxy 权限，不具备读取真实秘密的权限 |
 | Infisical Machine Identity / Vault 主密码 | `private/vault.env`，仅传给 Vault 容器 | 不传给应用或工具 |
 
-owner ID 不是请求凭证，所以不能用占位值让代理替换。应用只读取导出文件，不持有 Infisical 身份；在 Infisical 中修改后，重新导出该文件并重启应用。该文件属于访问控制配置，不是可公开的运行参数，放在 git/docker 构建上下文之外。Compose 的 file secret 以 bind mount 方式挂载，`uid`/`gid`/`mode` 不生效，容器内看到的仍是源文件权限；应用以 uid 1000 运行，因此该文件需设为 `644`（只含数字 ID，且所在 `private/` 目录为 `700`）。未启用 Vault 时仍可直接在 `.env` 或 `/etc/personal-agent.env` 设置 `TELEGRAM_OWNER_ID`；两种来源不能同时设置。
+owner ID 不是请求凭证，所以不能用占位值让代理替换。应用只读取导出文件，不持有 Infisical 身份；在 Infisical 中修改后，重新导出该文件并重启应用。该文件属于访问控制配置，不是可公开的运行参数，放在 git/docker 构建上下文之外。Compose 的 file secret 以 bind mount 方式挂载，`uid`/`gid`/`mode` 不生效，容器内看到的仍是源文件权限；应用以 uid 1000 运行，因此该文件需设为 `644`（只含数字 ID，且所在 `private/` 目录为 `700`）。未启用 Vault 时仍可直接在 `.env` 设置 `TELEGRAM_OWNER_ID`；两种来源不能同时设置。
 
 入口 token/key 与工具凭证目前共用一个工作负载的代理身份；这不代表按工具或进程隔离了各自权限。拆成独立权限域需要进一步拆分执行环境和代理身份。
 
@@ -58,7 +58,7 @@ openAgent
 | 配置 | 含义 |
 | --- | --- |
 | `AGENT_VAULT_ENABLED=1` | 启用应用侧代理检查与 MCP 凭证配置约束；缺省/`0` 保留原运行方式。启用后要求 Bot token 与所有已设置的注册表提供商 key 为占位值，owner ID 从文件读取 |
-| `HTTP_PROXY` / `HTTPS_PROXY` | 必须完全相同。单 vault 时格式 `http://<proxy-token>:<vault>@<broker>:14322`；多 vault 时指向本地 egress router，如 `http://app:<router-password>@127.0.0.1:14323`。也接受 HTTPS 代理 URL |
+| `HTTP_PROXY` / `HTTPS_PROXY` | 必须完全相同。单 vault 时格式 `http://<proxy-token>:<vault>@172.30.82.2:14322`；多 vault 时指向共享命名空间内的路由器，如 `http://app:<router-password>@127.0.0.1:14323`。也接受 HTTPS 代理 URL |
 | `NODE_USE_ENV_PROXY=1` | 在启动 Node 前设置；应用还调用 Node 24 的 `setGlobalProxyFromEnv` 覆盖默认网络客户端 |
 | `NODE_EXTRA_CA_CERTS` | 启动 Node 前指定绝对路径；证书必须可读，在线入口会验证 Node 已加载它 |
 | `NO_PROXY` | 仅允许为空或精确 loopback 主机列表，不允许 `*`、域名后缀或外部主机 |
@@ -70,7 +70,7 @@ openAgent
 
 一个 Agent Vault vault 绑定一个 Infisical project / environment / secret path，并且只同步该路径下的直接 key，不递归子文件夹。因此“不同基建放不同文件夹”对应多个 vault，而不是一个 vault 的多个路径。
 
-应用进程只有一组全局 `HTTP_PROXY` / `HTTPS_PROXY`，无法按目标 host 选择不同 vault。多 vault 部署在应用与 broker 之间增加 `agent-egress-router`：应用把代理指向路由器的回环端口，路由器按 CONNECT 的 `host:port` 从精确路由表选择 vault 与对应的 agent token，再转发到 `127.0.0.1:14322`。
+应用进程只有一组全局 `HTTP_PROXY` / `HTTPS_PROXY`，无法按目标 host 选择不同 vault。多 vault 部署在应用与 broker 之间增加 `agent-egress-router`：应用把代理指向路由器的回环端口，路由器按 CONNECT 的 `host:port` 从精确路由表选择 vault 与对应的 agent token，再转发到 broker。
 
 ```text
 app ── HTTP_PROXY → 127.0.0.1:14323 (router, app password)
@@ -78,16 +78,16 @@ app ── HTTP_PROXY → 127.0.0.1:14323 (router, app password)
                          ├─ api.deepseek.com:443 → vault deepseek + token B
                          └─ api.github.com:443   → vault tools    + token C
                          ▼
-                    127.0.0.1:14322 (one broker, many vaults)
+                    172.30.82.2:14322 (one broker, many vaults)
 ```
 
 - 每个 vault 配一个只授予该 vault `proxy` 角色的 agent token；token 是数据库记录，不增加常驻进程。
 - 仍然只运行一个 broker；只有需要独立故障域或独立信任边界时才拆多个 broker。
-- 路由器只监听回环，不解析 DNS，不持有 Infisical 凭据或真实 API key。
+- 路由器只监听回环，不解析 DNS，不持有 Infisical 凭据或真实 API key。为适配 Docker bridge，上游只接受回环或私有 IP 字面量，例如 `172.30.82.2:14322`；不接受公网 IP 或主机名。
 - 应用只持有路由器客户端密码，不持有 agent token。
 - 未列入路由表的 host 默认拒绝（`403`）；Agent Vault 的 `407`/`403` 原样透传。
 
-构建、配置、systemd 单元和验收命令见 [router/README.md](../router/README.md)、[示例配置](../deploy/agent-vault/egress-router.example.json) 与 [设计文档](agent-vault-router-plan.md)。
+路由器在 Docker 中与 `tool-network` 共享网络命名空间，因此回环地址就是应用看到的地址。运行方式、目录权限和验收命令见 [router/README.md](../router/README.md) 与 [部署运行手册](deployment-test-guide.md#6-多-vault-路由器)，示例配置见 [egress-router.example.json](../deploy/agent-vault/egress-router.example.json)。设计文档见 [host 路由方案](agent-vault-router-plan.md)。
 
 MCP 中 `${vault:KEY}` 转换为字符串 `__vault_KEY__`，**不是取密接口**。KEY 必须使用 UPPER_SNAKE_CASE；未启用 Vault 时使用引用会禁用对应 server。比如：
 
@@ -124,7 +124,7 @@ Vault 模式下禁止 stdio `inheritEnv: true`、覆盖代理/CA/Node TLS 配置
 
 ## 准备部署
 
-使用 Agent Vault `0.40.0` 镜像，与已核实的 release 文档一致。升级前核对 release 签名/来源及镜像 digest，重新执行集成验收。当前 Docker 配置和防火墙脚本已做静态校验；本地 Docker 引擎不可用，尚未完成容器实跑和真实 Infisical 联调。
+Broker 由 `${ASTER_VAULT_IMAGE:-aster-vault:local}` 提供，使用本仓库基于固定上游版本的受审构建，见 [构建与补丁](../deploy/agent-vault/broker/README.md)。原始 `infisical/agent-vault:0.40.0` 已复现取密重定向和错误日志泄露，不能直接作为自动生产部署的默认值，证据见 [安全调查](agent-vault-security-investigation.md)。受审构建仅支持 Universal Auth；升级前验证来源、签名及 digest，并重新运行回归。应用和网络命名空间镜像分别通过 `ASTER_IMAGE`／`ASTER_NETWORK_IMAGE` 指定；生产 Compose 只消费镜像。CI 与剩余准入条件见 [实施计划](ci-cd-implementation-plan.md)，此前 Docker 迁移证据见 [镜像迁移验证](docker-verification.md)。
 
 在独立 Linux Docker 主机或现有受控部署目录执行：
 
@@ -136,7 +136,23 @@ cp deploy/agent-vault/app.env.example deploy/agent-vault/private/app.env
 chmod 600 deploy/agent-vault/private/*.env
 ```
 
-`private/` 已同时加入 gitignore 和 dockerignore。不要在聊天、命令行参数、工具结果或日志中粘贴真实凭证。配置中的代理 token 本身具有访问权限，也需要保密。
+`private/` 已同时加入 gitignore 和 dockerignore，不会进入构建上下文。不要在聊天、命令行参数、工具结果或日志中粘贴真实凭证。配置中的代理 token 本身具有访问权限，也需要保密。
+
+多 vault 模式额外准备 `private/app.router.env` 和 `private/router/`：
+
+```sh
+cp deploy/agent-vault/app.router.env.example deploy/agent-vault/private/app.router.env
+chmod 600 deploy/agent-vault/private/app.router.env
+
+mkdir -p deploy/agent-vault/private/router
+cp deploy/agent-vault/egress-router.example.json deploy/agent-vault/private/router/config.json
+# 写入 client-password 与每个 vault 的 agent token 文件
+chown -R 1001:1001 deploy/agent-vault/private/router
+chmod 700 deploy/agent-vault/private/router
+chmod 600 deploy/agent-vault/private/router/*
+```
+
+路由器以 uid 1001 运行，整个目录只读挂载到 `/etc/aster-router`；JSON 内路径写作 `/etc/aster-router/...`，`upstream_proxy` 为 `172.30.82.2:14322`。`config.json` 中的 `listen` 与 `health_listen` 仍必须是回环地址。
 
 1. 在 Infisical 项目中创建对应环境和路径，例如 `prod`、`/personal-agent/tools`。把实际需要的 `GITHUB_TOKEN`、`EXAMPLE_USERNAME`、`EXAMPLE_PASSWORD`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID` 以及当前模型提供商的 API key 放入此路径。未使用的示例 key 不需要创建。
 2. 创建只读 Machine Identity，权限仅覆盖该项目、环境、路径。将 Universal Auth client ID/secret 填入 `private/vault.env`，并设置强 Vault master password。该密码用于包装本地数据密钥，保护 Vault 数据卷中的凭据和 CA 私钥；它不是 Infisical 密码，也不传给应用。丢失后原数据卷无法解密，只能用 `agent-vault master-password change` 在知道当前密码时轮换。不要把此文件挂载到应用。
@@ -168,15 +184,17 @@ chmod 600 deploy/agent-vault/private/*.env
    ```
 
    该文件必须在 `up` 前存在，Compose secret 的源文件缺失会阻止启动。应用以 uid 1000 读取；file secret 是 bind mount，不能靠 Compose 的 `mode` 改权限，所以用 `644`。文件只含数字 owner ID，`private/` 目录保持 `700`。在 Infisical 修改 owner ID 后重新导出并重启应用；应用进程不持有 Infisical 身份。若导出工具用重命名方式替换文件，重启后仍可能看到旧 inode，此时用 `docker compose -f docker-compose.agent-vault.yml up -d --force-recreate personal-agent` 重新挂载。
-9. 先停原 bot，保持整个持久化卷；再启动新部署：
+9. 先停原 bot，保持整个持久化卷；再启动新部署。生产配置不构建镜像，先按 [部署运行手册](deployment-test-guide.md#3-构建与分发镜像) 在构建机产出并分发：
 
    ```sh
    docker compose -f docker-compose.agent-vault.yml config --quiet
-   docker compose -f docker-compose.agent-vault.yml up -d --build
+   docker compose -f docker-compose.agent-vault.yml up -d --no-build
    docker compose -f docker-compose.agent-vault.yml stop personal-agent
    docker compose -f docker-compose.agent-vault.yml run --rm --no-deps personal-agent node dist/src/mcp-check.js
    docker compose -f docker-compose.agent-vault.yml start personal-agent
    ```
+
+   只有本地开发才叠加 `docker-compose.agent-vault.build.yml` 后 `build`。多 vault 时在每条命令追加 `-f docker-compose.router.yml`，并先用 `aster-router:local check -config /etc/aster-router/config.json`（挂载 `private/router`）验证配置。
 
    默认规则不会允许 npm registry，所以 stdio MCP 应预装在镜像中，不能依赖运行时 `npx` 下载；若要下载，需要单独授权且计入供应链管理。
 
@@ -186,11 +204,13 @@ chmod 600 deploy/agent-vault/private/*.env
 
 `tool-network` 在应用启动前设置 raw OUTPUT 规则：uid 1000 只允许 TCP 到固定 broker IP `172.30.82.2:14322` 与精确 loopback，拒绝其他 IPv4/IPv6/UDP 流量。规则在 Docker DNS DNAT 前匹配，不允许 `127.0.0.11` DNS 出网；应用通过代理让 broker 解析上游域名。应用容器固定 uid 1000，移除全部 capabilities、禁止提权、只读根文件系统，不共享 Docker socket。Vault 管理端口不能从应用网络直接访问。
 
-固定子网与已有网络冲突时，需要一起修改 Compose 子网/IP、network.sh 和 app.env；只改其中一处会阻断服务。不要手动给应用附加另一张网络、改变 uid 或开放 capabilities。防火墙容器配置变动/退出后，停止并重建整个应用和网络命名空间，不能只重启网络容器并保留旧应用。
+叠加 `docker-compose.router.yml` 时，`tool-network` 收到 `ROUTER_ENABLED=1`：uid 1000 的应用不再允许直连 broker，只能访问精确 loopback；uid 1001 的路由器才允许访问 `172.30.82.2:14322` 与 loopback。路由器与应用共享同一网络命名空间，因此 `127.0.0.1:14323` 对应用可达，而路由器不发布任何宿主端口。没有这一覆盖时，应用直接使用 broker 的 proxy 身份。
+
+固定子网与已有网络冲突时，需要一起修改 Compose 子网/IP、`network.sh` 和 app env；只改其中一处会阻断服务。不要手动给应用附加另一张网络、改变 uid 或开放 capabilities。防火墙容器配置变动/退出后，停止并重建整个应用、路由器和网络命名空间，不能只重启网络容器并保留旧应用。
 
 loopback 允许应用与可信本地 MCP 通信，不能在该命名空间增加允许转发出网的特权进程。Vault 的 netguard 不应允许 broker 自己的管理端口、宿主内网或云 metadata 地址。`deny` 模式只限制目标 host/path/port，不提供 HTTP method 或业务级权限控制；目标接口若会回显认证值、导出或创建新 token，需要禁用相应路径或增加可信响应适配。
 
-应用内存限制 2 GiB，Vault 512 MiB，网络容器 32 MiB，其他资源留给系统。实际并发与内存仍需在 4 GB 目标机测量。Vault 数据卷 `personal-agent-vault-data` 保存加密快照、CA 私钥与其他状态；应用只挂载原 `personal-agent-data`。同机容器不能抵御宿主 root 或内核逃逸；需要更强边界时把 broker 放到独立主机。
+应用内存限制 1 GiB，Vault 512 MiB，网络容器 32 MiB，路由器 128 MiB，其他资源留给系统。实际并发与内存仍需在 4 GB 目标机测量。Vault 数据卷 `personal-agent-vault-data` 保存加密快照、CA 私钥与其他状态；应用只挂载原 `personal-agent-data`。同机容器不能抵御宿主 root 或内核逃逸；需要更强边界时把 broker 放到独立主机。
 
 ## 轮换、失败与验收
 
