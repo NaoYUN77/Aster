@@ -32,9 +32,9 @@
 
 当前应用通过 `root.configure({ instructions })` 设置系统提示，将原文提交给 root Conversation；底座派生消息、执行工具并自动压缩。`workspace/MEMORY.md` 仍由模型通过文件工具读取和按用户明确要求更新。
 
-尚未实现：宿主记忆投影、归档任务与原生检索工具。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`；每日记忆的文件协议已由 MEM-04 实现（`src/memory/daily.ts`），其余未落地的名字仍是拟议应用接口，不是底座现有 API。
+尚未接入：宿主记忆投影、归档任务与原生检索工具。归档 module 与原生 Task 已由 MEM-05 实现并独立验证，尚未在运行入口注册。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`；每日记忆的文件协议已由 MEM-04 实现（`src/memory/daily.ts`），其余未落地的名字仍是拟议应用接口，不是底座现有 API。
 
-按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。这四项都还没有接入运行中的 agent：组合入口、原生检索工具、自定义周期快照与归档任务仍待 MEM-05～MEM-07 完成。
+按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。MEM-05 实现了独立可恢复的增量归档 Task（`archive.ts`、`archive-task.ts`）。这些 module 都还没有接入运行中的 agent：组合入口、原生检索工具和自定义周期快照仍待 MEM-06～MEM-07 完成。
 
 底座现有接入能力：
 
@@ -294,10 +294,10 @@ B 格式、working schema、归档批次和已持久化工具参数均是跨版�
 
 ### 12.6 仍未验证或受限的部分
 
-- 自定义 `defineTask` 的 `abort` 阶段是必需的；本轮只验证了内置 `CompactionTask` 的取消路径，归档 Task 的取消与恢复留待 MEM-05 验证。
+- 自定义 `defineTask` 的 `abort` 阶段是必需的；MEM-01 只验证内置 `CompactionTask`，MEM-05 已补充归档 Task 的实际 I/O 取消与恢复验证（第 16 节）。
 - hook 运行时对象虽然是完整 `TaskRuntime`，但声明类型 `HookApi` 只承诺读取与 memo。应用只用 `Harness.commit()` 持久化，不依赖未声明的 `commit()`，以免升级时静默失效。
 - 真实模型窗口下的预算、缓存命中与摘要质量不在本轮范围（MEM-06、MEM-08）。
-- 归档 Task 的恢复窗口未验证（MEM-05）。每日文件的替换本身已由 MEM-04 的失败注入覆盖（04-B）；「生成后未发布」「发布后未确认」「跨多个日期部分成功」属于归档任务的窗口，仍待 MEM-05。
+- 每日文件替换由 MEM-04 的失败注入覆盖（04-B）；MEM-05 已补充生成后未发布、发布后未确认、跨多个日期部分成功及游标提交前的归档 Task 恢复验证（第 16 节）。
 
 ## 13. MEM-02 实现结论与 Working 语义
 
@@ -493,10 +493,42 @@ B 格式、working schema、归档批次和已持久化工具参数均是跨版�
 - MEM-05 的 Archive Task 负责固定来源范围、提取、持久化待发布正文，然后逐段调用 `publishSegments`；只有全部回执确认后才推进连续游标。回执里 `published` 与 `duplicate` 都算已确认，`digest` 可用于核对「同一次生成没有产出第二份正文」。
 - 分段 ID 由归档批次决定（`<batchId>#<index>`），在重试间保持稳定；本模块只按 ID 与发布身份判重，不生成 ID。归档重试可以安全重放：已被替代的记录仍返回原回执。
 - 检索工具（`memory_search`／`memory_read`）由 MEM-07 用原生工具契约包装本模块；游标、上限和 `unread` 原样交给模型，不在这里改写语义。
-- 本模块未接入运行中的 agent，也未与归档任务联调；文件级恢复窗口（生成后未发布、发布后未确认）由 MEM-05 覆盖。
+- 本模块未接入运行中的 agent；已由 MEM-05 与归档任务联调，覆盖生成后未发布、发布后未确认及跨日部分成功（第 16 节）。
 - 两个窗口只有代码路径、没有自动化证据，因此不作为已验证结论：单次扫描内「文件在读取前消失」与「文件在读取后、游标签发前被追加」。两者都要求在一次调用内部、两个 I/O 步骤之间改变文件，而本模块没有在该窗口注入失败的接口。跨调用的追加已被 `covered` 覆盖并有测试；跨调用的**补写更早日期**由 `resumeAt` 回退扫描起点覆盖，同样有测试。
 
-## 16. 实施入口与发布判定
+## 16. MEM-05 实现结论与归档协议
+
+### 16.1 Interface 与归属
+
+`src/memory/archive.ts` 提供原生 Entry 到有界提取来源的转换、`ArchiveExtractionSchema`、`validateExtraction` 与提取提示；`src/memory/archive-task.ts` 提供 `createArchiveTask`、`initializeArchive`、`requestArchive`、`reconcileArchive`、`retryArchive`、`readArchive` 和 `ArchiveStateSchema`。`ArchiveBatch`／`MemorySegment` 继续以 `contracts.ts` 为权威来源，schema 版本仍为 1。
+
+宿主在 registry 中注册 `createArchiveTask({store, model, timeoutMs?})` 返回的 Task。它是 conversation-owned、`background: true` 的独立任务，不进入主 agent 工具队列、不加入普通 idle 等待。`boundary` 是可选的宿主观测接口，提供 extracted／saved／published／confirmed／before-cursor 同步点，测试借此关闭或强制终止进程。生产接线由 MEM-07 完成。
+
+`initializeArchive` 必须先调用：首次升级由宿主传入当前尾部作为起点；新会话可传 `null`。起点、时区、目标和批次通过 conversation 级 latest Document 保存；不自动回填旧历史。当前拒绝 fork。初始化后不能改变时区。模型与目录由宿主配置，不是模型参数。
+
+### 16.2 目标、来源与时间
+
+`requestArchive` 只接受宿主已确认发布的压缩截止点或业务完成边界；入队／stale 压缩不能调用它。事务内取目标最大值，同时创建唯一活跃归档 Task，不为每次通知建立 Promise 队列。`reconcileArchive` 每次最多扫 64 条原生 Entries，返回 `more`；宿主在启动／请求边界重复调用至本次扫描结束。扫描进度持久化，跨日时会重新检查未覆盖的当日事件。补扫依据最近已发布的原生 head（覆盖阻塞压缩路径）、WorkingCompleted 和已结束日期的原始事件；不要求午夜无请求时运行。
+
+来源范围仍为 `(after, through]`，每批最多 64 条、提取输入最多 64 KiB。当前处理原生 user、成功或工具调用中的 assistant、tool-result 和 WorkingCompleted；摘要、reset、system、working／cycle 投影及 memory_search／memory_read／working_read／working_update 的结果均跳过。未知自定义 kind 不自动解释，MEM-07 引入外部事件格式时须增加对应边界适配。工具失败保留显式失败标记；完整文本超限就拒绝并保留缺口，不冒充已归档。
+
+日期由被引用 Entry 的事件 timestamp 与初始化时区决定；完成事实使用其 `at`。缺失时间进 `unknown.md`，非法时间报错，模型不能指定日期、时区、ID、目录或归档游标。宿主收到的提取结果必须引用本批已读来源。自动 user-requirement 只是历史事件，不更新 Working 偏好或 MEMORY.md。
+
+### 16.3 持久化、发布和失败
+
+Task 先提交固定范围和稳定 batch ID，再调用模型；校验通过的正文与调用 usage 在同一 commit 保存。空结果也先保存。每次只发布一个分段，身份为 `<batchId>#<index>`；逐段保存内容摘要确认，全部确认后在事务内校验连续前缀并推进 `archivedThrough`。已保存正文不会因重试重新生成，文件已写但确认未提交时使用 Daily 的 duplicate 回执恢复。单文件容量不足时持久化下一页位置，最多 9 页；其他失败不自动换位置。
+
+提取和每段发布均最多自动尝试 3 次，计数先于外部 I/O 提交；重试等待通过原生 Task checkpoint／sleep 恢复。失败诊断只保存安全错误码和固定消息。耗尽、非重试错误或显式取消保留正文和覆盖缺口，由 `retryArchive` 显式重置尝试额度；普通触发不会无限重启失败任务。未知 Task fault 同样保留批次并需显式重试。主请求和已保存回复不重跑。
+
+模型调用默认 60 秒，允许宿主配置 1～300000 ms，取消／超时 signal 传至实际 provider。关闭 Harness 保留 checkpoint；显式 abort 进入原生 abort 阶段并保存 cancelled。Daily 的有限单段发布会等待原子替换完成后再处理取消，不使用仅停止等待的 Promise race，也不在取消后启动下一段 I/O。
+
+每个返回并提交的模型响应（含失败／非法结果）的 usage 计入原生 `UsageDoc.models["app/archive"]`，不重复计入 provider 的生成桶。响应尚未提交时进程被杀或调用被取消，远端已发生用量可能未知；恢复可能重调模型，不能承诺该窗口的精确计费。正文一旦提交便不再重调。应用不复制 SDK Usage／Entry／Task 类型。
+
+### 16.4 验证与限制
+
+离线验证使用真实 Harness、临时 SQLite、faux provider 和每日文件。关键四个窗口同时有正常关闭重开和真实子进程 SIGKILL 证据。具体命令、通过编号见 MEM-05 交接记录。当前单进程、线性会话；未在真实模型上验证提取质量、脱敏效果、目标 Linux 资源消耗。模块不承诺自动完成语义级纠正，`supersedes` 必须来自可定位的明确旧引用。实际应用接线、外部事件时间持久化和升级入口属于 MEM-07。
+
+## 17. 实施入口与发布判定
 
 按 [实施 issues](memory-implementation-issues.md) 的依赖顺序执行。先完成公开 API 可行性和 Interface 契约，再并行实现 Working、Context、Daily Memory；最后接入底座与应用并做故障恢复验收。
 
