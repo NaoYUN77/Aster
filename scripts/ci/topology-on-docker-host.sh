@@ -38,8 +38,9 @@ for image in "$ASTER_IMAGE" "$ASTER_ROUTER_IMAGE" "$ASTER_NETWORK_IMAGE" "$VAULT
   docker image inspect "$image" >/dev/null
 done
 docker run --rm --name "$container" --pull never --network none --read-only \
-  --user 0:0 --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 512m \
-  --env "TMPDIR=$run_root/runtime" \
+  --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+  --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 512m \
+  --env "HOME=$run_root/runtime" --env "TMPDIR=$run_root/runtime" \
   --env ASTER_IMAGE --env ASTER_ROUTER_IMAGE --env ASTER_NETWORK_IMAGE --env VAULT_CI_IMAGE \
   --env ASTER_DEPLOYMENT_TOOLS_IMAGE \
   --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \

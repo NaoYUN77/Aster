@@ -79,6 +79,6 @@ export ASTER_IMAGE ASTER_ROUTER_IMAGE ASTER_NETWORK_IMAGE VAULT_CI_IMAGE ASTER_D
 bash scripts/ci/topology-on-docker-host.sh
 ```
 
-脚本只复制两个公开 Compose 文件和三个合成测试脚本到独立临时目录，使用相同宿主／容器绝对路径解析 bind mount。外层运维容器使用只读根文件系统、无网络和受限资源，临时生成文件放在单独可写目录；合成服务仍通过 Docker 创建各自的隔离资源。`ASTER_DEPLOYMENT_TOOLS_IMAGE` 使完整拓扑复用已导入的运维镜像，结束时不会删除调用者提供的镜像。该测试依赖受测防火墙的公网 IPv4 正控，无法连接时会失败，不能计为通过。目录和本轮容器／卷在退出时清理；意外 SIGKILL 或断电后须核查残留测试资源。
+脚本只复制两个公开 Compose 文件和三个合成测试脚本到独立临时目录，使用相同宿主／容器绝对路径解析 bind mount。外层运维容器使用调用者 UID／GID，并补入 Docker socket 的组 ID，保持宿主私有临时目录可访问；同时使用只读根文件系统、无网络和受限资源，临时生成文件放在单独可写目录；合成服务仍通过 Docker 创建各自的隔离资源。`ASTER_DEPLOYMENT_TOOLS_IMAGE` 使完整拓扑复用已导入的运维镜像，结束时不会删除调用者提供的镜像。该测试依赖受测防火墙的公网 IPv4 正控，无法连接时会失败，不能计为通过。目录和本轮容器／卷在退出时清理；意外 SIGKILL 或断电后须核查残留测试资源。
 
 尚未实现 `deploy.yml` 或自动生产更新。后续必须先完成 CI-06 验签、API 回显边界和真实环境准入，再接入更新；不能把离线预检退出 0 当作上线授权。
