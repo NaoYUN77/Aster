@@ -130,15 +130,16 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 ### 2026-10-27 拓扑整合与 IPv6 修复
 
 - 确认 IPv6 正控超时由 INPUT 丢弃邻居发现报文引起：目标邻居状态为 FAILED，而无防火墙对照可达。`network.sh` 仅放行 code 0、hop limit 255 的邻居请求与通告，保留其他入站拒绝与 uid 出站限制。独立容器验证单 vault 和 router 模式的 uid 0 正控与 uid 1000／1001 拒绝，并验证 IPv4／IPv6 入站 TCP 被拒绝。
-- 使用重建的应用、router、network 镜像及 `aster-vault:ci05`，为 broker 挂载隔离的合成策略，完整拓扑 **16/16 本地通过**：含两 vault CONNECT/TLS 操作正反例及上游计数、真实业务、执行／投递中断恢复、IPv6 可达正控和 uid 限制、入站 TCP 拒绝以及日志凭据扫描。没有使用生产凭据或卷；新增检查尚无托管 CI 证据。公网 IPv6、IPv6 DNS 和获准接口的凭据回显防护仍未覆盖。
-- 最终 broker 构建 `aster-vault:mitm-reviewed-20261027` 通过：构建期 Infisical 回归、适配新策略后的 MITM 全包（56 PASS／8 显式 SKIP／0 FAIL）与 `go vet`。8 项跳过为 6 个 WebSocket 入口（含两个需真实密钥的集成）、普通 HTTP WebSocket 和 IPv6 转发成功用例，新策略禁止这些成功路径；对应入口的拒绝由 `TestReviewedAPI*` 在真实 CONNECT/TLS 下验证，跳过项不计为通过。该镜像的 `vault-security` **21/21** 通过；以它运行完整拓扑再次 **16/16** 通过，退出码 0，容器、卷、网络及临时目录已清理。旧 `aster-vault:ci` 标签未更新，CI 工作流仍构建当前源码，托管运行须待推送后确认。
+- 使用重建的应用、router、network 镜像及 `aster-vault:ci05`，为 broker 挂载隔离的合成策略，完整拓扑 **16/16 本地通过**：含两 vault CONNECT/TLS 操作正反例及上游计数、真实业务、执行／投递中断恢复、IPv6 可达正控和 uid 限制、入站 TCP 拒绝以及日志凭据扫描。没有使用生产凭据或卷；该次运行尚无托管证据，见下方推送后的运行记录。公网 IPv6、IPv6 DNS 和获准接口的凭据回显防护仍未覆盖。
+- 最终 broker 构建 `aster-vault:mitm-reviewed-20261027` 通过：构建期 Infisical 回归、适配新策略后的 MITM 全包（56 PASS／8 显式 SKIP／0 FAIL）与 `go vet`。8 项跳过为 6 个 WebSocket 入口（含两个需真实密钥的集成）、普通 HTTP WebSocket 和 IPv6 转发成功用例，新策略禁止这些成功路径；对应入口的拒绝由 `TestReviewedAPI*` 在真实 CONNECT/TLS 下验证，跳过项不计为通过。该镜像的 `vault-security` **21/21** 通过；以它运行完整拓扑再次 **16/16** 通过，退出码 0，容器、卷、网络及临时目录已清理。旧 `aster-vault:ci` 标签未更新；CI 工作流构建的是当前源码，托管结果见下一条。
 - 推送后的托管运行 40457199779 三个 job 全部通过：Node（检查、148 项测试、构建）、Go（`go test -race`、`go vet`）、最终镜像与凭据边界（受审 broker 构建含 MITM 全包、`Vault image regression passed: 21 checks`、四个镜像构建、`Topology acceptance passed: 16 checks`），与本机结果一致。
 - 托管 runner 暴露两处本机无法复现的 Compose 渲染差异：其版本在 `config --format json` 中省略 `bind.create_host_path: false`（仍保留空 `bind` 对象）。断言因此改为仅在渲染器显式报告 `true` 时失败；策略源文件在渲染前已写入，挂载本身未变。两次失败运行保留在历史中，不作为通过证据。
+- 记录上述结果的提交 9a4b098 再次触发托管运行 40457892602，三个 job 全部通过，仍为 148 项 Node 测试、`Vault image regression passed: 21 checks` 与 `Topology acceptance passed: 16 checks`。
 
 ### 2026-10-27 CI-05 可验证第一阶段
 
 - `deploy/agent-vault/broker/api_policy.go.in` 中的 Go YAML 类型与严格加载器为唯一策略 schema：`version: 1`、`rules`，规则精确绑定认证后的 vault、DNS host:port、method 与注入前 path。拒绝未知／重复字段、重复规则、多文档、通配符、非规范路径与超限输入。未配置或空规则默认拒绝；显式配置文件缺失／不可读／无效时启动失败。
 - 补丁在正式 `cmd/server.go` 加载策略快照，在 MITM `forwardRequest` 的凭据读取、替换、请求正文读取及上游 I/O 前逐次判定。单 vault 直连与多 vault router 复用该入口，不能靠改变客户端 hint 获得其他 vault 的规则。普通 HTTP、升级及常用 method/path override header 被拒绝。Compose 给 broker 只读挂载 `private/api-policy.yaml`，不自动创建缺失源路径；示例、运行说明与凭据注入 selector 的职责已区分。
 - 使用独立标签 `aster-vault:ci05` 完成本机构建，保留原 `aster-vault:ci` 供另一拓扑任务使用。构建的 Infisical 测试、真实 CONNECT/TLS 的 `TestReviewedAPI*` 及 MITM `go vet` 通过。操作正反覆盖允许的模型与 Telegram placeholder、错误方法、同域导出／token／echo 路径、百分号与双重编码、点段／斜线变体、override、upgrade、错误目标／端口、跨 vault 及 tunnel 复用；拒绝检查凭据解析和上游访问计数不变。上游旧 MITM 测试随后已适配新策略，见上一节最终构建记录。
-- `$env:VAULT_CI_IMAGE='aster-vault:ci05'; npm run test:vault-security` **21/21 本地通过**，包括真实最终镜像中单 vault 与多 vault agent hint 的允许／拒绝和上游访问计数、未配置／空规则默认拒绝、配置文件缺失／无效启动失败，以及原有 16 项取密、权限、日志、重定向与 TLS 回归。`npm run check`、三个 vault 脚本 `node --check` 和 `git diff --check` 通过。新增策略尚未有 GitHub 托管运行证据，也不以此代替完整 router／app／firewall 拓扑验收。
+- `$env:VAULT_CI_IMAGE='aster-vault:ci05'; npm run test:vault-security` **21/21 本地通过**，包括真实最终镜像中单 vault 与多 vault agent hint 的允许／拒绝和上游访问计数、未配置／空规则默认拒绝、配置文件缺失／无效启动失败，以及原有 16 项取密、权限、日志、重定向与 TLS 回归。`npm run check`、三个 vault 脚本 `node --check` 和 `git diff --check` 通过。此处记录的是当时的本机结果；托管证据见上一节的运行 40457199779。
 - 本阶段不约束获准路径的 query/body 参数语义、不检查或过滤响应，不承诺阻止获准接口回显认证值、派生 token 或任意编码。凭据回显仍是 CI-05 与生产准入阻塞；示例不是所有模型与工具接口的审核清单。真实服务联调、发布绑定与部署准入仍需后续完成。
