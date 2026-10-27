@@ -171,14 +171,22 @@ export function assertDistinctEnvironments(first: DeploymentEnvironment, second:
   const firstRange = ipv4Range(first.network.subnet)!;
   const secondRange = ipv4Range(second.network.subnet)!;
   if (rangesOverlap(firstRange, secondRange)) fail("ENVIRONMENT_RESOURCE_OVERLAP");
-  if (first.network.name !== undefined && first.network.name === second.network.name) fail("ENVIRONMENT_RESOURCE_OVERLAP");
+  // Compose derives "<project>_vault" when no name is set, so compare the effective name.
+  const networkName = (value: DeploymentEnvironment) => value.network.name ?? `${value.composeProject}_vault`;
+  if (networkName(first) === networkName(second)) fail("ENVIRONMENT_RESOURCE_OVERLAP");
   if (first.network.brokerAddress === second.network.brokerAddress) fail("ENVIRONMENT_RESOURCE_OVERLAP");
-  if (first.volumes.app === second.volumes.app || first.volumes.broker === second.volumes.broker) fail("ENVIRONMENT_RESOURCE_OVERLAP");
+  // Either role's volume is exclusive: a name reused across roles still points at one volume.
+  const firstVolumes = new Set([first.volumes.app, first.volumes.broker]);
+  if (firstVolumes.has(second.volumes.app) || firstVolumes.has(second.volumes.broker)) fail("ENVIRONMENT_RESOURCE_OVERLAP");
   if (first.broker.managementPort === second.broker.managementPort) fail("ENVIRONMENT_RESOURCE_OVERLAP");
-  if (first.privateDirectory === second.privateDirectory) fail("ENVIRONMENT_RESOURCE_OVERLAP");
+  // Host paths are compared case-insensitively: a case-variant pair is a possible alias on some
+  // filesystems, and rejecting it only asks the operator to pick clearly different directories.
+  const directory = (value: DeploymentEnvironment) => value.privateDirectory.replaceAll("\\", "/").replace(/\/+$/u, "").toLowerCase();
+  const firstDirectory = directory(first);
+  const secondDirectory = directory(second);
   // Relative files must not resolve to the same host path through aliased directories.
-  if (first.privateDirectory.startsWith(`${second.privateDirectory}/`)
-    || second.privateDirectory.startsWith(`${first.privateDirectory}/`)) fail("ENVIRONMENT_RESOURCE_OVERLAP");
+  if (firstDirectory === secondDirectory || firstDirectory.startsWith(`${secondDirectory}/`)
+    || secondDirectory.startsWith(`${firstDirectory}/`)) fail("ENVIRONMENT_RESOURCE_OVERLAP");
   // The same bot cannot serve two environments: long polling would split updates between them.
   if (first.identity.botId === second.identity.botId) fail("ENVIRONMENT_RESOURCE_OVERLAP");
 }

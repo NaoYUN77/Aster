@@ -125,6 +125,8 @@ test("two environments are distinct only when no host resource is shared", () =>
     (value) => { value.broker.managementPort = 15321; },
     (value) => { value.privateDirectory = "/srv/aster/test/private"; },
     (value) => { value.privateDirectory = "/srv/aster/test"; },
+    (value) => { value.privateDirectory = "/srv/aster/test/private/"; },
+    (value) => { value.privateDirectory = "/srv/aster/Test/Private"; },
     (value) => { value.identity.botId = "111111"; },
   ];
   for (const change of changes) {
@@ -136,6 +138,16 @@ test("two environments are distinct only when no host resource is shared", () =>
   const adjacent = production();
   adjacent.network = { name: "aster-production-vault", subnet: "172.30.83.0/24", brokerAddress: "172.30.83.2" };
   assert.doesNotThrow(() => assertDistinctEnvironments(parse(environment()), parse(adjacent)));
+  // A volume reused across roles still names one volume.
+  const crossed = production();
+  crossed.volumes = { app: "personal-agent-data", broker: "aster-test-app-data" };
+  assert.throws(() => assertDistinctEnvironments(parse(environment()), parse(crossed)), environmentCode("ENVIRONMENT_RESOURCE_OVERLAP"));
+  // An unnamed network gets the same Compose-derived name as an explicit one.
+  const derived = production();
+  derived.network = { subnet: "172.30.83.0/24", brokerAddress: "172.30.83.2" };
+  const explicit = environment();
+  explicit.network = { name: "aster-production_vault", subnet: "172.31.82.0/24", brokerAddress: "172.31.82.2" };
+  assert.throws(() => assertDistinctEnvironments(parse(explicit), parse(derived)), environmentCode("ENVIRONMENT_RESOURCE_OVERLAP"));
   // The same environment twice is never a valid comparison.
   assert.throws(() => assertDistinctEnvironments(parse(environment()), parse(environment())), environmentCode("ENVIRONMENT_RESOURCE_OVERLAP"));
 });
