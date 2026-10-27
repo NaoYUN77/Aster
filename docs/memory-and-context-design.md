@@ -1,6 +1,6 @@
 # Memory 与 Context 实施方案
 
-状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节），MEM-05 已实现可恢复的增量归档（结论见第 16 节），MEM-06 已实现原生压缩接入与周期快照切换（结论见第 17 节）；其余模块待实现。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
+状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节），MEM-05 已实现可恢复的增量归档（结论见第 16 节），MEM-06 已实现原生压缩接入与周期快照切换（结论见第 17 节），MEM-07 已完成组合接入并注册到运行中的 agent（结论见第 18 节）；MEM-08 待实施。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
 
 本轮是当前 MVP 之后的增量工作，不表示这些能力已经上线。现有运行范围见 [mvp.md](mvp.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.3.0 为准。
 
@@ -32,9 +32,9 @@
 
 当前应用通过 `root.configure({ instructions })` 设置系统提示，将原文提交给 root Conversation；底座派生消息、执行工具并自动压缩。`workspace/MEMORY.md` 仍由模型通过文件工具读取和按用户明确要求更新。
 
-尚未接入：宿主记忆投影、归档任务与原生检索工具。归档 module 与原生 Task 已由 MEM-05 实现并独立验证，尚未在运行入口注册。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`；每日记忆的文件协议已由 MEM-04 实现（`src/memory/daily.ts`），其余未落地的名字仍是拟议应用接口，不是底座现有 API。
+宿主记忆投影、归档任务与原生检索工具已由 MEM-07 接入运行入口（第 18 节）。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`；每日记忆的文件协议已由 MEM-04 实现（`src/memory/daily.ts`）。
 
-按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。MEM-05 实现了独立可恢复的增量归档 Task（`archive.ts`、`archive-task.ts`）。MEM-06 实现了 compaction Adapter、周期切换确认与轮数评估（`src/memory/compaction.ts`）。这些 module 都还没有接入运行中的 agent：组合入口与原生检索工具仍待 MEM-07 完成。
+按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。MEM-05 实现了独立可恢复的增量归档 Task（`archive.ts`、`archive-task.ts`）。MEM-06 实现了 compaction Adapter、周期切换确认与轮数评估（`src/memory/compaction.ts`）。MEM-07 实现了组合入口（`src/memory/integration.ts`）与原生检索工具（`src/memory/memory-tools.ts`），并已在 `src/agent.ts` 注册：记忆能力已接入运行中的 agent，真实模型质量与缓存命中仍待 MEM-08 验证。
 
 底座现有接入能力：
 
@@ -584,7 +584,57 @@ hook 内顺序固定：派生稳定 key → 查已保存结果 → 读边界状�
 - **云端缓存命中**：待验证。逻辑块相同（指纹相同）只说明本地字节相同，不等于提供商缓存命中；TTL、缓存粒度与计费须在目标提供商实测（第 10 节）。测试与代码中不以任何形式宣称已命中。
 - 真实窗口下的阈值标定与资源占用：待 MEM-08。本节的窗口数字是派生关系的验证，不是部署标定。
 
-## 18. 实施入口与发布判定
+## 18. MEM-07 实现结论与接入语义
+
+> 证据：`test/memory-integration.test.ts`，共 15 个用例（07-A～07-G 与组合接缝），全部跑在真实 `Harness` + Node SQLite + faux provider 上：其一经 `openAgent` 完整应用入口，其二经组合入口的 raw 装配（与 `agent.ts` 相同的注册方式）。验证命令与结果见实施 issues 的 MEM-07 交接记录。本节结论覆盖：组合入口 Interface、配置与错误映射、首次升级、检索预算与关闭语义。
+
+### 18.1 冻结位置
+
+| 内容 | 权威来源 |
+| --- | --- |
+| 组合入口 Interface（构造、扩展注册、生命周期方法、日志事件形状） | `src/memory/integration.ts` 文件头 |
+| `memory_search`／`memory_read` 的参数、结果、预算与错误语义 | `src/memory/memory-tools.ts` 文件头 |
+| 配置 schema 与有效范围（`MEMORY_*` 环境变量） | `src/config.ts` 的 `readMemoryConfig` |
+| agent 的组合方式（只经组合入口接入，不改动既有请求契约） | `src/agent.ts` |
+| 验收 | `test/memory-integration.test.ts`（07-A～07-G） |
+
+### 18.2 组合与生命周期顺序
+
+- 扩展注册顺序固定为 working 工具、检索工具、压缩 Adapter、归档 Task（`extensions()`）。检索与 working 工具在 MCP 适配之前注册，四个记忆工具名因此先于 MCP 工具名被保留；`settings.compaction` 由 `nativeCompactionPolicy(budget, reserve, 模型窗口)` 派生，不再使用 MEM-07 之前的固定值。窗口与预算关系非法时启动期以 `ConfigurationError` 失败，而不是运行到请求期才发现。
+- `initialize()` 先写首次升级迁移记录（文档家族 `personal.memory.upgrade`，键 `v1`），再以当前链尾为 archive origin 初始化归档，随后执行一次补扫；已经存在的迁移记录与归档状态使整个初始化成为无副作用重放。升级的完整语义见 18.6。
+- 每个请求按持久化事实分类：原回执已完成 → `replay`（不做任何投影、模型或归档工作）；原回执未终结 → `recover`（交回底座续跑原输入，组合层同样不介入）；新请求 → 补扫、投影复用检查、规划、投影或压缩、提交输入。投影复用按 `memory:projection:<requestId>` 的持久化写入决定：未被消费的投影原样复用（规划器版本变化也不重算），已消费的回执说明请求已经处理过。投影的实际写入顺序由第 12 节验证的底座规则保证，组合层不另设回执。
+- `afterRequest()` 只在请求完成回执落库后调用：记轮数、评估（窗口与评估间隔都来自配置）、需要时 `root.compact()` 触发原生压缩、再执行补扫。重置经组合入口 `resetConversation()`：先重置底座，再在新链上重新投影边界 B。
+- 错误映射：组合层把 `MemoryError` 翻译为带 `MEMORY_*` 应用码与冻结 cause 的错误，`agent.ts` 对 `MEMORY_*` 码原样透传（不包成 `AGENT_SESSION_FAILED`）；底座状态错误继续走既有 Session 失败与恢复退出路径。启动期时区与归档游标冲突（`revision-conflict`）映射为 `ConfigurationError`，其余启动期记忆错误带 `MEMORY_*` 码失败。规划拒绝（`planRequest` 的错误决定）以 `MEMORY_BUDGET_EXCEEDED` 抛出且请求不被 admission。
+- `MEMORY_ENABLED=0` 时应用与 MEM-07 之前逐项一致：不注册任何记忆扩展、不改压缩设置、不做投影与归档（07-F 的 disabled 用例逐项断言）。这是整套能力的回滚开关。
+
+### 18.3 facts 的接线取值
+
+本应用传入压缩 Adapter 的 facts 固定为：`instructionsDigest` 取配置 instructions 的 SHA-256 前 32 位十六进制；`memoryDigest` 取 `null`。理由：`MEMORY.md` 从不被载入 B——它由模型在每次请求中经文件工具读入 C——因此 B 没有可失效的 memory 版本；若把文件内容摘要放进 facts，任何一次「记住／忘记」编辑都会无谓地作废当前周期。宿主若把长期事实载入 B，必须提供真实摘要。facts 变化时优先走规划压缩（新 B 由原生压缩采用新 facts）；当没有可压缩内容（`compactableTokens == 0`、冻结规划器按设计拒绝）时，组合层执行一次显式周期重启：`root.reset()` 后在新链上投影边界 B，日志记为 `facts-restart`，而不是让后续请求永久失败。07-B/11 用例覆盖两条路径的分界与结果（新 B 的 `instructionsDigest` 为新版摘要、旧周期以 `pi.reset` 结束）。
+
+### 18.4 检索工具语义
+
+- 绑定：宿主在构造时绑定 Daily store 根目录（第 3 节的 `DATA_DIR/memory/daily`）与预算；工具执行时从 `api` 取得当前 Conversation、根目录身份与信号。结果条目携带 segment 的 `date` 与 `id`（来源）与 Charter section；分页游标是不透明字符串 `mc1.` + Daily 游标的 base64url，且同时出现在结果正文中（模型只能使用它看得见的值）。
+- 预算：单次结果上限取 `searchResultTokens`；单请求累计上限取 `requestSearchTokens`，按**持久化事实**重算——每个记忆工具的工具结果 Entry 都计入当前请求 user Entry 之后的结果 token 总和，重启后仍准确，不依赖内存计数（07-C 累计用例跨重启验证）。超出累计上限返回 `MEMORY_BUDGET_EXCEEDED` 的错误结果而不是截断到无提示。单个命中超过剩余份额时截断并显式标注 `truncated`；游标取「第一个未完整返回的命中」的重跑游标（有界重跑实现，与 Daily 游标的可重入语义一致）。
+- 零命中是成功结果，带 `scannedFrom`、`unread` 与 `available`（扫描边界与预算余量）；损坏的每日文件是 `MEMORY_CORRUPT_STATE` 错误结果，与零命中、文件缺失（目标日期无文件 → 「不存在」成功结果）三种语义互不混淆；未知/非 `MemoryError` 异常继续抛出。工具结果作为普通 native tool result 进入 C，不改变任何持久状态。
+- `workingInContext` 只由已记录的投影与快照 baseline 判定，绝不解析工具结果正文（第 14.5 节接缝的组合层实现）：`working_update` 落库后、下一次修订投影写入前，同版 working 可能以修订形式与 B 并存一次——内容相同、有界、无语义影响，记为已知冗余而非缺陷（第 18.7 节）。
+
+### 18.5 归档触发与确认的补扫
+
+补扫在启动与每个请求边界执行，全部来自持久化事实（不持有内存游标）：枚举原生 `pi.compaction` Task（上限 40 条），对终结者调用 `confirmCompactionCycle`，只对 `switched` 且归档范围非空者 `requestArchive`，随后 `reconcileArchive` 循环至多 32 轮把待处理范围推完。补扫是 best-effort：单个任务的 `MemoryError` 只记录安全错误码，不使请求失败（07-D：提取模型持续故障时归档失败状态被持久化、游标不前进，聊天与回复照常完成，原请求重放不产生任何新工作）；非 `MemoryError`（底座状态失败）继续抛出走 Session 路径。归档与聊天解耦的另一面：归档 Task 的完成与失败都不进入请求回执，投递重放只依赖原回执（07-D 与既有 inbox 用例）。
+
+### 18.6 首次升级与关闭
+
+- 升级（07-E）：已有 SQLite、旧原生 compaction（无 Adapter 的原生摘要）、非空 `MEMORY.md` 与未完成的工具调用在首次以 MEM-07 启动时全部保留：原生摘要 Entry 保持 narrative 来源，旧每日事实仍可经检索工具读到，未完成请求按原输入续跑并以原 requestId 完成；`MEMORY.md` 内容逐字不变。origin 冻结在升级时刻的链尾，归档从不回填 origin 之前的历史（升级用例断言归档范围为空、每日目录无新文件；更早的压缩范围同样不会被补扫提供给归档，因为 `archivedThrough` 从 origin 起步）。已有 `memory/daily` 文件被视为归档事实的一部分，不迁移、不改写。
+- 关闭（07-F）：`integration.close()` 只停止新的记忆工作（后续 `prepareRequest` 以 `MEMORY_CANCELLED` 拒绝），不取消、不改写任何已持久化的 Task、计数或归档状态；进程关闭后重开，计数、归档游标与待确认切换都从持久化状态继续。底座 Task 的实际 I/O 由 Harness 关闭负责，组合层不另造停止语义。
+
+### 18.7 未验证项
+
+- 真实模型的摘要与事件提取质量、真实窗口下阈值标定、目标提供商云端缓存命中：沿用第 17.7 节结论，待 MEM-08，本节不宣称通过。本地前缀指纹只证明字节身份。
+- Telegram 层没有 `/reset` 命令：显式重置能力在组合层（`app.reset()`）与 07-B 用例中验证，未接 Telegram 命令面。
+- 检索累计预算在单请求内的扫描上限为 1,000 条工具结果 Entry；超过时按已扫描部分计数（病理量级，正常请求不可达），未单独构造用例。
+- working 同版冗余（18.4）与「摘要已持久化未发布」崩溃窗口的复用（17.7）维持既有结论，本节没有新增端到端场景。
+
+## 19. 实施入口与发布判定
 
 按 [实施 issues](memory-implementation-issues.md) 的依赖顺序执行。先完成公开 API 可行性和 Interface 契约，再并行实现 Working、Context、Daily Memory；最后接入底座与应用并做故障恢复验收。
 
