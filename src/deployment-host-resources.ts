@@ -55,8 +55,13 @@ export interface HostCheckResult {
 
 export function checkHostResources(options: HostCheckOptions): HostCheckResult {
   const environment = options.environment;
-  if (run(["ps", "--all", "--filter", `label=com.docker.compose.project=${environment.composeProject}`, "--format", "{{.ID}}"])
-    .stdout.trim() !== "") throw new HostResourceError("PROJECT_CONFLICT");
+  const containers = (runningOnly: boolean) => run(["ps", ...(runningOnly ? [] : ["--all"]),
+    "--filter", `label=com.docker.compose.project=${environment.composeProject}`, "--format", "{{.ID}}"]).stdout.trim();
+  // A first install owns nothing yet. An update reuses the project's own containers, but they must
+  // be stopped: the caller stops writers before preflighting the volumes they are about to replace.
+  if (options.volumes === "absent" ? containers(false) !== "" : containers(true) !== "") {
+    throw new HostResourceError("PROJECT_CONFLICT");
+  }
 
   const expected = [environment.volumes.app, environment.volumes.broker];
   for (const name of expected) {
