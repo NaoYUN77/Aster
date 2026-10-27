@@ -16,6 +16,10 @@ import { composeEnvironment } from "../src/deployment-environment-check.js";
 
 const checkout = fileURLToPath(new URL("../", import.meta.url));
 const cli = fileURLToPath(new URL("../src/deployment-environment-check.ts", import.meta.url));
+// Rendering is Compose's own output, so these tests need a real Compose binary. A machine without
+// one reports an explicit skip instead of a pass.
+const compose = spawnSync("docker", ["compose", "version"], { encoding: "utf8", timeout: 30_000 });
+const requiresCompose = { skip: compose.error !== undefined || compose.status !== 0 ? "Docker Compose is unavailable" : false };
 
 function environment(overrides: Partial<DeploymentEnvironment> = {}): DeploymentEnvironment {
   return {
@@ -183,7 +187,7 @@ test("the router configuration must point at this environment's broker", () => {
     reject("ROUTER_DUPLICATE_KEY"));
 });
 
-test("a rendered project must match the description in every host-visible resource", async (t) => {
+test("a rendered project must match the description in every host-visible resource", requiresCompose, async (t) => {
   const privateDirectory = await mkdtemp(join(tmpdir(), "aster-private-"));
   t.after(() => rm(privateDirectory, { recursive: true, force: true }));
   await Promise.all(["vault.env", "app.env", "app.router.env", "api-policy.yaml", "ca.pem", "telegram-owner-id"]
@@ -251,7 +255,7 @@ test("a rendered project must match the description in every host-visible resour
   assert.deepEqual(check(loopback.stdout, { managementLoopback: true }).status, "render-matches-environment");
 });
 
-test("CLI reports fixed codes without echoing paths, values or environment contents", async (t) => {
+test("CLI reports fixed codes without echoing paths, values or environment contents", requiresCompose, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "aster-env-cli-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const marker = "DO_NOT_PRINT_SYNTHETIC_SECRET";
