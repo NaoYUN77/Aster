@@ -8,7 +8,7 @@
 
 本文件记录当前 MVP 的范围和设计，具体功能决策不写入仓库级 CLAUDE.md。
 
-后续的三块上下文、working memory 和每日记忆归档见 [Memory 与 Context 实施方案](memory-and-context-design.md)，任务拆分见 [实施 issues](memory-implementation-issues.md)。这些能力尚未接入运行中的 agent；MEM-01 冻结了数据契约，MEM-02 实现了 Working Module 与原生工具，MEM-03 实现了纯 Context 规划与快照渲染，MEM-04 实现了每日 Markdown 的发布与检索，MEM-05 实现了可恢复增量归档任务，但均未在组合入口注册。本文仍描述当前 MVP。
+后续的三块上下文、working memory 和每日记忆归档见 [Memory 与 Context 实施方案](memory-and-context-design.md)，任务拆分见 [实施 issues](memory-implementation-issues.md)。MEM-01～MEM-07 已全部完成：数据契约、Working Module、Context 规划与快照渲染、每日 Markdown 发布与检索、可恢复增量归档、原生压缩接入均已实现，并已由 MEM-07 在组合入口注册到运行中的 agent（`memory_search`／`memory_read`／`working_get`／`working_update` 工具、周期快照投影、归档触发与 `MEMORY_*` 配置，`MEMORY_ENABLED=0` 可整体关闭）。本文仍描述 MVP 基线范围；记忆系统的实际状态以实施方案第 18 节为准，其中真实模型质量与缓存命中尚未验证（MEM-08）。
 
 ## 当前范围
 
@@ -34,7 +34,7 @@
 
 长期记忆与会话历史是不同的数据：长期记忆存放在独立文件，会话和恢复状态使用底座自身机制。不能用一个记忆文件替代执行日志。
 
-长期记忆仅保存用户要求记住的事实，不把每条聊天自动追加为记忆。没有记忆文件时按空记忆处理；其他读取失败必须显式报告。偏好文件 PREFERENCE、自动偏好提取、向量检索及复杂记忆分层不在本次范围。
+长期记忆仅保存用户要求记住的事实，不把每条聊天自动追加为记忆。没有记忆文件时按空记忆处理；其他读取失败必须显式报告。偏好文件 PREFERENCE、自动偏好提取、向量检索不在本次范围。MEM-07 接入的分层记忆（working 状态、周期快照、每日事件归档）是独立于 `MEMORY.md` 的增量能力：每日归档只从已确认的会话范围提取事件，不改变 `MEMORY.md` 的写入语义；其范围与状态见实施方案。
 
 运行目录必须持久化。底座使用 Node 内置 SQLite 保存会话和执行状态，接入与投递使用独立 SQLite 文件；无需数据库服务。部署更新不能覆盖记忆、会话和消息处理状态。
 
