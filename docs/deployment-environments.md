@@ -21,7 +21,7 @@
 
 - `schemaVersion: 1`、`kind: "aster.deployment-environment"`；未知字段被拒绝。
 - `environment` 只能是 `test` 或 `production`。
-- `composeProject` 是小写 Docker 项目名；`volumes.app`／`volumes.broker` 与 `network.name` 是显式资源名，不由 Compose 从项目名派生。
+- `composeProject` 是小写 Docker 项目名；`volumes.app`／`volumes.broker` 是显式卷名，不由 Compose 从项目名派生；`network.name` 可选，省略时用 Compose 派生的 `<project>_vault`。
 - `network.subnet` 必须是 IPv4 网段，前缀 `/8`–`/30`；`network.brokerAddress` 必须在网段内，且不能是网络或广播地址。只支持 IPv4：防火墙规则、router 上游与 broker 地址都是 IPv4 字面量。
 - `broker.managementPort` 是 broker 容器内监听端口，默认不发布到宿主；需要宿主访问时叠加 `docker-compose.management-loopback.yml`，只绑定 `127.0.0.1`。
 - `privateDirectory` 是目标机上的绝对路径，不允许 `..` 段。`privateFiles` 是相对于它的路径，不能是绝对路径、不能含 `..` 或结尾斜线，同一环境内不得重复；这样一份描述只能读取自己的私有目录。
