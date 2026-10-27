@@ -1,0 +1,13 @@
+# Opt-in management access for docker-compose.agent-vault.yml.
+#
+# The default deployment publishes no management port: the broker listens inside its own
+# container network and is reachable only through an SSH forward to the host loopback. Add this
+# file only when a host-side tool needs the broker management API directly, and only on the host
+# loopback address. The render check rejects a non-loopback host address for this service.
+#
+#   docker compose -f docker-compose.agent-vault.yml \
+#     -f docker-compose.management-loopback.yml config
+services:
+  agent-vault:
+    ports:
+      - "127.0.0.1:${ASTER_BROKER_MANAGEMENT_PORT:-14321}:${ASTER_BROKER_MANAGEMENT_PORT:-14321}"

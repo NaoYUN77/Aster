@@ -2,6 +2,8 @@
 
 这些入口实现 CI-07 的一部分：主机基线、停止写入后的卷元数据检查与整卷备份。发布验签、真实 Infisical 最小权限、生产业务验收和 CD 仍未实现，参见 [实施计划](../../docs/ci-cd-implementation-plan.md)。所有成功结果保留 `productionAdmission: "not-evaluated"`。
 
+同一主机上的 `test`／`production` 资源隔离、环境描述格式与检查命令见 [部署环境描述](../../docs/deployment-environments.md)。
+
 ## 主机准备
 
 目标为 Linux x86_64，资源基线见 [CLAUDE.md](../../CLAUDE.md)。目标机只需 Docker 和常见 Linux 命令，不安装 Node 或 Go。检查、备份通过镜像中的 Node 与 SQLite 执行。

@@ -1,4 +1,6 @@
 # Multi-vault override for docker-compose.agent-vault.yml only. Requires Compose >=2.24.4.
+# The upstream broker endpoint must match the environment's ASTER_BROKER_ADDRESS/port; the
+# render check compares the router's upstream_proxy against the same description.
 services:
   tool-network:
     environment:
@@ -10,7 +12,7 @@ services:
       tool-network: { condition: service_healthy }
       agent-vault: { condition: service_healthy }
     volumes:
-      - ./deploy/agent-vault/private/router:/etc/aster-router:ro
+      - ${ASTER_PRIVATE_DIR:-./deploy/agent-vault/private}/router:/etc/aster-router:ro
     user: "1001:1001"
     read_only: true
     cap_drop: ["ALL"]
@@ -25,6 +27,6 @@ services:
       options: { max-size: "10m", max-file: "3" }
   personal-agent:
     env_file: !override
-      - ./deploy/agent-vault/private/app.router.env
+      - ${ASTER_PRIVATE_DIR:-./deploy/agent-vault/private}/app.router.env
     depends_on:
       egress-router: { condition: service_started }

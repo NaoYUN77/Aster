@@ -83,6 +83,12 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 
 回滚需区分镜像与数据兼容性；失败可以停止推进，不能自动恢复旧数据库备份冒充无损回滚。
 
+## 同机测试与生产隔离
+
+`test` 与 `production` 共用一份业务 Compose，由各自的版本化环境描述区分项目名、卷、网络名／网段、broker 地址、管理端口与私有目录。描述只含标识与资源名，不含凭据；宿主私有文件按环境分开。`npm run deployment:environment` 提供渲染核对、router 配置核对、只读宿主资源冲突检查与跨环境重叠检查，失败码固定且不回显路径或值。字段与用法见 [部署环境描述](deployment-environments.md)。
+
+已实现的是配置与离线／只读检查；测试实例启停／重置、合成生产哨兵演练、两环境真实 Linux 并行证据与真实 bot／Infisical 身份核对尚未实现，不能把渲染通过当作隔离已验收。
+
 ## 实施任务与进度
 
 | 编号 | 交付 | 完成条件 | 状态 |
@@ -90,8 +96,8 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 | CI-01 | 方案保存、来源及验收边界 | 本文、README 入口 | 已完成 |
 | CI-02 | broker 固定来源与补丁 | 真实客户端重定向／错误日志回归通过 | 已完成 |
 | CI-03 | Linux 基础 CI | Node check/test/build，Go race/vet，文件失败测试修正 | 已完成（本地与托管均通过） |
-| CI-04 | 完整最终镜像拓扑 | 临时资源、业务链路、恢复及内核网络拒绝用例 | 原 16 项本机与托管均通过；新增 CI-07 演练后 18 项本机通过，待托管复验 |
-| CI-05 | API 策略执行 | schema、正式执行路径及正反用例 | 第一阶段已实现，最终镜像本机与托管 21/21；原拓扑 16/16 托管通过，新增演练后 18/18 本机通过；响应回显防护仍阻塞准入 |
+| CI-04 | 完整最终镜像拓扑 | 临时资源、业务链路、恢复及内核网络拒绝用例 | 18/18 本机与托管均通过（托管运行 40493637513） |
+| CI-05 | API 策略执行 | schema、正式执行路径及正反用例 | 第一阶段已实现，最终镜像本机与托管 21/21，拓扑 18/18 托管通过；响应回显防护仍阻塞准入 |
 | CI-06 | 发布与供应链验证 | 同产物扫描、签名、发布清单 | 待实现 |
 | CI-07 | 部署预检与 CD | 真实最小权限、卷保护、备份更新与业务检查 | 离线发布绑定、卷元数据预检及整卷备份已实现；本地演练与目标机准备见下文，真实准入与 CD 待实现 |
 
@@ -156,3 +162,11 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 - 独立检查发现 Docker 会在首次挂载空命名卷时从镜像复制内容，即使挂载只读。所有备份／预检来源挂载增加 `volume-nocopy`。专项实测以含合成标记的镜像作正控，确认普通只读挂载会复制；备份使用修复后挂载时拒绝空源卷且两个源卷仍为空。该专项和拓扑演练的临时容器／卷均已清理。
 - 工作流已接入 Linux 卷权限、只读 WAL 回归及 Docker 主机完整演练入口。首轮推送 `86908a6` 的托管运行 [40492198704](https://github.com/NaoYUN77/Aster/actions/runs/40492198704) 中 Node、Go、broker 21 项回归、Linux 卷预检 11 PASS／1 显式 SKIP，以及独立 WAL 1/1 均通过；完整拓扑因外层运维容器使用 UID 0 且移除能力，无法访问非 root runner 创建的 0700 临时目录，在 `mkdtemp` 处报 EACCES。入口改为复用调用者 UID／GID、补入 socket 组 ID，并把 HOME 放入同一私有可写目录，不放宽目录权限。修正后以本地 Linux UID 1001／GID 1001、socket 补充组运行完整入口，**18/18 通过**；完整托管结果待修正后复验。
 - CI-06、真实身份权限和 API 响应边界、目标机业务联调、签名交付与生产 CD 仍未完成；所有预检结果保留 `productionAdmission: "not-evaluated"`。
+
+### 2026-10-27 阶段 A 配置与校验基础（PR A1）
+
+- 新增版本化环境描述（`aster.deployment-environment` v1）与 `npm run deployment:environment`（`render`／`router`／`host`／`compare`）。描述是项目名、卷、网络名／网段、broker 地址、管理端口与私有目录的唯一权威；Compose、`network.sh` 与 router 上游都从同一组值派生。
+- `docker-compose.agent-vault.yml` 的宿主可见资源改为 `ASTER_*` 插值，默认值保持现有生产部署不变；broker 管理端口默认改为不发布（仅 `expose`），需要宿主访问时叠加新的 `docker-compose.management-loopback.yml`，只绑定 `127.0.0.1`。`network.sh` 在使用 `iptables` 前校验 broker 地址与端口；router 目录随私有目录参数化。
+- `render` 用描述派生插值后重新解析 `docker compose config --format json`，逐项核对项目、卷、网络、broker 地址、管理端口、私有文件确切挂载与 UID／只读／capabilities 边界；`host` 只读查询 Docker 报告项目、卷、网络与端口冲突。全部失败只返回固定码，不回显路径或渲染值。
+- 本机（Windows + Docker Desktop linux/amd64）`npm run check`、`npm run build` 通过；`npm test` 167 项中 156 PASS、11 显式 SKIP（与既有 POSIX／Docker 编排用例相同）；`npm run test:topology -- --render-only` 通过。新增 7 项环境测试包含真实 Compose 渲染与篡改拒绝，未使用真实凭据、私有配置或生产卷。
+- 尚未实现：测试实例启停／重置、合成生产哨兵隔离演练、两环境真实 Linux 并行运行证据、真实 bot／Infisical 身份与凭据作用域核对。阶段 A 与 issue #18 均未完成；本记录不代表生产准入。
