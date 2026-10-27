@@ -87,6 +87,11 @@ test("a description is accepted only with canonical, self-consistent resources",
     environmentCode("ENVIRONMENT_UNSUPPORTED_NETWORK"));
   assert.throws(() => parse({ ...environment(), network: { ...environment().network, subnet: "172.0.0.0/7" } }),
     environmentCode("ENVIRONMENT_UNSUPPORTED_NETWORK"));
+  // A host-private entry must stay inside the environment's own directory.
+  for (const ca of ["/etc/passwd", "../vault.env", "a/../../b", ".", "..", "", "router/"]) {
+    assert.throws(() => parse({ ...environment(), privateFiles: { ...environment().privateFiles, ca } }),
+      environmentCode("ENVIRONMENT_INVALID_SCHEMA"), ca);
+  }
 });
 
 test("the checked-in examples parse and describe two distinct environments", async () => {

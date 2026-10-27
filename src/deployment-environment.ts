@@ -20,6 +20,13 @@ const NetworkName = Type.String({ minLength: 2, maxLength: 63, pattern: "^[a-z0-
 const PrivateDirectory = Type.String({ minLength: 2, maxLength: 512, pattern: "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|/)\\.\\.(?:/|$)).+$" });
 const Ip = Type.String({ minLength: 7, maxLength: 45 });
 const Port = Type.Integer({ minimum: 1, maximum: 65535 });
+// A host-private entry is relative to privateDirectory: absolute paths and `..` segments would
+// read outside the environment's own directory and alias another environment's material.
+const PrivatePath = Type.String({
+  minLength: 1,
+  maxLength: 255,
+  pattern: "^(?!\\.{1,2}$)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+});
 
 export const EnvironmentSchema = Type.Object({
   schemaVersion: Type.Literal(1),
@@ -45,13 +52,13 @@ export const EnvironmentSchema = Type.Object({
   privateDirectory: PrivateDirectory,
   // Host-private paths are relative to privateDirectory so one environment cannot alias another.
   privateFiles: Type.Object({
-    vaultEnv: Type.String({ minLength: 1, maxLength: 255 }),
-    appEnv: Type.String({ minLength: 1, maxLength: 255 }),
-    appRouterEnv: Type.String({ minLength: 1, maxLength: 255 }),
-    apiPolicy: Type.String({ minLength: 1, maxLength: 255 }),
-    ca: Type.String({ minLength: 1, maxLength: 255 }),
-    telegramOwnerId: Type.String({ minLength: 1, maxLength: 255 }),
-    routerDirectory: Type.String({ minLength: 1, maxLength: 255 }),
+    vaultEnv: PrivatePath,
+    appEnv: PrivatePath,
+    appRouterEnv: PrivatePath,
+    apiPolicy: PrivatePath,
+    ca: PrivatePath,
+    telegramOwnerId: PrivatePath,
+    routerDirectory: PrivatePath,
   }, { additionalProperties: false }),
   // The numeric Telegram bot user ID is an identifier, not a credential. Declaring it lets the
   // offline check reject two environments that consume the same bot; the live check (Stage A2)
