@@ -54,7 +54,7 @@ npm run deployment:environment -- <command> [options]
 
 - 项目名、两个卷的显式名称、网络名与唯一子网、broker 的 `ipv4_address`。
 - broker 入口脚本中的管理端口，以及管理端口默认不发布；叠加回环 override 后必须只发布在 `127.0.0.1` 且端口一致。任何其他已发布端口被拒绝。
-- 私有目录：CA、策略、owner 文件与 router 目录必须从描述指定的确切路径挂载；私有目录内的其他 bind 源被拒绝；私有目录必须已存在（缺失时 Compose 会创建目录并挂载空文件）。
+- 私有目录：CA、策略、owner 文件与 router 目录必须从描述指定的确切路径挂载；私有目录内的其他 bind 源被拒绝；私有目录与本次用到的私有文件／目录必须已存在（缺失时 Compose 会创建目录并挂载空文件，或直接拒绝渲染）。
 - 边界不回退：app `1000:1000`、共享 `tool-network` 命名空间、只读根、`cap_drop: ALL`；`tool-network` 只读且仅 `NET_ADMIN`；router `1001:1001`；`tool-network` 收到的 broker 地址与描述一致。
 
 ## 失败码
