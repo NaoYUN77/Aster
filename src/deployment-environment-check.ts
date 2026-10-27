@@ -91,6 +91,14 @@ async function render(values: Record<string, unknown>): Promise<unknown> {
     // would either fail on the missing env file or create a directory for a missing bind source
     // and mount an empty secret file. Check before rendering so the failure names the directory.
     if (!existsSync(privateDirectory)) throw new DeploymentRenderError("RENDER_PRIVATE_DIRECTORY_MISMATCH");
+    // The env files are not part of the rendered project, but Compose refuses to render without
+    // them; a missing one is a description/directory mismatch, not an unreadable render.
+    const files = environment.privateFiles;
+    const required = [files.vaultEnv, files.appEnv, files.apiPolicy, files.ca, files.telegramOwnerId,
+      ...(routerEnabled ? [files.appRouterEnv, files.routerDirectory] : [])];
+    if (required.some((relative) => !existsSync(join(privateDirectory, relative)))) {
+      throw new DeploymentRenderError("RENDER_PRIVATE_DIRECTORY_MISMATCH");
+    }
     // The generated env file carries only non-secret resource names; the description is the source.
     const envFile = join(directory, "environment.env");
     const assignments = composeEnvironment(environment, privateDirectory);
