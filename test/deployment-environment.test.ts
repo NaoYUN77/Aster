@@ -245,7 +245,7 @@ test("CLI reports fixed codes without echoing paths, values or environment conte
   const marker = "DO_NOT_PRINT_SYNTHETIC_SECRET";
   const path = join(directory, "environment.json");
   await writeFile(path, JSON.stringify({ ...environment(), privateDirectory: `/srv/${marker}` }));
-  await writeFile(join(directory, "valid.json"), JSON.stringify(environment()));
+  await writeFile(join(directory, "absent-dir.json"), JSON.stringify({ ...environment(), privateDirectory: join(directory, "absent") }));
   await writeFile(join(directory, "broken.json"), `{ ${marker}`);
   const run = (argv: string[]) => spawnSync(process.execPath, ["--import", "tsx", cli, ...argv], {
     cwd: checkout, encoding: "utf8", timeout: 60_000,
@@ -259,7 +259,7 @@ test("CLI reports fixed codes without echoing paths, values or environment conte
   assert.equal(JSON.parse(broken.stderr).code, "ENVIRONMENT_INVALID_JSON");
   assert.equal(broken.stderr.includes(marker), false);
   // A private directory that does not exist would make Compose mount an empty secret file.
-  const absent = run(["render", "--environment", join(directory, "valid.json"), "--private-dir", join(directory, "absent")]);
+  const absent = run(["render", "--environment", join(directory, "absent-dir.json")]);
   assert.equal(absent.status, 1);
   assert.equal(JSON.parse(absent.stderr).code, "RENDER_PRIVATE_DIRECTORY_MISMATCH");
   assert.equal(absent.stderr.includes(marker), false);

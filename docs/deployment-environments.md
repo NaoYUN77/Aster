@@ -39,7 +39,7 @@ npm run deployment:environment -- <command> [options]
 
 | 命令 | 作用 |
 | --- | --- |
-| `render --environment <file> [--private-dir <绝对路径>] [--router] [--management-loopback]` | 用描述派生全部 `ASTER_*` 插值，渲染 Compose 并逐项核对 |
+| `render --environment <file> [--router] [--management-loopback]` | 用描述派生全部 `ASTER_*` 插值，渲染 Compose 并逐项核对 |
 | `router --environment <file> --config <file> [--broker-port <port>]` | 核对将要挂载的 router 配置指向本环境的 broker |
 | `host --environment <file> [--volumes absent\|present\|any] [--management-loopback]` | 只读查询 Docker，报告宿主资源冲突 |
 | `compare --first <file> --second <file>` | 拒绝会在同一主机上冲突的两个环境 |

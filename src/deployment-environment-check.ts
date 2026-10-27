@@ -28,7 +28,7 @@ import { checkRouterConfig, RouterConfigError } from "./deployment-router.js";
  */
 const help = `Usage: npm run deployment:environment -- <command> [options]
 
-  render --environment <file> [--private-dir <absolute>] [--router] [--management-loopback]
+  render --environment <file> [--router] [--management-loopback]
   router --environment <file> --config <file> [--broker-port <port>]
   host   --environment <file> [--volumes absent|present|any] [--management-loopback]
   compare --first <file> --second <file>
@@ -82,7 +82,7 @@ function renderFiles(managementLoopback: boolean, routerEnabled: boolean): strin
 
 async function render(values: Record<string, unknown>): Promise<unknown> {
   const environment = await readEnvironment(requireValue(values, "environment"));
-  const privateDirectory = resolve(typeof values["private-dir"] === "string" ? values["private-dir"] : environment.privateDirectory);
+  const privateDirectory = environment.privateDirectory;
   const routerEnabled = values.router === true;
   const managementLoopback = values["management-loopback"] === true;
   const directory = await mkdtemp(join(tmpdir(), "aster-environment-"));
@@ -139,7 +139,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const { values, positionals } = parseArgs({
       options: {
-        environment: { type: "string" }, config: { type: "string" }, "private-dir": { type: "string" },
+        environment: { type: "string" }, config: { type: "string" },
         "broker-port": { type: "string" }, router: { type: "boolean" }, "management-loopback": { type: "boolean" },
         volumes: { type: "string" }, first: { type: "string" }, second: { type: "string" }, help: { type: "boolean" },
       },
