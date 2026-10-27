@@ -112,7 +112,9 @@ async function render(values: Record<string, unknown>): Promise<unknown> {
       // Inherited ASTER_* values would silently override the env file.
       env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("ASTER_") && !key.startsWith("COMPOSE_"))),
     });
-    if (result.error || result.status !== 0) throw new DeploymentRenderError("RENDER_INVALID_JSON");
+    // Compose refusing to render is not the same as rendering a project that disagrees with the
+    // description; keep the two apart so the operator knows which side to inspect.
+    if (result.error || result.status !== 0) throw new DeploymentRenderError("RENDER_COMPOSE_FAILED");
     return checkRenderedProject(Buffer.from(result.stdout, "utf8"), {
       environment, privateDirectory, projectName: environment.composeProject, managementLoopback, routerEnabled,
     });

@@ -64,7 +64,7 @@ npm run deployment:environment -- <command> [options]
 | 前缀 | 含义 |
 | --- | --- |
 | `ENVIRONMENT_*` | 描述本身：过大、JSON 非法、重复键、schema 不符、不可读、非普通文件、不支持的网段、资源重叠 |
-| `RENDER_*` | 渲染结果与描述不符：项目／卷／网络／broker 地址／管理端口／私有目录／服务集合／边界 |
+| `RENDER_*` | 渲染结果与描述不符：项目／卷／网络／broker 地址／管理端口／私有目录／服务集合／边界；`RENDER_COMPOSE_FAILED` 表示 Compose 本身未能渲染，而不是渲染结果不符 |
 | `ROUTER_*` | router 配置 JSON 非法、上游与本环境 broker 不一致、监听不在回环或端口不符 |
 | `HOST_*`／`PROJECT_*`／`VOLUME_*`／`NETWORK_*`／`PORT_IN_USE`／`DOCKER_UNAVAILABLE` | 宿主上已有资源冲突或无法查询 |
 | `ARGUMENTS_INVALID` | 命令或参数不合法 |
