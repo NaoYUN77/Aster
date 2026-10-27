@@ -23,6 +23,10 @@ iptables -A INPUT -i lo -j ACCEPT
 iptables -A INPUT -j DROP
 ip6tables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ip6tables -A INPUT -i lo -j ACCEPT
+# Neighbor discovery is required even for trusted outbound IPv6 connections.
+# Only on-link solicitations/advertisements (code 0, hop limit 255) may enter.
+ip6tables -A INPUT -p ipv6-icmp --icmpv6-type 135/0 -m hl --hl-eq 255 -j ACCEPT
+ip6tables -A INPUT -p ipv6-icmp --icmpv6-type 136/0 -m hl --hl-eq 255 -j ACCEPT
 ip6tables -A INPUT -j DROP
 touch /tmp/ready
 exec sleep infinity

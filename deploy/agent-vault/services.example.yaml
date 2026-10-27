@@ -1,5 +1,10 @@
 # Adapt before applying: every credential key must exist in the Infisical-backed vault.
 # Applying a service file replaces the complete set; preserve existing required rules.
+# These are credential-injection selectors, NOT API operation authorization.
+# broker/api_policy.go.in owns the operation schema; configure private/api-policy.yaml
+# using api-policy.example.yaml. The broker requires BOTH an exact API rule and a
+# matching injection selector. Broad selectors below cannot grant methods/paths.
+# Adding a provider here alone does not make it supported by the operation policy.
 services:
   - name: github
     host: api.github.com:443/*

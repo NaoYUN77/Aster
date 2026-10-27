@@ -15,10 +15,17 @@ services:
     environment:
       INFISICAL_URL: https://app.infisical.com
       AGENT_VAULT_TELEMETRY: "false"
+      ASTER_VAULT_API_POLICY: /etc/aster-vault/api-policy.yaml
     ports:
       - "127.0.0.1:14321:14321"
     volumes:
       - agent-vault-data:/data
+      - type: bind
+        source: ./deploy/agent-vault/private/api-policy.yaml
+        target: /etc/aster-vault/api-policy.yaml
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       vault:
         ipv4_address: 172.30.82.2

@@ -163,6 +163,10 @@ mkdir -p deploy/agent-vault/private
 chmod 700 deploy/agent-vault/private
 cp deploy/agent-vault/vault.env.example deploy/agent-vault/private/vault.env
 cp deploy/agent-vault/app.env.example deploy/agent-vault/private/app.env
+cp deploy/agent-vault/api-policy.example.yaml deploy/agent-vault/private/api-policy.yaml
+# 按实际 vault 名和已验证操作编辑策略；配置语义见 broker/README.md。
+# broker uid 65532 必须可读；策略不包含秘密，private 目录保持 0700。
+chmod 644 deploy/agent-vault/private/api-policy.yaml
 chmod 600 deploy/agent-vault/private/*.env
 ```
 

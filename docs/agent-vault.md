@@ -156,7 +156,7 @@ chmod 600 deploy/agent-vault/private/router/*
 
 1. 在 Infisical 项目中创建对应环境和路径，例如 `prod`、`/personal-agent/tools`。把实际需要的 `GITHUB_TOKEN`、`EXAMPLE_USERNAME`、`EXAMPLE_PASSWORD`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID` 以及当前模型提供商的 API key 放入此路径。未使用的示例 key 不需要创建。
 2. 创建只读 Machine Identity，权限仅覆盖该项目、环境、路径。将 Universal Auth client ID/secret 填入 `private/vault.env`，并设置强 Vault master password。该密码用于包装本地数据密钥，保护 Vault 数据卷中的凭据和 CA 私钥；它不是 Infisical 密码，也不传给应用。丢失后原数据卷无法解密，只能用 `agent-vault master-password change` 在知道当前密码时轮换。不要把此文件挂载到应用。
-3. 仅启动 broker：
+3. 先复制 `deploy/agent-vault/api-policy.example.yaml` 到 `private/api-policy.yaml`，把 `vault` 改为实际名称（本说明为 `personal-agent`），只保留实际需要并验证过的精确操作；示例只覆盖 Telegram 和 Anthropic Messages，其他模型提供商需要明确配置自己的推理路径。策略文件不含真实 token，设为 broker uid 65532 可读（例如 `chmod 644`），`private/` 保持 0700。Compose 把策略只读挂载给 broker，缺失时不自动创建目录；无效文件阻止启动。字段／限制的唯一权威见 [受审 broker schema](../deploy/agent-vault/broker/api_policy.go.in)，运行语义见 [构建说明](../deploy/agent-vault/broker/README.md)。然后仅启动 broker：
 
    ```sh
    docker compose -f docker-compose.agent-vault.yml up -d agent-vault

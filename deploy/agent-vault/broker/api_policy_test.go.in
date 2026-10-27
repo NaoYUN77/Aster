@@ -1,0 +1,233 @@
+package mitm
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/Infisical/agent-vault/internal/brokercore"
+)
+
+// Upstream forwarding tests must opt in to an exact operation before testing
+// downstream behavior. Keep setupProxy's default policy nil so policy tests
+// and future upstream tests cannot silently inherit a permissive fixture.
+func reviewedAllowOperation(t *testing.T, upstreamURL, method, requestPath string) func(*Options) {
+	t.Helper()
+	u, err := url.Parse(upstreamURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		t.Fatal("test operation requires an HTTPS upstream")
+	}
+	p, err := parseAPIPolicy(strings.NewReader(fmt.Sprintf(
+		"version: 1\nrules:\n- {vault: default, target: %q, method: %q, path: %q}\n",
+		u.Host, method, requestPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func(opts *Options) {
+		if opts.APIPolicy == nil {
+			opts.APIPolicy = p
+		} else {
+			opts.APIPolicy.Rules = append(opts.APIPolicy.Rules, p.Rules...)
+		}
+	}
+}
+
+func reviewedTrustUpstream(p *Proxy, upstream *httptest.Server) {
+	roots := x509.NewCertPool()
+	roots.AddCert(upstream.Certificate())
+	p.upstream.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+}
+
+func reviewedDialTLS(t *testing.T, proxyURL *url.URL, roots *x509.CertPool, upstreamURL string) *tls.Conn {
+	t.Helper()
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := openMITMTunnel(t, proxyURL, roots, u.Host, "av_sess_ok")
+	tlsConn := tls.Client(conn, &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: u.Hostname()})
+	if err := tlsConn.Handshake(); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	return tlsConn
+}
+
+func TestReviewedAPISchema(t *testing.T) {
+	valid := "version: 1\nrules:\n  - vault: model\n    target: api.example.test:443\n    method: POST\n    path: /v1/messages\n"
+	if _, err := parseAPIPolicy(strings.NewReader(valid)); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{
+		"", "version: 1", "version: 1\nrules: null", "version: 2\nrules: []",
+		valid + "unknown: true\n", valid + "version: 1\n", valid + "---\nversion: 1\nrules: []\n",
+		strings.Replace(valid, "POST", "post", 1), strings.Replace(valid, "POST", "*", 1),
+		strings.Replace(valid, "model", "*", 1), strings.Replace(valid, "model", "", 1),
+		strings.Replace(valid, "api.example.test:443", "*.example.test:443", 1),
+		strings.Replace(valid, "api.example.test:443", "API.example.test:443", 1),
+		strings.Replace(valid, ":443", ":0443", 1), strings.Replace(valid, ":443", ":0", 1),
+		strings.Replace(valid, ":443", "", 1),
+		strings.Replace(valid, "api.example.test:443", "[::1]:443", 1),
+		strings.Replace(valid, "/v1/messages", "/v1/*", 1),
+		strings.Replace(valid, "/v1/messages", "/v1/../messages", 1),
+		strings.Replace(valid, "/v1/messages", "/v1//messages", 1),
+		strings.Replace(valid, "/v1/messages", "/v1/messages/", 1),
+		strings.Replace(valid, "/v1/messages", "/v1/%6dessages", 1),
+		strings.Replace(valid, "/v1/messages", "/v1/messages?x=1", 1),
+		valid + strings.TrimPrefix(valid, "version: 1\nrules:\n"),
+		strings.Repeat(" ", (1<<20)+1),
+	} {
+		if _, err := parseAPIPolicy(strings.NewReader(invalid)); err == nil {
+			t.Fatal("invalid policy accepted")
+		}
+	}
+	if p, err := LoadAPIPolicy(""); err != nil || p != nil {
+		t.Fatal("missing configuration must yield deny-all")
+	}
+	if _, err := LoadAPIPolicy(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("configured missing file accepted")
+	}
+	file := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(file, []byte("version: 99\nrules: []"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadAPIPolicy(file); err == nil {
+		t.Fatal("invalid file accepted")
+	}
+}
+
+type reviewedCredentials struct{ calls atomic.Int32 }
+
+func (c *reviewedCredentials) Inject(_ context.Context, _, _ string, _ int, _ string) (*brokercore.InjectResult, error) {
+	c.calls.Add(1)
+	return &brokercore.InjectResult{Headers: map[string]string{"Authorization": "Bearer synthetic-operation-key"}}, nil
+}
+
+// Exercise the real CONNECT listener, TLS termination, per-request gate and
+// forwarding path. A denial must touch neither credentials nor the upstream.
+func TestReviewedAPIConnectOperations(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		if r.Header.Get("Authorization") != "Bearer synthetic-operation-key" {
+			t.Error("allowed request lost injection")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	target := strings.TrimPrefix(upstream.URL, "https://")
+	host, _, _ := net.SplitHostPort(target)
+	if host == "" {
+		t.Fatal("missing upstream host")
+	}
+	policy, err := parseAPIPolicy(strings.NewReader("version: 1\nrules:\n" +
+		"- {vault: model, target: '" + target + "', method: POST, path: /v1/messages}\n" +
+		"- {vault: model, target: '" + target + "', method: GET, path: /socket}\n" +
+		"- {vault: telegram, target: '" + target + "', method: POST, path: /bot__vault_TOKEN__/sendMessage}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scopeVault := range []string{"model", "telegram", "unlisted"} {
+		t.Run(scopeVault, func(t *testing.T) {
+			cp := &reviewedCredentials{}
+			resolver := validTokenResolver("av_sess_ok", &brokercore.ProxyScope{VaultID: "id-" + scopeVault, VaultName: scopeVault, VaultRole: "proxy"})
+			proxyURL, roots, p := setupProxy(t, resolver, cp, func(opts *Options) { opts.APIPolicy = policy })
+			upstreamRoots := x509.NewCertPool()
+			upstreamRoots.AddCert(upstream.Certificate())
+			p.upstream.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: upstreamRoots}
+			client := newTrustingClient(proxyURL, url.User("av_sess_ok"), roots)
+			defer client.CloseIdleConnections()
+			for _, test := range []struct {
+				method, path, header string
+				allowedVault         string
+			}{
+				{"POST", "/v1/messages", "", "model"},
+				{"GET", "/v1/messages", "", ""},
+				{"POST", "/v1/messages/export", "", ""},
+				{"POST", "/v1/tokens", "", ""},
+				{"POST", "/echo", "", ""},
+				{"POST", "/v1/%6dessages", "", ""},
+				{"POST", "/v1/%2e%2e/messages", "", ""},
+				{"POST", "/v1/%252e%252e/messages", "", ""},
+				{"POST", "/v1//messages", "", ""},
+				{"POST", "/v1/messages/", "", ""},
+				{"POST", "/v1/messages", "X-HTTP-Method-Override", ""},
+				{"POST", "/v1/messages", "X-Original-URL", ""},
+				{"POST", "/v1/messages", "Upgrade", ""},
+				{"GET", "/socket", "", "model"},
+				{"GET", "/socket", "Upgrade", ""},
+				{"POST", "/bot__vault_TOKEN__/sendMessage", "", "telegram"},
+				{"POST", "/bot__vault_TOKEN__/getMe", "", ""},
+				{"POST", "/bot123:real-token/sendMessage", "", ""},
+				// A second allowed request shares the same client/tunnel after denials.
+				{"POST", "/v1/messages?stream=true", "", "model"},
+			} {
+				beforeCreds, beforeUpstream := cp.calls.Load(), upstreamCalls.Load()
+				req, err := http.NewRequest(test.method, upstream.URL+test.path, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if test.header == "Upgrade" {
+					req.Header.Set("Upgrade", "websocket")
+					req.Header.Set("Connection", "Upgrade")
+					req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+					req.Header.Set("Sec-WebSocket-Version", "13")
+				} else if test.header != "" {
+					req.Header.Set(test.header, "rejected")
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				want := http.StatusForbidden
+				delta := int32(0)
+				if test.allowedVault == scopeVault {
+					want = http.StatusNoContent
+					delta = 1
+				}
+				if resp.StatusCode != want || cp.calls.Load()-beforeCreds != delta || upstreamCalls.Load()-beforeUpstream != delta {
+					t.Fatalf("%s %s: status %d want %d, or unexpected credential/upstream activity", test.method, test.path, resp.StatusCode, want)
+				}
+			}
+		})
+	}
+}
+
+func TestReviewedAPIDefaultDenyAndTarget(t *testing.T) {
+	for _, policy := range []*APIPolicy{nil, {Version: 1, Rules: []APIRule{}}, {Version: 1, Rules: []APIRule{{Vault: "default", Target: "different.test:443", Method: "POST", Path: "/v1/messages"}}}} {
+		cp := &reviewedCredentials{}
+		proxyURL, roots, _ := setupProxy(t, validTokenResolver("av_sess_ok", &brokercore.ProxyScope{VaultID: "v1", VaultName: "default", VaultRole: "proxy"}), cp, func(opts *Options) { opts.APIPolicy = policy })
+		client := newTrustingClient(proxyURL, url.User("av_sess_ok"), roots)
+		for _, scheme := range []string{"https", "http"} {
+			req, _ := http.NewRequest("POST", scheme+"://denied.test/v1/messages", nil)
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden || cp.calls.Load() != 0 {
+				t.Fatal("default/target deny touched credentials or failed")
+			}
+		}
+		client.CloseIdleConnections()
+	}
+	p := &APIPolicy{Version: 1, Rules: []APIRule{{Vault: "default", Target: "allowed.test:443", Method: "POST", Path: "/v1/messages"}}}
+	r, _ := http.NewRequest("POST", "/v1/messages", nil)
+	if p.allows("default", "allowed.test:444", r, true) || p.allows("default", "allowed.test:443", r, false) {
+		t.Fatal("port/plain HTTP bypass")
+	}
+}

@@ -14,6 +14,7 @@
     "test": "tsx --test test/*.test.ts",
     "test:vault-security": "node scripts/ci/vault-security.mjs",
     "test:topology": "node scripts/ci/compose-topology.mjs",
+    "release:preflight": "tsx src/release-preflight.ts",
     "deliveries": "node --env-file-if-exists=.env dist/src/deliveries.js",
     "mcp:auth": "node --env-file-if-exists=.env dist/src/mcp-auth.js",
     "mcp:check": "node --env-file-if-exists=.env dist/src/mcp-check.js"

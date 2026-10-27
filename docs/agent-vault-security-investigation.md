@@ -207,7 +207,7 @@ R12 的接收端只记录存在性，不打印收到的正文：
 
 当前单 vault 模式允许应用 uid 1000 访问 broker:14322，所以直接存在 R03 的协议入口；项目 router 只接受 CONNECT（[实现](../router/internal/proxy/connect.go)），router 模式的 [network.sh](../deploy/agent-vault/network.sh) 按 UID 仅允许 router uid 1001 接触 broker。R11 证实进程级限制；最终 CD 仍须实测应用 uid 无法直接访问 broker，不能仅从规则文本推断隔离已成立。
 
-[服务规则示例](../deploy/agent-vault/services.example.yaml) 中有 `/*`／`/v1/*` 等较宽路径，Agent Vault service 模型没有 HTTP method allowlist。因此需要逐个确认真实 API 的回显、调试、导出和生成新 token 能力；只收窄路径也未必足够。若必须承诺真实密钥永远不进入应用，需要在可信宿主／适配层对操作和响应作约束，通用字符串替换不足以覆盖编码、派生 token 或应用主动调用的凭据管理接口。
+[服务规则示例](../deploy/agent-vault/services.example.yaml) 中有 `/*`／`/v1/*` 等较宽的凭据注入 selector，原始 Agent Vault service 模型没有 HTTP method allowlist。本仓库受审构建现已在正式 TLS 解密路径加入独立的严格操作策略，按认证后的 vault、host:port、method、注入前精确 path 判定，默认拒绝；权威 schema 和运行边界见 [受审构建说明](../deploy/agent-vault/broker/README.md)。这一阶段没有过滤获准接口的响应，也未约束 query/body 的业务语义，仍需要逐个确认真实 API 的回显、调试、导出和生成新 token 能力；只收窄路径也未必足够。若必须承诺真实密钥永远不进入应用，需要在可信宿主／适配层对操作和响应作约束，通用字符串替换不足以覆盖编码、派生 token 或应用主动调用的凭据管理接口。
 
 本次未完成 cosign 独立验签、远端 registry manifest 再次核验（连接超时）、全镜像 SBOM／漏洞扫描、真实 Infisical 最小权限／引用展开测试，以及生产日志采集链和最终 Compose 防火墙验证。测试通过和已确认问题均限定在上述镜像与合成输入；没有将正常同步不输出 value 扩大成整个镜像无泄露风险。
 

@@ -30,7 +30,7 @@ try {
   fail("certificate");
 }
 let scenario = {};
-let calls = { login: 0, secrets: 0, redirected: 0, authenticated: 0 };
+let calls = { login: 0, secrets: 0, redirected: 0, authenticated: 0, operations: 0 };
 
 function send(response, status, body, headers = {}) {
   response.writeHead(status, { "Content-Type": "application/json", ...headers });
@@ -45,7 +45,7 @@ async function handler(request, response) {
   if (path === "/control") {
     if (request.method === "POST") {
       scenario = JSON.parse(body);
-      calls = { login: 0, secrets: 0, redirected: 0, authenticated: 0 };
+      calls = { login: 0, secrets: 0, redirected: 0, authenticated: 0, operations: 0 };
     }
     send(response, 200, calls);
     return;
@@ -53,6 +53,11 @@ async function handler(request, response) {
   if (path === "/received") {
     calls.redirected++;
     send(response, 200, { accessToken: credentials.accessToken, expiresIn: 7200 });
+    return;
+  }
+  if (path.startsWith("/operations/")) {
+    calls.operations++;
+    send(response, request.headers.authorization === `Bearer ${credentials.value}` ? 200 : 401, { ok: true });
     return;
   }
   const login = path === "/api/v1/auth/universal-auth/login";

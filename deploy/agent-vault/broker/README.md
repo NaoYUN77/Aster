@@ -26,6 +26,12 @@
 - 登录失败时取消 SDK 后台生命周期，不留下续期任务。
 - `getProjectSlug` 对 project ID 做路径转义，限制响应大小并统一错误。
 
+`api_policy.go.in` 的 `APIPolicy`／`APIRule` 和严格加载器是 API 操作策略的唯一 schema 权威；不另建 JSON Schema 或在 router 复制 method/path 清单。`api-policy.example.yaml` 只提供部署示例。字段为 `version: 1` 和 `rules`，每条规则精确匹配已认证的 `vault`、`target`（小写 DNS host:port）、大写 `method`、注入前的 `path`。`rules: []` 明确拒绝全部。未知／重复字段、重复规则、多文档、非法值、超过 1 MiB 或 1024 条规则均拒绝；不支持通配符、前缀、regex 或隐式 HEAD。路径只支持未编码的 ASCII 规范路径，拒绝百分号编码、点段、重复斜线、尾斜线和 query 写在 path 字段中。
+
+正式 `cmd/server.go` 通过 `ASTER_VAULT_API_POLICY` 加载只读文件并把不可变快照传给 MITM；未设置策略时代理全部返回 403，设置后文件缺失、不可读、无效则启动失败。修改文件后须重建 broker 容器／重启进程，不做热加载。正式 `forwardRequest` 对每个 TLS 解密请求在凭据读取、替换、body 读取及上游 I/O 之前判定，复用同一 CONNECT tunnel 也逐次校验；普通 HTTP、协议升级和常用 method/path override header 被拒绝。单 vault 直连 broker 和多 vault router 最终进入同一门禁，vault 取自认证后的 scope，不信任客户端自报身份。上游服务规则仍负责凭据注入，两者取交集；宽泛注入 selector 本身不能授予 API 操作。
+
+该策略只约束操作地址与 method，允许路径中的 query/body 参数及响应内容尚未受语义约束；代理不会过滤获准接口回显的认证值或派生 token。凭据回显风险仍是生产准入阻塞，不能因本阶段通过而宣称已解决。管理 API 使用既有权限边界；本策略只适用于 MITM 代理出口。
+
 持久化格式未改动。`infisical_security_test.go.in` 随构建执行，覆盖真实客户端的登录、取密、project 查询、自动续期、301/302/303/307/308、同域与跨域重定向、400/422/500、TLS 与 origin 校验，以及双日志出口。
 
 ## 构建
@@ -42,7 +48,7 @@ docker build -t aster-vault:local deploy/agent-vault/broker
 npm run test:vault-security
 ```
 
-`npm run test:vault-security` 默认使用 `aster-vault:ci`，可用 `VAULT_CI_IMAGE` 指定。回归覆盖真实镜像的取密、权限、错误日志、重定向与 TLS 行为；当前受审构建 16/16 通过（本机与 GitHub 托管 runner）。完整拓扑另需 `npm run test:topology`，见 [CI 运行入口](../../../scripts/ci/README.md)。
+`npm run test:vault-security` 默认使用 `aster-vault:ci`，可用 `VAULT_CI_IMAGE` 指定。回归覆盖真实镜像的取密、权限、错误日志、重定向、TLS 与 API 操作策略；历史取密补丁为 16/16（本机与 GitHub 托管 runner），新增 API 策略的本地结果见 [实施计划](../../../docs/ci-cd-implementation-plan.md)。构建期实际执行整个 MITM 测试包（`go test -v -count=1`）及 `go vet`。上游 TLS 用例逐项配置经正式加载器校验的精确测试规则，保留凭据注入、透传、端口路由、TLS 验证、替换、请求／响应限额和流式传输断言；`setupProxy` 默认仍为 nil 策略。可迁移的 HTTP 注入、逐跳 header 清理、SSRF、日志、keepalive 和端口提取用例改走 CONNECT/TLS；HTTP 成功认证限流用例验证认证后返回 403 且不消耗失败预算。chunked 响应限额用例额外要求先收到 200，避免默认拒绝导致假通过。6 项 WebSocket 入口测试（含原本需要真实密钥的 xAI／OpenAI 集成）、普通 HTTP WebSocket 和 IPv6 转发成功用例共 8 项显式跳过：新策略禁止 upgrade、普通 HTTP 和 IPv6 策略 target，不能保留这些成功预期。WebSocket 帧处理与 Host 格式单元测试仍执行；`TestReviewedAPI*` 通过真实 CONNECT/TLS 验证这些入口的拒绝及零凭据／上游调用，不把跳过项计为通过。完整拓扑另需 `npm run test:topology`，见 [CI 运行入口](../../../scripts/ci/README.md)。
 
 尚未完成：
 

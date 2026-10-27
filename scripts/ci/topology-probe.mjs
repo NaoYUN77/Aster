@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile, writeFile, chmod, chown, copyFile, stat } from "node:fs/promises";
 import net from "node:net";
 import http from "node:http";
 import tls from "node:tls";
 import dgram from "node:dgram";
 import { Resolver } from "node:dns/promises";
+import { networkInterfaces } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 
 const operation = process.argv[2];
@@ -76,7 +78,7 @@ function proxyStatus(port, method, target, authorization) {
 }
 // CONNECT itself always succeeds after proxy auth; the broker decides about the
 // target inside the tunnel. Only the tunnelled HTTP status is a policy verdict.
-function tunnelStatus(host, port, agentToken, vault, ca) {
+function tunnelStatus(host, port, agentToken, vault, ca, { method = "GET", path = "/", headers = {}, secrets = [] } = {}) {
   return new Promise((resolve) => {
     const authority = `${host}:${port}`;
     const authorization = `Basic ${Buffer.from(`${agentToken}:${vault}`).toString("base64")}`;
@@ -88,9 +90,17 @@ function tunnelStatus(host, port, agentToken, vault, ca) {
       let data = "";
       const finish = (value) => { secure.destroy(); resolve(value); };
       secure.setTimeout(5000, () => finish("timeout"));
-      secure.once("secureConnect", () => secure.write(`GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
-      secure.on("data", (chunk) => { data += chunk.toString(); });
-      secure.once("end", () => finish(Number(data.slice(9, 12)) || "no-status"));
+      secure.once("secureConnect", () => secure.write(`${method} ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\nContent-Length: 0\r\n` +
+        Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join("") + "\r\n"));
+      secure.on("data", (chunk) => {
+        data += chunk.toString();
+        if (data.length > 1_048_576) finish("response-too-large");
+      });
+      secure.once("end", () => {
+        const leaked = secrets.some((secret) => [secret, encodeURIComponent(secret), Buffer.from(secret).toString("base64"),
+          Buffer.from(secret).toString("hex")].some((value) => data.includes(value)));
+        finish(leaked ? "credential-in-response" : Number(data.slice(9, 12)) || "no-status");
+      });
       secure.once("error", (error) => finish(`tls-${error.code ?? "error"}`));
     });
     request.on("timeout", () => request.destroy(new Error("proxy deadline")));
@@ -163,6 +173,102 @@ try {
     const stats = await control();
     assert.ok(stats.login > 0 && stats.secrets >= 2);
     assert.equal(stats.protocolFailures, 0);
+  } else if (operation === "api-policy") {
+    const credentials = JSON.parse(await readFile("/fixtures/credentials.json", "utf8"));
+    const ca = await readFile("/app-ca/ca.pem", "utf8");
+    const secrets = Object.values(credentials);
+    for (const [vault, host, allowed, encoded] of [
+      ["telegram", "api.telegram.org", "/bot__vault_TELEGRAM_BOT_TOKEN__/getMe", "/bot__vault_TELEGRAM_BOT_TOKEN__/%67etMe"],
+      ["deepseek", "api.deepseek.com", "/chat/completions", "/chat/%63ompletions"],
+    ]) {
+      const token = await readFile(`/router/agent-token-${vault}`, "utf8");
+      const base = vault === "telegram" ? "/bot__vault_TELEGRAM_BOT_TOKEN__" : "";
+      for (const [label, method, path, headers, expected] of [
+        ["allowed", "POST", allowed, {}, 200],
+        ["wrong-method", "GET", allowed, {}, 403],
+        ["export", "POST", `${base}/export`, {}, 403],
+        ["tokens", "POST", `${base}/tokens`, {}, 403],
+        ["echo", "POST", `${base}/echo`, {}, 403],
+        ["encoded", "POST", encoded, {}, 403],
+        ["trailing-slash", "POST", `${allowed}/`, {}, 403],
+        ["method-override", "POST", allowed, { "X-HTTP-Method-Override": "DELETE" }, 403],
+      ]) {
+        stage = `api-policy:${vault}:${label}`;
+        const before = await control();
+        const status = await tunnelStatus(host, 443, token, vault, ca, { method, path,
+          headers: { "X-Topology-Policy-Probe": "1", ...headers }, secrets });
+        assert.equal(status, expected);
+        const after = await control();
+        assert.equal(after.apiRequests - before.apiRequests, expected === 200 ? 1 : 0);
+        assert.equal(after.policyAllowed - before.policyAllowed, expected === 200 ? 1 : 0);
+        assert.equal(after.protocolFailures, 0);
+      }
+    }
+  } else if (["arm-execution", "arm-delivery", "unblock"].includes(operation)) {
+    await control({ operation });
+  } else if (["execution-barrier", "delivery-barrier", "execution-restored", "delivery-blocked", "delivery-restored"].includes(operation)) {
+    await waitFor(async () => {
+      const result = await control();
+      assert.equal(result.protocolFailures, 0);
+      const execution = result.scenarios.execution;
+      const delivery = result.scenarios.delivery;
+      assert.ok(result.scenarios.business.model === 1 && result.scenarios.business.sends.length === 1);
+      if (operation === "execution-barrier") {
+        assert.ok(execution.model <= 2 && execution.sends.length === 0);
+        return result.barrier?.name === "execution" && result.barrier.reached && execution.model === 2;
+      }
+      assert.ok(execution.model <= 3, "only the interrupted model request may be repeated");
+      assert.ok(execution.sends.length <= 1);
+      if (operation === "execution-restored") return execution.model === 3 && execution.sends.length === 1 && execution.acknowledged > 0;
+      assert.equal(execution.model, 3);
+      assert.equal(execution.sends.length, 1);
+      assert.ok(delivery.model <= 1 && delivery.sends.length <= (operation === "delivery-restored" ? 3 : 2));
+      assert.deepEqual(delivery.sends, ["A".repeat(4000), "B".repeat(4000), "Delivery tail."].slice(0, delivery.sends.length));
+      if (operation === "delivery-barrier") return result.barrier?.name === "delivery" && result.barrier.reached && delivery.sends.length === 2;
+      if (operation === "delivery-blocked") return delivery.model === 1 && delivery.sends.length === 2 && delivery.acknowledged > 0;
+      return delivery.model === 1 && delivery.sends.length === 3 && delivery.acknowledged > 1;
+    }, 60_000);
+  } else if (["execution-pending", "execution-sent", "delivery-sending", "delivery-uncertain", "delivery-reconcile", "delivery-sent"].includes(operation)) {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync("/data/inbox.sqlite", { readOnly: true });
+    try {
+      const execution = operation.startsWith("execution");
+      const id = execution ? "telegram:900001:711" : "telegram:900001:712";
+      const row = db.prepare("SELECT requestId, status, reply FROM inbox WHERE requestId = ?").get(id);
+      assert.ok(row);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM inbox WHERE requestId = ?").get(id).n, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM failures").get().n, 0);
+      assert.equal(db.prepare("SELECT offset FROM checkpoint WHERE id = 1").get().offset, execution ? 712 : 713);
+      assert.ok((await stat("/data/agent.sqlite")).size > 0);
+      if (execution) {
+        assert.equal(await readFile("/data/workspace/topology-execution-marker", "utf8"), "completed\n", "completed external side effect must not repeat");
+        assert.equal(row.status, operation === "execution-pending" ? "pending" : "sent");
+        assert.equal(row.reply, operation === "execution-pending" ? null : "Execution recovered reply.");
+        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE requestId = ?").get(id).n, operation === "execution-pending" ? 0 : 1);
+      } else {
+        const sending = operation === "delivery-sending";
+        const sent = operation === "delivery-sent";
+        assert.equal(row.status, sending ? "ready" : sent ? "sent" : "uncertain");
+        assert.equal(row.reply, "A".repeat(4000) + "B".repeat(4000) + "Delivery tail.");
+        const parts = db.prepare("SELECT part, status, text, messageId, error FROM deliveries WHERE requestId = ? ORDER BY part").all(id);
+        assert.deepEqual(parts.map(({ part, status, text, error }) => ({ part, status, text, error })), [
+          { part: 0, status: "sent", text: "A".repeat(4000), error: null },
+          { part: 1, status: sending ? "sending" : sent ? "sent" : "uncertain", text: "B".repeat(4000), error: sending || sent ? null : "PROCESS_INTERRUPTED" },
+          { part: 2, status: sent ? "sent" : "pending", text: "Delivery tail.", error: null },
+        ]);
+        assert.ok(parts[0].messageId);
+        assert.equal(parts[1].messageId, null, "operator confirmation must not invent a Telegram message ID");
+        if (!sent) assert.equal(parts[2].messageId, null);
+      }
+    } finally { db.close(); }
+    if (operation === "delivery-reconcile") {
+      const cli = (...args) => execFileSync(process.execPath, ["/app/dist/src/deliveries.js", ...args], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
+      const listing = JSON.parse(cli("list"));
+      assert.equal(listing.failures.length, 0);
+      assert.deepEqual(listing.blocked.map(({ requestId, part, status, error }) => ({ requestId, part, status, error })),
+        [{ requestId: "telegram:900001:712", part: 1, status: "uncertain", error: "PROCESS_INTERRUPTED" }]);
+      cli("sent", "telegram:900001:712", "1");
+    }
   } else if (operation === "release" || operation === "replay") {
     stage = `${operation}:control`;
     try {
@@ -180,6 +286,41 @@ try {
       return result.getMe >= minimum && result.getWebhookInfo >= minimum && result.getUpdates >= minimum
         && result.model === 1 && result.sendMessage === 1 && result.acknowledged >= minimum;
     }, 60_000);
+  } else if (operation === "ipv6-inbound-listen") {
+    assert.equal(process.getuid(), 0);
+    const server = net.createServer((socket) => {
+      socket.setTimeout(1000, () => socket.destroy());
+      socket.on("data", (data) => { if (data.toString() === "stop") server.close(); socket.end(); });
+    });
+    const timer = setTimeout(() => server.close(), 30_000);
+    server.once("close", () => clearTimeout(timer));
+    server.listen({ host: "::", port: 18081, ipv6Only: true });
+  } else if (operation === "ipv6-inbound-ready") {
+    assert.equal(process.getuid(), 0);
+    const address = Object.values(networkInterfaces()).flat().find((entry) => entry.family === "IPv6"
+      && entry.address.startsWith("fd82:6173:7465:") && !entry.internal)?.address;
+    assert.ok(address);
+    await waitFor(async () => await connected(address, 18081) === true, 5000);
+    console.info(address);
+  } else if (operation === "ipv6-inbound-stop") {
+    assert.equal(process.getuid(), 0);
+    const socket = net.connect({ host: "::1", port: 18081 });
+    socket.setTimeout(1000, () => socket.destroy());
+    socket.once("connect", () => socket.end("stop"));
+    socket.on("error", () => { process.exitCode = 1; });
+  } else if (operation === "ipv6-inbound") {
+    assert.equal(await connected("fd82:6173:7465::2", 443), true);
+    const result = await control({ operation, host: process.argv[3] });
+    assert.equal(result.result, "timeout", "inbound denial requires a live listener and working route");
+  } else if (["root-ipv6", "app-ipv6", "router-ipv6"].includes(operation)) {
+    const root = operation === "root-ipv6";
+    assert.equal(process.getuid(), root ? 0 : operation === "router-ipv6" ? 1001 : 1000);
+    const result = await connected("fd82:6173:7465::2", 443);
+    stage = root ? "root-ipv6:live-positive-control" : `${operation}:uid-deny`;
+    if (typeof result === "string" && /^[A-Z_]+$/u.test(result)) stage += `:${result.toLowerCase()}`;
+    // A routing failure/refusal is not evidence of firewall isolation. The same
+    // final app container must first reach this real IPv6 listener as uid 0.
+    assert.equal(result, root);
   } else if (operation === "root-network" || operation === "app-network") {
     const root = operation === "root-network";
     assert.equal(process.getuid(), root ? 0 : 1000);
@@ -207,8 +348,9 @@ try {
   } else {
     throw new Error("unknown operation");
   }
-} catch {
+} catch (error) {
   // Assertion values, errors, API responses and credentials must never enter CI diagnostics.
-  console.error(`Topology probe failed: ${stage}`);
+  const line = error?.stack?.match(/topology-probe\.mjs:(\d+):/u)?.[1];
+  console.error(`Topology probe failed: ${stage}${line ? ` (line ${line})` : ""}`);
   process.exitCode = 1;
 }

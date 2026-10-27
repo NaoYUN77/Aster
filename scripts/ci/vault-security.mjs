@@ -70,7 +70,7 @@ async function stopBroker(name) {
   await docker("rm", name);
   containers.delete(name);
 }
-async function startBroker(name, url, ca = true) {
+async function startBroker(name, url, ca = true, policy = "/fixtures/api-policy.yaml", waitReady = true) {
   containers.add(name);
   await docker("run", "--detach", "--name", name, "--network", `container:${id}`,
     "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
@@ -80,10 +80,14 @@ async function startBroker(name, url, ca = true) {
     "--env", `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=${values.clientId}`,
     "--env", `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=${values.clientSecret}`,
     "--env", `INFISICAL_URL=${url}`, "--env", "AGENT_VAULT_TELEMETRY=false",
+    "--env", `ASTER_VAULT_API_POLICY=${policy}`,
+    "--env", "AGENT_VAULT_ALLOW_PRIVATE_RANGES=true",
     ...(ca ? ["--env", "SSL_CERT_FILE=/fixtures/ca.pem"] : []),
     image, "server", "--host", "0.0.0.0", "--port", "14321");
-  await probe("ready");
-  await probe("bootstrap");
+  if (waitReady) {
+    await probe("ready");
+    await probe("bootstrap");
+  }
 }
 async function check(name, run) {
   current = name;
@@ -109,6 +113,11 @@ try {
   await chmod(join(directory, "ca.pem"), 0o644);
   await chmod(join(directory, "key.pem"), 0o644);
   await writeFile(join(directory, "credentials.json"), JSON.stringify(values));
+  await writeFile(join(directory, "invalid-api-policy.yaml"), "version: 99\nrules: []\n");
+  await writeFile(join(directory, "empty-api-policy.yaml"), "version: 1\nrules: []\n");
+  await writeFile(join(directory, "api-policy.yaml"), "version: 1\nrules:\n" +
+    "- {vault: ci-vault, target: 'infisical.ci.test:18888', method: POST, path: /operations/infer}\n" +
+    "- {vault: ci-second, target: 'infisical.ci.test:18888', method: GET, path: /operations/status}\n");
   await Promise.all(["vault-fixture.mjs", "vault-probe.mjs"].map((name) => copyFile(join(source, name), join(directory, name))));
   containers.add(id);
   await docker("run", "--detach", "--name", id, "--network", "none", "--read-only",
@@ -137,6 +146,10 @@ try {
     await startBroker(normal, "https://infisical.ci.test:18888");
     await probe("baseline");
   });
+  await check("decrypted-api-policy-single-and-multiple-vaults", async () => {
+    await probe("api-policy");
+    assertClean(await docker("logs", normal));
+  });
   for (const status of [400, 422, 500]) {
     await check(`initial-manual-and-log-error-${status}`, async () => {
       await probe("sync-error", String(status));
@@ -144,6 +157,28 @@ try {
     });
   }
   await stopBroker(normal);
+
+  for (const [label, policy] of [["missing", ""], ["empty", "/fixtures/empty-api-policy.yaml"]]) {
+    await check(`api-policy-${label}-defaults-to-deny`, async () => {
+      await probe("control", "{}");
+      const name = `${id}-policy-${label}`;
+      await startBroker(name, "https://infisical.ci.test:18888", true, policy);
+      await probe("api-default-deny");
+      await stopBroker(name);
+    });
+  }
+  for (const [label, policy] of [["unreadable", "/fixtures/no-policy.yaml"], ["invalid", "/fixtures/invalid-api-policy.yaml"]]) {
+    await check(`api-policy-${label}-rejects-startup`, async () => {
+      const name = `${id}-policy-${label}`;
+      await startBroker(name, "https://infisical.ci.test:18888", true, policy, false);
+      // docker wait is bounded by command timeout; a mistakenly running broker
+      // fails the check and is removed in finally.
+      assert.notEqual((await docker("wait", name)).trim(), "0", "bad policy did not fail startup");
+      assertClean(await docker("logs", name));
+      await docker("rm", name);
+      containers.delete(name);
+    });
+  }
 
   const cases = [
     ...[307, 308].flatMap((status) => ["login", "secrets"].map((operation) => ({

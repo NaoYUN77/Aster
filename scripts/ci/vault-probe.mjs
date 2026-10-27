@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import net from "node:net";
+import tls from "node:tls";
+import { once } from "node:events";
 import { readFile, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -33,6 +36,30 @@ async function create(name, owner) {
   return api("POST", "/v1/vaults", { name, credential_store: {
     kind: "infisical", config: { project_id: "ci-project", environment: "ci", secret_path: "/ci" }, poll_interval_seconds: 10,
   } }, owner);
+}
+
+// Real CONNECT and broker-issued TLS, without following redirects or printing
+// any peer response. Deliberately preserve the raw request path for negatives.
+async function proxied(token, method, path, headers = {}) {
+  const ca = await api("GET", "/v1/mitm/ca.pem");
+  assert.equal(ca.status, 200, "proxy CA unavailable");
+  const socket = net.connect(14322, "127.0.0.1");
+  socket.setTimeout(10_000, () => socket.destroy(new Error("proxy timeout")));
+  await once(socket, "connect");
+  socket.write("CONNECT infisical.ci.test:18888 HTTP/1.1\r\nHost: infisical.ci.test:18888\r\n" +
+    `Proxy-Authorization: Basic ${Buffer.from(token).toString("base64")}\r\n\r\n`);
+  let response = "";
+  while (!response.includes("\r\n\r\n")) response += (await once(socket, "data"))[0].toString();
+  assert.match(response, /^HTTP\/1\.1 200 /, "CONNECT rejected");
+  const secure = tls.connect({ socket, ca: ca.text, servername: "infisical.ci.test" });
+  await once(secure, "secureConnect");
+  secure.write(`${method} ${path} HTTP/1.1\r\nHost: infisical.ci.test:18888\r\nConnection: close\r\nContent-Length: 0\r\n` +
+    Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join("") + "\r\n");
+  const chunks = [];
+  for await (const chunk of secure) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString();
+  noSecrets(text);
+  return Number(/^HTTP\/1\.1 (\d{3}) /.exec(text)?.[1]);
 }
 
 try {
@@ -73,6 +100,50 @@ try {
     const anonymous = await api("GET", "/v1/credentials?vault=ci-vault&reveal=true");
     assert.equal(anonymous.status, 401, "anonymous reveal status");
     noSecrets(anonymous.text);
+  } else if (operation === "api-default-deny") {
+    const owner = await readFile("/tmp/ci-owner", "utf8");
+    assert.equal((await create("ci-vault", owner)).status, 201, "deny-all vault creation");
+    assert.equal((await api("PUT", "/v1/vaults/ci-vault/services", { services: [{
+      name: "ci-operation", host: "infisical.ci.test:18888/*", auth: { type: "bearer", token: "CI_KEY" },
+    }] }, owner)).status, 200, "deny-all injection setup");
+    const agent = await api("POST", "/v1/agents", { name: "ci-deny", role: "no-access",
+      vaults: [{ vault_name: "ci-vault", vault_role: "proxy" }] }, owner);
+    assert.equal(agent.status, 201, "deny-all proxy identity");
+    assert.equal(await proxied(agent.value.av_agent_token, "POST", "/operations/infer"), 403, "default deny failed");
+    assert.equal((await control()).operations, 0, "default deny reached upstream");
+  } else if (operation === "api-policy") {
+    const owner = await readFile("/tmp/ci-owner", "utf8");
+    assert.equal((await create("ci-second", owner)).status, 201, "second vault creation");
+    for (const vault of ["ci-vault", "ci-second"]) {
+      const rules = await api("PUT", `/v1/vaults/${vault}/services`, { services: [{
+        name: "ci-operation", host: "infisical.ci.test:18888/*", auth: { type: "bearer", token: "CI_KEY" },
+      }] }, owner);
+      assert.equal(rules.status, 200, "operation injection setup");
+    }
+    for (const vaults of [["ci-vault"], ["ci-vault", "ci-second"]]) {
+      const agent = await api("POST", "/v1/agents", { name: `ci-policy-${vaults.length}`, role: "no-access",
+        vaults: vaults.map(vault_name => ({ vault_name, vault_role: "proxy" })) }, owner);
+      assert.equal(agent.status, 201, "policy proxy identity");
+      for (const vault of vaults) {
+        // Router uses the same authenticated agent-token:vault-name Basic form.
+        const token = vaults.length === 1 ? agent.value.av_agent_token : `${agent.value.av_agent_token}:${vault}`;
+        for (const [method, path, headers, expected] of [
+          ["POST", "/operations/infer", {}, vault === "ci-vault" ? 200 : 403],
+          ["GET", "/operations/status", {}, vault === "ci-second" ? 200 : 403],
+          ["GET", "/operations/infer", {}, 403],
+          ["POST", "/operations/export", {}, 403],
+          ["POST", "/operations/tokens", {}, 403],
+          ["POST", "/operations/echo", {}, 403],
+          ["POST", "/operations/%69nfer", {}, 403],
+          ["POST", "/operations/infer/", {}, 403],
+          ["POST", "/operations/infer", { "X-HTTP-Method-Override": "DELETE" }, 403],
+        ]) {
+          const before = (await control()).operations;
+          assert.equal(await proxied(token, method, path, headers), expected, "decrypted operation policy");
+          assert.equal((await control()).operations - before, expected === 200 ? 1 : 0, "denied operation reached upstream");
+        }
+      }
+    }
   } else if (operation === "sync-error") {
     const owner = await readFile("/tmp/ci-owner", "utf8");
     const status = Number(process.argv[3]);

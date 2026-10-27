@@ -25,9 +25,14 @@ COPY upstream.patch /audit/upstream.patch
 RUN git -C /reviewed apply --check /audit/upstream.patch && git -C /reviewed apply /audit/upstream.patch
 COPY infisical_security.go.in /reviewed/internal/infisical/infisical_security.go
 COPY infisical_security_test.go.in /reviewed/internal/infisical/infisical_security_test.go
+COPY api_policy.go.in /reviewed/internal/mitm/api_policy.go
+COPY api_policy_test.go.in /reviewed/internal/mitm/api_policy_test.go
 WORKDIR /reviewed
 RUN go mod download && go mod verify
 RUN go test -count=1 -timeout=120s ./internal/infisical
+# Run upstream regressions with explicit operation policies alongside the
+# reviewed gate tests. Verbose output keeps policy-incompatible skips visible.
+RUN go test -v -count=1 -timeout=120s ./internal/mitm && go vet ./internal/mitm
 COPY --from=frontend /reviewed/internal/server/webdist /reviewed/internal/server/webdist
 RUN go build -mod=readonly -trimpath -ldflags="-s -w -X github.com/Infisical/agent-vault/cmd.version=0.40.0-reviewed -X github.com/Infisical/agent-vault/cmd.commit=872578e4cdf9e03d5e3bcb5512023a70bf90ed65 -X github.com/Infisical/agent-vault/cmd.date=2026-10-01T06:04:43Z" -o /audit/agent-vault .
 

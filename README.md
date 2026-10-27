@@ -86,7 +86,7 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 
 不同基础设施的密钥按 Infisical 文件夹拆分时，每个文件夹对应一个 vault。叠加 `docker-compose.router.yml`，使用独立 `aster-router` 镜像按目标 `host:port` 选择 vault。配置和运行方法见 [router/README.md](router/README.md)。
 
-CI/CD 的安全关卡、实施顺序与当前进度见 [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)。Agent Vault 受审构建及虚构凭据回归用于验证已确认的取密重定向与日志问题，基础 CI 成功不等于已获得生产部署准入。
+CI/CD 的安全关卡、实施顺序与当前进度见 [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)。Agent Vault 受审构建及虚构凭据回归用于验证已确认的取密重定向与日志问题，基础 CI 成功不等于已获得生产部署准入。`npm run release:preflight` 提供版本化清单、两份本地 Compose／显式策略文件摘要及预期四镜像 digest 引用的离线绑定检查；[契约与用法](scripts/ci/README.md#离线发布清单绑定预检ci-07-基础)说明其边界，通过不代表已验签、策略安全或生产预检完成。
 
 ## MCP 服务器（可选）
 

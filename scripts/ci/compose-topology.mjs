@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,7 +49,9 @@ function command(program, args, { input, allowFailure = false, timeout = 120_000
       clearTimeout(timer);
       if (!overflow && !timedOut && (code === 0 || allowFailure)) resolvePromise({ code, output });
       else {
-        failureCode = output.includes("env file") ? "COMPOSE_ENV_FILE" : output.includes("network_mode") ? "COMPOSE_NETWORK_MODE"
+        const probeFailure = output.match(/Topology probe failed: ([a-z0-9:-]+)(?: \(line (\d+)\))?/u);
+        failureCode = probeFailure ? `PROBE_${probeFailure[1]}${probeFailure[2] ? `_LINE_${probeFailure[2]}` : ""}`
+          : output.includes("env file") ? "COMPOSE_ENV_FILE" : output.includes("network_mode") ? "COMPOSE_NETWORK_MODE"
           : output.includes("yaml") ? "COMPOSE_YAML" : `COMMAND_EXIT_${code ?? "SIGNAL"}`;
         reject(new Error(`command failed during ${step}`));
       }
@@ -81,6 +83,13 @@ try {
   await writeFile(file("empty.env"), "");
   await writeFile(file("credentials.json"), JSON.stringify(credentials), { mode: 0o600 });
   await writeFile(file("telegram-owner-id"), "424242\n", { mode: 0o644 });
+  const rules = [
+    ...["getMe", "getWebhookInfo", "getUpdates", "sendMessage"].map((method) => ({ vault: "telegram",
+      target: "api.telegram.org:443", method: "POST", path: `/bot__vault_TELEGRAM_BOT_TOKEN__/${method}` })),
+    { vault: "deepseek", target: "api.deepseek.com:443", method: "POST", path: "/chat/completions" },
+  ];
+  // JSON is a YAML subset; these exact placeholder paths never contain a real token.
+  await writeFile(file("api-policy.yaml"), JSON.stringify({ version: 1, rules }), { mode: 0o644 });
   await Promise.all(["topology-fixture.mjs", "topology-probe.mjs"].map((name) => copyFile(join(source, name), file(name))));
   await writeFile(file("router-config.json"), JSON.stringify({ listen: "127.0.0.1:14323", upstream_proxy: "172.30.82.2:14322",
     client_auth: { username: "app", password_files: ["/etc/aster-router/client-password"] },
@@ -111,6 +120,7 @@ try {
     networks:
       vault:
         ipv4_address: 172.30.82.2
+        ipv6_address: fd82:6173:7465::2
     extra_hosts:
       infisical.topology.test: 172.30.82.2
       api.telegram.org: 172.30.82.2
@@ -136,17 +146,25 @@ try {
       SSL_CERT_FILE: /fixtures/test-ca.pem
       AGENT_VAULT_ALLOW_PRIVATE_RANGES: "true"
       AGENT_VAULT_TELEMETRY: "false"
+      ASTER_VAULT_API_POLICY: /etc/aster-vault/api-policy.yaml
     restart: "no"
     ports: !override []
     networks: !reset {}
     network_mode: service:topology-fixture
     depends_on:
       topology-fixture: {condition: service_healthy}
-    volumes:
+    volumes: !override
+      - agent-vault-data:/data
       - type: bind
         source: ${quote(file("test-ca.pem"))}
         target: /fixtures/test-ca.pem
         read_only: true
+      - type: bind
+        source: ${quote(file("api-policy.yaml"))}
+        target: /etc/aster-vault/api-policy.yaml
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:14321/health"]
       interval: 1s
@@ -188,6 +206,13 @@ try {
         source: ${quote(file("topology-probe.mjs"))}
         target: /ci/topology-probe.mjs
         read_only: true
+networks:
+  vault:
+    enable_ipv6: true
+    ipam:
+      config: !override
+        - subnet: 172.30.82.0/24
+        - subnet: fd82:6173:7465::/64
 volumes:
   personal-agent-data:
     name: ${project}-app
@@ -217,6 +242,8 @@ secrets:
     assert.equal(router.network_mode, "service:tool-network");
     assert.equal(broker.network_mode, "service:topology-fixture");
     assert.equal(config.services["topology-fixture"].networks.vault.ipv4_address, "172.30.82.2");
+    assert.equal(config.services["topology-fixture"].networks.vault.ipv6_address, "fd82:6173:7465::2");
+    assert.equal(config.networks.vault.enable_ipv6, true);
     assert.equal(network.environment.ROUTER_ENABLED, "1");
     assert.equal(network.read_only, true);
     assert.deepEqual(network.cap_add, ["NET_ADMIN"]);
@@ -230,6 +257,15 @@ secrets:
     assert.ok(!Object.hasOwn(app.environment, "AGENT_VAULT_MASTER_PASSWORD"));
     assert.equal(app.environment.NODE_TLS_REJECT_UNAUTHORIZED, undefined);
     assert.equal(app.environment.DEEPSEEK_API_KEY, "__vault_DEEPSEEK_API_KEY__");
+    assert.equal(broker.image, images.broker);
+    assert.equal(broker.environment.ASTER_VAULT_API_POLICY, "/etc/aster-vault/api-policy.yaml");
+    const policyMount = broker.volumes.filter((volume) => volume.target === broker.environment.ASTER_VAULT_API_POLICY);
+    assert.equal(policyMount.length, 1);
+    assert.equal(policyMount[0].type, "bind");
+    assert.equal(resolve(policyMount[0].source), resolve(file("api-policy.yaml")));
+    assert.equal(policyMount[0].read_only, true);
+    assert.equal(policyMount[0].bind.create_host_path, false);
+    assert.ok(!app.environment.ASTER_VAULT_API_POLICY && !router.environment?.ASTER_VAULT_API_POLICY);
     for (const volume of Object.values(config.volumes)) assert.ok(volume.name.startsWith(`${project}-`) && !volume.external);
     for (const service of Object.values(config.services)) {
       assert.ok(!service.ports?.length, "CI must not publish management or proxy ports");
@@ -237,8 +273,13 @@ secrets:
       for (const volume of service.volumes ?? []) {
         if (volume.type === "bind") assert.ok(resolve(volume.source) === resolve(directory)
           || resolve(volume.source).startsWith(`${resolve(directory)}${process.platform === "win32" ? "\\" : "/"}`));
+        else assert.ok(volume.type === "volume" && Object.hasOwn(config.volumes, volume.source), "CI must use declared isolated volumes");
       }
+      for (const secret of service.secrets ?? []) assert.equal(secret.source, "telegram-owner-id");
+      assert.ok(!service.configs?.length, "CI must not import host configs");
     }
+    assert.deepEqual(Object.keys(config.secrets), ["telegram-owner-id"]);
+    assert.equal(config.secrets["telegram-owner-id"].external, undefined);
     assert.equal(resolve(config.secrets["telegram-owner-id"].file), resolve(file("telegram-owner-id")));
     assert.ok(config.networks.vault.name.startsWith(`${project}_`));
   });
@@ -258,6 +299,9 @@ secrets:
       await compose("up", "--detach", "--no-build", "--pull", "never", "agent-vault");
       await probe("ready");
       await probe("bootstrap");
+    });
+    await check("broker-decrypted-api-policy-allow-and-deny", async () => {
+      await probe("api-policy");
     });
     await check("final-main-telegram-streamed-model-delivery", async () => {
       await compose("up", "--detach", "--no-build", "--pull", "never", "personal-agent");
@@ -293,13 +337,59 @@ secrets:
       await probe("restored", "3");
       await compose("exec", "-T", "personal-agent", "node", "/ci/topology-probe.mjs", "persistent-files");
     });
+    await check("sigkill-during-execution-resumes-without-repeating-completed-tool", async () => {
+      await probe("arm-execution");
+      await probe("execution-barrier");
+      await compose("exec", "-T", "personal-agent", "node", "/ci/topology-probe.mjs", "execution-pending");
+      await compose("kill", "--signal", "SIGKILL", "personal-agent");
+      await compose("run", "--rm", "--no-deps", "--entrypoint", "node", "personal-agent", "/ci/topology-probe.mjs", "execution-pending");
+      await probe("unblock");
+      await probe("replay");
+      await compose("start", "personal-agent");
+      await probe("execution-restored");
+      await compose("exec", "-T", "personal-agent", "node", "/ci/topology-probe.mjs", "execution-sent");
+    });
+    await check("sigkill-during-delivery-quarantines-only-unconfirmed-part", async () => {
+      await probe("arm-delivery");
+      await probe("delivery-barrier");
+      await compose("exec", "-T", "personal-agent", "node", "/ci/topology-probe.mjs", "delivery-sending");
+      await compose("kill", "--signal", "SIGKILL", "personal-agent");
+      await compose("run", "--rm", "--no-deps", "--entrypoint", "node", "personal-agent", "/ci/topology-probe.mjs", "delivery-sending");
+      await probe("unblock");
+      await probe("replay");
+      await compose("start", "personal-agent");
+      await probe("delivery-blocked");
+      await compose("exec", "-T", "personal-agent", "node", "/ci/topology-probe.mjs", "delivery-uncertain");
+      // The synthetic recipient accepted part 1. Follow the operator contract:
+      // stop the app, inspect the real CLI, then mark only that part as sent.
+      await compose("stop", "--timeout", "20", "personal-agent");
+      await compose("run", "--rm", "--no-deps", "--entrypoint", "node", "personal-agent", "/ci/topology-probe.mjs", "delivery-reconcile");
+      await compose("start", "personal-agent");
+      await probe("delivery-restored");
+      await compose("exec", "-T", "personal-agent", "node", "/ci/topology-probe.mjs", "delivery-sent");
+    });
+    await check("ipv6-live-positive-control-and-uid1000-uid1001-deny", async () => {
+      await compose("exec", "-T", "--user", "0:0", "personal-agent", "node", "/ci/topology-probe.mjs", "root-ipv6");
+      await compose("exec", "-T", "--user", "1000:1000", "personal-agent", "node", "/ci/topology-probe.mjs", "app-ipv6");
+      await compose("exec", "-T", "--user", "1001:1001", "personal-agent", "node", "/ci/topology-probe.mjs", "router-ipv6");
+    });
+    await check("ipv6-live-listener-rejects-inbound-tcp", async () => {
+      await compose("exec", "--detach", "--user", "0:0", "personal-agent", "node", "/ci/topology-probe.mjs", "ipv6-inbound-listen");
+      try {
+        const address = (await compose("exec", "-T", "--user", "0:0", "personal-agent", "node", "/ci/topology-probe.mjs", "ipv6-inbound-ready")).output.trim();
+        assert.match(address, /^fd82:6173:7465:[a-f0-9:]+$/u);
+        await probe("ipv6-inbound", address);
+      } finally {
+        await compose("exec", "-T", "--user", "0:0", "personal-agent", "node", "/ci/topology-probe.mjs", "ipv6-inbound-stop");
+      }
+    });
     await check("container-logs-do-not-contain-synthetic-credentials", async () => {
       await compose("stop", "--timeout", "20", "personal-agent", "egress-router", "agent-vault");
       const logs = await compose("logs", "--no-color");
       assertClean(logs.output);
     });
     console.info(`Topology acceptance passed: ${checks} checks; final images; isolated synthetic resources.`);
-    console.info("NOT COVERED: in-flight task/delivery crash points; IPv6 with live positive control; API method/path allowlist and credential-echo prevention; release/prod admission.");
+    console.info("NOT COVERED: interrupted unsafe tool replay; public IPv6/DNS IPv6 positive controls; allowed API query/body semantics and credential-echo prevention; release/prod admission.");
   } else {
     console.info("Compose render checks passed; runtime topology was not executed.");
   }

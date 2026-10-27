@@ -4,3 +4,5 @@
 !upstream.patch
 !infisical_security.go.in
 !infisical_security_test.go.in
+!api_policy.go.in
+!api_policy_test.go.in
