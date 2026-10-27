@@ -168,5 +168,5 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 - 新增版本化环境描述（`aster.deployment-environment` v1）与 `npm run deployment:environment`（`render`／`router`／`host`／`compare`）。描述是项目名、卷、网络名／网段、broker 地址、管理端口与私有目录的唯一权威；Compose、`network.sh` 与 router 上游都从同一组值派生。
 - `docker-compose.agent-vault.yml` 的宿主可见资源改为 `ASTER_*` 插值，默认值保持现有生产部署不变；broker 管理端口默认改为不发布（仅 `expose`），需要宿主访问时叠加新的 `docker-compose.management-loopback.yml`，只绑定 `127.0.0.1`。`network.sh` 在使用 `iptables` 前校验 broker 地址与端口；router 目录随私有目录参数化。
 - `render` 用描述派生插值后重新解析 `docker compose config --format json`，逐项核对项目、卷、网络、broker 地址、管理端口、私有文件确切挂载与 UID／只读／capabilities 边界；`host` 只读查询 Docker 报告项目、卷、网络与端口冲突。全部失败只返回固定码，不回显路径或渲染值。
-- 本机（Windows + Docker Desktop linux/amd64）`npm run check`、`npm run build` 通过；`npm test` 167 项中 156 PASS、11 显式 SKIP（与既有 POSIX／Docker 编排用例相同）；`npm run test:topology -- --render-only` 通过。新增 7 项环境测试包含真实 Compose 渲染与篡改拒绝，未使用真实凭据、私有配置或生产卷。
+- 本机（Windows + Docker Desktop linux/amd64）`npm run check`、`npm run build` 通过；`npm test` 168 项中 157 PASS、11 显式 SKIP（与既有 POSIX／Docker 编排用例相同）；`npm run test:topology -- --render-only` 通过。新增 8 项环境测试包含真实 Compose 渲染与篡改拒绝，未使用真实凭据、私有配置或生产卷。
 - 尚未实现：测试实例启停／重置、合成生产哨兵隔离演练、两环境真实 Linux 并行运行证据、真实 bot／Infisical 身份与凭据作用域核对。阶段 A 与 issue #18 均未完成；本记录不代表生产准入。
