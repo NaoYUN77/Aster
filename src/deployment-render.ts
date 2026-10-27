@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { ipv4Range, type DeploymentEnvironment } from "./deployment-environment.js";
+import { BROKER_PROXY_PORT, ipv4Range, type DeploymentEnvironment } from "./deployment-environment.js";
 import { parseStrictJson, StrictJsonError } from "./strict-json.js";
 
 /**
@@ -142,7 +142,9 @@ export function checkRenderedProject(bytes: Uint8Array, options: RenderCheckOpti
   const published = (broker.ports ?? []).filter((port) => String(port.target) === management);
   if (!options.managementLoopback) {
     if ((broker.ports ?? []).length > 0) fail("RENDER_MANAGEMENT_EXPOSED");
-  } else if (published.length !== 1 || published[0]!.host_ip !== "127.0.0.1" || published[0]!.published !== management) {
+  } else if ((broker.ports ?? []).length !== 1 || published[0]?.host_ip !== "127.0.0.1" || published[0]?.published !== management) {
+    // The override may publish the management port and nothing else; a second mapping is a
+    // host-reachable port the description never sanctioned.
     fail("RENDER_MANAGEMENT_EXPOSED");
   }
   for (const [name, service] of Object.entries(config.services)) {
@@ -190,6 +192,10 @@ export function checkRenderedProject(bytes: Uint8Array, options: RenderCheckOpti
       || router.read_only !== true || !router.cap_drop?.includes("ALL")) fail("RENDER_BOUNDARY_MISMATCH");
   }
   if (toolNetwork.environment?.ASTER_BROKER_ADDRESS !== environment.network.brokerAddress) fail("RENDER_BOUNDARY_MISMATCH");
+  // The proxy port is a topology constant, not a description field: the firewall rules inside the
+  // network image and the router upstream both target it, so a rendered drift breaks agent→broker
+  // connectivity instead of failing loudly.
+  if (toolNetwork.environment?.ASTER_BROKER_PORT !== String(BROKER_PROXY_PORT)) fail("RENDER_BOUNDARY_MISMATCH");
 
   return {
     status: "render-matches-environment",

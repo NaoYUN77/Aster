@@ -51,10 +51,9 @@ export const EnvironmentSchema = Type.Object({
   }, { additionalProperties: false }),
   privateDirectory: PrivateDirectory,
   // Host-private paths are relative to privateDirectory so one environment cannot alias another.
+  // Only entries the rendered project actually exposes are listed: mounts and secrets are visible
+  // after rendering, so their paths can be checked; env files are not (see TEMPLATE_ENV_FILES).
   privateFiles: Type.Object({
-    vaultEnv: PrivatePath,
-    appEnv: PrivatePath,
-    appRouterEnv: PrivatePath,
     apiPolicy: PrivatePath,
     ca: PrivatePath,
     telegramOwnerId: PrivatePath,
@@ -69,6 +68,18 @@ export const EnvironmentSchema = Type.Object({
 }, { additionalProperties: false });
 
 export type DeploymentEnvironment = Static<typeof EnvironmentSchema>;
+
+/**
+ * Env files the Compose template reads by fixed name inside the private directory. They are
+ * deliberately not description fields: Compose inlines `env_file` contents when rendering and
+ * drops the path, so a name in the description could never be checked against the rendered
+ * project. A field that looks configurable but cannot be verified is worse than a documented
+ * constant the template already pins.
+ */
+export const TEMPLATE_ENV_FILES = { vault: "vault.env", app: "app.env", router: "app.router.env" } as const;
+
+/** Broker proxy port inside the vault network; the firewall rules and router upstream target it. */
+export const BROKER_PROXY_PORT = 14322;
 
 export type EnvironmentFailureCode =
   | "ENVIRONMENT_TOO_LARGE" | "ENVIRONMENT_INVALID_JSON" | "ENVIRONMENT_DUPLICATE_KEY"

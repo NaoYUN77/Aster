@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { readBoundedFile, BoundedFileError } from "./bounded-file.js";
 import {
-  assertDistinctEnvironments, EnvironmentError, readEnvironment, type DeploymentEnvironment,
+  assertDistinctEnvironments, BROKER_PROXY_PORT, EnvironmentError, readEnvironment,
+  TEMPLATE_ENV_FILES, type DeploymentEnvironment,
 } from "./deployment-environment.js";
 import { checkHostResources, HostResourceError } from "./deployment-host-resources.js";
 import { checkRenderedProject, DeploymentRenderError } from "./deployment-render.js";
@@ -39,7 +40,6 @@ Read-only. Exit 0 is not signature verification or production admission.`;
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const root = [resolve(moduleDirectory, ".."), resolve(moduleDirectory, "../..")]
   .find((candidate) => existsSync(join(candidate, "docker-compose.agent-vault.yml"))) ?? resolve(moduleDirectory, "..");
-const brokerProxyPort = 14322;
 
 class ArgumentError extends Error {}
 
@@ -66,7 +66,7 @@ export function composeEnvironment(environment: DeploymentEnvironment, privateDi
     ...(environment.network.name === undefined ? {} : { ASTER_NETWORK_NAME: environment.network.name }),
     ASTER_VAULT_SUBNET: environment.network.subnet,
     ASTER_BROKER_ADDRESS: environment.network.brokerAddress,
-    ASTER_BROKER_PORT: String(brokerProxyPort),
+    ASTER_BROKER_PORT: String(BROKER_PROXY_PORT),
     ASTER_BROKER_MANAGEMENT_PORT: String(environment.broker.managementPort),
     ASTER_PRIVATE_DIR: privateDirectory,
   };
@@ -91,11 +91,12 @@ async function render(values: Record<string, unknown>): Promise<unknown> {
     // would either fail on the missing env file or create a directory for a missing bind source
     // and mount an empty secret file. Check before rendering so the failure names the directory.
     if (!existsSync(privateDirectory)) throw new DeploymentRenderError("RENDER_PRIVATE_DIRECTORY_MISMATCH");
-    // The env files are not part of the rendered project, but Compose refuses to render without
-    // them; a missing one is a description/directory mismatch, not an unreadable render.
+    // The env files are not part of the rendered project (Compose inlines them and drops the
+    // path), so their names are template constants; the description's own entries are checked by
+    // name. A missing file is a description/directory mismatch, not an unreadable render.
     const files = environment.privateFiles;
-    const required = [files.vaultEnv, files.appEnv, files.apiPolicy, files.ca, files.telegramOwnerId,
-      ...(routerEnabled ? [files.appRouterEnv, files.routerDirectory] : [])];
+    const required = [TEMPLATE_ENV_FILES.vault, TEMPLATE_ENV_FILES.app, files.apiPolicy, files.ca,
+      files.telegramOwnerId, ...(routerEnabled ? [TEMPLATE_ENV_FILES.router, files.routerDirectory] : [])];
     if (required.some((relative) => !existsSync(join(privateDirectory, relative)))) {
       throw new DeploymentRenderError("RENDER_PRIVATE_DIRECTORY_MISMATCH");
     }
@@ -126,7 +127,7 @@ async function render(values: Record<string, unknown>): Promise<unknown> {
 async function router(values: Record<string, unknown>): Promise<unknown> {
   const environment = await readEnvironment(requireValue(values, "environment"));
   const config = await readFileBounded(requireValue(values, "config"), 256 * 1024);
-  const port = values["broker-port"] === undefined ? brokerProxyPort : Number(values["broker-port"]);
+  const port = values["broker-port"] === undefined ? BROKER_PROXY_PORT : Number(values["broker-port"]);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new ArgumentError();
   return checkRouterConfig(config, { environment, brokerPort: port });
 }

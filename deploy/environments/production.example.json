@@ -17,9 +17,6 @@
   },
   "privateDirectory": "/srv/aster/production/private",
   "privateFiles": {
-    "vaultEnv": "vault.env",
-    "appEnv": "app.env",
-    "appRouterEnv": "app.router.env",
     "apiPolicy": "api-policy.yaml",
     "ca": "ca.pem",
     "telegramOwnerId": "telegram-owner-id",

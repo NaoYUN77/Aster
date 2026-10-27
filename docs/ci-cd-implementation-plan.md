@@ -170,4 +170,5 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 - `render` 用描述派生插值后重新解析 `docker compose config --format json`，逐项核对项目、卷、网络、broker 地址、管理端口、私有文件确切挂载与 UID／只读／capabilities 边界；`host` 只读查询 Docker 报告项目、卷、网络与端口冲突。全部失败只返回固定码，不回显路径或渲染值。
 - 本机（Windows + Docker Desktop linux/amd64）`npm run check`、`npm run build` 通过；`npm test` 168 项中 157 PASS、11 显式 SKIP（与既有 POSIX／Docker 编排用例相同）；`npm run test:topology -- --render-only` 通过，完整拓扑 18/18 通过。新增 8 项环境测试包含真实 Compose 渲染与篡改拒绝，未使用真实凭据、私有配置或生产卷。
 - 首轮托管运行在启动 `agent-vault` 时报 `conflicting options: port exposing and the container type network mode`：`expose` 与共享另一服务网络命名空间不能并存。该端口在共享命名空间内本已可达，删除这条 `expose` 后本机完整拓扑复验 18/18 通过。
+- Stage A 验收 review 提出三项检查缺口，已在本 PR 内补齐：管理端口回环 override 现在要求 broker 恰好一条映射（单条错误端口与双条目都被拒绝，单条错误端口此前会抛 TypeError 而非返回固定码）；渲染核对新增断言 `tool-network` 收到的 `ASTER_BROKER_PORT` 等于拓扑常量 14322；`privateFiles` 删除 `vaultEnv`／`appEnv`／`appRouterEnv` 三个无法核对的字段（Compose 渲染会把 `env_file` 内联并丢弃路径），env 文件名改为模板常量 `vault.env`／`app.env`／`app.router.env`，描述仍携带渲染结果可核对的策略、CA、owner 文件与 router 目录。
 - 尚未实现：测试实例启停／重置、合成生产哨兵隔离演练、两环境真实 Linux 并行运行证据、真实 bot／Infisical 身份与凭据作用域核对。阶段 A 与 issue #18 均未完成；本记录不代表生产准入。

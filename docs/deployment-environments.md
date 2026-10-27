@@ -24,7 +24,7 @@
 - `composeProject` 是小写 Docker 项目名；`volumes.app`／`volumes.broker` 是显式卷名，不由 Compose 从项目名派生；`network.name` 可选，省略时用 Compose 派生的 `<project>_vault`。
 - `network.subnet` 必须是 IPv4 网段，前缀 `/8`–`/30`；`network.brokerAddress` 必须在网段内，且不能是网络或广播地址。只支持 IPv4：防火墙规则、router 上游与 broker 地址都是 IPv4 字面量。
 - `broker.managementPort` 是 broker 容器内监听端口，默认不发布到宿主；需要宿主访问时叠加 `docker-compose.management-loopback.yml`，只绑定 `127.0.0.1`。
-- `privateDirectory` 是目标机上的绝对路径，不允许 `..` 段。`privateFiles` 是相对于它的路径，不能是绝对路径、不能含 `..` 或结尾斜线，同一环境内不得重复；这样一份描述只能读取自己的私有目录。
+- `privateDirectory` 是目标机上的绝对路径，不允许 `..` 段。`privateFiles` 是相对于它的路径，只包含渲染结果中可核对的条目（策略、CA、owner 文件、router 目录）；不能是绝对路径、不能含 `..` 或结尾斜线，同一环境内不得重复。env 文件（`vault.env`、`app.env`、`app.router.env`）不是描述字段：Compose 渲染时会把 `env_file` 内联并丢弃路径，描述里的名字无法被核对，它们是模板固定的文件名，位于同一私有目录内。这样一份描述只能读取自己的私有目录。
 
 `network.name` 可以省略，此时 Compose 派生 `<project>_vault`。已部署环境若已有网络名，必须写入描述，避免创建第二张网络。
 
@@ -55,7 +55,7 @@ npm run deployment:environment -- <command> [options]
 - 项目名、两个卷的显式名称、网络名与唯一子网、broker 的 `ipv4_address`。
 - broker 入口脚本中的管理端口，以及管理端口默认不发布；叠加回环 override 后必须只发布在 `127.0.0.1` 且端口一致。任何其他已发布端口被拒绝。
 - 私有目录：CA、策略、owner 文件与 router 目录必须从描述指定的确切路径挂载；私有目录内的其他 bind 源被拒绝；私有目录与本次用到的私有文件／目录必须已存在（缺失时 Compose 会创建目录并挂载空文件，或直接拒绝渲染）。
-- 边界不回退：app `1000:1000`、共享 `tool-network` 命名空间、只读根、`cap_drop: ALL`；`tool-network` 只读且仅 `NET_ADMIN`；router `1001:1001`；`tool-network` 收到的 broker 地址与描述一致。
+- 边界不回退：app `1000:1000`、共享 `tool-network` 命名空间、只读根、`cap_drop: ALL`；`tool-network` 只读且仅 `NET_ADMIN`；router `1001:1001`；`tool-network` 收到的 broker 地址与描述一致，broker 代理端口等于拓扑常量 `14322`（防火墙规则与 router 上游都以它为目标）。
 
 ## 失败码
 
@@ -82,7 +82,7 @@ npm run deployment:environment -- <command> [options]
 | `ASTER_BROKER_ADDRESS` | `network.brokerAddress` |
 | `ASTER_BROKER_MANAGEMENT_PORT` | `broker.managementPort` |
 | `ASTER_PRIVATE_DIR` | `privateDirectory` |
-| `ASTER_BROKER_PORT` | broker 代理端口，固定 14322，不由描述配置 |
+| `ASTER_BROKER_PORT` | broker 代理端口，固定 14322（拓扑常量，`render` 断言渲染值等于它） |
 
 `network.sh` 从容器环境读取 `ASTER_BROKER_ADDRESS`／`ASTER_BROKER_PORT`，在使用 `iptables` 前做点分 IPv4 与端口范围检查；`docker-compose.router.yml` 挂载同一私有目录下的 router 目录。三者由同一描述驱动，修改网段必须同时通过 `render` 与 `router` 检查，不能只改 Compose。
 

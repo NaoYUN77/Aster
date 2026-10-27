@@ -31,10 +31,7 @@ function environment(overrides: Partial<DeploymentEnvironment> = {}): Deployment
     network: { name: "aster-test-vault", subnet: "172.31.82.0/24", brokerAddress: "172.31.82.2" },
     broker: { managementPort: 15321 },
     privateDirectory: "/srv/aster/test/private",
-    privateFiles: {
-      vaultEnv: "vault.env", appEnv: "app.env", appRouterEnv: "app.router.env", apiPolicy: "api-policy.yaml",
-      ca: "ca.pem", telegramOwnerId: "telegram-owner-id", routerDirectory: "router",
-    },
+    privateFiles: { apiPolicy: "api-policy.yaml", ca: "ca.pem", telegramOwnerId: "telegram-owner-id", routerDirectory: "router" },
     identity: { botId: "111111" },
     ...overrides,
   };
@@ -68,6 +65,9 @@ test("a description is accepted only with canonical, self-consistent resources",
     { ...environment(), accepted: true }, { ...environment(), productionAdmission: "ok" },
     { ...environment(), composeProject: "Aster_Test" }, { ...environment(), composeProject: "a" },
     { ...environment(), volumes: { app: "app", broker: "broker", extra: "x" } },
+    // Env file names are template constants, not description fields; a stale description that
+    // still carries them is unknown-field input, not configurable data.
+    { ...environment(), privateFiles: { ...environment().privateFiles, vaultEnv: "vault.env" } },
     { ...environment(), network: { ...environment().network, subnet: "172.31.0.0" } },
     // Broker outside the subnet, or on the network/broadcast address, cannot be reached reliably.
     { ...environment(), network: { ...environment().network, brokerAddress: "172.32.82.2" } },
@@ -84,7 +84,7 @@ test("a description is accepted only with canonical, self-consistent resources",
   ];
   for (const value of bad) assert.throws(() => parse(value), environmentCode("ENVIRONMENT_INVALID_SCHEMA"), JSON.stringify(value));
   // Two private files resolving to one host path is a resource overlap, not a schema slip.
-  assert.throws(() => parse({ ...environment(), privateFiles: { ...environment().privateFiles, ca: "vault.env" } }),
+  assert.throws(() => parse({ ...environment(), privateFiles: { ...environment().privateFiles, ca: "api-policy.yaml" } }),
     environmentCode("ENVIRONMENT_RESOURCE_OVERLAP"));
   // An unsupported address family or an unusable prefix is reported distinctly from a schema slip.
   assert.throws(() => parse({ ...environment(), network: { ...environment().network, subnet: "fd00::/64" } }),
@@ -253,6 +253,21 @@ test("a rendered project must match the description in every host-visible resour
   assert.equal(loopback.status, 0, loopback.stderr);
   assert.throws(() => check(loopback.stdout), renderCode("RENDER_MANAGEMENT_EXPOSED"));
   assert.deepEqual(check(loopback.stdout, { managementLoopback: true }).status, "render-matches-environment");
+  // The override publishes the management port and nothing else: a second mapping is host-reachable,
+  // and a single mapping on the wrong port must fail with the fixed code, not a thrown TypeError.
+  for (const ports of [
+    [{ mode: "host", host_ip: "127.0.0.1", target: 15321, published: "15321", protocol: "tcp" },
+     { mode: "host", host_ip: "127.0.0.1", target: 14399, published: "14399", protocol: "tcp" }],
+    [{ mode: "host", host_ip: "127.0.0.1", target: 14399, published: "14399", protocol: "tcp" }],
+  ]) {
+    const tampered = JSON.parse(loopback.stdout);
+    tampered.services["agent-vault"].ports = ports;
+    assert.throws(() => check(JSON.stringify(tampered), { managementLoopback: true }), renderCode("RENDER_MANAGEMENT_EXPOSED"), JSON.stringify(ports));
+  }
+  // The broker proxy port is a topology constant; a rendered drift silently breaks the firewall.
+  const wrongProxyPort = JSON.parse(rendered.stdout);
+  wrongProxyPort.services["tool-network"].environment.ASTER_BROKER_PORT = "9999";
+  assert.throws(() => check(JSON.stringify(wrongProxyPort)), renderCode("RENDER_BOUNDARY_MISMATCH"));
 });
 
 test("CLI reports fixed codes without echoing paths, values or environment contents", requiresCompose, async (t) => {
