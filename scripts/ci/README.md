@@ -55,7 +55,7 @@ npm run test:topology -- --render-only
 
 临时 `AGENT_VAULT_ALLOW_PRIVATE_RANGES=true` 仅用于 broker 访问本地 fixture，不能复制到生产。防火墙否定测试先用同命名空间 uid 0 连接活跃目标和 DNS 作正控；公网正控依赖 `1.1.1.1:443`，无相应网络时该项失败，不能计为隔离通过。执行和投递中断、IPv6 与 API 策略的具体覆盖及实际运行结果以实施计划为准；响应回显防护仍待验收。容器存在、渲染成功不能替代业务与网络验收。
 
-历史版本曾在本机与 GitHub 托管 runner 通过 11 项；这不是当前扩展用例的托管验证结果。本轮本机以 `VAULT_CI_IMAGE=aster-vault:ci05`、`aster:ci`、`aster-router:ci` 和重建的 `aster-network:ci` 运行，render 通过，完整拓扑 **16 项全部通过**：包括 API 操作正反检查、执行中／投递中 SIGKILL 恢复、IPv6 活跃目标 uid 0 正控及 uid 1000／1001 出站拒绝，以及 IPv6 入站 TCP 拒绝。入站检查在 app 命名空间启动真实 IPv6 监听器，由 uid 0 从该命名空间地址确认监听可达，再确认 fixture IPv6 目标可达，从 fixture 连接该监听器须超时；拒绝不以无路由或端口未监听冒充通过。此前 IPv6 正控失败保留为历史失败；本轮使用主代理修正 NDP 后重建的网络镜像，拓扑脚本未改写防火墙规则。随后以最终 broker 镜像 `aster-vault:mitm-reviewed-20261027`（MITM 全包 56 PASS／8 显式 SKIP）复跑，同样 16 项通过。最新扩展用例尚未在托管 runner 验证。
+历史版本曾在本机与 GitHub 托管 runner 通过 11 项；这不是当前扩展用例的托管验证结果。本轮本机以 `VAULT_CI_IMAGE=aster-vault:ci05`、`aster:ci`、`aster-router:ci` 和重建的 `aster-network:ci` 运行，render 通过，完整拓扑 **16 项全部通过**：包括 API 操作正反检查、执行中／投递中 SIGKILL 恢复、IPv6 活跃目标 uid 0 正控及 uid 1000／1001 出站拒绝，以及 IPv6 入站 TCP 拒绝。入站检查在 app 命名空间启动真实 IPv6 监听器，由 uid 0 从该命名空间地址确认监听可达，再确认 fixture IPv6 目标可达，从 fixture 连接该监听器须超时；拒绝不以无路由或端口未监听冒充通过。此前 IPv6 正控失败保留为历史失败；本轮使用主代理修正 NDP 后重建的网络镜像，拓扑脚本未改写防火墙规则。随后以最终 broker 镜像 `aster-vault:mitm-reviewed-20261027`（MITM 全包 56 PASS／8 显式 SKIP）复跑，同样 16 项通过。推送后的托管运行 40457199779 三个 job 全部通过，实际输出 `Vault image regression passed: 21 checks` 与 `Topology acceptance passed: 16 checks`，与本机一致。
 
 未覆盖中断的不安全工具重放、公网 IPv6／DNS IPv6 正控、获准接口的 query/body 语义与认证值回显防护，以及发布／生产准入。失败时只输出失败步骤名与阶段标识，不输出容器日志、环境、断言值或响应正文；排查需自行复现，不能把日志上传当作诊断捷径。
 

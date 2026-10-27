@@ -90,8 +90,8 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 | CI-01 | 方案保存、来源及验收边界 | 本文、README 入口 | 已完成 |
 | CI-02 | broker 固定来源与补丁 | 真实客户端重定向／错误日志回归通过 | 已完成 |
 | CI-03 | Linux 基础 CI | Node check/test/build，Go race/vet，文件失败测试修正 | 已完成（本地与托管均通过） |
-| CI-04 | 完整最终镜像拓扑 | 临时资源、业务链路、恢复及内核网络拒绝用例 | 16 项本地通过（最终镜像），待托管复验 |
-| CI-05 | API 策略执行 | schema、正式执行路径及正反用例 | 第一阶段已实现，最终镜像本地 21/21 与拓扑 16/16；响应回显防护仍阻塞准入 |
+| CI-04 | 完整最终镜像拓扑 | 临时资源、业务链路、恢复及内核网络拒绝用例 | 16 项本机与托管均通过 |
+| CI-05 | API 策略执行 | schema、正式执行路径及正反用例 | 第一阶段已实现，最终镜像本机与托管 21/21、拓扑 16/16；响应回显防护仍阻塞准入 |
 | CI-06 | 发布与供应链验证 | 同产物扫描、签名、发布清单 | 待实现 |
 | CI-07 | 部署预检与 CD | 真实最小权限、卷保护、备份更新与业务检查 | 离线发布清单绑定预检已实现；真实预检与 CD 待实现 |
 
@@ -116,7 +116,7 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 - 托管 runner 上的实际检查输出为 `Vault image regression passed: 16 checks` 与 `Topology acceptance passed: 11 checks`，与本机结果一致；因此四个最终镜像在托管 runner 上同样构建成功，先前记录的取镜像受限只是本机网络条件。
 - 托管执行暴露了一个本机无法复现的缺陷：fixture 容器以 root 加 `--cap-drop ALL` 运行，没有 `CAP_DAC_OVERRIDE`，而 `openssl` 以调用者身份写出 0600 的 `key.pem`；runner 上调用者既非 root 也不在文件组内，读失败导致 fixture 退出 21。Windows bind mount 不保留真实 mode，所以本机一直通过。修复方式是在 fixture 启动前把合成 `key.pem` 放宽到 0644（与 `ca.pem` 一致），不为此给 fixture 容器增加特权；本机用 1001 属主的 0600 key 复现了退出 21，改权限后恢复正常。
 - 诊断仍只输出固定标识。fixture 自身的启动失败改为固定退出码（20 凭据、21 key、22 证书、23 监听、24 未捕获），编排脚本据此报告失败类别，不输出容器 stderr、日志、环境或断言值。拓扑 fixture 以 `user: "0:0"` 运行并显式保留 `DAC_OVERRIDE`，不存在同一问题，未改动。
-- 本次托管执行不发布镜像、不签名、不部署，也没有使用真实 Infisical、Telegram 或模型凭据。`release.yml` 与 `deploy.yml` 仍未实现，CI-05 至 CI-07 保持待办。
+- 本次托管执行不发布镜像、不签名、不部署，也没有使用真实 Infisical、Telegram 或模型凭据。`release.yml` 与 `deploy.yml` 仍未实现；该次运行早于 CI-05 策略实施，后续进度见下方各节。
 
 ### 2026-10-27 执行中与投递中崩溃验收补充
 
@@ -132,6 +132,8 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 - 确认 IPv6 正控超时由 INPUT 丢弃邻居发现报文引起：目标邻居状态为 FAILED，而无防火墙对照可达。`network.sh` 仅放行 code 0、hop limit 255 的邻居请求与通告，保留其他入站拒绝与 uid 出站限制。独立容器验证单 vault 和 router 模式的 uid 0 正控与 uid 1000／1001 拒绝，并验证 IPv4／IPv6 入站 TCP 被拒绝。
 - 使用重建的应用、router、network 镜像及 `aster-vault:ci05`，为 broker 挂载隔离的合成策略，完整拓扑 **16/16 本地通过**：含两 vault CONNECT/TLS 操作正反例及上游计数、真实业务、执行／投递中断恢复、IPv6 可达正控和 uid 限制、入站 TCP 拒绝以及日志凭据扫描。没有使用生产凭据或卷；新增检查尚无托管 CI 证据。公网 IPv6、IPv6 DNS 和获准接口的凭据回显防护仍未覆盖。
 - 最终 broker 构建 `aster-vault:mitm-reviewed-20261027` 通过：构建期 Infisical 回归、适配新策略后的 MITM 全包（56 PASS／8 显式 SKIP／0 FAIL）与 `go vet`。8 项跳过为 6 个 WebSocket 入口（含两个需真实密钥的集成）、普通 HTTP WebSocket 和 IPv6 转发成功用例，新策略禁止这些成功路径；对应入口的拒绝由 `TestReviewedAPI*` 在真实 CONNECT/TLS 下验证，跳过项不计为通过。该镜像的 `vault-security` **21/21** 通过；以它运行完整拓扑再次 **16/16** 通过，退出码 0，容器、卷、网络及临时目录已清理。旧 `aster-vault:ci` 标签未更新，CI 工作流仍构建当前源码，托管运行须待推送后确认。
+- 推送后的托管运行 40457199779 三个 job 全部通过：Node（检查、148 项测试、构建）、Go（`go test -race`、`go vet`）、最终镜像与凭据边界（受审 broker 构建含 MITM 全包、`Vault image regression passed: 21 checks`、四个镜像构建、`Topology acceptance passed: 16 checks`），与本机结果一致。
+- 托管 runner 暴露两处本机无法复现的 Compose 渲染差异：其版本在 `config --format json` 中省略 `bind.create_host_path: false`（仍保留空 `bind` 对象）。断言因此改为仅在渲染器显式报告 `true` 时失败；策略源文件在渲染前已写入，挂载本身未变。两次失败运行保留在历史中，不作为通过证据。
 
 ### 2026-10-27 CI-05 可验证第一阶段
 
