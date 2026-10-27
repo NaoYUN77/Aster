@@ -57,9 +57,10 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 
 | 路径 | 内容 |
 | --- | --- |
-| `workspace/MEMORY.md` | 用户明确要求保存的长期事实 |
+| `workspace/MEMORY.md` | 用户明确要求保存的长期事实（语义不变，仍由模型经文件工具按需读写） |
 | `workspace/` | agent 的任务文件 |
-| `agent.sqlite` 及其 WAL 文件 | 底座会话与执行恢复状态 |
+| `memory/daily/YYYY-MM-DD.md` | 每日事件记忆：归档任务从已确认的会话范围提取，经检索工具按需读取 |
+| `agent.sqlite` 及其 WAL 文件 | 底座会话与执行恢复状态，以及记忆系统的 working 状态、周期快照投影、归档进度与轮数计数 |
 | `inbox.sqlite` 及其 WAL 文件 | 请求消费位置、身份绑定和投递状态 |
 | `mcp.json`（可选） | MCP server 配置；默认路径，可用 `MCP_CONFIG` 覆盖 |
 | `mcp-oauth/<server>.json`（可选） | 远程 MCP server 的 OAuth token，仅属主可读 |
@@ -74,9 +75,25 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 
 在 `src/tools.ts` 使用底座 `defineTool` 定义工具，并加入 `personalTools.tools`。现有 `current_time` 是最小示例。参数由 TypeBox schema 定义，底座负责执行前校验；名称冲突在注册时拒绝。
 
-内置工具为 `read/write/edit/bash`，由 pi durable 提供。文件记忆通过这些工具维护，不另建记忆数据库。工具并非文件系统沙箱，生产环境使用独立的低权限系统用户；部署示例约束写入持久化目录。
+内置工具为 `read/write/edit/bash`，由 pi durable 提供。工具并非文件系统沙箱，生产环境使用独立的低权限系统用户；部署示例约束写入持久化目录。
 
 工具契约、错误语义、重放与升级兼容性见 [设计文档](docs/contracts-and-lifecycle.md)。仓库级约束见 [CLAUDE.md](CLAUDE.md)，MVP 范围见 [docs/mvp.md](docs/mvp.md)。
+
+## 记忆系统（MEM-01～MEM-07，已接入）
+
+在既有会话之上增加三层结构：稳定规则（系统提示）＋周期快照 B（连续性摘要与 working 基线，只在压缩或重置正式生效时切换）＋追加流水 C（近期原文、工具结果与检索结果）。模型可用的记忆工具：
+
+| 工具 | 用途 |
+| --- | --- |
+| `working_get` / `working_update` | 读取／按预期版本更新当前任务状态（目标、进度、待办、偏好等结构化 JSON） |
+| `memory_search` | 按关键词与日期范围检索每日事件记忆，带来源、分页游标与未扫描范围 |
+| `memory_read` | 按日期＋段落 id 精确读取一条每日事件 |
+
+已确认的会话范围会被后台归档任务增量提取为 `memory/daily/*.md`；归档失败只记录状态，不影响聊天与回复。检索有预算：单次结果与单请求累计都有 token 上限（默认约 4 Ki／8 Ki），超限返回明确错误而不是静默截断。`workspace/MEMORY.md` 的语义不变。设计与实现结论见 [Memory 与 Context 实施方案](docs/memory-and-context-design.md)。
+
+可选配置（`.env`，均有默认值与范围校验，见 `.env.example`）：`MEMORY_ENABLED`（默认开）、`MEMORY_BACKGROUND_TARGET_TOKENS`、`MEMORY_RECENT_VERBATIM_TOKENS`、`MEMORY_SNAPSHOT_TOKENS`、`MEMORY_NARRATIVE_TOKENS`、`MEMORY_INSTRUCTIONS_TOKENS`、`MEMORY_SEARCH_RESULT_TOKENS`、`MEMORY_REQUEST_SEARCH_TOKENS`、`MEMORY_EVALUATE_AFTER_USER_TURNS`（默认 20）、`MEMORY_RESERVE_TOKENS`、`MEMORY_TIMEZONE`、`MEMORY_ARCHIVE_TIMEOUT_MS`。设 `MEMORY_ENABLED=0` 可整体关闭记忆系统，应用行为与接入前一致（回滚开关）。
+
+状态：接入、恢复、预算、错误映射与升级路径已由本地自动化测试覆盖（`test/memory-integration.test.ts` 等，离线 faux 模型）；**真实模型的摘要与事件提取质量、真实窗口下的阈值标定、提供商缓存命中尚未验证**，属于 MEM-08 的验收范围，不要据此宣称线上效果。
 
 ## 工具凭证与 Agent Vault
 
