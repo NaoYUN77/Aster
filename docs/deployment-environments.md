@@ -46,7 +46,7 @@ npm run deployment:environment -- <command> [options]
 
 所有命令只读。`render` 在临时目录写一个仅含资源名的 env 文件，调用 `docker compose config --format json`，不创建容器、网络或卷；`host` 只执行 `docker ps`／`volume inspect`／`network inspect`。成功输出固定带 `productionAdmission: "not-evaluated"`。
 
-`--volumes absent` 用于首次安装（目标卷必须不存在），`present` 用于更新（卷必须已存在且无消费者）。已存在的生产卷不会被静默改名、迁移或接管。
+`--volumes absent` 用于首次安装（项目不得有任何容器，目标卷必须不存在），`present` 用于更新（项目不得有运行中的容器，卷必须已存在且无任何消费者）。更新预检应在停止写入者之后运行。已存在的生产卷不会被静默改名、迁移或接管。
 
 ## 渲染核对内容
 
