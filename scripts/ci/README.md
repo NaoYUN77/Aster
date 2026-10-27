@@ -49,6 +49,8 @@ npm run test:topology -- --render-only
 
 镜像可通过 `ASTER_IMAGE`、`ASTER_ROUTER_IMAGE`、`ASTER_NETWORK_IMAGE`、`VAULT_CI_IMAGE` 指定，默认均为上述 `:ci` tag。脚本运行正式 app/router/firewall 入口，通过测试 CA 与本地域名映射连接模拟 Infisical、Telegram 和一个模型提供商；没有修改生产 endpoint 或 TLS 校验。
 
+只有 Docker 的 Linux 主机可通过 `bash scripts/ci/topology-on-docker-host.sh` 在临时运维容器里执行同一组检查，要求显式设置上述四个变量及 `ASTER_DEPLOYMENT_TOOLS_IMAGE`，所有镜像须已导入本机。准备方法和隔离限制见 [主机演练入口](../deploy/README.md#隔离演练)。直接运行 Node 入口时，若未提供运维镜像则自动构建本轮临时运维镜像；提供时只复用，不拉取、不重建或删除该镜像。
+
 每轮在独立临时目录生成 `api-policy.yaml`，仅允许 `telegram` vault 的四个 POST 操作（`getMe`、`getWebhookInfo`、`getUpdates`、`sendMessage`）及 `deepseek` vault 的 `POST /chat/completions`，Telegram 路径使用 token 占位符。通过 `ASTER_VAULT_API_POLICY` 指向 broker 的只读 bind mount，并在 render 中核对策略源文件、挂载属性及全部资源隔离边界；不挂载生产策略或读取 private 目录。策略 schema 仍以 [`api_policy.go.in`](../../deploy/agent-vault/broker/api_policy.go.in) 为准。
 
 未匹配主机与 API 操作策略由 broker 在 CONNECT 隧道内判定，隧道 TLS 使用 broker 自签发的 MITM CA（`/v1/mitm/ca.pem`），不是 fixture CA；探针按此读取隧道内状态码，不对 CONNECT 自身的 200 作策略断言。两 vault 各有一个获准操作正例，验证路径替换／bearer 注入；同域错误方法、export／tokens／echo 路径、编码路径、尾部斜杠及 method override 必须返回 403，且 fixture 应用请求计数不变。正反例使用合成凭据并扫描响应；这不证明获准接口自身不能回显认证值。
@@ -113,7 +115,7 @@ npm run release:preflight -- \
 
 此结果只证明本次读取的材料绑定一致。策略内容视为不透明字节：任意非空文件即使摘要匹配，也不能证明 schema、方法／路径限制、响应回显保护或 broker 实际执行已满足 CI-05。缺失策略文件会失败，没有“跳过策略”选项；测试中的合成策略仅用于验证摘要绑定。当前仓库没有可据此宣布安全准入的正式策略，生产仍被该关卡阻断。
 
-该工具还不验证清单或镜像签名、发布者身份、registry 内容／平台、同产物验收证据、SBOM／扫描，不证明当前环境实际使用这些四镜像引用；也不检查真实 Infisical 权限、DEK 包装、主密码、卷权限、备份、单实例更新及业务就绪。调用后文件仍可能变化，不提供部署锁或事务。后续 CD 必须在完成验签与其他准入关卡后，使用相同材料和引用并防止检查后被替换；退出 0 不能直接作为生产 `up` 的授权。CI-05、CI-06 和完整 CI-07 保持待完成。
+该工具还不验证清单或镜像签名、发布者身份、registry 内容／平台、同产物验收证据、SBOM／扫描，不证明当前环境实际使用这些四镜像引用；也不检查真实 Infisical 权限、DEK 包装、主密码、卷权限、备份、单实例更新及业务就绪。独立的卷元数据检查与整卷备份入口见 [CI-07 主机准备与离线备份](../deploy/README.md)，不改变此工具的离线绑定职责。调用后文件仍可能变化，不提供部署锁或事务。后续 CD 必须在完成验签与其他准入关卡后，使用相同材料和引用并防止检查后被替换；退出 0 不能直接作为生产 `up` 的授权。CI-05、CI-06 和完整 CI-07 保持待完成。
 
 测试随 `npm test` 执行；单独运行：
 
@@ -123,4 +125,4 @@ npx tsx --test test/release-preflight.test.ts
 
 ## GitHub Actions
 
-`ci.yml` 包含 Linux Node、Go 和最终镜像 jobs。它不发布镜像、不部署，也不持有生产 secrets。完整镜像 job 依次构建受审 broker、运行泄露回归、构建其他正式镜像并执行拓扑检查。构建、检查或网络依赖失败均保留失败状态，不使用 `continue-on-error` 放行。
+`ci.yml` 包含 Linux Node、Go 和最终镜像 jobs。它不发布镜像、不部署，也不持有生产 secrets。完整镜像 job 依次构建受审 broker、运行泄露回归、构建其他正式镜像、运行 Linux 卷权限及独立只读 WAL 检查，最后构建临时运维镜像并通过 Docker 主机入口执行拓扑检查。构建、检查或网络依赖失败均保留失败状态，不使用 `continue-on-error` 放行。

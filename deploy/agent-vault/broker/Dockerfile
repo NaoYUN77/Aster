@@ -40,6 +40,9 @@ RUN go build -mod=readonly -trimpath -ldflags="-s -w -X github.com/Infisical/age
 # entrypoint. Its embedded frontend cannot be copied independently, therefore
 # the new binary embeds the fixed source frontend built above with Node 24.
 FROM infisical/agent-vault:0.40.0@sha256:4d490e2586c553ea121fa404b66812ad40c246cc841b0cc746682d0a360bdf1e AS runtime
+# Upstream precreates this directory as 0755; MkdirAll at startup does not
+# tighten existing permissions. Existing volumes still require an offline check.
+RUN chmod 0700 /data/.agent-vault
 COPY --from=builder /audit/agent-vault /usr/local/bin/agent-vault
 LABEL org.opencontainers.image.version="0.40.0-reviewed" \
       org.opencontainers.image.revision="872578e4cdf9e03d5e3bcb5512023a70bf90ed65" \

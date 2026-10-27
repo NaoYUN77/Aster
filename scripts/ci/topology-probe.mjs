@@ -228,7 +228,7 @@ try {
       if (operation === "delivery-blocked") return delivery.model === 1 && delivery.sends.length === 2 && delivery.acknowledged > 0;
       return delivery.model === 1 && delivery.sends.length === 3 && delivery.acknowledged > 1;
     }, 60_000);
-  } else if (["execution-pending", "execution-sent", "delivery-sending", "delivery-uncertain", "delivery-reconcile", "delivery-sent"].includes(operation)) {
+  } else if (["execution-pending", "execution-sent", "execution-sent-after-deployment", "delivery-sending", "delivery-uncertain", "delivery-reconcile", "delivery-sent"].includes(operation)) {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync("/data/inbox.sqlite", { readOnly: true });
     try {
@@ -238,7 +238,8 @@ try {
       assert.ok(row);
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM inbox WHERE requestId = ?").get(id).n, 1);
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM failures").get().n, 0);
-      assert.equal(db.prepare("SELECT offset FROM checkpoint WHERE id = 1").get().offset, execution ? 712 : 713);
+      assert.equal(db.prepare("SELECT offset FROM checkpoint WHERE id = 1").get().offset,
+        execution && operation !== "execution-sent-after-deployment" ? 712 : 713);
       assert.ok((await stat("/data/agent.sqlite")).size > 0);
       if (execution) {
         assert.equal(await readFile("/data/workspace/topology-execution-marker", "utf8"), "completed\n", "completed external side effect must not repeat");

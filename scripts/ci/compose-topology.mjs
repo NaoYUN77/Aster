@@ -24,6 +24,12 @@ const quote = (value) => JSON.stringify(value);
 let step = "prepare";
 let checks = 0;
 let created = false;
+const suppliedRehearsalImage = process.env.ASTER_DEPLOYMENT_TOOLS_IMAGE;
+const rehearsalImage = suppliedRehearsalImage ?? `${project}-deploy-tools:ci`;
+const rehearsalContainer = `${project}-deploy-tools`;
+const restoredVolumes = [`${project}-restored-app`, `${project}-restored-vault`];
+let rehearsalBuilt = false;
+let rehearsalVolumesCreated = false;
 let failureCode = "CHECK_FAILED";
 const composeArgs = ["compose", "--project-name", project, "--project-directory", root,
   "--env-file", file("empty.env"), "-f", join(root, "docker-compose.agent-vault.yml"),
@@ -391,6 +397,48 @@ secrets:
       const logs = await compose("logs", "--no-color");
       assertClean(logs.output);
     });
+    await check("offline-volume-preflight-and-whole-volume-backup-restore", async () => {
+      const appId = (await docker("image", "inspect", images.app, "--format", "{{.Id}}")).output.trim();
+      const metadata = await docker("run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--user", "0:0",
+        "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges:true",
+        "--mount", `type=volume,source=${project}-app,target=/app-data,readonly,volume-nocopy`,
+        "--mount", `type=volume,source=${project}-vault,target=/broker-data,readonly,volume-nocopy`,
+        "--entrypoint", "node", appId, "dist/src/deployment-volume-preflight.js",
+        "--app-volume", "/app-data", "--broker-volume", "/broker-data", "--inbox-diagnostics");
+      assertClean(metadata.output);
+      assert.ok(metadata.output.includes('"status":"offline-volume-metadata-ok"'));
+      if (suppliedRehearsalImage) {
+        await docker("image", "inspect", rehearsalImage);
+      } else {
+        await docker("build", "--file", join(source, "deployment-tools.Dockerfile"),
+          "--build-arg", `APP_IMAGE=${images.app}`, "--tag", rehearsalImage, root);
+        rehearsalBuilt = true;
+      }
+      rehearsalVolumesCreated = true;
+      for (const volume of restoredVolumes) await docker("volume", "create", volume);
+      // Only the disposable operator gets the socket; deployed application and
+      // fixture containers retain their original isolation and have no socket.
+      const result = await command("docker", ["run", "--rm", "--name", rehearsalContainer, "--pull", "never",
+        "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true", "--tmpfs", "/backups:mode=700,size=256m",
+        "--mount", "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
+        rehearsalImage, "/ci/deployment-rehearsal.sh", appId, `${project}-app`, `${project}-vault`, ...restoredVolumes],
+      { timeout: 180_000 });
+      assertClean(result.output);
+      assert.ok(result.output.includes("deployment-backup-rehearsal-ok"));
+    });
+    await check("recreate-shared-namespace-retains-completed-requests", async () => {
+      const oldNamespace = (await compose("ps", "--all", "--quiet", "tool-network")).output.trim();
+      await compose("stop", "--timeout", "20", "tool-network");
+      await compose("rm", "--force", "personal-agent", "egress-router", "tool-network");
+      await compose("up", "--detach", "--no-build", "--pull", "never", "personal-agent");
+      const newNamespace = (await compose("ps", "--quiet", "tool-network")).output.trim();
+      assert.ok(oldNamespace && newNamespace && oldNamespace !== newNamespace);
+      await probe("delivery-restored");
+      await compose("exec", "-T", "personal-agent", "node", "/ci/topology-probe.mjs", "delivery-sent");
+      await compose("exec", "-T", "personal-agent", "node", "/ci/topology-probe.mjs", "execution-sent-after-deployment");
+      await compose("exec", "-T", "--user", "1000:1000", "personal-agent", "node", "/ci/topology-probe.mjs", "app-network");
+    });
     console.info(`Topology acceptance passed: ${checks} checks; final images; isolated synthetic resources.`);
     console.info("NOT COVERED: interrupted unsafe tool replay; public IPv6/DNS IPv6 positive controls; allowed API query/body semantics and credential-echo prevention; release/prod admission.");
   } else {
@@ -401,6 +449,16 @@ secrets:
   console.error(`Topology acceptance FAILED: ${step} (${failureCode}${line ? `; check-line ${line}` : ""})`);
   process.exitCode = 1;
 } finally {
+  if (rehearsalVolumesCreated) {
+    try {
+      await command("docker", ["rm", "--force", rehearsalContainer, `${project}-app-backup-writer`], { allowFailure: true });
+      for (const volume of restoredVolumes) await docker("volume", "rm", volume);
+    } catch { console.error("Deployment rehearsal cleanup FAILED"); process.exitCode = 1; }
+  }
+  if (rehearsalBuilt) {
+    try { await docker("image", "rm", rehearsalImage); }
+    catch { console.error("Deployment operator image cleanup FAILED"); process.exitCode = 1; }
+  }
   if (created) {
     try {
       await compose("stop", "--timeout", "20");
