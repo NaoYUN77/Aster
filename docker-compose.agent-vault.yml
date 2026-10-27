@@ -19,10 +19,10 @@ services:
       INFISICAL_URL: https://app.infisical.com
       AGENT_VAULT_TELEMETRY: "false"
       ASTER_VAULT_API_POLICY: /etc/aster-vault/api-policy.yaml
-    # Management port stays unpublished unless a loopback override adds it; see
-    # docker-compose.management-loopback.yml. Never bind it to a public interface.
-    expose:
-      - "${ASTER_BROKER_MANAGEMENT_PORT:-14321}"
+    # The management port is reachable only inside this container's network and is never
+    # published; docker-compose.management-loopback.yml adds an explicit loopback publish.
+    # No `expose` entry: it adds nothing here and Docker rejects it for a container sharing
+    # another service's network namespace.
     volumes:
       - agent-vault-data:/data
       - type: bind
