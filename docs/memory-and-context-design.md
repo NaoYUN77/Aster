@@ -1,6 +1,6 @@
 # Memory 与 Context 实施方案
 
-状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节）；其余模块待实现。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
+状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节），MEM-05 已实现可恢复的增量归档（结论见第 16 节），MEM-06 已实现原生压缩接入与周期快照切换（结论见第 17 节）；其余模块待实现。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
 
 本轮是当前 MVP 之后的增量工作，不表示这些能力已经上线。现有运行范围见 [mvp.md](mvp.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.3.0 为准。
 
@@ -34,7 +34,7 @@
 
 尚未接入：宿主记忆投影、归档任务与原生检索工具。归档 module 与原生 Task 已由 MEM-05 实现并独立验证，尚未在运行入口注册。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`；每日记忆的文件协议已由 MEM-04 实现（`src/memory/daily.ts`），其余未落地的名字仍是拟议应用接口，不是底座现有 API。
 
-按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。MEM-05 实现了独立可恢复的增量归档 Task（`archive.ts`、`archive-task.ts`）。这些 module 都还没有接入运行中的 agent：组合入口、原生检索工具和自定义周期快照仍待 MEM-06～MEM-07 完成。
+按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。MEM-05 实现了独立可恢复的增量归档 Task（`archive.ts`、`archive-task.ts`）。MEM-06 实现了 compaction Adapter、周期切换确认与轮数评估（`src/memory/compaction.ts`）。这些 module 都还没有接入运行中的 agent：组合入口与原生检索工具仍待 MEM-07 完成。
 
 底座现有接入能力：
 
@@ -528,7 +528,63 @@ Task 先提交固定范围和稳定 batch ID，再调用模型；校验通过的
 
 离线验证使用真实 Harness、临时 SQLite、faux provider 和每日文件。关键四个窗口同时有正常关闭重开和真实子进程 SIGKILL 证据。具体命令、通过编号见 MEM-05 交接记录。当前单进程、线性会话；未在真实模型上验证提取质量、脱敏效果、目标 Linux 资源消耗。模块不承诺自动完成语义级纠正，`supersedes` 必须来自可定位的明确旧引用。实际应用接线、外部事件时间持久化和升级入口属于 MEM-07。
 
-## 17. 实施入口与发布判定
+## 17. MEM-06 实现结论与压缩接入语义
+
+本节记录 compaction Adapter 的实测行为，是第 6、7、10 节在压缩侧的具体落实。证据为 `test/memory-compaction.test.ts`（06-A～06-G）在真实 `Harness` + SQLite + faux provider 上执行；摘要模型是独立的 faux provider，因此适配器调用不消耗主 agent 的脚本回复。
+
+### 17.1 冻结位置
+
+| 内容 | 权威来源 |
+| --- | --- |
+| compaction Adapter Interface（工厂、确认、计数、评估、指纹）、错误与副作用 | `src/memory/compaction.ts` 文件头 |
+| 摘要结果／失败事实的持久化格式（`personal.compaction.summary` 家族文档）、轮数回执与计数器（`personal.compaction.turn`／`turn-counter`） | `src/memory/compaction.ts` |
+| 验收 06-A～06-G | `test/memory-compaction.test.ts` |
+
+### 17.2 Adapter Interface
+
+`createCompactionExtension(options)` 返回可直接 `registry.install` 的 extension，只注册 `hook(CompactionTask, { beforeCompact })`。options 注入宿主 `commit`（`Pick<Session, "commit">`）、摘要模型 ref、budget（默认 `MEMORY_BUDGET_DEFAULTS`，按 schema 校验）、facts（值或函数）、`maxAttempts`（默认 2，范围 1..5，工厂期校验）与可选 `onResult` 观测回调（只带标识与错误码，不带正文）。持久化只走注入的宿主 commit：`HookApi` 没有 commit（第 12.6 节），声明类型之外的运行时成员一概不用，与 MEM-05 用 options 注入 model/store 的范式一致。
+
+hook 内顺序固定：派生稳定 key → 查已保存结果 → 读边界状态 → 摘要调用（每次尝试后立即记账）→ 组装并渲染 B → 先持久化结果再返回 `{ summary }`。普通失败一律在持久化失败事实后返回 `{ decline: true }`，**绝不抛错**：原生 hook runner 对普通异常是「报告后继续」，抛错会回落到默认摘要，等于发布一份未校验的 B；只有取消是例外（见 17.4）。
+
+稳定 key 由被替换范围（`firstKept`、最后一个被替换 Entry）、边界 anchor、上一周期 `cycleId` 与 `sources.through`、facts、模型与叙事／快照预算派生（sha256）。命中且校验通过（渲染文本能解码回该范围的快照）才复用，不再调用模型；链在已发布周期之后的压缩因上一周期不同而 key 不同，不会复用一份 `sources.after` 会倒退的快照。
+
+### 17.3 边界 anchor 规则
+
+基线只从被替换范围内的最后一个 `personal.working.anchor` 经 `readWorkingAt` 读取。无 anchor 时用 `snapshotAsOf(WorkingDoc, …, 最后一个被替换 Entry)` 探查，且只有一种结局可继续：
+
+| 探查结局 | 处理 |
+| --- | --- |
+| 返回 `undefined` | 认定边界处尚无 working 写入，用初始状态；`boundary.anchor` 记为该探查 Entry |
+| 返回一个值 | 状态存在但范围内无 anchor 能钉住它 → decline 并记录 `not-covered` 失败，不猜边界 revision |
+| 抛错 | 边界不被覆盖 → decline 并记录 `not-covered` 失败 |
+
+这条规则的实测后果（06-D 开发探针中观察到）：一次阻塞压缩消耗掉 anchor 后，紧接着的后台压缩若其范围仍无新 anchor，会按规则 decline。这不是故障而是规则本身：周期内 C 中的 working 更新会持续写入新 anchor（原生工具每次调用同 commit 追加），长 run 因此不断获得可钉住的边界；06-C 正是靠请求内工具回路中的 working 更新在同一次请求内完成多次压缩。旧 B 的处理按第 7 节：被替换范围首条若是 `pi.compaction`（或应用的 `personal.cycle` 投影），从其 model 文本提取 `<summary>` 体并 `snapshotFromHead` 解码——解出快照则旧叙事取其 `narrative`、`sources.after` 承接其 `sources.through`；解不出（`undefined`）按旧原生摘要兼容，整段正文作为旧叙事（06-E 实测：原生摘要先行、后装 Adapter 的第二次压缩把原生叙事折入来源，且新快照 `sources.after` 为 `null`）；未知版本／损坏则显式失败 decline，不静默降级为叙事。
+
+摘要来源由 Adapter 自己序列化（不深导入 SDK 私有路径）：旧叙事单列，消息取可见文本、工具调用与工具结果，system 消息省略，head marker 自身的消息不重复；工具结果截断在 2,000 字符并明确标注截断字符数与「完整结果仍在已存 Entry 中」，不宣称完整。
+
+### 17.4 usage 与取消
+
+每次摘要尝试（成功、失败、重试都算）在判定结果之前，就通过宿主 commit 把该次 usage 累加到 `UsageDoc` 的 `app/summary` 键（01-E 的累加写法）；hook 内调用不产生原生记账（06-A 实测 `summary/summary-1` 键缺失、`app/summary` 大于 0），两套键不重叠故不重复计量。只有 provider 的 `error` 值得重试（至 `maxAttempts`）；`length`、空文本、含 toolCall、叙事经 `estimateTextTokens` 超过 `budget.narrativeTokens` 一律视为不完整，立即 decline 不发布。`stopReason: "aborted"` 时用 `ctx.abortSignal.throwIfAborted()` 传播任务取消，不吞掉取消后返回摘要。精确状态组装后 `renderSnapshot` 抛 `budget-exceeded`（渲染文本超 `MEMORY_LIMITS.snapshotText`）时 decline 并记录，绝不截断或把精确状态概括进叙事（06-E 实测：32 条满格偏好加满格任务状态时 decline，存储状态逐项不变）。
+
+### 17.5 两条确认路径
+
+`confirmCompactionCycle(deps, conversationId, taskId, context, { archivedThrough })` 只读持久化事实，`createHarnessConfirmDeps(harness)` 是其 Harness 绑定。判据严格按第 14.5 节：任务未终结 → `pending`；任务 `failed`／`aborted` → `not-published` 并带原因；submission 路径须 submission 为 `done` 且 view head 是该 submission 的 Entry（`queued`／`placed` → `pending`，`unanswered`（含 reset 越过的 `stale`）→ `not-published`）；阻塞路径须 `outcome.result.entryId === view.head.id`，不等为 `head-mismatch`。任务完成但无 entry、无 submission（无可压缩内容）为 `not-published`／`nothing-compacted`。切换时返回解码后的快照（原生摘要 head 为 `snapshot: undefined, native: true`）与 `archiveRange`：`after` 取新快照 `sources.after` 与入参 `archivedThrough` 中更靠后者，绝不回退；范围已空则为 `null`。06-D 实测：后台压缩在 submission `queued` 时 confirm 为 `pending`，`done`＋head 后为 `switched`，关闭重开 Harness 后按同一判据仍得到 `switched` 与相同 entryId。
+
+### 17.6 预算参数取值
+
+原生策略只由唯一 budget 与窗口派生（`nativeCompactionPolicy`／`compactionThresholds`）：`settings.compaction = { enabled: true, reserveTokens: R, keepRecentTokens: budget.recentVerbatimTokens, backgroundTokens: budget.backgroundTargetTokens }`，阻塞阈值 `C - R`、后台阈值 `C - R - backgroundTargetTokens`。用 `MEMORY_BUDGET_DEFAULTS` 与真实窗口 200,000、R = 16,000 时：keepRecent 16 Ki、backgroundTarget 48 Ki、阻塞 184,000、后台 134,848（06-F 实测断言）。传入 `contextWindow` 时校验窗口关系（后台目标须低于阻塞阈值、保留原文须装得下），非法抛 `MemoryError`（`invalid-input`／`budget-exceeded`），不静默钳制。摘要调用的 `maxTokens` 由 `budget.narrativeTokens`（默认 3 Ki）派生并受模型上限约束；`cacheRetention: "none"`。
+
+轮数评估（06-F）：`recordCompletedUserRequest` 以 `requestId` 为回执键与计数器同 commit 推进，同 id 重放不重复计数，第 `evaluateAfterUserTurns`（默认 20）的倍数时 `shouldEvaluate` 为真；`evaluateCompaction` 先 token 后轮数——`inputTokens` 达阻塞／后台阈值即返回 token 决策（一次大工具回合可触发，不等轮数），否则轮数达标且 `compactableTokens > 0` 返回 `rounds`，其余 `none`。实测 20 个短请求只在第 20 个评估、低 token 时决策为 `none`／`rounds` 而从不强压。
+
+前缀指纹（06-G）：`requestPrefixFingerprint` 对 instructions 文本、快照文本、工具名集合（按提供顺序）分别取 sha256 并合成总 digest，`comparePrefix` 报告变化的逻辑块；工具集合变化（新 schema 加载）明确归类为 `tools` 前缀变化。实测同周期内两次适配请求的 A／工具指纹不变、C 仅追加（后一请求的会话消息以前一请求为字节前缀）。
+
+### 17.7 未验证项
+
+- **真实模型摘要质量**：待验证。06-A～06-G 全部使用 faux provider 的脚本叙事，只证明机制（选段、记账、发布、确认、边界）与拒绝不完整结果，不证明真实模型叙事对目标、约束与未完成状态的保留质量（MEM-08）。
+- **云端缓存命中**：待验证。逻辑块相同（指纹相同）只说明本地字节相同，不等于提供商缓存命中；TTL、缓存粒度与计费须在目标提供商实测（第 10 节）。测试与代码中不以任何形式宣称已命中。
+- 真实窗口下的阈值标定与资源占用：待 MEM-08。本节的窗口数字是派生关系的验证，不是部署标定。
+
+## 18. 实施入口与发布判定
 
 按 [实施 issues](memory-implementation-issues.md) 的依赖顺序执行。先完成公开 API 可行性和 Interface 契约，再并行实现 Working、Context、Daily Memory；最后接入底座与应用并做故障恢复验收。
 

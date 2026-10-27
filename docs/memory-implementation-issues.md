@@ -1,6 +1,6 @@
 # Memory 与 Context：实施 issues 和验收
 
-状态：MEM-01～MEM-05 的 module 已实现并通过各自本地验收；MEM-06 待领取，全部能力尚未接入运行中的 agent（MEM-07 负责组合）。编制日期：2026-10-25。架构与 Interface 语义以 [实施方案](memory-and-context-design.md) 为唯一来源；本文负责拆分任务、依赖、交接产物和完成条件。
+状态：MEM-01～MEM-06 的 module 已实现并通过各自本地验收；MEM-07、MEM-08 待实施，全部能力尚未接入运行中的 agent（MEM-07 负责组合）。编制日期：2026-10-25。架构与 Interface 语义以 [实施方案](memory-and-context-design.md) 为唯一来源；本文负责拆分任务、依赖、交接产物和完成条件。
 
 ## 接手方式
 
@@ -25,7 +25,7 @@
 | MEM-07 | [#14](https://github.com/NaoYUN77/personal-agent-base-durable/issues/14) |
 | MEM-08 | [#15](https://github.com/NaoYUN77/personal-agent-base-durable/issues/15) |
 
-只先领取 MEM-01。依赖未满足时不要提前实现下游 module 的接入部分；本表与各 issue 的「依赖」一节一致，改动时两处同步。MEM-01 已于 2026-10-25 完成（交接记录见本节末），MEM-02、MEM-03、MEM-04 同批完成（交接记录分别见其小节末）。MEM-05 已于 2026-10-26 认领并完成本地验收（交接记录见对应小节）；MEM-06 的两半依赖（MEM-02、MEM-03）已满足，可开始。
+只先领取 MEM-01。依赖未满足时不要提前实现下游 module 的接入部分；本表与各 issue 的「依赖」一节一致，改动时两处同步。MEM-01 已于 2026-10-25 完成（交接记录见本节末），MEM-02、MEM-03、MEM-04 同批完成（交接记录分别见其小节末）。MEM-05 已于 2026-10-26 认领并完成本地验收（交接记录见对应小节）；MEM-06 已于 2026-10-27 认领并完成本地验收（交接记录见其小节末）。
 
 ## 依赖与并行安排
 
@@ -348,13 +348,54 @@ MEM-01 验证失败的接入点必须有具体替代方案和对应验收后才�
 
 **验收**：
 
-- [ ] 06-A：压缩前 A/B/C 与压缩后 A/新 B/保留 C 都能从持久化记录重建；system prompt 和工具关联完整，原始 Entries 未删除。
-- [ ] 06-B：切分边界前后分别更新 working，B 精确取边界版本，保留 C 携带之后修订；不因 head marker 的较大 ID 读取未来状态。
-- [ ] 06-C：一个长用户请求经历至少两次压缩，后续模型调用持续取得正确任务状态，无需下一条用户输入或模型主动补读。
-- [ ] 06-D：后台摘要入队、stale、失败、阻塞失败、重置交错与重启均遵循原生语义，不发布半成品 B，不同步等待无法前进的边界。
-- [ ] 06-E：叙事摘要超限／被截断时不作为完整 B 发布；精确状态超限不被静默概括。旧原生摘要有兼容读取路径。
-- [ ] 06-F：20 个短请求只评估不强压；一次大工具回合可先触发 token 压缩；同 requestId 恢复和 generation 重试不重复计数。
-- [ ] 06-G：实际适配请求比较表明周期内 A/B 稳定、C 仅追加；新 schema 加载明确记录为前缀变化，不能凭逻辑块相同宣称云端缓存已命中。
+- [x] 06-A：压缩前 A/B/C 与压缩后 A/新 B/保留 C 都能从持久化记录重建；system prompt 和工具关联完整，原始 Entries 未删除。
+- [x] 06-B：切分边界前后分别更新 working，B 精确取边界版本，保留 C 携带之后修订；不因 head marker 的较大 ID 读取未来状态。
+- [x] 06-C：一个长用户请求经历至少两次压缩，后续模型调用持续取得正确任务状态，无需下一条用户输入或模型主动补读。
+- [x] 06-D：后台摘要入队、stale、失败、阻塞失败、重置交错与重启均遵循原生语义，不发布半成品 B，不同步等待无法前进的边界。
+- [x] 06-E：叙事摘要超限／被截断时不作为完整 B 发布；精确状态超限不被静默概括。旧原生摘要有兼容读取路径。
+- [x] 06-F：20 个短请求只评估不强压；一次大工具回合可先触发 token 压缩；同 requestId 恢复和 generation 重试不重复计数。
+- [x] 06-G：实际适配请求比较表明周期内 A/B 稳定、C 仅追加；新 schema 加载明确记录为前缀变化，不能凭逻辑块相同宣称云端缓存已命中。
+
+**交接记录（2026-10-27）**
+
+基线：本项最初基于 PR #16 的分支开发；PR #16／#17／#19 全部合并后，已变基到 main（`eefe3aa`）并按下方命令重新验证，实施方案结论章节顺延为第 17 节。
+
+交付物：
+
+- `src/memory/compaction.ts`：compaction Adapter 与其 Interface——`createCompactionExtension(options)`（注入宿主 commit／摘要模型／budget／facts／maxAttempts／onResult，只注册 `hook(CompactionTask, { beforeCompact })`）、`nativeCompactionPolicy`／`compactionThresholds`、`confirmCompactionCycle`＋`createHarnessConfirmDeps`、`recordCompletedUserRequest`／`readCompactionTurnCount`、`evaluateCompaction`、`requestPrefixFingerprint`／`comparePrefix`、`publishedSnapshot`／`summaryBodyOfEntry`、`deriveCompactionKey`、`readCompactionSummary`。文件头写明输入、输出、错误、副作用与顺序；实现结论见实施方案第 17 节。
+- `test/memory-compaction.test.ts`：06-A～06-G 共 14 个用例，全部用真实 `Harness` + Node SQLite + faux provider（主模型与摘要模型各一），临时目录。
+- `docs/memory-and-context-design.md`：新增第 17 节（MEM-06 实现结论与压缩接入语义），原第 17 节顺延为第 18 节；文首状态与第 2 节同步 MEM-06 状态。
+
+执行命令与结果：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm ci` | 通过（基线分支无 `node_modules`，本次新装） |
+| `npm run check` | 通过，无输出 |
+| `npm run build` | 通过，无输出 |
+| `npx tsx --test test/memory-compaction.test.ts` | 14/14 通过 |
+| `npm test`（本机默认环境） | 178/182 通过、3 跳过；唯一失败为 `test/agent-vault.test.ts` 的「stdio MCP inherits proxy and CA settings…」，原因是本机环境变量 `SSL_CERT_FILE` 等 CA 变量污染（与本次改动无关，PR #16 review 已确认） |
+| `env -u SSL_CERT_FILE -u SSL_CERT_DIR -u NODE_EXTRA_CA_CERTS -u CURL_CA_BUNDLE -u REQUESTS_CA_BUNDLE -u GIT_SSL_CAINFO -u AWS_CA_BUNDLE npm test` | 179/182 通过、3 跳过、0 失败（变基后基线 168 项无回归） |
+
+逐项结论：
+
+- 06-A：三轮对话内发生两次压缩并正确链接（第二周期 `sources.after` 等于第一周期 `sources.through`）；第一周期切分早于 working 更新，其 B 为初始 revision 1，第二周期 B 为边界 revision 2；压缩后请求带 `instructions` section、工具声明与 `<cycle-snapshot>`；被替换的原始 Entries（含锚点）仍可经 conversation entries 查到，未删除；`app/summary` 有记账且原生键 `summary/summary-1` 缺失；阻塞路径以 `outcome.result.entryId === head` confirm 为 `switched`，且返回前已持久化的结果与 head 正文逐字一致。
+- 06-B：边界前更新 rev 2、保留 C 内更新 rev 3，新 B 的 `baseline.revision` 为 2、`boundary.anchor` 为 rev 2 的锚点；rev 3 锚点保留在活跃 C 中且仍是当前状态；head marker 的 id 大于保留条目（含 rev 3 锚点），边界读未被其拉向未来。
+- 06-C：单个用户请求内由工具回路（大工具结果＋同 commit 的 working 检查点）真实触发至少两次阻塞压缩——不是用同一 requestId 的 generation 续跑冒充；后续模型调用的 transcript 含新 B，最终 B 的 baseline 来自请求内的检查点（revision ≥ 3），全程无下一条用户输入。
+- 06-D：后台压缩在 submission `queued` 时 confirm 为 `pending`，`done`＋head 后为 `switched`；摘要模型连续 error 用尽 2 次尝试后 decline、无新 head、旧 B/C 不变、失败尝试的 usage 已记入 `app/summary`、失败事实（`model-failure`、attempts 2）已持久化到结果家族；reset 越过的手动压缩 submission 为 `unanswered`/`stale`，confirm 为 `not-published`，head 仍为 `pi.reset`；关闭重开 Harness（含恢复相同的 compaction settings）后，submission 路径仍 confirm 为 `switched` 且 entryId 相同；阻塞路径在 06-A 中以 entryId＋head 复查。
+- 06-E：摘要 `stopReason: "length"`、叙事超 `narrativeTokens`（11,500 字符 ≈ 3,286 token > 3,072）、摘要返回 toolCall，三者都 decline 不发布且失败已持久化；精确状态超限（满格任务＋32 条满格偏好使 `renderSnapshot` 抛 `budget-exceeded`）decline 且存储状态逐项不变、未被概括；旧原生摘要（未装 Adapter 先行压缩）经 `publishedSnapshot` 读得 `undefined`，装上 Adapter 后的下一次压缩把原生叙事折入摘要来源，新快照 `sources.after` 为 `null`。
+- 06-F：20 个不同 requestId 依次计数且只在第 20 个 `shouldEvaluate` 为真，同 id 重放（含第 20、7 个）不重复计数；`evaluateCompaction` 在低 token＋20 轮＋无可压缩内容时为 `none`、有可压缩内容时为 `rounds`、单回合大 token 时为 `token`（blocking／background 两档）；计数 API 只由「完成的用户请求」调用，generation 重试不调用它、恢复重放同一 requestId 由回执去重——测试名与注释已写明该机制。`nativeCompactionPolicy` 在 200,000 窗口下派生 keepRecent 16 Ki／background 48 Ki／阻塞 184,000／后台 134,848，非法窗口关系显式抛 `MemoryError`。
+- 06-G：指纹按块隔离，工具名集合新增一个即报告 `changedBlocks: ["tools"]`；同周期内两次适配请求（经 `nativeCompactionPolicy` 派生的 settings）的 instructions／工具指纹不变，后一请求的会话消息以前一请求为字节前缀（C 仅追加）。逻辑块相同不等于缓存命中，命中仍标待验证。
+
+未覆盖／受限：
+
+- 已保存结果的复用：key 派生的稳定性与「链接周期不复用」由单元用例（06-D 的 key 用例）与「返回前先持久化」的记录断言覆盖；没有单独构造「任务在持久化后、发布前崩溃并重跑 hook」的端到端场景，该崩溃窗口的复用行为未实测。
+- 边界 anchor 规则的实测后果：被替换范围有状态但无 anchor 时 decline 为 `not-covered`（含探针观察：阻塞压缩消耗 anchor 后紧接着的后台压缩会因此 decline），这是规则本身而非故障，已写入实施方案 17.3；MEM-07 接线时应保证周期内 working 更新持续产生 anchor。
+- 真实模型摘要质量、目标提供商云端缓存命中、真实窗口阈值标定与资源测量：待验证（MEM-08），本项不宣称通过。
+- 本机 CA 环境变量污染 `test/agent-vault.test.ts` 既有用例（见上表），未改动该测试。
+- 尚未接入运行中的 agent：extension 已导出但未在 `src/agent.ts` 注册（MEM-07 负责组合）。
+
+对下游的解锁条件：MEM-06 已完成。MEM-07 接线时：压缩 settings 用 `nativeCompactionPolicy(budget, reserveTokens, contextWindow)` 派生；周期切换与归档触发只认 `confirmCompactionCycle` 的 `switched`（两条路径），不认任务终态；轮数计数只在用户请求完成时调用 `recordCompletedUserRequest`；摘要结果与失败事实查 `personal.compaction.summary` 家族（经 `readCompactionSummary`），不要直接读文档。
 
 ## MEM-07：接入请求生命周期及记忆工具
 
