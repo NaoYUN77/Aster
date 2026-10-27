@@ -109,6 +109,8 @@ export function checkRenderedProject(bytes: Uint8Array, options: RenderCheckOpti
   if (config.name !== options.projectName || config.name !== environment.composeProject) fail("RENDER_PROJECT_MISMATCH");
 
   const expectedVolumes = { "personal-agent-data": environment.volumes.app, "agent-vault-data": environment.volumes.broker };
+  // An extra volume is a deployment resource the description does not name, so it is rejected.
+  if (Object.keys(config.volumes).sort().join() !== Object.keys(expectedVolumes).sort().join()) fail("RENDER_VOLUME_MISMATCH");
   for (const [key, name] of Object.entries(expectedVolumes)) {
     const volume = config.volumes[key];
     if (!volume) fail("RENDER_VOLUME_MISMATCH");
@@ -116,6 +118,7 @@ export function checkRenderedProject(bytes: Uint8Array, options: RenderCheckOpti
     if (volume.name !== name) fail("RENDER_VOLUME_MISMATCH");
   }
 
+  if (Object.keys(config.networks).join() !== "vault") fail("RENDER_NETWORK_MISMATCH");
   const network = config.networks.vault;
   if (!network) fail("RENDER_NETWORK_MISMATCH");
   if (environment.network.name !== undefined && network.name !== environment.network.name) fail("RENDER_NETWORK_MISMATCH");
