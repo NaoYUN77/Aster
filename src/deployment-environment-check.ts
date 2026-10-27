@@ -87,6 +87,10 @@ async function render(values: Record<string, unknown>): Promise<unknown> {
   const managementLoopback = values["management-loopback"] === true;
   const directory = await mkdtemp(join(tmpdir(), "aster-environment-"));
   try {
+    // A rendered project must never point at a private directory that does not exist: Compose
+    // would either fail on the missing env file or create a directory for a missing bind source
+    // and mount an empty secret file. Check before rendering so the failure names the directory.
+    if (!existsSync(privateDirectory)) throw new DeploymentRenderError("RENDER_PRIVATE_DIRECTORY_MISMATCH");
     // The generated env file carries only non-secret resource names; the description is the source.
     const envFile = join(directory, "environment.env");
     const assignments = composeEnvironment(environment, privateDirectory);
@@ -101,9 +105,6 @@ async function render(values: Record<string, unknown>): Promise<unknown> {
       env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("ASTER_") && !key.startsWith("COMPOSE_"))),
     });
     if (result.error || result.status !== 0) throw new DeploymentRenderError("RENDER_INVALID_JSON");
-    // A rendered project must never point at a private directory that does not exist: Compose
-    // would create a directory for a missing bind source and mount an empty secret file.
-    if (!existsSync(privateDirectory)) throw new DeploymentRenderError("RENDER_PRIVATE_DIRECTORY_MISMATCH");
     return checkRenderedProject(Buffer.from(result.stdout, "utf8"), {
       environment, privateDirectory, projectName: environment.composeProject, managementLoopback, routerEnabled,
     });
