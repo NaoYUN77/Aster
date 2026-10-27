@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 import { join } from "node:path";
-import { TextDecoder } from "node:util";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
+import { BoundedFileError, readBoundedFile } from "./bounded-file.js";
+import { parseStrictJson, StrictJsonError } from "./strict-json.js";
 
 const Sha256 = Type.String({ minLength: 71, maxLength: 71, pattern: "^sha256:[0-9a-f]{64}$" });
 const Commit = Type.String({ minLength: 40, maxLength: 40, pattern: "^[0-9a-f]{40}$" });
@@ -56,62 +55,25 @@ function validPorts(images: ReleaseImages): boolean {
 }
 
 // JSON.parse discards duplicate keys. Reject them, including escaped aliases, before trusting the result.
-function rejectDuplicateKeys(text: string): void {
-  const stack: (Set<string> | null)[] = [];
-  const tokens = /"(?:\\.|[^"\\])*"|[{}\[\]]/g;
-  for (const match of text.matchAll(tokens)) {
-    const token = match[0];
-    if (token === "{") stack.push(new Set());
-    else if (token === "[") stack.push(null);
-    else if (token === "}" || token === "]") stack.pop();
-    else if (text.slice(match.index + token.length).trimStart().startsWith(":")) {
-      const keys = stack.at(-1)!;
-      const key: string = JSON.parse(token);
-      if (keys?.has(key)) fail("MANIFEST_DUPLICATE_KEY");
-      keys?.add(key);
-    }
-  }
-}
-
 export function parseReleaseManifest(bytes: Uint8Array): ReleaseManifest {
-  if (bytes.byteLength > 64 * 1024) fail("MANIFEST_TOO_LARGE");
-  let text: string;
   let value: unknown;
   try {
-    // Reject malformed UTF-8 and BOM rather than silently hashing/parsing different representations.
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    value = JSON.parse(text);
-  } catch {
-    return fail("MANIFEST_INVALID_JSON");
+    value = parseStrictJson(bytes, 64 * 1024);
+  } catch (error) {
+    return fail(error instanceof StrictJsonError && error.code === "TOO_LARGE" ? "MANIFEST_TOO_LARGE"
+      : error instanceof StrictJsonError && error.code === "DUPLICATE_KEY" ? "MANIFEST_DUPLICATE_KEY"
+      : "MANIFEST_INVALID_JSON");
   }
-  rejectDuplicateKeys(text);
   if (!Value.Check(ReleaseManifestSchema, value) || !validPorts(value.images)) fail("MANIFEST_INVALID_SCHEMA");
   return value;
 }
 
 async function readBounded(path: string, limit: number, subject: string): Promise<Buffer> {
   try {
-    // Nonblocking open prevents a supplied FIFO from hanging the offline check on POSIX.
-    const file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
-    try {
-      const stat = await file.stat();
-      if (!stat.isFile()) fail(`${subject}_NOT_REGULAR_FILE`);
-      if (stat.size > limit) fail(`${subject}_TOO_LARGE`);
-      const buffer = Buffer.alloc(limit + 1);
-      let length = 0;
-      while (length < buffer.length) {
-        const { bytesRead } = await file.read(buffer, length, buffer.length - length, null);
-        if (bytesRead === 0) break;
-        length += bytesRead;
-      }
-      if (length > limit) fail(`${subject}_TOO_LARGE`);
-      return buffer.subarray(0, length);
-    } finally {
-      await file.close();
-    }
+    return await readBoundedFile(path, limit);
   } catch (error) {
-    if (error instanceof ReleasePreflightError) throw error;
-    return fail(`${subject}_UNREADABLE`);
+    if (!(error instanceof BoundedFileError)) throw error;
+    return fail(`${subject}_${error.code}`);
   }
 }
 

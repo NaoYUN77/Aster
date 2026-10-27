@@ -91,6 +91,8 @@ npm run test:topology -- --render-only
 
 摘要计算对象是本地文件的**完整原始字节**，不规范化换行、不解析 YAML、不展开 Compose 环境变量。Compose 仅支持上述固定顺序的 Vault + router 两文件组合，不接受 build override、其他部署模式或清单提供的任意路径。策略对象没有路径字段；本地路径只来自 `--policy`。文件必须是普通文件，清单上限 64 KiB，单份 Compose／策略上限 1 MiB；策略不能为空。使用 POSIX 命名管道等特殊文件也会拒绝。清单编码限定严格 UTF-8，无 BOM。
 
+`docker-compose.management-loopback.yml` 与[部署环境描述](../../docs/deployment-environments.md)不属于 v1 绑定范围：v1 语义保持不变，也不会因为文件出现在仓库里就被视为已绑定。把它们纳入发布材料需要新的版本化契约（阶段 B），在此之前叠加了回环 override 的部署不能用现有 v1 清单声称材料完整。
+
 从独立、可信的交付选择中取得预期 commit 和四镜像完整引用，再显式传入（以下变量需由运维自行设置，不从待检查清单提取）：
 
 ```sh

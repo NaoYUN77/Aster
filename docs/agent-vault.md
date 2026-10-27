@@ -162,7 +162,13 @@ chmod 600 deploy/agent-vault/private/router/*
    docker compose -f docker-compose.agent-vault.yml up -d agent-vault
    ```
 
-4. 通过 `http://127.0.0.1:14321` 设置 owner。远程使用 SSH 转发管理端口；默认不公开管理界面。创建名为 `personal-agent` 的 vault，credential store 选择 Infisical，绑定 project/environment/path，轮询周期初始 60 秒。确认同步成功，设置 `unmatched_host_policy=deny`。
+4. 管理端口默认不发布到宿主。设置 owner、导出 CA 等宿主侧操作需要临时叠加回环 override：
+
+   ```sh
+   docker compose -f docker-compose.agent-vault.yml -f docker-compose.management-loopback.yml up -d agent-vault
+   ```
+
+   该 override 只把管理端口发布在 `127.0.0.1`；不要改成其他宿主地址。通过 `http://127.0.0.1:14321` 设置 owner，远程使用 SSH 转发。创建名为 `personal-agent` 的 vault，credential store 选择 Infisical，绑定 project/environment/path，轮询周期初始 60 秒。确认同步成功，设置 `unmatched_host_policy=deny`。完成后移除 override 并重建 broker：`docker compose -f docker-compose.agent-vault.yml up -d --force-recreate agent-vault`。
 5. 根据 `deploy/agent-vault/services.example.yaml` 配置实际服务规则。删除不用的示例，替换 example.com；每个规则引用的 key 必须已同步存在。CLI 导入 service 文件会替换整个规则集合，保留模型、Telegram、OAuth discovery/token/registration 等所需规则。服务 host 限定端口与路径，不能仅因为域名可信就允许所有凭证管理接口。
 6. 创建只具备该 vault `proxy` 角色的 agent 身份，把 token 和 vault 名按 URL userinfo 编码填入 `private/app.env` 的两条 proxy URL。不能授予 member/admin；应用不需要 credential get/list-reveal 权限。
 7. 从自己部署的管理端点获取公共 CA，并确认来自预期实例：
@@ -202,11 +208,11 @@ chmod 600 deploy/agent-vault/private/router/*
 
 ## 网络与数据边界
 
-`tool-network` 在应用启动前设置 raw OUTPUT 规则：uid 1000 只允许 TCP 到固定 broker IP `172.30.82.2:14322` 与精确 loopback，拒绝其他 IPv4/IPv6/UDP 流量。规则在 Docker DNS DNAT 前匹配，不允许 `127.0.0.11` DNS 出网；应用通过代理让 broker 解析上游域名。应用容器固定 uid 1000，移除全部 capabilities、禁止提权、只读根文件系统，不共享 Docker socket。Vault 管理端口不能从应用网络直接访问。
+`tool-network` 在应用启动前设置 raw OUTPUT 规则：uid 1000 只允许 TCP 到固定 broker IP `172.30.82.2:14322` 与精确 loopback，拒绝其他 IPv4/IPv6/UDP 流量。这些地址与端口来自[部署环境描述](deployment-environments.md)，不是 `network.sh` 内的常量。规则在 Docker DNS DNAT 前匹配，不允许 `127.0.0.11` DNS 出网；应用通过代理让 broker 解析上游域名。应用容器固定 uid 1000，移除全部 capabilities、禁止提权、只读根文件系统，不共享 Docker socket。Vault 管理端口不能从应用网络直接访问。
 
 叠加 `docker-compose.router.yml` 时，`tool-network` 收到 `ROUTER_ENABLED=1`：uid 1000 的应用不再允许直连 broker，只能访问精确 loopback；uid 1001 的路由器才允许访问 `172.30.82.2:14322` 与 loopback。路由器与应用共享同一网络命名空间，因此 `127.0.0.1:14323` 对应用可达，而路由器不发布任何宿主端口。没有这一覆盖时，应用直接使用 broker 的 proxy 身份。
 
-固定子网与已有网络冲突时，需要一起修改 Compose 子网/IP、`network.sh` 和 app env；只改其中一处会阻断服务。不要手动给应用附加另一张网络、改变 uid 或开放 capabilities。防火墙容器配置变动/退出后，停止并重建整个应用、路由器和网络命名空间，不能只重启网络容器并保留旧应用。
+固定子网与已有网络冲突时，不要逐个文件改 IP：项目名、卷、网络名／网段、broker 地址与管理端口由[部署环境描述](deployment-environments.md)统一给出，`network.sh`、router 上游和 Compose 都从同一组值派生。改描述后用 `npm run deployment:environment -- render` 与 `router` 核对，只改其中一处会阻断服务。不要手动给应用附加另一张网络、改变 uid 或开放 capabilities。防火墙容器配置变动/退出后，停止并重建整个应用、路由器和网络命名空间，不能只重启网络容器并保留旧应用。
 
 loopback 允许应用与可信本地 MCP 通信，不能在该命名空间增加允许转发出网的特权进程。Vault 的 netguard 不应允许 broker 自己的管理端口、宿主内网或云 metadata 地址。`deny` 模式只限制目标 host/path/port，不提供 HTTP method 或业务级权限控制；目标接口若会回显认证值、导出或创建新 token，需要禁用相应路径或增加可信响应适配。
 

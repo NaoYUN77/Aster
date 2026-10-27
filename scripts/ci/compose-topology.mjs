@@ -39,7 +39,9 @@ function command(program, args, { input, allowFailure = false, timeout = 120_000
   return new Promise((resolvePromise, reject) => {
     const child = spawn(program, args, { cwd: root, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
       env: { ...process.env, COMPOSE_ENV_FILES: "", COMPOSE_DISABLE_ENV_FILE: "1",
-        ASTER_IMAGE: images.app, ASTER_ROUTER_IMAGE: images.router, ASTER_NETWORK_IMAGE: images.network, ASTER_VAULT_IMAGE: images.broker } });
+        ASTER_IMAGE: images.app, ASTER_ROUTER_IMAGE: images.router, ASTER_NETWORK_IMAGE: images.network, ASTER_VAULT_IMAGE: images.broker,
+        // The Compose file defaults to the production network name; CI must never join it.
+        ASTER_NETWORK_NAME: `${project}-vault` } });
     let output = "";
     let overflow = false;
     let timedOut = false;
@@ -180,6 +182,8 @@ try {
     image: ${quote(images.network)}
     environment: !override
       ROUTER_ENABLED: "1"
+      ASTER_BROKER_ADDRESS: "172.30.82.2"
+      ASTER_BROKER_PORT: "14322"
     dns: ["172.30.82.2"]
   egress-router:
     image: ${quote(images.router)}
@@ -290,7 +294,8 @@ secrets:
     assert.deepEqual(Object.keys(config.secrets), ["telegram-owner-id"]);
     assert.equal(config.secrets["telegram-owner-id"].external, undefined);
     assert.equal(resolve(config.secrets["telegram-owner-id"].file), resolve(file("telegram-owner-id")));
-    assert.ok(config.networks.vault.name.startsWith(`${project}_`));
+    // CI must never join the production network, whose name is the Compose default.
+    assert.equal(config.networks.vault.name, `${project}-vault`);
   });
   if (!renderOnly) {
     await check("final-images-present", async () => {

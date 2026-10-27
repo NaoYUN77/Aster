@@ -184,7 +184,9 @@ docker compose -f docker-compose.agent-vault.yml logs --tail 50
 
 使用路由器时，把 `-f docker-compose.router.yml` 加到每条命令，并在启动应用前多一步 `up -d egress-router`；完整顺序见第 6 节。
 
-应用与 `tool-network` 共享网络命名空间，broker 固定 IP `172.30.82.2`。单 vault 模式下，uid 1000 的应用只允许访问 broker 的 `172.30.82.2:14322` 和精确 loopback，其他出网（包括公网直连、UDP、Docker DNS `127.0.0.11`）被丢弃；这不是“完全不能访问 broker”，而是不能绕过 broker 的代理端口。管理端口 `14321` 只绑定宿主回环，通过 SSH 转发访问。叠加路由器后规则改为应用只能访问 loopback、路由器（uid 1001）才能访问 broker，见第 6 节。
+应用与 `tool-network` 共享网络命名空间，broker 固定 IP `172.30.82.2`。单 vault 模式下，uid 1000 的应用只允许访问 broker 的 `172.30.82.2:14322` 和精确 loopback，其他出网（包括公网直连、UDP、Docker DNS `127.0.0.11`）被丢弃；这不是“完全不能访问 broker”，而是不能绕过 broker 的代理端口。管理端口 `14321` 默认不发布到宿主；需要宿主侧操作时叠加 `docker-compose.management-loopback.yml`，只绑定 `127.0.0.1`，再通过 SSH 转发访问。叠加路由器后规则改为应用只能访问 loopback、路由器（uid 1001）才能访问 broker，见第 6 节。
+
+以上地址、端口、卷名与项目名都是 `production` 环境描述中的值；`test` 使用另一份描述。两份描述由 `npm run deployment:environment` 校验，字段与用法见 [部署环境描述](deployment-environments.md)。本节命令默认使用 Compose 文件中的生产默认值；切换到其他环境时用描述派生的 `ASTER_*` 变量渲染同一份 Compose，而不是复制一份业务 Compose。
 
 ## 6. 多 vault 路由器
 
