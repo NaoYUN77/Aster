@@ -1,6 +1,0 @@
-# Overlay for running the application under systemd instead of the Compose app service.
-# The base file already publishes the management port; this adds the proxy port on loopback.
-services:
-  agent-vault:
-    ports:
-      - "127.0.0.1:14322:14322"

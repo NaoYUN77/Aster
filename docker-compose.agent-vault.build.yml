@@ -1,0 +1,8 @@
+# Combine only with docker-compose.agent-vault.yml (and the router override if used).
+services:
+  personal-agent:
+    build: .
+  tool-network:
+    build:
+      context: ./deploy/agent-vault
+      dockerfile: network.Dockerfile

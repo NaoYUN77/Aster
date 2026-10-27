@@ -1,8 +1,6 @@
 services:
   personal-agent:
-    build: .
-    image: personal-agent:local
-    container_name: personal-agent
+    image: ${ASTER_IMAGE:-aster:local}
     restart: unless-stopped
     env_file:
       - .env
@@ -10,14 +8,13 @@ services:
       DATA_DIR: /data
     volumes:
       - personal-agent-data:/data
-    # 3 GB hard limit for the app and its tool subprocesses. The systemd example is tighter
-    # (1 GB) because it targets hosts shared with other containers; Docker suits a dedicated host.
-    mem_limit: 3g
+    mem_limit: 1g
     pids_limit: 128
     init: true
     stop_grace_period: 45s
     security_opt:
       - no-new-privileges:true
+    cap_drop: ["ALL"]
     logging:
       driver: json-file
       options:
@@ -26,5 +23,5 @@ services:
 
 volumes:
   personal-agent-data:
-    # Fix the volume name so backup commands do not depend on the project directory name.
+    # Keep the deployed volume name across the Aster image rename.
     name: personal-agent-data

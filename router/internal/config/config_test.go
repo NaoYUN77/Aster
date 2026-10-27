@@ -89,6 +89,26 @@ func TestLoadValidAndDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadDockerBrokerEndpoint(t *testing.T) {
+	for _, upstream := range []string{"172.30.82.2:14322", "[fd00::2]:14322"} {
+		t.Run(upstream, func(t *testing.T) {
+			path, _, _ := writeConfig(t, func(raw map[string]any) { raw["upstream_proxy"] = upstream })
+			cfg, err := Load(path)
+			if err != nil || cfg.UpstreamProxy != upstream {
+				t.Fatalf("private broker rejected: cfg=%v err=%v", cfg, err)
+			}
+		})
+	}
+	for _, upstream := range []string{"8.8.8.8:14322", "0.0.0.0:14322", "169.254.169.254:80", "agent-vault:14322", "172.30.82.2:0"} {
+		t.Run(upstream, func(t *testing.T) {
+			path, _, _ := writeConfig(t, func(raw map[string]any) { raw["upstream_proxy"] = upstream })
+			if _, err := Load(path); err == nil {
+				t.Fatal("invalid broker endpoint accepted")
+			}
+		})
+	}
+}
+
 func TestLoadNormalizesHostAndName(t *testing.T) {
 	configPath, _, _ := writeConfig(t, func(raw map[string]any) {
 		route := raw["routes"].([]any)[0].(map[string]any)

@@ -1,0 +1,110 @@
+package infisical
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	sdkerrors "github.com/infisical/go-sdk/packages/errors"
+)
+
+var errInfisicalOrigin = errors.New("infisical: INFISICAL_URL must be an explicit HTTPS origin")
+
+// Do not accept a base path, embedded credentials, or URL parameters. In
+// particular, URL parsing must not turn an invalid value into a default site.
+func infisicalOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" ||
+		u.User != nil || u.Opaque != "" || u.Path != "" || u.RawPath != "" ||
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") ||
+		strings.HasSuffix(u.Host, ":") {
+		return "", errInfisicalOrigin
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", errInfisicalOrigin
+		}
+	}
+	return "https://" + strings.ToLower(u.Host), nil
+}
+
+type originTransport struct {
+	host string
+	base *http.Transport
+}
+
+func (t *originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL == nil || req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Host, t.host) ||
+		req.URL.User != nil || req.URL.Opaque != "" || req.URL.Fragment != "" ||
+		(req.Host != "" && !strings.EqualFold(req.Host, t.host)) {
+		return nil, errors.New("infisical: request origin rejected")
+	}
+	res, err := t.base.RoundTrip(req)
+	if err != nil {
+		// net/http and TLS errors can embed the URL, query and peer input.
+		return nil, errors.New("infisical: HTTPS request failed")
+	}
+	return res, nil
+}
+
+func infisicalHTTPClient(origin string, base *http.Transport) *http.Client {
+	transport := base.Clone()
+	// The broker connects directly to its selected origin. Ambient proxy
+	// settings must not acquire credentials or choose a different destination.
+	transport.Proxy = nil
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.InsecureSkipVerify = false
+	transport.TLSClientConfig.MinVersion = tls.VersionTLS12
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ResponseHeaderTimeout = 10 * time.Second
+	transport.MaxResponseHeaderBytes = 1 << 20
+	return &http.Client{
+		Transport: &originTransport{host: strings.TrimPrefix(origin, "https://"), base: transport},
+		Timeout:   10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("infisical: redirect rejected")
+		},
+	}
+}
+
+// Both SDK zerolog and Resty have independent logging paths. Neither receives
+// permission to forward arbitrary response bodies, URLs, credentials or errors.
+// Keep fixed events observable while dropping all library-provided payloads.
+type safeSDKLog struct{ logger *slog.Logger }
+
+func (l safeSDKLog) Write(p []byte) (int, error) {
+	l.logger.Warn("infisical SDK event")
+	return len(p), nil
+}
+func (l safeSDKLog) Errorf(string, ...interface{}) { l.logger.Warn("infisical HTTP error") }
+func (l safeSDKLog) Warnf(string, ...interface{})  { l.logger.Warn("infisical HTTP warning") }
+func (l safeSDKLog) Debugf(string, ...interface{}) { l.logger.Debug("infisical HTTP event") }
+
+func safeInfisicalError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	var apiErr *sdkerrors.APIError
+	if errors.As(err, &apiErr) {
+		return fmt.Errorf("infisical: API request failed (HTTP %d)", apiErr.StatusCode)
+	}
+	return errors.New("infisical: request failed")
+}

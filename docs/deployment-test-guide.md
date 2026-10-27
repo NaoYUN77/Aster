@@ -1,553 +1,453 @@
-# 上线测试指南
+# Aster Docker 部署运行手册
 
-面向第一次把本应用部署到云服务器的人。按顺序执行，每步给出命令、预期结果和失败时的排查入口。范围是本仓库当前的单用户 Telegram 文本 MVP。
+生产交付统一使用 Docker 镜像 **Aster**（镜像仓库名 `aster`）。服务器只需要 Docker Engine 24+ 和 Compose 2.24.4+，不需要主机 Node.js 或 Go。开发运行仍可使用 README 中的 npm 命令。
 
-工程约束见 [CLAUDE.md](../CLAUDE.md)，部署参数细节见 [README.md](../README.md)，已有本地验证记录见 [mvp-verification.md](mvp-verification.md)。
+状态：本手册依据本地镜像构建、Compose 配置渲染和主机测试编写，尚未在真实云服务器执行完整上线。文中的“预期”是验收标准，不是已完成的部署记录。原 systemd 部署已停止支持，只保留[迁移路径](#9-从-systemd-迁移)。
 
-## 0. 测试前准备
+## 1. 交付物与镜像
 
-| 项目 | 要求 | 确认方式 |
+| 文件 | 用途 |
+| --- | --- |
+| `docker-compose.yml` | 基础部署：只运行应用，镜像为 `${ASTER_IMAGE:-aster:local}`，不含 `build` |
+| `docker-compose.build.yml` | 本地构建覆盖：为应用添加 `build: .` |
+| `docker-compose.agent-vault.yml` | Agent Vault 隔离部署：broker、防火墙命名空间和应用；应用镜像 `${ASTER_IMAGE:-aster:local}`，网络镜像 `${ASTER_NETWORK_IMAGE:-aster-network:local}` |
+| `docker-compose.agent-vault.build.yml` | Vault 模式的本地构建覆盖：应用和网络容器 |
+| `docker-compose.router.yml` | 多 vault 覆盖：只能叠加在 Vault 基础文件上；新增 `${ASTER_ROUTER_IMAGE:-aster-router:local}` |
+| `docker-compose.router.build.yml` | 路由器构建覆盖：`build: ./router` |
+| `docker-compose.agent-vault.broker-build.yml` | 受审 broker 本地构建覆盖；来源与补丁见 [broker 说明](../deploy/agent-vault/broker/README.md) |
+
+镜像仓库目前没有发布 Aster 的公共镜像。示例中的 `aster:local` 是本地标签，生产应替换为你自己的镜像仓库引用。`docker-compose.router.yml` 使用 Compose 的 `!override` 标签，因此 Compose 最低版本为 **2.24.4**；更早版本会直接报解析错误。
+
+资源上限（配置值，不是实测峰值）：
+
+| 服务 | 内存 | 进程/线程 |
 | --- | --- | --- |
-| 服务器 | Linux，4 核 / 4 GB 或以上 | `nproc`、`free -h` |
-| 磁盘 | 建议 ≥ 10 GB 可用 | `df -h` |
-| 软件 | Docker 24+ 与 Compose v2；或 Node.js 24.19.0 | `docker --version`、`docker compose version` |
-| 账号 | BotFather 创建的 bot token；自己的 Telegram 数字用户 ID | — |
-| 模型 | 账户可用的 `MODEL_PROVIDER`／`MODEL_ID` 及对应 API key | 见步骤 1 |
+| `personal-agent` | 1 GB | 128 |
+| `agent-vault` | 512 MB | 64 |
+| `tool-network` | 32 MB | 16 |
+| `egress-router` | 128 MB | 32 |
 
-准备一个**测试专用**的 bot 和隔离数据目录。正式使用前不要直接拿日常 bot 试。
+基础部署的应用容器以 uid 1000 运行，可写卷 `/data`；它的根文件系统并非只读。Vault 模式的 `personal-agent` 服务额外设置 `read_only: true` 和 128 MB `/tmp` tmpfs，此时唯一可写持久化位置是 `/data`（以及 tmpfs）。镜像内置 Bash、`flock`、npm 和 Node 24.19.0，并设置 `HOME=/data`、`NPM_CONFIG_CACHE=/data/.npm`。
 
-## 1. 配置检查（不上线也要先过）
+### 同一数据卷的单实例保护
+
+镜像入口为 `flock --no-fork --nonblock /data/app.lock node dist/src/main.js`。同一个数据卷上的第二个应用容器会因拿不到锁而立即退出，这是有意的保护。它只覆盖“同卷多容器”：
+
+- 不同数据卷、同一个 bot token 或同一个 owner 的两个实例不会被镜像检测。Telegram 长轮询会互相争抢，可能产生重复回复。
+- 迁移、回滚或演练期间不要让旧实例和新实例同时消费同一个 bot。
+- 同一数据卷只允许一个容器使用；不要用 `docker compose up --scale` 扩容。
+
+## 2. 配置
+
+基础部署使用项目目录下的 `.env`：
 
 ```sh
 cp .env.example .env
 vi .env
+chmod 600 .env
 ```
 
 必填项：
 
-- `TELEGRAM_BOT_TOKEN`：bot token。
-- `TELEGRAM_OWNER_ID`：纯数字，不接受用户名。
-- `MODEL_PROVIDER`：`src/providers.ts` 注册表内的 id，常用 `anthropic`、`openai`、`deepseek`、`google`、`moonshotai`、`zai` 等。
-- `MODEL_ID`：该提供商在 pi-ai 1.3.0 目录中的 id，写错不会自动替换；启动前报错并列出示例。
-- 所选提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`）；其他提供商的 key 留空即可。
-- Docker 部署时 `DATA_DIR` 会被 compose 固定为 `/data`，`.env` 里的值不生效。
-- systemd 部署时配置放在 `/etc/personal-agent.env`，其中必须设置 `DATA_DIR=/var/lib/personal-agent`。
+- `TELEGRAM_BOT_TOKEN`：BotFather 创建的 bot token。
+- `TELEGRAM_OWNER_ID`：纯数字 Telegram 用户 ID；不要写用户名。
+- `MODEL_PROVIDER`：`src/providers.ts` 注册表内的 id。
+- `MODEL_ID`：该提供商在 pi-ai 1.3.0 模型目录中的 id。
+- 当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`）；其他提供商的 key 留空。
+
+只检查键是否存在，不要在终端或日志中回显值：
 
 ```sh
-# 不要在日志或终端里回显 token；只检查键是否存在
-# Docker 用项目目录下的 .env；systemd 用 /etc/personal-agent.env
 grep -cE '^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # 预期 4
 grep -cE '^[A-Z0-9_]*_API_KEY=.+' .env                                            # 至少 1
-chmod 600 .env
 ```
 
-systemd 部署时对 `/etc/personal-agent.env` 执行同样的检查（文件应已由 `install -m 600` 创建为 root 所有）。更可靠的判定是让应用自己检查：
+`DATA_DIR` 由 Compose 固定为 `/data`，`.env` 中的值不生效。数据卷的显式名称是 `personal-agent-data`，不随项目目录名变化；升级 Aster 改名时也不改卷名。
+
+离线配置检查不联网、不回显凭据：
 
 ```sh
-# systemd：脚本已自动执行；手动安装时可单独运行
-sudo env -i HOME="$HOME" PATH="$PATH" bash -c "set -a; . /etc/personal-agent.env; set +a; exec $(command -v node) /opt/personal-agent/dist/src/check-config.js"
+docker compose run --rm --no-deps personal-agent node dist/src/check-config.js
 ```
 
-预期输出 `Configuration OK: MODEL_PROVIDER=... MODEL_ID=... MCP_SERVERS=...`。该检查不联网，也不回显任何凭据。
+预期输出 `Configuration OK: MODEL_PROVIDER=... MODEL_ID=... MCP_SERVERS=...`。缺失项会打印 `Missing configuration: <KEY>`，提供商或模型 id 错误会打印候选列表；先修配置，不要反复重启。bot 已有 webhook 时应用拒绝启动，需先在原部署中停用。
 
-MCP server 是可选功能：默认路径 `DATA_DIR/mcp.json` 不存在即关闭；该文件存在但有文件级错误时，运行时禁用 MCP，检查也只在输出中告警而不失败。用 `MCP_CONFIG` 显式指定时，文件缺失或非法会使检查失败。配置格式与接入说明见 [README.md](../README.md#mcp-服务器可选)。
+MCP 配置默认读取 `DATA_DIR/mcp.json`，即卷内 `/data/mcp.json`；文件不存在表示关闭。默认路径上的文件级错误只禁用 MCP，`MCP_CONFIG` 显式指定的文件错误会使检查失败。配置格式见 README 的 MCP 章节。
 
-缺失或非法配置时应用会直接退出并打印 `Missing configuration: <KEY>`、`MODEL_PROVIDER must be one of: ...` 或 `Unknown MODEL_ID ...`。看到这类错误先修配置，不要反复重启。
+容器内的绝对路径是卷内路径，不是旧主机路径：`cwd`、stdio `command`/`args` 必须指向 `/data/...` 或镜像内已有程序。迁移 systemd 配置时，把 `/var/lib/personal-agent/...` 改为 `/data/...`，并把 `command` 改为镜像内可用的绝对路径（如 `/usr/local/bin/node`）。镜像不会自动安装 stdio server 的依赖；需要在派生镜像中预装，或显式允许并审计运行时下载。
 
-**bot 已配置 webhook 会拒绝启动**，错误为 `Telegram webhook is active; remove it before starting long polling`。先在原部署里停用 webhook。
+## 3. 构建与分发镜像
 
-## 1.5 选择部署方式
-
-同一台服务器还要运行其他常驻服务（例如 QQ bot）时，先决定用 Docker 还是 systemd，再执行后续对应步骤。
-
-| 维度 | Docker | systemd 直跑 |
-| --- | --- | --- |
-| 磁盘 | 基础镜像 + 应用约 470 MB | Node 运行时 + 生产依赖约 260 MB |
-| 常驻内存 | Node 进程 + 约 10–20 MB 容器运行时 | 仅 Node 进程 |
-| 启动速度 | 慢 1–3 秒 | 快 |
-| 升级 | `docker compose build && up -d` | `git pull && sudo ./deploy/install-systemd.sh` |
-| 与其他容器共存 | 多一层 Docker 资源限制，排查面更大 | 与主机统一调度 |
-| 进程回收 | `init: true` | systemd 作为 PID 1 |
-
-**推荐：主机已有 Docker 服务（如 QQ bot）时用 systemd。** 原因不是省那 200 MB，而是：
-
-- 内存账更好算。QQ bot 容器有各自的 `mem_limit`，再叠一个容器后，三套限制互相独立，容易出现“谁都没超限、合起来却 OOM”。原生进程与 QQ bot 共享剩余内存，由内核统一回收。
-- 避免 Docker 层争抢。容器内存上限包含工具子进程，主机紧张时容器更容易被 OOM killer 选中。
-- 少一层故障面。本应用只需要出网访问 Telegram 和模型 API，不需要容器网络。
-
-主机只有这一个服务时，Docker 更省运维。
-
-### 与 QQ bot 共存的资源分配
-
-以下按 4 核 / 4 GB 估算，实测值需在部署后按第 6 节记录。
-
-| 组件 | 预估常驻 | 上限设置 |
-| --- | --- | --- |
-| QQ bot（AstrBot + NapCat 两个容器） | 约 600 MB | 各自容器限制 |
-| 本应用（systemd） | 100–300 MB | `MemoryMax=1G`、`MemoryHigh=768M` |
-| 系统与其他 | 约 500 MB | — |
-| 剩余缓冲 | 2 GB 以上 | — |
-
-本应用的服务文件已按与 QQ bot 共存收紧为 `MemoryHigh=768M`、`MemoryMax=1G`、`TasksMax=64`。单用户文本 agent 实际占用远低于 1 GB；这个上限是保护线，触发时会先回收本服务而不是拖垮整机。
-
-单独使用这台服务器、需要更多余量时：
+生产 Compose 文件本身不构建。构建在构建机执行：
 
 ```sh
-sudo systemctl edit personal-agent
+# 应用镜像
+docker compose -f docker-compose.yml -f docker-compose.build.yml build personal-agent
+
+# Vault 模式：应用与网络命名空间镜像
+docker compose -f docker-compose.agent-vault.yml -f docker-compose.agent-vault.build.yml build
+
+# Vault + 多 vault 路由器：再叠加两个覆盖文件
+docker compose -f docker-compose.agent-vault.yml -f docker-compose.router.yml \
+  -f docker-compose.agent-vault.build.yml -f docker-compose.router.build.yml build
 ```
 
-```ini
-[Service]
-MemoryHigh=2G
-MemoryMax=3G
-TasksMax=128
-```
+等价的单镜像命令是 `docker build -t aster:local .` 和 `docker build -t aster-router:local ./router`；网络镜像使用 `deploy/agent-vault/network.Dockerfile`。构建机需要能访问 npm registry 和 Docker 基础镜像仓库。本地验证中应用镜像已成功构建；路由器与网络镜像构建曾因 Docker Hub 认证超时未完成，不能据此声称已产出这两个镜像。
 
-## 2. 构建镜像（Docker 部署）
+通过镜像仓库分发时，推送后记录不可变 digest。通过文件分发时：
 
 ```sh
-docker compose build
+# 构建机
+docker save aster:local | gzip > aster-image.tar.gz
+
+# 服务器
+docker load < aster-image.tar.gz
 ```
 
-预期：构建成功，最后输出镜像 `personal-agent:local`。
+生产不在服务器上临时构建。选择一种交付方式并在部署记录中写明镜像 digest 或归档校验和。
+
+## 4. 基础部署
 
 ```sh
-docker compose config | grep -A2 '^volumes:'
+docker compose config --quiet
+docker compose run --rm --no-deps personal-agent node dist/src/check-config.js
+docker compose up -d --no-build
+docker compose logs --tail 50 personal-agent
 ```
 
-预期：卷名为 `personal-agent-data`（不是带项目目录前缀的名字）。卷名不对时不要继续，先核对 `docker-compose.yml`。
+预期日志出现 `Personal agent starting; single-owner private Telegram messages enabled.`，随后进入长轮询且无持续报错。`docker compose ps` 显示 `running` 只表示进程存在，不代表已通过 Telegram 验收。
 
-失败排查：
-
-- `npm ci` 失败：检查服务器能否访问 npm registry。
-- 拉取基础镜像失败：检查 Docker 镜像源配置。
-- 类型错误：本地先跑 `npm run check` 定位，不要靠容器内报错。
-
-## 2b. 安装与构建（systemd 部署）
-
-### 方式一：安装脚本（推荐）
-
-先把代码放到服务器（`git clone` 或上传），在仓库根目录执行：
+用 owner 账号私聊 bot 发送“现在几点？”。预期收到与服务器 UTC 时间一致的回复，日志中没有 `Agent request failed`。数据卷中应出现：
 
 ```sh
-# 安装 Node.js 24.19.0 与 util-linux 后
-node --version   # 必须是 v24.19.x
-sudo ./deploy/install-systemd.sh
-```
-
-脚本会创建用户和目录、复制代码、安装依赖并构建、生成 unit、启用服务。必需配置缺失或为空时只启用不启动，避免重启循环。
-
-首次运行后编辑配置：
-
-```sh
-sudo vi /etc/personal-agent.env   # 至少填 TELEGRAM_BOT_TOKEN、TELEGRAM_OWNER_ID、MODEL_ID 和对应 API key
-sudo systemctl start personal-agent
-```
-
-### 方式二：手动安装
-
-脚本做的事都可以手工执行；注意 unit 模板里的 `/usr/bin/node`、`/usr/bin/flock` 要替换为 `command -v` 的实际路径。
-
-```sh
-sudo useradd --system --home /opt/personal-agent --shell /usr/sbin/nologin personal-agent
-sudo apt install -y bash util-linux
-node --version   # 必须是 v24.19.x
-command -v node flock
-```
-
-```sh
-sudo mkdir -p /opt/personal-agent /var/lib/personal-agent
-sudo chown personal-agent:personal-agent /opt/personal-agent /var/lib/personal-agent
-sudo chmod 700 /var/lib/personal-agent
-
-# 复制应用文件后以服务用户安装依赖并构建
-sudo runuser -u personal-agent -- env HOME=/opt/personal-agent \
-  bash -c 'cd /opt/personal-agent && npm ci && npm run build && npm prune --omit=dev'
-```
-
-配置放到 systemd 环境文件，不要放在项目目录：
-
-```sh
-sudo install -o root -g root -m 600 /dev/null /etc/personal-agent.env
-sudo vi /etc/personal-agent.env
-```
-
-内容与 `.env.example` 相同，但必须设置：
-
-```ini
-DATA_DIR=/var/lib/personal-agent
-```
-
-安装服务并启动：
-
-```sh
-sudo sed -e "s#/usr/bin/node#$(command -v node)#" -e "s#/usr/bin/flock#$(command -v flock)#" \
-  deploy/personal-agent.service | sudo tee /etc/systemd/system/personal-agent.service >/dev/null
-sudo systemctl daemon-reload
-sudo systemctl enable --now personal-agent
-sudo systemctl status personal-agent --no-pager
-journalctl -u personal-agent -f
-```
-
-预期：`active (running)`，日志出现 `Personal agent starting; single-owner private Telegram messages enabled.`
-
-失败排查：
-
-- `status=203/EXEC`：`ExecStart` 里的 Node 或 `flock` 路径不对，用 `command -v node`、`command -v flock` 确认并替换；脚本会自动替换为实际路径。Node 装在 `/home`、`/root` 或 `/run/user` 下时会被 `ProtectHome=true` 挡住，必须用系统级安装。
-- `status=200/CHDIR`：`WorkingDirectory` 不存在或权限不足。
-- `status=226/NAMESPACE`：`ReadWritePaths` 指向的目录不存在；先创建 `/var/lib/personal-agent`。
-- 启动即退出且日志有 `Missing configuration`：检查 `/etc/personal-agent.env` 权限与内容。
-- 启动即退出且日志有 `Unable to open the database file` 或 `EACCES`：`DATA_DIR` 不在 `ReadWritePaths` 内，或目录属主不对。
-- `flock` 报错：说明已有实例在跑，`ps aux | grep main.js` 确认。
-- 脚本报 `run from the repository root`：在包含 `package.json` 的目录执行。
-- 脚本报 `must set DATA_DIR=/var/lib/personal-agent`：配置文件里的 `DATA_DIR` 与 unit 的 `ReadWritePaths` 不一致。
-- 脚本报 `MODEL_PROVIDER must be one of: ...`：提供商 id 不在注册表内，按提示选择。
-- 脚本报 `Unknown MODEL_ID ...`：`MODEL_ID` 不在该提供商的 pi-ai 模型目录中，按提示里的示例选择。
-
-数据目录权限必须允许服务用户读写；`ProtectSystem=strict` 下只有 `ReadWritePaths` 指定的路径可写。服务文件默认限制为 `MemoryHigh=768M`、`MemoryMax=1G`、`TasksMax=64`，与 QQ bot 共存；单独使用时可 `sudo systemctl edit personal-agent` 调高。
-
-## 3. 首次启动与冒烟测试
-
-启动（按部署方式选一条）：
-
-```sh
-# Docker
-docker compose up -d && docker compose logs -f
-
-# systemd
-sudo systemctl start personal-agent && journalctl -u personal-agent -f
-```
-
-预期日志依次出现：
-
-1. `Personal agent starting; single-owner private Telegram messages enabled.`
-2. 轮询期间无报错。若启动即退出，看上一节配置错误。
-
-然后用**owner 账号**私聊 bot 发一条：`现在几点？`
-
-预期：
-
-- 收到回复，内容与当前时间一致（验证模型调用与 `current_time` 工具）。
-- 日志中该请求无 `Agent request failed`。
-- 数据目录出现文件：
-
-```sh
-# Docker
 docker compose exec personal-agent ls -la /data /data/workspace
-
-# systemd
-sudo ls -la /var/lib/personal-agent /var/lib/personal-agent/workspace
 ```
 
-应看到 `inbox.sqlite`、`agent.sqlite`、`workspace/MEMORY.md`。
+`inbox.sqlite`、`agent.sqlite`、`workspace/` 应存在；`workspace/MEMORY.md` 在第一次明确要求记忆后出现。
 
-## 3.5 MCP server 冒烟测试（可选，仅配置了 MCP 时）
+### 生产更新（不可变引用）
 
-没有 `mcp.json` 时跳过本节。配置好 server 后，先单独验证连接，再让模型调用；这一步不经过 Telegram 和模型，失败原因不会被 agent 的错误提示掩盖。
+在 `.env` 中设置实际镜像引用，例如：
+
+```env
+ASTER_IMAGE=registry.example.com/team/aster@sha256:<digest>
+```
+
+然后：
 
 ```sh
-# Docker：配置放在数据卷内的 /data/mcp.json
+docker compose pull personal-agent
 docker compose stop personal-agent
-docker compose run --rm personal-agent node dist/src/mcp-check.js
+docker compose up -d --no-build personal-agent
+docker compose logs --tail 50 personal-agent
+```
+
+数据卷保持不变。更新前先按第 8 节备份。不要用 `docker compose down -v` 代替普通停服。
+
+### 回滚
+
+把 `ASTER_IMAGE` 改回上一个可用 digest，执行 `docker compose up -d --no-build personal-agent`。镜像回滚不会自动回滚数据；应用没有数据库降级机制，旧镜像也不保证能读取新版本写入的状态。
+
+- 若新版本只运行过、未产生不可逆数据，直接用旧镜像启动即可。
+- 若出现 schema 或数据不兼容，这是一个显式的恢复决策：按第 8 节还原备份会丢失备份之后产生的会话、记忆和投递状态，可能造成重复回复。先停服、备份当前卷，再决定是否还原；不要把它当作回滚的默认步骤。
+- 回滚前始终先备份当前卷，保留现场以便排查。
+
+## 5. Agent Vault 隔离部署
+
+Vault 模式使用独立文件，不能与基础 `docker-compose.yml` 合并。完整配置、Infisical 规则、CA、owner ID 和验收见 [Agent Vault 运行说明](agent-vault.md)；本节只给运行顺序。
+
+Broker 镜像由 `ASTER_VAULT_IMAGE` 指定，默认 `aster-vault:local`，需先按 [受审构建说明](../deploy/agent-vault/broker/README.md) 构建或分发。原始 `infisical/agent-vault:0.40.0` 存在已复现的取密重定向与日志风险，不作为自动上线的默认产物。生产发布须使用通过相应准入的 digest；当前自动检查范围与尚未完成的发布／部署关卡见 [CI/CD 实施计划](ci-cd-implementation-plan.md)。
+
+```sh
+mkdir -p deploy/agent-vault/private
+chmod 700 deploy/agent-vault/private
+cp deploy/agent-vault/vault.env.example deploy/agent-vault/private/vault.env
+cp deploy/agent-vault/app.env.example deploy/agent-vault/private/app.env
+cp deploy/agent-vault/api-policy.example.yaml deploy/agent-vault/private/api-policy.yaml
+# 按实际 vault 名和已验证操作编辑策略；配置语义见 broker/README.md。
+# broker uid 65532 必须可读；策略不包含秘密，private 目录保持 0700。
+chmod 644 deploy/agent-vault/private/api-policy.yaml
+chmod 600 deploy/agent-vault/private/*.env
+```
+
+按 `agent-vault.md` 填写 `vault.env`、`app.env`，导出 `private/telegram-owner-id`，并获取 `private/ca.pem`。`private/` 已在 gitignore 和 dockerignore 中，不会进入构建上下文。
+
+首次启动按顺序执行：先起 broker 与网络命名空间，再做离线配置检查，最后起应用。
+
+```sh
+docker compose -f docker-compose.agent-vault.yml config --quiet
+docker compose -f docker-compose.agent-vault.yml up -d tool-network agent-vault
+docker compose -f docker-compose.agent-vault.yml run --rm --no-deps personal-agent node dist/src/check-config.js
+docker compose -f docker-compose.agent-vault.yml up -d --no-build personal-agent
+docker compose -f docker-compose.agent-vault.yml logs --tail 50
+```
+
+使用路由器时，把 `-f docker-compose.router.yml` 加到每条命令，并在启动应用前多一步 `up -d egress-router`；完整顺序见第 6 节。
+
+应用与 `tool-network` 共享网络命名空间，broker 固定 IP `172.30.82.2`。单 vault 模式下，uid 1000 的应用只允许访问 broker 的 `172.30.82.2:14322` 和精确 loopback，其他出网（包括公网直连、UDP、Docker DNS `127.0.0.11`）被丢弃；这不是“完全不能访问 broker”，而是不能绕过 broker 的代理端口。管理端口 `14321` 只绑定宿主回环，通过 SSH 转发访问。叠加路由器后规则改为应用只能访问 loopback、路由器（uid 1001）才能访问 broker，见第 6 节。
+
+## 6. 多 vault 路由器
+
+只有在不同基础设施的密钥分属多个 Infisical 文件夹、需要多个 vault 时才使用。路由器按 CONNECT 的 `host:port` 选择 vault，应用只持有一个路由器密码。
+
+```sh
+cp deploy/agent-vault/app.router.env.example deploy/agent-vault/private/app.router.env
+chmod 600 deploy/agent-vault/private/app.router.env
+
+mkdir -p deploy/agent-vault/private/router
+cp deploy/agent-vault/egress-router.example.json deploy/agent-vault/private/router/config.json
+# 写入 client-password 和每个 vault 的 agent token 文件
+chown -R 1001:1001 deploy/agent-vault/private/router
+chmod 700 deploy/agent-vault/private/router
+chmod 600 deploy/agent-vault/private/router/*
+```
+
+路由器容器以 uid 1001 运行，整个 `private/router` 目录只读挂载到 `/etc/aster-router`。配置中的路径因此是 `/etc/aster-router/config.json`、`/etc/aster-router/client-password` 等；文件必须是 uid 1001 可读的 `600`，目录不能让其他用户写入。
+
+启动前用现有 `check` 命令验证路由、超时、限制和凭据文件权限：
+
+```sh
+docker run --rm -u 1001:1001 \
+  -v "$PWD/deploy/agent-vault/private/router:/etc/aster-router:ro" \
+  aster-router:local check -config /etc/aster-router/config.json
+```
+
+预期输出 `configuration OK: N routes, listen 127.0.0.1:14323, upstream 172.30.82.2:14322`。路由器没有单独的探测子命令；运行时只有 `serve`、`check`、`version`、`redact`。健康端点 `127.0.0.1:14324`（`/healthz`、`/readyz`）只在共享命名空间内可达，不发布宿主端口。
+
+组合启动：
+
+```sh
+docker compose -f docker-compose.agent-vault.yml -f docker-compose.router.yml config --quiet
+docker compose -f docker-compose.agent-vault.yml -f docker-compose.router.yml up -d --no-build
+docker compose -f docker-compose.agent-vault.yml -f docker-compose.router.yml logs --tail 50 egress-router
+```
+
+路由器覆盖会把应用的 `env_file` 替换为 `private/app.router.env`，应用代理改为 `http://app:<router-password>@127.0.0.1:14323`。`tool-network` 设置 `ROUTER_ENABLED=1` 后：
+
+- uid 1000 的应用只能访问精确 loopback，不能直连 broker；
+- uid 1001 的路由器只能访问 broker `172.30.82.2:14322` 和 loopback；
+- 未列入路由表的 host 返回 `403`，错误的客户端密码返回 `407`。
+
+修改路由或凭据文件后重载：
+
+```sh
+docker compose -f docker-compose.agent-vault.yml -f docker-compose.router.yml kill -s SIGHUP egress-router
+```
+
+已有 tunnel 不受影响；配置语法错误会在日志中记录并保留旧配置。
+
+## 7. 维护命令
+
+所有一次性命令使用同一组 Compose 文件和同一镜像，先停应用，避免与运行中的进程争用 SQLite 或 OAuth token 文件。
+
+```sh
+# 投递核查
+docker compose stop personal-agent
+docker compose run --rm --no-deps personal-agent node dist/src/deliveries.js list
 docker compose start personal-agent
 
-# systemd：以服务用户和环境验证权限与连接，不验证 unit 沙箱
-sudo systemctl stop personal-agent
-sudo bash -c 'set -a; . /etc/personal-agent.env; set +a; \
-  exec runuser -u personal-agent -- env HOME=/var/lib/personal-agent \
-  node /opt/personal-agent/dist/src/mcp-check.js'
-sudo systemctl start personal-agent
+# MCP 连接检查
+docker compose stop personal-agent
+docker compose run --rm --no-deps personal-agent node dist/src/mcp-check.js
+docker compose start personal-agent
 ```
 
-预期每个 server 一行工具数量，随后逐行列出工具名，退出码为 0：
-
-```text
-github (stdio): 12 tools
-  create_issue
-  search_repositories
-```
-
-失败时该 server 打印 `unavailable (<CODE>)`，其他 server 照常输出，退出码为 1。使用 OAuth 的 server 会读写 `DATA_DIR/mcp-oauth/`，验证时先停服务，避免与运行中的刷新竞争 token 文件。按错误码处理：
-
-| 错误码 | 含义 | 先查什么 |
-| --- | --- | --- |
-| `MCP_CONNECT_FAILED` | 进程起不来、URL 不可达或初始化失败 | 单独执行 `command`／`args`；`curl` 目标 URL；确认 `cwd` 存在 |
-| `MCP_TIMEOUT` | 超过 `connectTimeoutMs` | 首次 `npx` 下载慢；调大超时或预装 server |
-| `MCP_AUTH_REQUIRED` | 远程 server 未授权、refresh token 失效（如 Notion 的 180 天／30 天不活动上限）或授权被撤销 | 停服务后运行 `mcp:auth`（见下）；这是预期行为，不是故障 |
-| `MCP_HTTP_401` / `MCP_HTTP_403` | 鉴权头或 OAuth token 不被接受 | 检查 `headers` 引用与授权状态 |
-| `MCP_PROTOCOL` | 对端返回不符合 MCP 的内容 | 确认 URL 指向 MCP 端点，而不是普通网页 |
-
-远程 OAuth server 的首次授权（先停服务，避免与运行中的刷新竞争 token 文件）：
+Vault 模式把 `-f docker-compose.agent-vault.yml` 加到每条命令；使用多 vault 路由器时还必须同时加 `-f docker-compose.router.yml`。Compose 的 `run`、`stop`、`down` 都按项目计算服务集合，只用基础文件停止会留下路由器容器继续共享旧网络命名空间，因此停服和重建都要用同一组文件：
 
 ```sh
-# Docker
-docker compose stop
-docker compose run --rm personal-agent node dist/src/mcp-auth.js calendar
-docker compose start
+COMPOSE_VAULT="-f docker-compose.agent-vault.yml"
+COMPOSE_ROUTER="$COMPOSE_VAULT -f docker-compose.router.yml"
 
-# systemd
-sudo systemctl stop personal-agent
-sudo bash -c 'set -a; . /etc/personal-agent.env; set +a; \
-  exec runuser -u personal-agent -- env HOME=/var/lib/personal-agent \
-  /opt/personal-agent/dist/src/mcp-auth.js calendar'
-sudo systemctl start personal-agent
+docker compose $COMPOSE_ROUTER stop personal-agent egress-router
+docker compose $COMPOSE_ROUTER run --rm --no-deps personal-agent node dist/src/deliveries.js list
+docker compose $COMPOSE_ROUTER up -d --no-build personal-agent egress-router
 ```
 
-授权命令会打印一个 URL 并等待回调；服务器没有入站端口时，先在本机建立 `ssh -L 8765:127.0.0.1:8765 user@host`（端口与 `auth.redirectPort` 一致）。完成后 `DATA_DIR/mcp-oauth/<server>.json` 应为属主 `600`，再次运行 `mcp-check` 应显示工具数量。
+`--no-deps` 依赖 `tool-network`、broker 和（路由器模式下）路由器已经在运行。`deliveries.js list` 输出 `blocked` 与 `failures` 两个数组；该命令会先执行恢复，强杀时处于 `sending` 的分段会以 `uncertain` 出现。先核对 Telegram 实际收到的内容，再决定 `retry` 或 `sent`。销毁环境时同样使用完整的 `-f` 组合执行 `down`，不要只对基础文件执行 `down`。
 
-最后在 Telegram 里让 agent 完成一次真实调用：发“用 MCP 工具列出仓库 issue”（或该 server 对应的任务）。预期模型先调用 `tool_search` 加载工具，再调用 `mcp__<server>__<tool>`；日志中该 server 无 `unavailable`。工具名、schema 与 server 的差异、`tool_search` 的行为见 [README.md](../README.md#mcp-服务器可选)。
+### MCP OAuth
 
-## 4. 功能验收（对应 MVP 七条）
+`mcp-auth.js` 在进程内监听 `127.0.0.1:<redirectPort>`。普通 `docker compose run` 的容器有自己的网络命名空间；`-p 127.0.0.1:8765:8765` 把宿主端口转发到容器网络接口，而进程只监听容器回环，回调因此不会到达进程。Vault 模式的命名空间也不发布入站端口。两种模式因此都使用同一个离线流程：停止生产，在可信运维环境完成授权，再把授权文件放回数据卷。
 
-逐条执行并记录结果。表格里的“通过标准”就是判定依据，不要用“看起来正常”代替。
-
-| # | 测试 | 操作 | 通过标准 |
-| --- | --- | --- | --- |
-| 1 | 基本对话 | owner 私聊发一条普通问题 | 收到有效回复，日志无错误 |
-| 2 | 上下文连续 | 接着发“我刚才问了什么？” | 回复能引用上一条内容 |
-| 3 | 工具调用 | 发“现在几点？” | 时间与服务器 UTC 时间一致 |
-| 4 | 非法参数 | 不需要手工构造；确认现有测试通过即可 | `npm test` 中参数校验用例通过 |
-| 5 | 记忆持久 | 发“请记住：我的代号是 blue”，再问“我的代号是什么？” | 回复 `blue`；数据目录下 `workspace/MEMORY.md` 含该事实 |
-| 6 | 记忆跨重启 | 重启服务后问“我的代号是什么？” | 仍回复 `blue`，不需要重新告知 |
-| 7 | 非授权隔离 | 用另一个账号（或群聊）给 bot 发消息 | bot 不回复；日志无该请求的 agent 执行 |
-| 8 | 失败可区分 | 临时把 `MODEL_ID` 改成一个不存在的值，重启后发消息，然后改回 | 用户收到“本次处理未能完成”类提示，日志错误码为模型相关；改回后恢复正常 |
-| 9 | 长回复分段 | 发“请分点详细说明……”，让回复超过 4000 字符 | 收到多条连续消息，内容完整、无乱码、顺序正确 |
-
-第 5 条同时验证了“普通聊天不会自动写入记忆”：发几句闲聊后再看 `MEMORY.md`，不应出现未明确要求保存的内容。
-
-第 8 条修改配置后需要重启服务：Docker 用 `docker compose up -d`（会重建容器），systemd 用 `sudo systemctl restart personal-agent`。
-
-## 5. 重启与恢复测试
-
-以下命令按部署方式二选一。Docker 用 `docker compose`，systemd 用 `systemctl`／`journalctl`。
-
-### 5.1 正常重启
+在 Linux 运维主机上，可以直接用宿主网络运行同一个镜像，让授权进程和操作者的 SSH 转发共享回环。显式指定镜像，先停应用：
 
 ```sh
-# Docker
-docker compose restart && docker compose logs --tail 20
-
-# systemd
-sudo systemctl restart personal-agent && journalctl -u personal-agent -n 20 --no-pager
+docker compose stop personal-agent
+docker run --rm --network host --env-file .env \
+  -e DATA_DIR=/data -v personal-agent-data:/data \
+  aster:local node dist/src/mcp-auth.js calendar
+docker compose start personal-agent
 ```
 
-预期：重新启动后能继续对话；之前已完成的记忆仍在。
+使用 `ASTER_IMAGE` 引用时把最后一条命令中的 `aster:local` 换成该值；`--network host` 只在 Linux 上可用。授权进程会读写卷内 `mcp-oauth/`，因此必须先停应用。操作者本机先建立 `ssh -L 8765:127.0.0.1:8765 user@host`（端口与 `auth.redirectPort` 一致），再打开命令打印的 URL。
 
-### 5.2 执行中断
-
-在 agent 正在执行一个长任务时（例如让它跑一条耗时命令）执行：
+Vault 模式不能直接套用上述命令：应用配置依赖共享命名空间和代理，宿主网络不具备相同的出网策略与 broker 可达性，不能视为等价的隔离环境。Vault 模式保持纯离线流程：在可信环境（可以是另一台机器上的开发运行）按 README 的 `mcp:auth` 流程完成授权，再把 `mcp-oauth/<server>.json` 放入数据卷：
 
 ```sh
-# Docker
-docker compose stop && docker compose start && docker compose logs --tail 30
-
-# systemd
-sudo systemctl stop personal-agent && sudo systemctl start personal-agent
-journalctl -u personal-agent -n 30 --no-pager
+docker run --rm -v personal-agent-data:/data -v "$PWD/oauth-export":/oauth:ro alpine \
+  sh -c 'mkdir -p /data/mcp-oauth && cp /oauth/* /data/mcp-oauth/ \
+    && chown -R 1000:1000 /data/mcp-oauth && chmod 600 /data/mcp-oauth/*'
 ```
 
-预期：
+不要删除已有的 client 注册信息；重新注册会让旧授权失效。授权文件必须保持 uid 1000、`600`。Vault 服务规则必须放行授权服务器实际使用的 discovery、registration 和 token endpoint；应用不会回退直连。
 
-- 停止在 45 秒宽限期内完成，不报超时错误。
-- 重启后该请求能继续完成，或明确报告失败；不会重复执行已完成的部分。
-- 不会给同一请求重复发两条完整回复。
-
-### 5.3 强杀
+### 日志与资源
 
 ```sh
-# Docker
-docker compose kill && docker compose start && docker compose logs --tail 30
-
-# systemd（模拟进程被强杀，systemd 会按 Restart=on-failure 拉起）
-sudo systemctl kill -s SIGKILL personal-agent
-sleep 15
-journalctl -u personal-agent -n 30 --no-pager
+docker compose ps
+docker compose logs --tail 100 personal-agent
+docker stats --no-stream $(docker compose ps -q personal-agent)
+docker inspect --format '{{.State.OOMKilled}}' $(docker compose ps -q personal-agent)
 ```
 
-预期：应用能重新打开数据目录并继续服务；未完成的请求不会静默消失。
+关注初始化日志、`Agent request failed`、`delivery`、`polling retry`、重启次数和 `OOMKilled`。1 GB 是保护线，不是性能保证；真实峰值仍需在目标机测量。
 
-### 5.4 投递核查入口
+## 8. 备份与还原（整个卷）
 
-```sh
-# Docker
-docker compose stop
-docker compose run --rm personal-agent node dist/src/deliveries.js list
-docker compose start
+备份前停止应用，保证 SQLite 连接已关闭。备份和还原都针对整个数据卷，不做单文件挑选。
 
-# systemd
-sudo systemctl stop personal-agent
-sudo -u personal-agent env DATA_DIR=/var/lib/personal-agent \
-  node /opt/personal-agent/dist/src/deliveries.js list
-sudo systemctl start personal-agent
-```
-
-预期：输出 JSON（`blocked` 与 `failures` 两个数组）。没有异常时两个数组都为空。若之前制造过发送失败，应能看到请求 ID、分段号和错误码。
-
-注意：该命令会先执行恢复，被强杀时处于 `sending` 的分段会以 `uncertain` 出现。按 README 先核对 Telegram 实际收到的内容，再决定 `retry` 或 `sent`。
-
-## 6. 资源与稳定性
-
-挂一段时间（至少跑通一轮日常使用）后检查：
+### 8.1 基础部署
 
 ```sh
-# Docker
-docker stats --no-stream personal-agent
-docker inspect personal-agent --format '{{.State.OOMKilled}}'
-docker compose logs --tail 100 | grep -E 'Agent request failed|delivery|polling retry'
+docker compose stop personal-agent
 
-# systemd
-systemctl show personal-agent -p MemoryCurrent,MemoryMax,TasksCurrent,NRestarts
-journalctl -u personal-agent -n 100 --no-pager | grep -E 'Agent request failed|delivery|polling retry'
-ps -o pid,rss,cmd -C node
-
-# 通用
-free -h
-df -h
-```
-
-与 QQ bot 共存时，额外确认主机整体余量：
-
-```sh
-free -h
-docker stats --no-stream
-```
-
-记录：
-
-| 指标 | 关注点 |
-| --- | --- |
-| 内存 | Docker 部署：峰值明显低于 3 GB，`OOMKilled` 为 `false`；systemd 部署：`MemoryCurrent` 稳定低于 `MemoryMax`，主机仍有 1 GB 以上可用 |
-| CPU | 空闲时接近 0，不应持续满载 |
-| 磁盘 | 数据卷缓慢增长属正常；短期暴涨说明会话或投递记录异常 |
-| 日志 | 不应出现凭据、完整消息内容或 SDK 请求对象 |
-| 重启 | Docker 看 `docker compose ps`，systemd 看 `NRestarts`；重启次数不应持续增加 |
-
-## 7. 备份与还原演练
-
-**必须实际做一次**，不能只看命令退出码。两种部署方式的数据位置不同：Docker 是命名卷 `personal-agent-data`，systemd 是 `/var/lib/personal-agent`。
-
-### 7.1 备份
-
-```sh
-# Docker
-docker compose stop
 docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine \
-  tar czf /backup/personal-agent-data.tgz -C /data .
-tar tzf personal-agent-data.tgz | grep -E '(^|/)(inbox|agent)\.sqlite(-wal|-shm)?$|workspace/MEMORY\.md$'
-ls -l personal-agent-data.tgz
+  tar czf /backup/aster-data.tgz -C /data .
 
-# systemd（先停服务，保证 SQLite 连接已关闭）
-sudo systemctl stop personal-agent
-sudo tar czf /root/personal-agent-data.tgz -C /var/lib/personal-agent .
-sudo tar tzf /root/personal-agent-data.tgz | grep -E '(^|/)(inbox|agent)\.sqlite(-wal|-shm)?$|workspace/MEMORY\.md$'
+tar tzf aster-data.tgz | grep -E '(^|/)(agent|inbox)\.sqlite(-wal|-shm)?$|(^|/)workspace/|(^|/)mcp-oauth/'
+ls -l aster-data.tgz
+
+docker compose start personal-agent
 ```
 
 通过标准：
 
-- 列表包含 `inbox.sqlite`、`agent.sqlite`、`workspace/MEMORY.md`。
-- 归档文件大小不为 0。
-- 只出现空列表或找不到文件，说明备份的是错误卷或空目录，**不要当作备份成功**。
+- 归档非空，列表包含 `agent.sqlite`、`inbox.sqlite`、`workspace/`；SQLite 的 `-wal`、`-shm` 文件可能同时存在。
+- 配置了 MCP 时包含 `mcp.json`，使用过 OAuth 时包含 `mcp-oauth/<server>.json`。
+- 只有空列表或找不到文件，说明卷名错误或目录为空，不能当作备份成功。
 
-### 7.2 还原
-
-先记下当前一条记忆内容，然后：
+还原会覆盖现有数据：
 
 ```sh
-# Docker
 docker compose down
 docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine \
-  sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzf /backup/personal-agent-data.tgz -C /data'
-docker compose up -d
-docker compose logs --tail 20
-
-# systemd
-sudo systemctl stop personal-agent
-sudo sh -c 'rm -rf /var/lib/personal-agent/* /var/lib/personal-agent/.[!.]* 2>/dev/null; tar xzf /root/personal-agent-data.tgz -C /var/lib/personal-agent'
-sudo chown -R personal-agent:personal-agent /var/lib/personal-agent
-sudo systemctl start personal-agent
-journalctl -u personal-agent -n 20 --no-pager
+  sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzf /backup/aster-data.tgz -C /data; \
+    chown -R 1000:1000 /data'
+docker compose up -d --no-build
+docker compose logs --tail 20 personal-agent
 ```
 
-通过标准：
+`chown` 保证应用以 uid 1000 读写；不要跳过。还原后确认记忆和会话回到备份时状态。
 
-- 应用正常启动，无身份或配置错误。
-- 记忆内容和会话历史恢复到备份时状态。
+### 8.2 Vault 部署
 
-还原会覆盖现有数据，演练时不要拿正式数据做第一次尝试。systemd 还原后必须恢复文件所有者，否则服务用户无法写入。
+Vault 模式有两个卷和一份私有配置。使用路由器时，停止和启动都要带上 `-f docker-compose.router.yml`，否则路由器容器会继续运行并占用旧命名空间：
 
-## 8. 常见故障对照
+```sh
+# 有路由器时使用：COMPOSE="-f docker-compose.agent-vault.yml -f docker-compose.router.yml"
+COMPOSE="-f docker-compose.agent-vault.yml"
+docker compose $COMPOSE down
+
+docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/aster-data.tgz -C /data .
+docker run --rm -v personal-agent-vault-data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/aster-vault-data.tgz -C /data .
+# 私有配置归档写到当前目录，不依赖可能不存在的 /backup
+umask 077
+tar czf aster-private.tgz -C deploy/agent-vault private
+
+docker compose $COMPOSE up -d --no-build
+```
+
+`private/` 包含 Vault 主密码、CA 和 agent token，属于敏感材料，按凭据管理。Vault 数据卷保存加密快照和 CA 私钥；丢失主密码后无法解密。还原时同时恢复两个卷和 `private/`，应用数据卷再执行 `chown -R 1000:1000 /data`；Vault 卷不要改成 uid 1000，保持归档中的属主。不要用 `down -v`。归档文件名以当前目录为准；还原前确认三个归档都存在且非空。
+
+## 9. 从 systemd 迁移
+
+旧部署的 systemd unit、安装脚本和 broker overlay 已从仓库删除；这些命令只用于停止和迁移旧实例，不是受支持的安装方式。迁移期间保持旧数据目录完整，先备份再导入。
+
+```sh
+# 1. 停止旧应用；如果旧主机上仍有 unit
+sudo systemctl stop personal-agent
+sudo systemctl disable personal-agent
+
+# 2. 备份整个旧数据目录
+sudo tar czf /root/aster-legacy-data.tgz -C /var/lib/personal-agent .
+sudo tar tzf /root/aster-legacy-data.tgz | \
+  grep -E '(^|/)(agent|inbox)\.sqlite(-wal|-shm)?$|(^|/)workspace/|(^|/)mcp-oauth/'
+
+# 3. 目标卷必须为空。先确认没有旧实例写入；已有内容时先单独备份，不要直接覆盖。
+docker volume create personal-agent-data
+docker run --rm -v personal-agent-data:/data alpine \
+  sh -c 'set -e; [ -z "$(ls -A /data)" ] || { echo "target volume is not empty; back it up and import into a new volume" >&2; exit 1; }'
+
+# 4. 导入命名卷，保留所有文件并改为 uid 1000
+docker run --rm -v personal-agent-data:/data -v /root:/backup alpine \
+  sh -ec '[ -z "$(ls -A /data)" ] || { echo "target volume is not empty" >&2; exit 1; }; \
+    tar xzf /backup/aster-legacy-data.tgz -C /data; chown -R 1000:1000 /data'
+
+# 5. 检查并启动
+docker compose run --rm --no-deps personal-agent node dist/src/check-config.js
+docker compose up -d --no-build
+docker compose logs --tail 50 personal-agent
+```
+
+第 3 步故意在目标卷非空时失败，避免把已有卷内容删除后才发现归档错误。已有目标卷（例如之前演练过）先按第 8 节整卷备份；需要保留时改为导入一个新卷，再通过 `docker-compose.yml` 的卷名或复制数据切换，不要用 `rm -rf /data/*` 清空正在使用的卷。
+
+迁移时必须保留：
+
+| 内容 | 说明 |
+| --- | --- |
+| `agent.sqlite` 及其 WAL/SHM | 底座会话与执行恢复状态 |
+| `inbox.sqlite` 及其 WAL/SHM | 请求消费位置、身份绑定和投递状态 |
+| `workspace/` | 记忆和任务文件 |
+| `mcp.json` | 可选，MCP 配置 |
+| `mcp-oauth/` | 可选，MCP OAuth token 与动态注册信息 |
+| `.npm/` | 可选，stdio MCP 的缓存；保留可减少重新下载 |
+
+配置迁移应在上述第 5 步启动前完成：
+
+- MCP 的 `cwd` 改为容器内路径，例如 `/data/workspace`；宿主 `/opt` 或用户目录下的命令不可直接复用，应在派生镜像中安装依赖并更新绝对路径。
+- 从 `/etc/personal-agent.env` 摘取 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`、`MODEL_PROVIDER`、`MODEL_ID` 和对应 API key 到 `.env`。
+- 不要复制 `DATA_DIR=/var/lib/personal-agent`；容器内固定 `/data`。
+- 基础部署使用 `.env` 中的内联 `TELEGRAM_OWNER_ID`；Vault 模式使用 `private/app.env` 和挂载的 owner 文件，二者不能同时设置。
+- 旧 systemd 专用的 `ProtectHome`、`MemoryMax`、`ReadWritePaths` 等设置不再适用；资源限制由 Compose 提供。
+- 旧 Vault 混合部署：在旧 checkout 中停止 broker 容器，保留卷名 `personal-agent-vault-data`，按 `agent-vault.md` 重新创建 `private/vault.env`（主密码必须与旧卷一致）、CA 和 owner 文件，再启动 Vault Compose。旧 `/etc/personal-agent/egress-router*` 配置迁移到 `private/router/`，文件属主改为 1001、`600`。
+
+已有卷名必须保留：应用卷 `personal-agent-data`，Vault 卷 `personal-agent-vault-data`。如果旧 Compose 创建的是带项目前缀的卷（如 `<目录名>_personal-agent-data`），把内容复制到显式命名的卷后再启动，不要改名或新建空卷。迁移验收通过并保留一段回滚窗口后，再删除旧 unit 和旧数据目录；在此之前不要删除 `/var/lib/personal-agent`。
+
+旧 systemd 路径的详细说明见 [历史 systemd 混合部署（仅迁移）](agent-vault-systemd.md)。
+
+## 10. 常见故障
 
 | 现象 | 可能原因 | 处理 |
 | --- | --- | --- |
-| 启动即退出，`Missing configuration` | `.env` 或 `/etc/personal-agent.env` 缺项 | 补齐对应键 |
+| `pull access denied` / 找不到镜像 | 镜像未构建、未 `load` 或引用写错 | 核对 `ASTER_IMAGE`；构建机分发或从仓库拉取 |
+| Compose 报 `!override` 解析错误 | Compose 低于 2.24.4 | 升级 Compose |
+| 启动即退出，`Missing configuration` | `.env` 或 `private/app.env` 缺项 | 补齐对应键 |
 | 启动即退出，webhook 错误 | bot 已有 webhook | 先停用原 webhook |
-| 启动即退出，`belongs to another Telegram bot or owner` | 数据目录来自别的 bot／用户 | 换独立数据目录，或确认身份后迁移 |
-| `status=203/EXEC` | systemd 的 Node 或 `flock` 路径不对 | `command -v node`、`command -v flock` 后修正 `ExecStart` |
-| `status=226/NAMESPACE` | `ReadWritePaths` 指向的目录不存在 | 先创建 `/var/lib/personal-agent` 再启动 |
-| 日志提示 `EACCES`／`Unable to open the database file` | 数据目录属主、权限或 `DATA_DIR` 与 `ReadWritePaths` 不一致 | `chown -R personal-agent:personal-agent /var/lib/personal-agent`；核对 `/etc/personal-agent.env` 的 `DATA_DIR` |
-| 收到“本次处理未能完成” | 模型错误、超时或工具失败 | 看日志错误码；`AGENT_TIMEOUT` 表示已请求取消执行 |
+| 启动即退出，`belongs to another Telegram bot or owner` | 数据卷来自别的 bot／用户 | 换独立数据卷，或确认身份后迁移 |
+| 启动即退出，`flock` 无法加锁 | 同一数据卷已有实例 | 停掉旧容器；不要并行运行 |
+| `EACCES` / `Unable to open the database file` | 卷内文件属主不是 uid 1000 | `chown -R 1000:1000 /data` |
+| 容器 `running` 但无回复 | 模型、代理或 Telegram 网络失败 | 看日志错误码；核对 `NO_PROXY` 与代理地址 |
+| Vault 请求 `407`/`403` | agent token、vault 名或服务规则不匹配 | 核对代理 URL、vault 与 `services.yaml` |
+| 路由器 `check` 报权限错误 | 文件不是 uid 1001 的 `600`，或目录可被其他用户写 | 修正属主和权限 |
+| 路由器未匹配 host 返回 `403` | 路由表缺少精确 `host:port` | 增加路由；不支持通配符 |
+| 直接出网被拒绝 | `tool-network` 的预期行为 | 通过 broker／路由器访问 |
+| 备份归档为空 | 卷名错误 | `docker volume ls` 核对 `personal-agent-data` |
 | 收到截断提示 | 模型输出达到长度上限 | 让用户拆分问题；不会自动续写 |
 | 回复重复 | 发送结果曾未知后人工 `retry` | 核对 Telegram 实际消息，重复属预期风险 |
-| 日志反复 `polling retry` | 网络或 Telegram 限流 | 应用有退避；持续失败检查出网与 token |
-| 进程反复重启 | 底座 Session 失效（`AGENT_SESSION_FAILED`） | 属设计行为，重启恢复；若持续出现，检查磁盘与 SQLite 文件权限 |
-| 备份归档为空 | 挂载了错误卷名 | 用 `docker volume ls` 确认真实卷名 |
-| 启动日志 `MCP server <name> unavailable (MCP_TIMEOUT)` | server 启动慢、命令不存在或网络不通 | 检查 `command`/`cwd` 与网络；单独运行该命令验证 |
-| 出现 `MCP_AUTH_REQUIRED` | 远程 server 未授权、refresh token 失效或授权被撤销 | 停服务后运行 `mcp:auth`，再重启；不要删除 `mcp-oauth/<server>.json` 里的 client 注册信息 |
-| `npx` server 启动报 `EACCES`／`ENOENT` | `ProtectHome`/`ProtectSystem` 下 npm 缓存不可写 | 设置 `NPM_CONFIG_CACHE=/var/lib/personal-agent/.npm` 或预装 server |
-| 模型说找不到某 MCP 工具 | 工具未通过 `tool_search` 加载，或 server 未连上 | 让模型先 `tool_search`；对照启动日志中的 server 状态 |
 
-## 9. 上线判定
+## 11. 上线判定与验证边界
 
 全部满足才算部署验收完成：
 
-- [ ] 第 4 节九项功能验收通过，并有记录。
-- [ ] 配置了 MCP 时，第 3.5 节连接测试与一次真实工具调用通过。
+- [ ] 配置检查输出 `Configuration OK`。
+- [ ] owner 私聊、会话连续、工具调用、记忆跨重启、非授权隔离均通过。
 - [ ] 正常重启、执行中断、强杀三种场景通过。
-- [ ] 投递核查命令可用，`list` 输出可读。
-- [ ] 内存未触发 OOM，重启次数稳定。
-- [ ] 与 QQ bot 共存时主机仍有 1 GB 以上可用内存。
-- [ ] 备份归档包含三个持久化位置，还原演练成功。
-- [ ] 日志中无凭据与完整消息内容。
-- [ ] 已记录真实模型的名称、版本与当日费用消耗。
+- [ ] `deliveries.js list` 可用且输出可读。
+- [ ] 未触发 OOM，重启次数稳定。
+- [ ] 备份归档包含 SQLite、WAL、`workspace/` 和 `mcp-oauth/`，整卷还原演练成功。
+- [ ] 日志中没有凭据或完整消息内容。
+- [ ] 记录了镜像 digest、Compose 版本、真实模型和当日费用。
 
-把结果追加到 [mvp-verification.md](mvp-verification.md) 的阶段 E／F 部分，写明日期、命令、观察结果和未覆盖项。测试通过但未实际部署的情况不能写成“已上线”。
-
-## 10. 回滚
-
-```sh
-# Docker
-git checkout <上一个可用提交>
-docker compose build && docker compose up -d
-
-# systemd
-git checkout <上一个可用提交>
-sudo ./deploy/install-systemd.sh
-```
-
-数据不随代码回滚。若新版本写入过不兼容数据，用第 7 节还原备份。回滚前先备份当前数据。
-
-## 11. 与 QQ bot 共存的日常检查
-
-两边都在跑时，定期看整体而不是只看单个服务：
-
-```sh
-free -h
-docker stats --no-stream
-systemctl show personal-agent -p MemoryCurrent,NRestarts
-```
-
-关注点：
-
-- 主机 `available` 内存持续低于 300 MB 时，先看是不是 QQ bot 侧镜像更新或本应用会话历史异常增长。
-- 本应用 `NRestarts` 增加且日志有 `AGENT_SESSION_FAILED`，说明底座遇到过存储错误；检查磁盘空间与 `/var/lib/personal-agent` 权限。
-- 两个服务都正常时不要为了“省内存”频繁重启；重启本身会重新加载会话上下文。
-
-## 附：本地回归（服务器上也可执行）
-
-```sh
-npm run check
-npm test
-npm run build
-```
-
-三项都通过才继续部署。服务器上运行测试需要 Node.js 24.19.0 与完整开发依赖；Agent Vault TLS 测试还需要 `openssl`。MCP 与代理测试使用本地 fixture，不访问外网。
+本仓库当前已验证：应用镜像可构建；六种 Compose 组合可渲染；主机测试 137/137 通过；Go 测试与 `go vet` 通过；`network.sh` 通过 `sh -n`。未验证：真实云服务器上线、真实 Telegram／模型联调、Agent Vault 与 Infisical 联调、路由器与网络镜像的 Docker 构建（曾遇 Docker Hub 认证超时）、Go race detector（当前 Windows 环境 CGO 关闭）。这些项目不能写成“已上线”或“已验证”。

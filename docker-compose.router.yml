@@ -1,0 +1,30 @@
+# Multi-vault override for docker-compose.agent-vault.yml only. Requires Compose >=2.24.4.
+services:
+  tool-network:
+    environment:
+      ROUTER_ENABLED: "1"
+  egress-router:
+    image: ${ASTER_ROUTER_IMAGE:-aster-router:local}
+    network_mode: "service:tool-network"
+    depends_on:
+      tool-network: { condition: service_healthy }
+      agent-vault: { condition: service_healthy }
+    volumes:
+      - ./deploy/agent-vault/private/router:/etc/aster-router:ro
+    user: "1001:1001"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    mem_limit: 128m
+    pids_limit: 32
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+  personal-agent:
+    env_file: !override
+      - ./deploy/agent-vault/private/app.router.env
+    depends_on:
+      egress-router: { condition: service_started }

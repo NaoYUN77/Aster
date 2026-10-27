@@ -8,7 +8,7 @@
 
 本文件记录当前 MVP 的范围和设计，具体功能决策不写入仓库级 CLAUDE.md。
 
-后续的三块上下文、working memory 和每日记忆归档见 [Memory 与 Context 实施方案](memory-and-context-design.md)，任务拆分见 [实施 issues](memory-implementation-issues.md)。这些能力尚未接入运行中的 agent；MEM-01 冻结了数据契约，MEM-02 实现了 Working Module 与原生工具，MEM-03 实现了纯 Context 规划与快照渲染，但均未在组合入口注册。本文仍描述当前 MVP。
+后续的三块上下文、working memory 和每日记忆归档见 [Memory 与 Context 实施方案](memory-and-context-design.md)，任务拆分见 [实施 issues](memory-implementation-issues.md)。这些能力尚未接入运行中的 agent；MEM-01 冻结了数据契约，MEM-02 实现了 Working Module 与原生工具，MEM-03 实现了纯 Context 规划与快照渲染，MEM-04 实现了每日 Markdown 的发布与检索，MEM-05 实现了可恢复增量归档任务，但均未在组合入口注册。本文仍描述当前 MVP。
 
 ## 当前范围
 
@@ -44,11 +44,11 @@
 
 ## 资源与部署
 
-- 单机、单应用进程，Node.js 24.19.0；Linux 部署示例通过 systemd 与 flock 托管。
+- 单机、单应用进程，Node.js 24.19.0；生产以 Docker 镜像 Aster 交付，由 Compose 托管，镜像入口用 `flock` 防止同一数据卷被多个容器同时打开。
 - 不在 4 GB 服务器上运行本地大模型；暂不引入向量数据库或独立缓存服务。
 - 为输入大小、工具输出、执行时长和待处理请求设置明确上限；不能静默截断用户输入。
 - 使用独立的运行工作目录；Telegram token 和模型凭据通过部署环境注入，不写入仓库或日志。
-- 使用进程管理器托管应用并优雅退出。云服务器操作系统和底座兼容性需在部署前核实。
+- 由 Compose 负责重启策略与优雅退出，停止宽限期 45 秒。云服务器操作系统和底座兼容性需在部署前核实。部署方法见 [Docker 部署运行手册](deployment-test-guide.md)。
 
 ## 验收
 

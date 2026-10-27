@@ -140,7 +140,7 @@ func (c *Config) finalize() error {
 	if c.Listen, err = validateLoopbackEndpoint("listen", c.Listen); err != nil {
 		return err
 	}
-	if c.UpstreamProxy, err = validateLoopbackEndpoint("upstream_proxy", c.UpstreamProxy); err != nil {
+	if c.UpstreamProxy, err = validateUpstreamEndpoint(c.UpstreamProxy); err != nil {
 		return err
 	}
 	if c.HealthListen != "" {
@@ -342,6 +342,25 @@ func validateVault(vault string) error {
 		return fmt.Errorf("invalid character %q", r)
 	}
 	return nil
+}
+
+// The broker may live on a private Docker bridge; listeners remain loopback-only.
+// Require a literal address so DNS cannot change the broker destination after validation.
+func validateUpstreamEndpoint(addr string) (string, error) {
+	addr = strings.TrimSpace(addr)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("upstream_proxy must be host:port: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if !isLoopbackHost(host) && (ip == nil || !ip.IsPrivate()) {
+		return "", errors.New("upstream_proxy must connect to loopback or a private IP address")
+	}
+	number, err := strconv.Atoi(port)
+	if err != nil || number < 1 || number > 65535 {
+		return "", errors.New("upstream_proxy has an invalid port")
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 func validateLoopbackEndpoint(name, addr string) (string, error) {

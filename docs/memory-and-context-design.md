@@ -1,6 +1,6 @@
 # Memory 与 Context 实施方案
 
-状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节）；其余模块待实现。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
+状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节）；其余模块待实现。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
 
 本轮是当前 MVP 之后的增量工作，不表示这些能力已经上线。现有运行范围见 [mvp.md](mvp.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.3.0 为准。
 
@@ -32,9 +32,9 @@
 
 当前应用通过 `root.configure({ instructions })` 设置系统提示，将原文提交给 root Conversation；底座派生消息、执行工具并自动压缩。`workspace/MEMORY.md` 仍由模型通过文件工具读取和按用户明确要求更新。
 
-尚未实现：宿主记忆投影、每日记忆及其归档和查询工具。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`，其余未落地的名字仍是拟议应用接口，不是底座现有 API。
+尚未接入：宿主记忆投影、归档任务与原生检索工具。归档 module 与原生 Task 已由 MEM-05 实现并独立验证，尚未在运行入口注册。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`；每日记忆的文件协议已由 MEM-04 实现（`src/memory/daily.ts`），其余未落地的名字仍是拟议应用接口，不是底座现有 API。
 
-按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）。这三项都还没有接入运行中的 agent：组合入口、原生检索工具、自定义周期快照与每日记忆仍待 MEM-04～MEM-07 完成。
+按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。MEM-05 实现了独立可恢复的增量归档 Task（`archive.ts`、`archive-task.ts`）。这些 module 都还没有接入运行中的 agent：组合入口、原生检索工具和自定义周期快照仍待 MEM-06～MEM-07 完成。
 
 底座现有接入能力：
 
@@ -182,7 +182,7 @@ B 使用版本化的应用格式保存：连续性摘要、结构化基线、来
 
 1. 固定连续来源范围、格式版本、稳定 batch ID 和分段 ID。
 2. 分页读取并提取，校验后持久化待发布的实际正文及内容摘要；模型可能因中断重复调用，但已保存正文不再生成。
-3. Daily Memory 单写者按分段 ID 发布，临时文件写完并同步后原子替换日期文件。同 ID 同正文返回原回执；同 ID 不同正文或文件异常修改报冲突。
+3. Daily Memory 单写者按分段 ID 发布，临时文件写完并同步后原子替换日期文件。同 ID 同正文返回原回执；同 ID 不同正文或文件异常修改报冲突。（发布协议已由 MEM-04 实现，见第 15.2、15.3 节。）
 4. 所有日期分段发布成功后，才确认批次并推进连续归档游标。失败的日期分段补写，已成功分段不追加第二次。
 
 文件替换和 SQLite commit 不构成同一个事务；必须分别覆盖生成后未发布、发布后未确认、跨多个日期部分成功等恢复窗口。采用有界重试，耗尽后保留可恢复失败事实供诊断和重试。原始 Entries 保留，因此归档失败不会重新执行业务任务，也不必阻止下一次普通聊天。
@@ -193,7 +193,7 @@ B 使用版本化的应用格式保存：连续性摘要、结构化基线、来
 
 拟议 `memory_search` 返回日期／主题／关键词的有界命中及稳定引用，`memory_read` 按引用读取有界片段和分页游标。两者由原生工具暴露，结果进入 C，不每轮重新注入全部 LTM。零命中与读失败分开；可按日期浏览，必要时回读来源 Entry。
 
-首版直接分页扫描 Markdown，给出明确的扫描范围、返回上限和继续游标。后续全文索引是可重建派生物，不能成为另一个可编辑事实库。
+首版直接分页扫描 Markdown，给出明确的扫描范围、返回上限和继续游标。后续全文索引是可重建派生物，不能成为另一个可编辑事实库。分页扫描、游标与上限已在 MEM-04 实现，语义见第 15.4 节；原生工具包装仍待 MEM-07。
 
 既有 `MEMORY.md` 保留为用户明确保存的事实来源，不自动把日记合并进去，也不未经确认把旧文本转换成结构化偏好。加载时记录内容摘要；纠正或忘记后，未来快照与检索不能继续把旧值当作当前约定。
 
@@ -294,10 +294,10 @@ B 格式、working schema、归档批次和已持久化工具参数均是跨版�
 
 ### 12.6 仍未验证或受限的部分
 
-- 自定义 `defineTask` 的 `abort` 阶段是必需的；本轮只验证了内置 `CompactionTask` 的取消路径，归档 Task 的取消与恢复留待 MEM-05 验证。
+- 自定义 `defineTask` 的 `abort` 阶段是必需的；MEM-01 只验证内置 `CompactionTask`，MEM-05 已补充归档 Task 的实际 I/O 取消与恢复验证（第 16 节）。
 - hook 运行时对象虽然是完整 `TaskRuntime`，但声明类型 `HookApi` 只承诺读取与 memo。应用只用 `Harness.commit()` 持久化，不依赖未声明的 `commit()`，以免升级时静默失效。
 - 真实模型窗口下的预算、缓存命中与摘要质量不在本轮范围（MEM-06、MEM-08）。
-- 归档 Task、每日文件发布与检索的文件级恢复窗口未验证（MEM-04、MEM-05）。
+- 每日文件替换由 MEM-04 的失败注入覆盖（04-B）；MEM-05 已补充生成后未发布、发布后未确认、跨多个日期部分成功及游标提交前的归档 Task 恢复验证（第 16 节）。
 
 ## 13. MEM-02 实现结论与 Working 语义
 
@@ -405,7 +405,130 @@ B 格式、working schema、归档批次和已持久化工具参数均是跨版�
 
 两条路径都以「新 Entry 真的成为活跃 head」为最终判据；任务终态本身不足以证明已发布，内存通知更不足。
 
-## 15. 实施入口与发布判定
+## 15. MEM-04 实现结论与每日记忆语义
+
+本节把第 8、9 节写成可执行的 Interface。证据为 `test/memory-daily.test.ts`（04-A～04-F），该文件在真实临时目录上运行，不启动 Harness、不打开数据库、不调用模型。
+
+### 15.1 冻结位置
+
+| 内容 | 权威来源 |
+| --- | --- |
+| Daily Interface（`openDaily`／`publishSegments`／`readSegment`／`searchDaily`／`digestOfSegment`／`identityOfSegment`）、`DAILY_LIMITS`、`SearchCursor`、`CoveredFile`、文件协议与错误语义 | `src/memory/daily.ts` 文件头 |
+| `MemorySegment`、`ArchiveBatch`、`dailyFileName`、`DAILY_DIRECTORY`、`DAILY_MAX_PAGES`、`UNKNOWN_DATE`、`MemoryError` | `src/memory/contracts.ts` |
+| 验收 04-A～04-F | `test/memory-daily.test.ts` |
+
+模块只接受已校验的 `MemorySegment` 与宿主给的绝对根目录，读写 `root/memory/daily` 下的文件，不持有模型、Harness 或数据库客户端。分页上限、游标与回执属于 Interface，不写入被持久化的数据。
+
+### 15.2 文件协议
+
+每个事件日期一个 Markdown 文件，命名为 `dailyFileName(date, page)`。文件头一行标题，随后每段一个块：
+
+```text
+<!-- memory-segment:begin
+{"digest":"…","segment":{…}}
+-->
+<分段正文，原样>
+<!-- memory-segment:end -->
+```
+
+- 元数据行是键排序的规范 JSON，且**不含 `text`**：正文只有一个存放位置。元数据若重复携带正文，读者无法判断两处不一致时哪个是事实，因此按 `corrupt-state` 拒绝，而不是择一采信。
+- `digest` 覆盖分段自身的规范 JSON（含正文）。正文被编辑后与元数据不符即为 `corrupt-state`，不会被当成一个新值静默读出。
+- 文件通过「同目录临时文件写入 → `sync` → `rename` 覆盖」替换，读者看到完整旧版或完整新版。目录 `sync` 在 Windows 上被拒绝（`EPERM` 等），只容忍这些明确的拒绝码，其余 I/O 失败照常报 `io-failure`。
+- **读取是严格的**：日期文件只能包含本模块写出的内容——一行标题、空行、格式完整的块。块外的任何内容、标题与文件名不符、空文件都报 `corrupt-state`，绝不跳过。跳过会让损坏标记后的记录对检索不可见，而下一次发布会把该文件整体重写，等于静默删除记忆。
+- 换行在边界统一为 LF：发布时先把正文规范化再计算摘要，读取时同样规范化。因此 `\r\n` 正文存成 LF，回执摘要可复现；否则写入的摘要与读回的正文永远对不上。
+- `root` 与文件之间的每一层目录（包括 `root/memory`）都 `lstat` 检查，符号链接一律拒绝（`corrupt-state`）；`filePath` 拒绝任何解析后离开根目录的名字。只检查最后一层会让 `root/memory` 指向外部目录时仍然写入成功。
+- 读取在**读的过程中**受限：用文件句柄最多读到上限多一个字节即停，超限报 `budget-exceeded`。先整份读入再检查大小只会限制答案，不会限制内存。
+- 分段正文不得包含块标记行，否则会伪造块边界（`invalid-input`）。
+
+### 15.3 幂等、冲突与替代
+
+发布以 `(文件, 分段 ID)` 为键：
+
+- 同 ID 同**发布身份** → `duplicate` 回执，不追加，文件字节不变。重试与重启后的重复调用因此不会写第二份。
+- 同 ID 不同发布身份，或同一次调用内两个分段共用 ID 而内容不同 → `revision-conflict`，整次调用不写任何文件。
+- 发布身份（`identityOfSegment`）是 `supersededBy: null` 时的分段摘要，与文件里存的 `digest` 分开：`supersededBy` 会被后续替代改写，若把它算进发布身份，一条已被替代的记录就无法幂等重放原始发布，恢复会变成冲突。存储摘要仍包含它，因为文件必须能发现编辑。
+- 先校验全部输入与被触及文件的边界，再落盘：任何拒绝都发生在第一个字节写入之前。
+
+替代关系写在旧记录上（`supersededBy`），不靠删除。目标记录由 `supersedes` 指名，在 `scanFilesMax` 范围内查找；找不到报 `not-covered`，已被另一条记录替代则报 `revision-conflict`，不会形成链或悬空引用。同一次调用里两条记录替代同一个旧记录同样报 `revision-conflict`：否则两条都会作为当前事实返回，而旧记录只指向其中一条。
+
+写入分两阶段：**先把所有文件的替代标记写完，再写任何含新记录的文件**。跨文件时只保证「先撤销、后新增」；同一文件同时含标记与新记录时会被写两次，正是为了保住这个顺序。失败时有三种结果，第三种是本模块**不做端到端事务**的直接代价：旧事实仍在且新事实未出现（标记阶段未写）；旧事实已撤销且新事实已出现（两阶段都完成）；或**旧事实已撤销、新事实尚未落盘**（标记已写、追加阶段失败）。第三种不会让两条事实同时读作当前，但会让用户暂时失去该事实——重试同一批次即可补齐，因为分段 ID 与发布身份在重试间稳定。因此回执确认之前，调用方不能把「已撤销」当作「已被新事实替代」。这条顺序由 04-E 的注入失败用例固定：替换文件不可写时，被撤销的那条已标记，未撤销的那条保持当前，且没有任何新记录落盘。
+
+进程内每个根一个单写者链（`withLock`）。部署是单应用进程，因此这就是全部串行化保证；同一根上的第二个进程不受支持，需要锁文件才能成立——这是当前明确不支持的能力，不是未发现的缺陷。
+
+### 15.4 检索、游标与边界
+
+`searchDaily` 按日期顺序扫描范围内的文件，返回命中、扫描量、未读范围与继续游标：
+
+- `available` 是范围内的文件数，`scanned.files`／`scanned.segments` 是本次实际读到的量，`unread` 列出因上限未读的文件。**零命中与没有历史是两件事**：前者 `available > 0`，后者 `available === 0`。
+- `scanned.from`／`through` 是本次真正读到的文件名而非日期，一个都没读到时为 `null`。文件一读完就记入范围，命中或分段上限提前结束时也是；不能等到整个文件循环走完才赋值。
+- 上限：单文件 500 段／1 MiB，单次扫描 20 个文件（可放宽至 200）／5,000 段，单次返回 20 条（可放宽至 100）。超限给游标与未读清单，不截断、不静默丢。
+- 默认只返回当前事实（`supersededBy === null`）；`includeHistory` 才包含旧记录，并以 `historyExcluded` 报出被跳过的条数。历史视图里旧记录仍带着 `supersededBy`，因此旧状态可见而不会被误读为当前约定。
+- 游标由 `file`、`index`、`fileDigest`、`covered` 组成。`fileDigest` 钉住被恢复文件的内容；`covered` 记录**已被完整扫描的文件在读取前一刻观察到的 size 与 mtime**。续页时重新观察这些文件并逐个比对，不符即 `stale`。
+  - 关键在「读取前一刻」：如果在构造游标时才去测量，那么读取之后、构造之前的追加会被吸收进游标自己的指纹里，续页时自然一致，追加就永久漏掉。游标必须携带扫描实际消费的那个版本，而不是它签发那一刻的状态。
+  - 只列出真正读过的文件；没读到的文件不存在被跳过的风险。
+- 范围可能在两页之间**变大**：补写一个更早的日期会排在游标文件之前，它从未被读过，因此不在 `covered` 里，也没有任何 `stale` 比对能发现它。续页因此不是从游标文件开始，而是从「游标之前第一个 `covered` 没有记录的文件」开始；`covered` 里的文件已在上一步逐个校验未变，扫描时直接跳过，所以既不会漏掉补写，也不会重复返回调用方已有的命中。同理，游标推进时跳过 `covered` 中的文件，不把已返回的文件再指向一次。
+  - 这条规则只对**排在前面的**新增文件成立。游标之后新出现的文件本来就落在剩余范围内，正常扫描会读到。
+  - 回退只允许用于 `index === 0 && fileDigest === null` 的文件边界游标。若游标已经保留文件内位置（`index > 0`）或内容摘要（`fileDigest !== null`，包括 index 为零的情况），发现更早补写时立即报 `stale`，调用方丢弃该分页链并重新检索。单位置游标无法同时保留补写页的位置和原文件的位置／摘要；提前拒绝避免再次分页时重复返回旧记录或丢失变化检测。未出现更早补写时，原有位置与摘要校验照常生效。
+- 命中数到上限时，游标停在放不下的那一条之前，续页会先返回它。
+- 列出的文件在读取前消失时记为 `unread`（不是「读过且为空」），且**不进入 `covered`**：它已经不存在，记进去只会让下一次续页永远 `stale`。游标前进到下一个文件。已记录在 `covered` 的文件之后被删除同样不报 `stale`——里面已无记录可漏，续页照常进行；只有文件**变大了**（或内容被改）才意味着有记录落在游标后面。
+
+`readSegment` 按稳定引用读取，文件不存在与文件内无此记录分别报 `missing-file`／`missing-segment`，是返回值而不是异常。已替代的记录仍能按引用读出原值并带 `supersededBy`：稳定引用不会悄悄变成新值。
+
+### 15.5 错误与边界
+
+| 情况 | 结果 |
+| --- | --- |
+| 相对根目录、非法日期／页码、正文含块标记 | `invalid-input` |
+| 同 ID 不同内容、重复替代、链式替代 | `revision-conflict` |
+| 替代目标不在已覆盖文件内 | `not-covered` |
+| 段数或字节数超文件上限、单次发布超段数上限、读到超大文件 | `budget-exceeded`（换续页或分页，不截断） |
+| 块外内容、标题不符、元数据缺失／非法、摘要不符、位置与文件名不符、任一层目录或文件为符号链接 | `corrupt-state` |
+| 游标失效 | `stale` |
+| 其余读写失败 | `io-failure`（可重试） |
+
+全部错误码都在 MEM-01 的 `MEMORY_ERROR_MAPPING` 内，均不映射为 `AGENT_SESSION_FAILED`。日志只记标识、文件名与错误码，不输出正文。
+
+### 15.6 与 MEM-05／MEM-07 的接缝
+
+- MEM-05 的 Archive Task 负责固定来源范围、提取、持久化待发布正文，然后逐段调用 `publishSegments`；只有全部回执确认后才推进连续游标。回执里 `published` 与 `duplicate` 都算已确认，`digest` 可用于核对「同一次生成没有产出第二份正文」。
+- 分段 ID 由归档批次决定（`<batchId>#<index>`），在重试间保持稳定；本模块只按 ID 与发布身份判重，不生成 ID。归档重试可以安全重放：已被替代的记录仍返回原回执。
+- 检索工具（`memory_search`／`memory_read`）由 MEM-07 用原生工具契约包装本模块；游标、上限和 `unread` 原样交给模型，不在这里改写语义。
+- 本模块未接入运行中的 agent；已由 MEM-05 与归档任务联调，覆盖生成后未发布、发布后未确认及跨日部分成功（第 16 节）。
+- 两个窗口只有代码路径、没有自动化证据，因此不作为已验证结论：单次扫描内「文件在读取前消失」与「文件在读取后、游标签发前被追加」。两者都要求在一次调用内部、两个 I/O 步骤之间改变文件，而本模块没有在该窗口注入失败的接口。跨调用的追加已被 `covered` 覆盖并有测试；跨调用的**补写更早日期**由 `resumeAt` 回退扫描起点覆盖，同样有测试。
+
+## 16. MEM-05 实现结论与归档协议
+
+### 16.1 Interface 与归属
+
+`src/memory/archive.ts` 提供原生 Entry 到有界提取来源的转换、`ArchiveExtractionSchema`、`validateExtraction` 与提取提示；`src/memory/archive-task.ts` 提供 `createArchiveTask`、`initializeArchive`、`requestArchive`、`reconcileArchive`、`retryArchive`、`readArchive` 和 `ArchiveStateSchema`。`ArchiveBatch`／`MemorySegment` 继续以 `contracts.ts` 为权威来源，schema 版本仍为 1。
+
+宿主在 registry 中注册 `createArchiveTask({store, model, timeoutMs?})` 返回的 Task。它是 conversation-owned、`background: true` 的独立任务，不进入主 agent 工具队列、不加入普通 idle 等待。`boundary` 是可选的宿主观测接口，提供 extracted／saved／published／confirmed／before-cursor 同步点，测试借此关闭或强制终止进程。生产接线由 MEM-07 完成。
+
+`initializeArchive` 必须先调用：首次升级由宿主传入当前尾部作为起点；新会话可传 `null`。起点、时区、目标和批次通过 conversation 级 latest Document 保存；不自动回填旧历史。当前拒绝 fork。初始化后不能改变时区。模型与目录由宿主配置，不是模型参数。
+
+### 16.2 目标、来源与时间
+
+`requestArchive` 只接受宿主已确认发布的压缩截止点或业务完成边界；入队／stale 压缩不能调用它。事务内取目标最大值，同时创建唯一活跃归档 Task，不为每次通知建立 Promise 队列。`reconcileArchive` 每次最多扫 64 条原生 Entries，返回 `more`；宿主在启动／请求边界重复调用至本次扫描结束。扫描进度持久化，跨日时会重新检查未覆盖的当日事件。补扫依据最近已发布的原生 head（覆盖阻塞压缩路径）、WorkingCompleted 和已结束日期的原始事件；不要求午夜无请求时运行。
+
+来源范围仍为 `(after, through]`，每批最多 64 条、提取输入最多 64 KiB。当前处理原生 user、成功或工具调用中的 assistant、tool-result 和 WorkingCompleted；摘要、reset、system、working／cycle 投影及 memory_search／memory_read／working_read／working_update 的结果均跳过。未知自定义 kind 不自动解释，MEM-07 引入外部事件格式时须增加对应边界适配。工具失败保留显式失败标记；完整文本超限就拒绝并保留缺口，不冒充已归档。
+
+日期由被引用 Entry 的事件 timestamp 与初始化时区决定；完成事实使用其 `at`。缺失时间进 `unknown.md`，非法时间报错，模型不能指定日期、时区、ID、目录或归档游标。宿主收到的提取结果必须引用本批已读来源。自动 user-requirement 只是历史事件，不更新 Working 偏好或 MEMORY.md。
+
+### 16.3 持久化、发布和失败
+
+Task 先提交固定范围和稳定 batch ID，再调用模型；校验通过的正文与调用 usage 在同一 commit 保存。空结果也先保存。每次只发布一个分段，身份为 `<batchId>#<index>`；逐段保存内容摘要确认，全部确认后在事务内校验连续前缀并推进 `archivedThrough`。已保存正文不会因重试重新生成，文件已写但确认未提交时使用 Daily 的 duplicate 回执恢复。单文件容量不足时持久化下一页位置，最多 9 页；其他失败不自动换位置。
+
+提取和每段发布均最多自动尝试 3 次，计数先于外部 I/O 提交；重试等待通过原生 Task checkpoint／sleep 恢复。失败诊断只保存安全错误码和固定消息。耗尽、非重试错误或显式取消保留正文和覆盖缺口，由 `retryArchive` 显式重置尝试额度；普通触发不会无限重启失败任务。未知 Task fault 同样保留批次并需显式重试。主请求和已保存回复不重跑。
+
+模型调用默认 60 秒，允许宿主配置 1～300000 ms，取消／超时 signal 传至实际 provider。关闭 Harness 保留 checkpoint；显式 abort 进入原生 abort 阶段并保存 cancelled。Daily 的有限单段发布会等待原子替换完成后再处理取消，不使用仅停止等待的 Promise race，也不在取消后启动下一段 I/O。
+
+每个返回并提交的模型响应（含失败／非法结果）的 usage 计入原生 `UsageDoc.models["app/archive"]`，不重复计入 provider 的生成桶。响应尚未提交时进程被杀或调用被取消，远端已发生用量可能未知；恢复可能重调模型，不能承诺该窗口的精确计费。正文一旦提交便不再重调。应用不复制 SDK Usage／Entry／Task 类型。
+
+### 16.4 验证与限制
+
+离线验证使用真实 Harness、临时 SQLite、faux provider 和每日文件。关键四个窗口同时有正常关闭重开和真实子进程 SIGKILL 证据。具体命令、通过编号见 MEM-05 交接记录。当前单进程、线性会话；未在真实模型上验证提取质量、脱敏效果、目标 Linux 资源消耗。模块不承诺自动完成语义级纠正，`supersedes` 必须来自可定位的明确旧引用。实际应用接线、外部事件时间持久化和升级入口属于 MEM-07。
+
+## 17. 实施入口与发布判定
 
 按 [实施 issues](memory-implementation-issues.md) 的依赖顺序执行。先完成公开 API 可行性和 Interface 契约，再并行实现 Working、Context、Daily Memory；最后接入底座与应用并做故障恢复验收。
 

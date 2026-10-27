@@ -1,4 +1,4 @@
-# Personal Agent
+# Aster
 
 基于官方 `@earendil-works/pi-durable` 的个人任务助手：从 Telegram 私聊接收文本，运行 agent 和工具，然后回复。远端模型负责推理；应用面向 4 核 CPU、4 GB 内存云服务器部署。
 
@@ -82,9 +82,11 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 
 工具的 API token、API key、用户名和密码可由开源 Agent Vault 从 Infisical Secret Management 同步，再在 HTTP(S) 出口注入；应用只持有占位值。启用方式、`${vault:KEY}` 引用、Basic/Bearer 配置及独立隔离部署见 [Agent Vault 运行说明](docs/agent-vault.md)。模型提供商的 API key、Telegram Bot token 和 owner ID 的存放方式也在该文档中说明；`MODEL_PROVIDER`、`MODEL_ID` 等非秘密配置仍留在应用环境。MCP 外部 OAuth 保留现有授权流程和本地 token 状态，不要求迁入 Vault。
 
-使用独立 `docker-compose.agent-vault.yml` 启动这一模式，不与默认 Compose 合并。普通本地/systemd 运行仅设置代理变量不会自动获得网络隔离；应用继续用 systemd、只把 broker 放入容器的混合部署见 [systemd 应用 + 容器 broker](docs/agent-vault-systemd.md)。真实 Infisical 联调与容器出口验收尚需在目标机完成。
+使用独立 `docker-compose.agent-vault.yml` 启动这一模式，不与默认 Compose 合并。Aster 与防火墙容器共享网络命名空间，broker 独立运行；真实 Infisical 联调与容器出口验收尚需在目标机完成。
 
-不同基础设施的密钥按 Infisical 文件夹拆分时，每个文件夹对应一个 vault。应用只有一组全局代理变量，无法直接选择 vault；仓库内提供 `agent-egress-router`，按目标 `host:port` 路由到一个 broker 下的不同 vault。构建和配置见 [router/README.md](router/README.md)，systemd 单元与示例配置在 [`deploy/agent-vault/`](deploy/agent-vault/)，设计见 [host 路由方案](docs/agent-vault-router-plan.md)。
+不同基础设施的密钥按 Infisical 文件夹拆分时，每个文件夹对应一个 vault。叠加 `docker-compose.router.yml`，使用独立 `aster-router` 镜像按目标 `host:port` 选择 vault。配置和运行方法见 [router/README.md](router/README.md)。
+
+CI/CD 的安全关卡、实施顺序与当前进度见 [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)。Agent Vault 受审构建及虚构凭据回归用于验证已确认的取密重定向与日志问题，基础 CI 成功不等于已获得生产部署准入。`npm run release:preflight` 提供版本化清单、两份本地 Compose／显式策略文件摘要及预期四镜像 digest 引用的离线绑定检查；[契约与用法](scripts/ci/README.md#离线发布清单绑定预检ci-07-基础)说明其边界，通过不代表已验签、策略安全或生产预检完成。主机基线、停止写入后的卷元数据预检与整卷备份入口见 [CI-07 主机准备与离线备份](scripts/deploy/README.md)。
 
 ## MCP 服务器（可选）
 
@@ -145,7 +147,7 @@ npm run build
 DATA_DIR=./data npm run mcp:auth -- calendar
 ```
 
-`mcp:auth` 与 bot 读取同一组 `DATA_DIR`、`MCP_CONFIG` 环境变量；用 `MCP_CONFIG` 指定过路径时，授权命令也要带上同样的值（systemd 部署见 [deploy/README-systemd.md](deploy/README-systemd.md)）。
+`mcp:auth` 与 bot 读取同一组 `DATA_DIR`、`MCP_CONFIG` 环境变量；用 `MCP_CONFIG` 指定过路径时，授权命令也要带上同样的值。生产容器的维护命令与 OAuth 回调转发见 [部署指南](docs/deployment-test-guide.md)。
 
 打开命令打印的 URL 完成授权，回到终端等待回调。服务器没有入站端口时，先建立到配置端口的 SSH 端口转发，例如 `ssh -L 8765:127.0.0.1:8765 user@host`。命令只打印 server 名和工具数量，不打印 token。运行中需要重新授权时，该工具调用返回 `MCP_AUTH_REQUIRED`，按上述步骤处理后重启。
 
@@ -174,8 +176,8 @@ MCP server 与应用使用同一系统用户，不构成安全边界；stdio ser
 
 部署注意：
 
-- systemd 的 `ProtectHome`/`ProtectSystem` 使默认 npm 缓存不可写。用 `npx` 启动 stdio server 时，在 `/etc/personal-agent.env` 设置 `NPM_CONFIG_CACHE=/var/lib/personal-agent/.npm`（位于 `ReadWritePaths` 内），或构建时预装 server 并改用绝对路径。`TasksMax=64` 需同时容纳 stdio server 进程。
-- Docker 镜像自带 npm；把 MCP 配置放在数据卷内，不要把含 secret 的配置写进镜像。
+- Aster 镜像自带 Bash 和 npm，`HOME=/data`、`NPM_CONFIG_CACHE=/data/.npm`，缓存与 OAuth 状态均可持久化。MCP 配置使用容器内路径，例如 `/data/workspace`。
+- stdio server 的依赖宜在派生镜像中预装；隔离 Vault 模式不会自动放行 npm registry。把 MCP 配置放在数据卷内，不要把含 secret 的配置写进镜像。
 - 每个 stdio server 都会增加常驻进程和内存占用；4 GB 主机上优先少而稳的 server。
 
 ## 投递核查与补发
@@ -202,87 +204,44 @@ npm run deliveries -- sent telegram:123:456 1
 
 ## Linux 云服务器
 
-提供两种部署方式：Docker Compose（无需在主机安装 Node）和 systemd 直接托管。主机只有这一个服务时 Docker 更省运维；主机已有其他 Docker 服务（如 QQ bot）时用 systemd，资源账更好算。两种方式都没有取代另一种，选择依据见 [部署指南](docs/deployment-test-guide.md) 第 1.5 节。
+生产交付统一使用 Docker 镜像 **Aster**（镜像仓库名 `aster`）。服务器只需 Docker Engine 24+ 与 Compose 2.24.4+，不需要主机 Node.js 或 Go。开发运行仍可使用上文的 npm 命令。
 
-### Docker
-
-需要 Docker 24 及 Compose v2，主机安装 `bash`（工具执行依赖它）。
+先在构建机生成本地镜像：
 
 ```sh
-# 在项目目录创建 .env，至少填写 TELEGRAM_BOT_TOKEN、TELEGRAM_OWNER_ID、MODEL_PROVIDER、MODEL_ID 和对应 API key
+docker build -t aster:local .
 cp .env.example .env
-vi .env
-
-docker compose build
+# 填写 .env 中的 bot、owner、模型和 API key
+docker compose run --rm --no-deps personal-agent node dist/src/check-config.js
 docker compose up -d
-docker compose logs -f
+docker compose logs --tail 50 personal-agent
 ```
 
-- 持久化数据保存在命名卷 `personal-agent-data`（容器内 `/data`），`docker compose down` 不会删除；只有 `docker compose down -v` 会删除。卷名由 `docker-compose.yml` 顶层 `volumes` 的 `name: personal-agent-data` 显式指定，不随项目目录名变化。设置显式卷名之前创建的卷带项目前缀（如 `<目录名>_personal-agent-data`），升级时需先把其中的数据复制到新卷，否则应用会看到空数据目录。
-- `DATA_DIR` 在 compose 中固定为 `/data`，`.env` 里的 `DATA_DIR` 会被覆盖。
-- 容器以非 root 的 `node` 用户运行，内存上限 3 GB，`init: true` 回收工具子进程，停止宽限期 45 秒。systemd 示例默认更紧（`MemoryMax=1G`），用于与 QQ bot 等容器共存；Docker 方式适合独占主机。
-- 同一数据卷只允许一个容器使用；不要对同一卷启动多个副本。
-- 备份：先停止服务，再归档整个卷。归档后列出内容，确认三个持久化位置都在，不能只看命令退出码。
+也可使用显式构建覆盖：`docker compose -f docker-compose.yml -f docker-compose.build.yml build`。生产 Compose 本身只引用镜像；仓库尚未发布公共镜像。通过镜像仓库或 `docker save` / `docker load` 把产物交付到服务器，不在生产主机上强制构建。
 
-  ```sh
-  docker compose stop
-  docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine \
-    tar czf /backup/personal-agent-data.tgz -C /data .
-  tar tzf personal-agent-data.tgz | grep -E '(^|/)(inbox|agent)\.sqlite(-wal|-shm)?$|workspace/MEMORY\.md$'
-  ```
-
-  输出应包含 `inbox.sqlite`、`agent.sqlite` 和 `workspace/MEMORY.md`；SQLite 的 `-wal`、`-shm` 文件可能同时存在。用 `ls -l personal-agent-data.tgz` 确认归档非空。备份完成后 `docker compose start`。
-
-- 还原：停服务后把归档解回同一卷。归档保留 `node` 用户（uid 1000）的文件所有权。
-
-  ```sh
-  docker compose down
-  docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine \
-    sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xzf /backup/personal-agent-data.tgz -C /data'
-  docker compose up -d
-  docker compose logs --tail 20
-  ```
-
-  还原会覆盖卷内现有数据，只用于恢复演练或确实需要回到旧状态时。启动日志出现配置或身份错误时，先核对 `.env` 与归档是否来自同一个 bot。
-
-- 投递核查命令需在容器内执行（先停服务）：
-
-  ```sh
-  docker compose stop
-  docker compose run --rm personal-agent node dist/src/deliveries.js list
-  docker compose start
-  ```
-
-- 更新：拉取新代码后重新 `docker compose build && docker compose up -d`；数据卷保持不变。
-
-### systemd
-
-提供 [systemd 服务示例](deploy/personal-agent.service) 和安装脚本，默认代码位于 `/opt/personal-agent`，数据位于 `/var/lib/personal-agent`，配置位于 `/etc/personal-agent.env`。
+生产发布在 `.env` 中指定实际镜像摘要，例如 `ASTER_IMAGE=registry.example.com/team/aster@sha256:<digest>`，然后拉取、停止旧实例并更新：
 
 ```sh
-sudo ./deploy/install-systemd.sh
+docker compose pull
+docker compose stop personal-agent
+docker compose up -d --no-build personal-agent
+docker compose logs --tail 50 personal-agent
 ```
 
-脚本会创建系统用户和目录、安装依赖并构建、生成 unit、启用服务；必需配置缺失或为空时只启用不启动。重复执行会清空并重建代码目录、更新 unit，保留数据与配置。详细行为、路径约定和日常操作见 [deploy/README-systemd.md](deploy/README-systemd.md)。
+`running` 只表示进程存在，仍需核对初始化日志、重启次数及真实 Telegram 验收；当前没有应用就绪探针。不要对同一 bot 或数据卷启动多个实例。
 
-手动安装：
+持久化卷继续使用 `personal-agent-data`，不随 Aster 改名；容器内固定 `/data`，由 uid 1000 读写。应用默认内存上限 1 GB、128 个进程/线程、45 秒停止宽限；这些是配置上限，4 核／4 GB 目标机峰值仍待验收。更新不删除数据卷，禁止用 `down -v` 代替普通停服。
 
-1. 在服务器安装 Node.js 24.19.0、npm、bash，以及提供 `flock` 的 util-linux；创建 `personal-agent` 系统用户。
-2. 将项目部署到 `/opt/personal-agent`，执行 `npm ci && npm run build && npm prune --omit=dev`。
-3. 将 `.env.example` 的配置写入 `/etc/personal-agent.env`，设为 root 所有、权限 `600`，并使用 `DATA_DIR=/var/lib/personal-agent`。
-4. 将服务文件安装到 `/etc/systemd/system/personal-agent.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now personal-agent`。
-5. 使用 `journalctl -u personal-agent -f` 查看运行情况。
-
-服务采用 `flock` 避免重复实例，应用与工具共享 1 GB 内存硬上限（`MemoryHigh` 768 MB、`TasksMax` 64），适合与其他服务共存于 4 GB 主机。单独使用时可通过 `systemctl edit personal-agent` 调高。该上限是保护措施，不是性能保证。实际云端内存、取消和重启行为仍需上线环境验收。工具子进程继承宿主环境，部署账户和所配置凭据均属于受信任执行环境，不用于执行敌对代码。
-
-生产环境使用投递管理命令时，要以同一服务用户和同一个 `DATA_DIR` 运行，例如：
+维护命令在停服后通过同一 Compose 配置执行：
 
 ```sh
-sudo -u personal-agent env DATA_DIR=/var/lib/personal-agent node /opt/personal-agent/dist/src/deliveries.js list
+docker compose stop personal-agent
+docker compose run --rm --no-deps personal-agent node dist/src/deliveries.js list
+docker compose up -d personal-agent
 ```
 
-先停服务再修改投递记录。服务停止后尚处于 sending 的分段，会在下一次应用启动恢复为 uncertain。
+完整的镜像交付、备份恢复、MCP/OAuth、systemd 旧数据迁移及上线验收见 [部署指南](docs/deployment-test-guide.md)。Vault 隔离及多 vault router 使用各自 Compose 组合，见 [Agent Vault](docs/agent-vault.md)；不要与普通 Compose 混合。
 
 ## 验证边界
 
-本地自动化验证覆盖类型、构建、消息边界、分段投递、工具重放、取消及底座离线恢复；真实 Telegram/模型联调需要有效配置。测试通过不代表已部署，仓库不包含真实凭据。当前环境、用例与资源边界记录见 [docs/mvp-verification.md](docs/mvp-verification.md)。
+本地自动化验证覆盖类型、构建、消息边界、分段投递、工具重放、取消及底座离线恢复；真实 Telegram/模型联调需要有效配置。测试通过不代表已部署，仓库不包含真实凭据。历史 MVP 用例记录见 [docs/mvp-verification.md](docs/mvp-verification.md)，本次镜像迁移的实测结果与阻塞见 [Docker 验证记录](docs/docker-verification.md)。

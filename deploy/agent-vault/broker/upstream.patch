@@ -1,0 +1,759 @@
+--- a/internal/mitm/proxy.go
++++ b/internal/mitm/proxy.go
+@@ -57,6 +57,7 @@
+ 	logSink          requestlog.Sink     // never nil (Nop default); shared with the HTTP server
+ 	maxResponseBytes int64               // 0 = unlimited
+ 	maxRequestBytes  int64
++	apiPolicy        *APIPolicy
+ }
+
+ // Options carries the dependencies a Proxy needs. BaseURL is the
+@@ -75,6 +76,7 @@
+ 	LogSink          requestlog.Sink // nil → Nop
+ 	MaxResponseBytes int64           // 0 = unlimited (default); >0 = cap in bytes
+ 	MaxRequestBytes  int64           // 0 → DefaultMaxRequestBytes (1 GiB)
++	APIPolicy        *APIPolicy      // nil denies all operations
+ }
+
+ // New builds a Proxy bound to addr. The returned Proxy does not begin
+@@ -111,6 +113,7 @@
+ 		logSink:          sink,
+ 		maxResponseBytes: opts.MaxResponseBytes, // 0 = unlimited
+ 		maxRequestBytes:  maxReq,
++		apiPolicy:        opts.APIPolicy,
+ 	}
+
+ 	p.httpServer = &http.Server{
+--- a/internal/mitm/forward.go
++++ b/internal/mitm/forward.go
+@@ -194,6 +194,13 @@
+ 	useTLSUpstream bool,
+ 	scope *brokercore.ProxyScope,
+ ) {
++	// Evaluate every decrypted request, including keep-alive tunnel requests,
++	// before credential resolution, substitutions, body reads or upstream I/O.
++	if !p.apiPolicy.allows(scope.VaultName, target, r, useTLSUpstream) {
++		http.Error(w, "API operation denied", http.StatusForbidden)
++		return
++	}
++
+ 	start := time.Now()
+ 	authScheme, authHeader := detectAuthFromHeaders(r.Header)
+ 	event := brokercore.ProxyEvent{
+--- a/cmd/server.go
++++ b/cmd/server.go
+@@ -199,6 +199,10 @@
+ // cannot create ~/.agent-vault/ca/ (read-only FS, containers without HOME,
+ // corrupted state) must still be able to run the core HTTP server.
+ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKey []byte, db store.Store, maxRespBytes, maxReqBytes int64) error {
++	apiPolicy, err := mitm.LoadAPIPolicy(os.Getenv("ASTER_VAULT_API_POLICY"))
++	if err != nil {
++		return err
++	}
+ 	if mitmPort <= 0 {
+ 		return nil
+ 	}
+@@ -220,6 +224,7 @@
+ 	srv.AttachMITM(mitm.New(
+ 		net.JoinHostPort(host, strconv.Itoa(mitmPort)),
+ 		mitm.Options{
++			APIPolicy:        apiPolicy,
+ 			CA:               caProv,
+ 			Sessions:         srv.SessionResolver(),
+ 			Credentials:      srv.CredentialProvider(),
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,8 @@
+ module github.com/Infisical/agent-vault
+
+ go 1.25.0
++
++replace github.com/infisical/go-sdk => ./third_party/infisical-go-sdk
+
+ require (
+ 	github.com/charmbracelet/huh v1.0.0
+--- a/internal/infisical/client.go
++++ b/internal/infisical/client.go
+@@ -7,9 +7,9 @@
+ 	"io"
+ 	"log/slog"
+ 	"net/http"
++	"net/url"
+ 	"os"
+ 	"strconv"
+-	"strings"
+ 	"sync"
+ 	"time"
+
+@@ -83,6 +83,14 @@
+ 		return nil, ErrNotConfigured
+ 	}
+
++	return newClient(ctx, logger, siteURL, http.DefaultTransport.(*http.Transport))
++}
++
++func newClient(ctx context.Context, logger *slog.Logger, siteURL string, transport *http.Transport) (*Client, error) {
++	siteURL, err := infisicalOrigin(siteURL)
++	if err != nil {
++		return nil, err
++	}
+ 	method, err := DetectAuthMethod(os.Getenv, logger)
+ 	if err != nil {
+ 		return nil, err
+@@ -91,7 +99,21 @@
+ 		return nil, ErrNoAuthMethod
+ 	}
+
++	// Cloud identity methods may contact metadata and STS using independent
++	// clients. This reviewed broker only uses same-origin Universal Auth.
++	if method != AuthUniversal {
++		return nil, fmt.Errorf("infisical: reviewed broker requires Universal Auth")
++	}
++	httpc := infisicalHTTPClient(siteURL, transport)
++	sdkLog := safeSDKLog{logger}
++	sdkCtx, cancel := context.WithCancel(ctx)
+-	c := sdk.NewInfisicalClient(ctx, sdk.Config{
++	c := sdk.NewInfisicalClient(sdkCtx, sdk.Config{
++		// The syncer owns retries. Never retry rejected redirects or writes.
++		RetryRequestsConfig: &sdk.RetryRequestsConfig{ExponentialBackoff: &sdk.ExponentialBackoffStrategy{MaxRetries: 0}},
++		HTTPClient: httpc,
++		HTTPLogger: sdkLog,
++		LogWriter: sdkLog,
++		SilentMode: true,
+ 		SiteUrl:          siteURL,
+ 		AutoTokenRefresh: sdk.BoolPtr(true), // v0.8.0 made this a *bool
+
+@@ -99,7 +118,8 @@
+ 	})
+
+ 	if err := loginWithMethod(c, method); err != nil {
+-		return nil, fmt.Errorf("infisical login (%s): %w", method, err)
++		cancel()
++		return nil, safeInfisicalError(err)
+ 	}
+
+ 	logger.Info("infisical client ready",
+@@ -109,9 +128,9 @@
+ 	return &Client{
+ 		sdk:       c,
+ 		method:    method,
+-		siteURL:   strings.TrimRight(siteURL, "/"),
++		siteURL:   siteURL,
+ 		logger:    logger,
+-		httpc:     &http.Client{Timeout: 10 * time.Second},
++		httpc:     httpc,
+ 		slugCache: make(map[string]slugCacheEntry),
+ 	}, nil
+ }
+@@ -155,7 +174,7 @@
+ 	}()
+ 	select {
+ 	case r := <-done:
+-		return r.v, r.err
++		return r.v, safeInfisicalError(r.err)
+ 	case <-ctx.Done():
+ 		var zero T
+ 		return zero, ctx.Err()
+@@ -270,19 +289,22 @@
+ // getProjectSlug GETs /api/v1/workspace/{id} and extracts the project slug.
+ // Free function so the HTTP/parse path is testable without the SDK.
+ func getProjectSlug(ctx context.Context, httpc *http.Client, siteURL, token, projectID string) (string, error) {
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, siteURL+"/api/v1/workspace/"+projectID, nil)
+-	if err != nil {
+-		return "", err
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, siteURL+"/api/v1/workspace/"+url.PathEscape(projectID), nil)
++	if err != nil {
++		return "", safeInfisicalError(err)
+ 	}
+ 	req.Header.Set("Authorization", "Bearer "+token)
+ 	resp, err := httpc.Do(req)
+ 	if err != nil {
+-		return "", err
++		return "", safeInfisicalError(err)
+ 	}
+ 	defer func() { _ = resp.Body.Close() }()
+-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+ 	if resp.StatusCode != http.StatusOK {
+-		return "", fmt.Errorf("infisical: resolving project slug for %q: status %d", projectID, resp.StatusCode)
++		return "", fmt.Errorf("infisical: project lookup failed (HTTP %d)", resp.StatusCode)
++	}
++	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
++	if err != nil || len(body) > 1<<20 {
++		return "", fmt.Errorf("infisical: invalid project lookup response")
+ 	}
+ 	var parsed struct {
+ 		Workspace struct {
+@@ -290,10 +312,10 @@
+ 		} `json:"workspace"`
+ 	}
+ 	if err := json.Unmarshal(body, &parsed); err != nil {
+-		return "", fmt.Errorf("infisical: parsing project slug response: %w", err)
++		return "", fmt.Errorf("infisical: invalid project lookup response")
+ 	}
+ 	if parsed.Workspace.Slug == "" {
+-		return "", fmt.Errorf("infisical: project %q has no slug in response", projectID)
++		return "", fmt.Errorf("infisical: project lookup response has no slug")
+ 	}
+ 	return parsed.Workspace.Slug, nil
+ }
+--- a/third_party/infisical-go-sdk/client.go
++++ b/third_party/infisical-go-sdk/client.go
+@@ -12,6 +12,7 @@
+ 	"math"
+ 	"math/rand"
+ 	"net"
++	"net/http"
+ 	"reflect"
+ 	"strconv"
+ 	"strings"
+@@ -122,6 +123,9 @@
+ }
+
+ type Config struct {
++	// Host-owned HTTP policy is shared by login, secrets, clones and refresh.
++	HTTPClient *http.Client
++	HTTPLogger resty.Logger
+ 	SiteUrl              string `default:"https://app.infisical.com"`
+ 	CaCertificate        string
+ 	LogLevel             LogLevel // Specify the log level for the SDK. If set to debug, the SDK will print to stdout with verbose logging. Defaults to no logging.
+@@ -309,9 +313,15 @@
+ 	c.config = config
+
+ 	if c.httpClient == nil {
+-		c.httpClient = resty.New().
+-			SetHeader("User-Agent", config.UserAgent).
+-			SetBaseURL(config.SiteUrl)
++		if config.HTTPClient != nil {
++			c.httpClient = resty.NewWithClient(config.HTTPClient)
++		} else {
++			c.httpClient = resty.New()
++		}
++		if config.HTTPLogger != nil {
++			c.httpClient.SetLogger(config.HTTPLogger)
++		}
++		c.httpClient.SetHeader("User-Agent", config.UserAgent).SetBaseURL(config.SiteUrl)
+
+ 		maxRetries := 3
+ 		maxWaitTime := 30 * time.Second
+--- a/third_party/infisical-go-sdk/packages/errors/api.go
++++ b/third_party/infisical-go-sdk/packages/errors/api.go
+@@ -4,7 +4,6 @@
+ 	"fmt"
+
+ 	"github.com/go-resty/resty/v2"
+-	"github.com/infisical/go-sdk/packages/util"
+ )
+
+ // APIError represents an error response from the API
+@@ -18,44 +17,16 @@
+ }
+
+ func (e *APIError) Error() string {
+-	msg := fmt.Sprintf(
+-		"APIError: %s unsuccessful response [%v %v] [status-code=%v] [reqId=%v]",
+-		e.Operation,
+-		e.Method,
+-		e.URL,
+-		e.StatusCode,
+-		e.ReqId,
+-	)
+-
+-	if e.ErrorMessage != "" {
+-		return fmt.Sprintf("%s [message=\"%s\"]", msg, e.ErrorMessage)
+-
+-	}
+-
+-	return msg
++	return fmt.Sprintf("infisical: API request failed (HTTP %d)", e.StatusCode)
+ }
+
+ func NewAPIError(operation string, res *resty.Response) error {
+-	return &APIError{
+-		Operation:  operation,
+-		Method:     res.Request.Method,
+-		URL:        res.Request.URL,
+-		StatusCode: res.StatusCode(),
+-	}
++	return &APIError{Operation: operation, StatusCode: res.StatusCode()}
+ }
+
+ func NewAPIErrorWithResponse(operation string, res *resty.Response) error {
+-	errorMessage := util.TryParseErrorBody(res)
+-	reqId := util.TryExtractReqId(res)
+-
+-	return &APIError{
+-		Operation:    operation,
+-		Method:       res.Request.Method,
+-		URL:          res.Request.URL,
+-		StatusCode:   res.StatusCode(),
+-		ErrorMessage: errorMessage,
+-		ReqId:        reqId,
+-	}
++	// Do not retain peer-controlled bodies, URLs or request IDs in errors.
++	return NewAPIError(operation, res)
+ }
+
+ // NotModifiedError is returned when the server responds with 304 Not Modified,
+--- a/third_party/infisical-go-sdk/packages/errors/request.go
++++ b/third_party/infisical-go-sdk/packages/errors/request.go
+@@ -1,8 +1,6 @@
+ package errors
+
+-import (
+-	"fmt"
+-)
++
+
+ // RequestError represents an error that occurred during an API request
+ type RequestError struct {
+@@ -11,12 +9,11 @@
+ }
+
+ func (e *RequestError) Error() string {
+-	return fmt.Sprintf("%s: unable to complete api request [err=%s]", e.Operation, e.error)
++	return "infisical: API request failed"
+ }
+
+ func NewRequestError(operation string, err error) error {
+ 	return &RequestError{
+ 		Operation: operation,
+-		error:     err,
+ 	}
+ }
+--- a/internal/mitm/proxy_test.go
++++ b/internal/mitm/proxy_test.go
+@@ -177,7 +177,7 @@ func TestMITMInjectsCredentials(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/ping"))
+
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+@@ -253,7 +253,7 @@ func TestMITMForwardsBoundedBodiesWithContentLength(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "POST", "/chat"))
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+ 	p.upstream.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: upstreamRoots}
+@@ -285,6 +285,7 @@ func TestMITMForwardsBoundedBodiesWithContentLength(t *testing.T) {
+ }
+
+ func TestMITMWebSocketInjectsCredentialsAndPipesFrames(t *testing.T) {
++	t.Skip("reviewed API policy forbids protocol upgrades; covered by TestReviewedAPIConnectOperations")
+ 	var sawAuth, sawClientAuth, sawProxyAuth, sawUpgrade string
+ 	var sawKeyValues []string
+ 	serverDone := make(chan error, 1)
+@@ -435,6 +436,7 @@ func TestMITMWebSocketInjectsCredentialsAndPipesFrames(t *testing.T) {
+ }
+
+ func TestMITMWebSocketXAITTSIntegration(t *testing.T) {
++	t.Skip("reviewed API policy forbids protocol upgrades; covered by TestReviewedAPIConnectOperations")
+ 	if os.Getenv("AGENT_VAULT_XAI_INTEGRATION") != "1" {
+ 		t.Skip("set AGENT_VAULT_XAI_INTEGRATION=1 to run")
+ 	}
+@@ -525,6 +527,7 @@ func TestMITMWebSocketXAITTSIntegration(t *testing.T) {
+ }
+
+ func TestMITMWebSocketOpenAIRealtimeIntegration(t *testing.T) {
++	t.Skip("reviewed API policy forbids protocol upgrades; covered by TestReviewedAPIConnectOperations")
+ 	if os.Getenv("AGENT_VAULT_OPENAI_INTEGRATION") != "1" {
+ 		t.Skip("set AGENT_VAULT_OPENAI_INTEGRATION=1 to run")
+ 	}
+@@ -613,6 +616,7 @@ func TestMITMWebSocketOpenAIRealtimeIntegration(t *testing.T) {
+ }
+
+ func TestMITMWebSocketSanitizesSwitchingResponseAndInjectedHeadersWin(t *testing.T) {
++	t.Skip("reviewed API policy forbids protocol upgrades; covered by TestReviewedAPIConnectOperations")
+ 	var sawProtocol string
+ 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		sawProtocol = r.Header.Get("Sec-Websocket-Protocol")
+@@ -709,6 +713,7 @@ func TestMITMWebSocketSanitizesSwitchingResponseAndInjectedHeadersWin(t *testing
+ }
+
+ func TestMITMWebSocketHoldsProxyConcurrencyUntilTunnelCloses(t *testing.T) {
++	t.Skip("reviewed API policy forbids protocol upgrades; covered by TestReviewedAPIConnectOperations")
+ 	releaseUpstream := make(chan struct{})
+ 	upstreamReady := make(chan struct{}, 1)
+ 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+@@ -840,6 +845,7 @@ func TestMITMWebSocketHoldsProxyConcurrencyUntilTunnelCloses(t *testing.T) {
+ }
+
+ func TestMITMWebSocketUpstreamHandshakeTimeout(t *testing.T) {
++	t.Skip("reviewed API policy forbids protocol upgrades; covered by TestReviewedAPIConnectOperations")
+ 	releaseUpstream := make(chan struct{})
+ 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		hj, ok := w.(http.Hijacker)
+@@ -942,7 +948,7 @@ func TestMITMPassthroughForwardsClientAuthorization(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/data"))
+
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+@@ -1017,7 +1023,7 @@ func TestMITMBearerForwardsArbitraryClientHeaders(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/v1/messages"))
+
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+@@ -1246,7 +1252,7 @@ func TestMITMUnknownHostInTunnel(t *testing.T) {
+ 	// byHost empty → every Inject returns ErrServiceNotFound.
+ 	cp := &fakeCredProvider{byHost: map[string]fakeInjectResult{}}
+
+-	proxyURL, clientRoots, _ := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, _ := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/ping"))
+ 	client := newTrustingClient(proxyURL, url.User("av_sess_ok"), clientRoots)
+
+ 	resp, err := client.Get(upstream.URL + "/ping")
+@@ -1297,7 +1303,7 @@ func TestMITMUnknownHostPassthrough(t *testing.T) {
+ 		upstreamHost: {result: &brokercore.InjectResult{Passthrough: true}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/ping"))
+
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+@@ -1337,7 +1343,7 @@ func TestMITMUpstreamCertUntrusted(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, _ := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, _ := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/ping"))
+ 	// NOTE: not adding upstream's cert to p.upstream; verification fails.
+
+ 	client := newTrustingClient(proxyURL, url.User("av_sess_ok"), clientRoots)
+@@ -1398,7 +1404,7 @@ func TestMITMSubstitutionRewritesPath(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/2010-04-01/Accounts/__account_sid__/Messages.json"))
+
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+@@ -1453,7 +1459,7 @@ func TestMITMSubstitutionCaseSensitive(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/items/__ACCOUNT_SID__"))
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+ 	p.upstream.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: upstreamRoots}
+@@ -1493,7 +1499,7 @@ func TestMITMSubstitutionRewritesQueryAndHeader(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/data"))
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+ 	p.upstream.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: upstreamRoots}
+@@ -1665,7 +1671,7 @@ func TestResponseLimitRejectsKnownOversizeWith502(t *testing.T) {
+ 		upstreamHost: {result: &brokercore.InjectResult{}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp, func(o *Options) {
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/big"), func(o *Options) {
+ 		o.MaxResponseBytes = 1024
+ 	})
+ 	upstreamRoots := x509.NewCertPool()
+@@ -1711,7 +1717,7 @@ func TestResponseLimitAbortsChunkedMidStream(t *testing.T) {
+ 		upstreamHost: {result: &brokercore.InjectResult{}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp, func(o *Options) {
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/chunked"), func(o *Options) {
+ 		o.MaxResponseBytes = 1024
+ 	})
+ 	upstreamRoots := x509.NewCertPool()
+@@ -1720,9 +1726,12 @@ func TestResponseLimitAbortsChunkedMidStream(t *testing.T) {
+
+ 	resp, err := newTrustingClient(proxyURL, url.User("tok"), clientRoots).Get(upstream.URL + "/chunked")
+ 	if err != nil {
+-		return
++		t.Fatalf("client.Get before streaming: %v", err)
+ 	}
+ 	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("status = %d, want 200 before mid-stream abort", resp.StatusCode)
++	}
+ 	data, _ := io.ReadAll(resp.Body)
+ 	if len(data) >= 2560 {
+ 		t.Fatalf("got %d bytes, expected incomplete response (limit 1024)", len(data))
+@@ -1742,7 +1751,7 @@ func TestResponseExactFitNoAbort(t *testing.T) {
+ 		upstreamHost: {result: &brokercore.InjectResult{}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp, func(o *Options) {
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/exact"), func(o *Options) {
+ 		o.MaxResponseBytes = 1024
+ 	})
+ 	upstreamRoots := x509.NewCertPool()
+@@ -1777,7 +1786,7 @@ func TestResponseUnlimitedByDefault(t *testing.T) {
+ 		upstreamHost: {result: &brokercore.InjectResult{}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/large"))
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+ 	p.upstream.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: upstreamRoots}
+@@ -1809,7 +1818,7 @@ func TestRequestBodyCapConfigurable(t *testing.T) {
+ 		upstreamHost: {result: &brokercore.InjectResult{}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp, func(o *Options) {
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "POST", "/upload"), func(o *Options) {
+ 		o.MaxRequestBytes = 512
+ 	})
+ 	upstreamRoots := x509.NewCertPool()
+@@ -1867,7 +1876,7 @@ func TestMITMForwardStreamsChunksPromptly(t *testing.T) {
+ 		upstreamHost: {result: &brokercore.InjectResult{}},
+ 	}}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/stream"))
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream.Certificate())
+ 	p.upstream.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: upstreamRoots}
+--- a/internal/mitm/port_routing_test.go
++++ b/internal/mitm/port_routing_test.go
+@@ -11,7 +11,6 @@ import (
+ 	"net/url"
+ 	"strings"
+ 	"testing"
+-	"time"
+
+ 	"github.com/Infisical/agent-vault/internal/brokercore"
+ )
+@@ -53,7 +52,7 @@ func TestMITMPortBasedRouting(t *testing.T) {
+ 		},
+ 	}
+
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream1.URL, "GET", "/ping"), reviewedAllowOperation(t, upstream2.URL, "GET", "/ping"))
+
+ 	upstreamRoots := x509.NewCertPool()
+ 	upstreamRoots.AddCert(upstream1.Certificate())
+@@ -84,17 +83,17 @@ func TestMITMPortBasedRouting(t *testing.T) {
+ 	}
+ }
+
+-// TestMITMForwardPortExtraction verifies the plain HTTP forward-proxy path
+-// correctly extracts port from the URL and routes to port-specific services.
++// TestMITMForwardPortExtraction verifies CONNECT/TLS routes to port-specific
++// services; the reviewed policy forbids the original plain HTTP variant.
+ func TestMITMForwardPortExtraction(t *testing.T) {
+ 	var sawAuth string
+-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		sawAuth = r.Header.Get("Authorization")
+ 		_, _ = io.WriteString(w, "ok")
+ 	}))
+ 	defer upstream.Close()
+
+-	authority := strings.TrimPrefix(upstream.URL, "http://")
++	authority := strings.TrimPrefix(upstream.URL, "https://")
+ 	host, port, _ := net.SplitHostPort(authority)
+
+ 	sr := validTokenResolver("av_sess_ok",
+@@ -108,12 +107,10 @@ func TestMITMForwardPortExtraction(t *testing.T) {
+ 		},
+ 	}
+
+-	proxyURL, _, _ := setupProxy(t, sr, cp)
++	proxyURL, roots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/test"))
++	reviewedTrustUpstream(p, upstream)
+
+-	client := &http.Client{
+-		Timeout:   5 * time.Second,
+-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+-	}
++	client := newTrustingClient(proxyURL, url.User("av_sess_ok"), roots)
+
+ 	req, _ := http.NewRequest("GET", upstream.URL+"/test", nil)
+ 	req.Header.Set("Proxy-Authorization", "Basic "+
+--- a/internal/mitm/forward_test.go
++++ b/internal/mitm/forward_test.go
+@@ -108,7 +108,7 @@ func writeRawRequestLine(t *testing.T, conn net.Conn, line string, headers map[s
+ // the upstream response.
+ func TestMITMForwardPlainHTTPInjectsCredentials(t *testing.T) {
+ 	var sawAuth, sawClientHeader, sawProxyAuth, sawHost, sawMethod, sawPath string
+-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		sawAuth = r.Header.Get("Authorization")
+ 		sawClientHeader = r.Header.Get("X-Client-Header")
+ 		sawProxyAuth = r.Header.Get("Proxy-Authorization")
+@@ -119,7 +119,7 @@ func TestMITMForwardPlainHTTPInjectsCredentials(t *testing.T) {
+ 	}))
+ 	defer upstream.Close()
+
+-	upstreamAuthority := strings.TrimPrefix(upstream.URL, "http://") // host:port
++	upstreamAuthority := strings.TrimPrefix(upstream.URL, "https://") // host:port
+ 	upstreamHost, _, _ := net.SplitHostPort(upstreamAuthority)
+
+ 	sr := validTokenResolver("av_sess_ok",
+@@ -130,7 +130,8 @@ func TestMITMForwardPlainHTTPInjectsCredentials(t *testing.T) {
+ 		}},
+ 	}}
+
+-	proxyURL, clientRoots, _ := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "POST", "/v1/messages"))
++	reviewedTrustUpstream(p, upstream)
+
+ 	client := newTrustingClient(proxyURL, url.User("av_sess_ok"), clientRoots)
+
+@@ -308,7 +309,7 @@ func TestMITMForwardVaultHintMismatchReturns403(t *testing.T) {
+ // scoped Proxy-Authorization / X-Vault headers.
+ func TestMITMForwardStripsHopByHopHeaders(t *testing.T) {
+ 	var sawCustom, sawConnection, sawProxyAuth, sawXVault, sawTE string
+-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		sawCustom = r.Header.Get("X-Custom")
+ 		sawConnection = r.Header.Get("Connection")
+ 		sawProxyAuth = r.Header.Get("Proxy-Authorization")
+@@ -318,21 +319,22 @@ func TestMITMForwardStripsHopByHopHeaders(t *testing.T) {
+ 	}))
+ 	defer upstream.Close()
+
+-	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
++	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "https://"))
+ 	sr := validTokenResolver("av_sess_ok",
+ 		&brokercore.ProxyScope{VaultID: "v1", VaultName: "default", VaultRole: "proxy"})
+ 	cp := &fakeCredProvider{byHost: map[string]fakeInjectResult{
+ 		upstreamHost: {result: &brokercore.InjectResult{Passthrough: true}},
+ 	}}
+
+-	proxyURL, _, _ := setupProxy(t, sr, cp)
++	proxyURL, roots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/x"))
++	reviewedTrustUpstream(p, upstream)
+
+-	conn := dialProxy(t, proxyURL)
++	conn := reviewedDialTLS(t, proxyURL, roots, upstream.URL)
+ 	defer conn.Close()
+
+ 	auth := base64.StdEncoding.EncodeToString([]byte("av_sess_ok:"))
+ 	resp := writeRawRequestLine(t, conn,
+-		"GET "+upstream.URL+"/x HTTP/1.1",
++		"GET /x HTTP/1.1",
+ 		map[string]string{
+ 			"Host":                upstreamHost,
+ 			"Proxy-Authorization": "Basic " + auth,
+@@ -367,6 +369,7 @@ func TestMITMForwardStripsHopByHopHeaders(t *testing.T) {
+ // scheme-aware branch in dialWebSocketUpstream that skips TLS for
+ // http:// upstreams.
+ func TestMITMForwardWebSocketPlainHTTP(t *testing.T) {
++	t.Skip("reviewed API policy forbids plain HTTP and protocol upgrades; host-header unit tests still run")
+ 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+ 			http.Error(w, "expected websocket", http.StatusBadRequest)
+@@ -460,18 +463,19 @@ func TestMITMForwardWebSocketPlainHTTP(t *testing.T) {
+ // forward request to 127.0.0.1 must be rejected at dial time and
+ // surfaced as 502.
+ func TestMITMForwardSSRFLoopbackBlocked(t *testing.T) {
+-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+ 		_, _ = io.WriteString(w, "should-not-reach")
+ 	}))
+ 	defer upstream.Close()
+
+-	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
++	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "https://"))
+ 	sr := validTokenResolver("av_sess_ok",
+ 		&brokercore.ProxyScope{VaultID: "v1", VaultName: "default", VaultRole: "proxy"})
+ 	cp := &fakeCredProvider{byHost: map[string]fakeInjectResult{
+ 		upstreamHost: {result: &brokercore.InjectResult{Passthrough: true}},
+ 	}}
+-	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/x"))
++	reviewedTrustUpstream(p, upstream)
+ 	// Override the dialler with a stricter SafeDialContext that blocks
+ 	// loopback (setupProxy seeded ALLOW_PRIVATE_RANGES=true for the
+ 	// other tests; we bypass that policy here directly).
+@@ -489,16 +493,16 @@ func TestMITMForwardSSRFLoopbackBlocked(t *testing.T) {
+ }
+
+ // TestMITMForwardEmitsRequestLogRow asserts the audit row shape on the
+-// plain-HTTP forward path: ingress, method, host (with port), path,
++// CONNECT/TLS path (plain HTTP is forbidden): ingress, method, host (with port), path,
+ // vault id, actor type+id, status.
+ func TestMITMForwardEmitsRequestLogRow(t *testing.T) {
+-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+ 		w.WriteHeader(http.StatusOK)
+ 		_, _ = io.WriteString(w, "ok")
+ 	}))
+ 	defer upstream.Close()
+
+-	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
++	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "https://"))
+ 	sr := validTokenResolver("av_sess_ok",
+ 		&brokercore.ProxyScope{
+ 			AgentID:   "agent-42",
+@@ -515,7 +519,8 @@ func TestMITMForwardEmitsRequestLogRow(t *testing.T) {
+ 		}},
+ 	}}
+ 	sink := &recordingSink{}
+-	proxyURL, clientRoots, _ := setupProxy(t, sr, cp, func(o *Options) { o.LogSink = sink })
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "POST", "/v1/things"), func(o *Options) { o.LogSink = sink })
++	reviewedTrustUpstream(p, upstream)
+
+ 	client := newTrustingClient(proxyURL, url.User("av_sess_ok"), clientRoots)
+ 	req, err := http.NewRequest("POST", upstream.URL+"/v1/things", strings.NewReader("payload"))
+@@ -578,20 +583,21 @@ func TestMITMForwardEmitsRequestLogRow(t *testing.T) {
+ // without state leaks between requests on the keepalive channel.
+ func TestMITMForwardKeepalivePersistsAcrossRequests(t *testing.T) {
+ 	var hits atomic.Int32
+-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+ 		hits.Add(1)
+ 		_, _ = io.WriteString(w, "ok")
+ 	}))
+ 	defer upstream.Close()
+
+-	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
++	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "https://"))
+ 	sr := validTokenResolver("av_sess_ok",
+ 		&brokercore.ProxyScope{VaultID: "v1", VaultName: "default", VaultRole: "proxy"})
+ 	cp := &fakeCredProvider{byHost: map[string]fakeInjectResult{
+ 		upstreamHost: {result: &brokercore.InjectResult{Passthrough: true}},
+ 	}}
+ 	sink := &recordingSink{}
+-	proxyURL, clientRoots, _ := setupProxy(t, sr, cp, func(o *Options) { o.LogSink = sink })
++	proxyURL, clientRoots, p := setupProxy(t, sr, cp, reviewedAllowOperation(t, upstream.URL, "GET", "/x"), func(o *Options) { o.LogSink = sink })
++	reviewedTrustUpstream(p, upstream)
+
+ 	client := newTrustingClient(proxyURL, url.User("av_sess_ok"), clientRoots)
+
+@@ -625,6 +631,7 @@ func TestMITMForwardKeepalivePersistsAcrossRequests(t *testing.T) {
+ // because Go's http.Client rewrites URLs through ProxyURL in ways
+ // that would obscure what we want to assert.
+ func TestMITMForwardIPv6PreservesHostHeader(t *testing.T) {
++	t.Skip("reviewed API policy forbids plain HTTP and IPv6 policy targets; host-header unit tests still run")
+ 	// Bind an upstream on an ephemeral ::1 port so we can send an
+ 	// IPv6-literal-with-port URL through the forward proxy. SkipNow if
+ 	// the host has no IPv6 loopback (CI sometimes).
+@@ -706,8 +713,9 @@ func TestMITMForwardAuthRateLimitSkipsSuccessfulAuth(t *testing.T) {
+ 		if resp.StatusCode == http.StatusTooManyRequests {
+ 			t.Fatalf("forward %d got 429; successful auth should not consume TierAuth budget", i+1)
+ 		}
+-		if resp.StatusCode != http.StatusOK {
+-			t.Fatalf("forward %d got %d, want 200", i+1, resp.StatusCode)
++		// Authentication succeeded; the operation gate rejects plain HTTP.
++		if resp.StatusCode != http.StatusForbidden {
++			t.Fatalf("forward %d got %d, want 403 after successful auth", i+1, resp.StatusCode)
+ 		}
+ 	}
+ }

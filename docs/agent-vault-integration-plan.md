@@ -1,6 +1,6 @@
 # Infisical Agent Vault 接入计划
 
-状态：原始规划，部分已实施。调研日期：2026-10-23。
+状态：原始规划，部分已实施。调研日期：2026-10-23。本文的宿主 systemd 部署讨论属于历史方案；生产交付现统一为 Aster Docker 镜像，当前操作见 [部署指南](deployment-test-guide.md)。
 
 实施范围调整：用户确认优先管理工具 token、用户名和密码；MCP 外部 OAuth 保留现有授权流程。本文件后续的全量 OAuth 迁移及缓存超时关断仍是后续方案，不是当前功能。已实现配置、部署和验证边界见 [Agent Vault 运行说明](agent-vault.md)。
 
