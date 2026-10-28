@@ -173,6 +173,116 @@ test("pin changes preserve a committed memory projection whose input was not adm
   }
 });
 
+test("unchanged pins persist the resident catalog without advancing the declaration epoch", { timeout: 30_000 }, async () => {
+  for (const enabled of [false, true]) {
+    const directory = await mkdtemp(join(tmpdir(), "tool-pin-catalog-"));
+    const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
+      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }),
+      memory: readMemoryConfig({ MEMORY_ENABLED: enabled ? "1" : "0" }) };
+    let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+    let storage: Storage | undefined;
+    try {
+      await writeFile(join(directory, "mcp.json"), JSON.stringify({ servers: [{ name: "s", transport: "stdio", command: process.execPath,
+        args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: true } } }));
+      const first = models();
+      first.faux.setResponses([fauxAssistantMessage("done")]);
+      storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+      app = await openAgent(config, first.models, storage);
+      await app.reply({ requestId: "telegram:catalog:1", conversationId: "test", senderId: "1", text: "hello" }, new AbortController().signal);
+      const before = await ledger(storage);
+      assert.equal((await readToolCatalog(storage, context)).find(({ name }) => name === "mcp__s__echo")?.tier, 1);
+      const page = await storage.scanConversations({}, 10, undefined, context);
+      const entries = await storage.scanEntries({ conversationId: page.items[0]!.id }, 100, undefined, context);
+      await app.close(); app = undefined; storage = undefined;
+
+      const second = models();
+      storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+      app = await openAgent(config, second.models, storage);
+      assert.equal(second.faux.state.callCount, 0, "startup does not schedule a model call");
+      assert.equal((await readToolCatalog(storage, context)).find(({ name }) => name === "mcp__s__echo")?.tier, 1);
+      assert.deepEqual(await ledger(storage), before, "catalog synchronization does not change epoch or loads");
+      assert.deepEqual((await storage.scanEntries({ conversationId: page.items[0]!.id }, 100, undefined, context)).items, entries.items);
+      await app.close(); app = undefined; storage = undefined;
+      storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+      assert.equal((await readToolCatalog(storage, context)).find(({ name }) => name === "mcp__s__echo")?.tier, 1, "the catalog remains correct on disk after close");
+    } finally {
+      if (app) await app.close(); else await storage?.close(context);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("startup reconciles a published compaction before considering a pin boundary", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tool-pin-archive-"));
+  const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
+    args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
+  const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }),
+    memory: readMemoryConfig({ MEMORY_RECENT_VERBATIM_TOKENS: "512", MEMORY_EVALUATE_AFTER_USER_TURNS: "1" }) };
+  const gate = Promise.withResolvers<void>();
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  let storage: Storage | undefined;
+  try {
+    await writeFile(join(directory, "mcp.json"), JSON.stringify(raw));
+    const started = Promise.withResolvers<void>();
+    const published = Promise.withResolvers<void>();
+    const initial = models();
+    initial.faux.setResponses([fauxAssistantMessage("B".repeat(3_500)), async () => {
+      started.resolve();
+      await gate.promise;
+      return fauxAssistantMessage("A useful continuity summary.");
+    }]);
+    const backend = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+    storage = new Proxy(backend, {
+      get(target, property) {
+        if (property === "commit") return async (writes: readonly StorageWrite[], callContext: typeof context) => {
+          const seq = await target.commit(writes, callContext);
+          if (writes.some((write) => write.type === "task" && write.value.kind === "pi.compaction"
+            && write.value.state.status === "terminal" && write.value.state.outcome?.status === "completed")) published.resolve();
+          return seq;
+        };
+        const member = Reflect.get(target, property, target);
+        return typeof member === "function" ? member.bind(target) : member;
+      },
+    });
+    app = await openAgent(config, initial.models, storage);
+    await app.reply({ requestId: "telegram:archive:1", conversationId: "test", senderId: "1", text: "A".repeat(3_500) }, new AbortController().signal);
+    await started.promise;
+    gate.resolve();
+    await published.promise;
+    const page = await storage.scanConversations({}, 10, undefined, context);
+    const id = page.items[0]!.id;
+    const address = { kind: "personal.archive", scope: { kind: "conversation" as const, conversationId: id } };
+    const archiveBefore = await storage.findDocument(address, "current", context);
+    assert.equal((await storage.document(archiveBefore!.id, "current", context))?.value.target, null, "the completed compaction has not been reconciled yet");
+    const before = await ledger(storage);
+    const entries = await storage.scanEntries({ conversationId: id }, 100, undefined, context);
+    const compaction = entries.items.findLast(({ kind }) => kind === "pi.compaction");
+    assert.ok(compaction?.head);
+    const cutoff = entries.items.findLast(({ id }) => id < compaction.head!)!.id;
+    await app.close(); app = undefined; storage = undefined;
+
+    raw.tools.mcp__s__echo.pin = true;
+    await writeFile(join(directory, "mcp.json"), JSON.stringify(raw));
+    const recovered = models();
+    storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+    app = await openAgent(config, recovered.models, storage);
+    const archiveAfter = await storage.findDocument(address, "current", context);
+    const archive = (await storage.document(archiveAfter!.id, "current", context))!.value;
+    assert.equal(typeof archive.target, "number");
+    assert.ok((archive.target as number) >= cutoff, "published compaction coverage is persisted before changing the head");
+    assert.equal(typeof archive.activeTask, "number", "the archive is scheduled from the published coverage");
+    assert.equal(recovered.faux.state.callCount, 0, "startup keeps the archive task paused");
+    assert.deepEqual(await ledger(storage), before, "new archive work defers pin settlement");
+    assert.deepEqual(await readResidentTools(storage, id, context), []);
+    assert.ok(!(await storage.scanEntries({ conversationId: id }, 100, undefined, context)).items.some(({ kind }) => kind === "pi.reset"));
+  } finally {
+    gate.resolve();
+    if (app) await app.close(); else await storage?.close(context);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("pin changes wait through recovery and preserve loaded tools and their sequences", { timeout: 30_000 }, async () => {
   for (const priorPin of [false, true]) {
     const directory = await mkdtemp(join(tmpdir(), "tool-pin-recovery-"));

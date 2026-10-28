@@ -122,6 +122,16 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
 
   try {
     const root = await harness.root(context);
+    if (memory) {
+      memory.attach(harness, root);
+      try {
+        // Preserve published compaction coverage before a pin change can replace its head.
+        // Reconciliation may queue archive work; inspect it below while scheduling is paused.
+        await memory.initialize(context);
+      } catch (error) {
+        throw memoryStartupError(error);
+      }
+    }
     const priorPins = await readResidentTools(durableStorage, root.id, context);
     const inspection = await harness.inspect(context);
     const hasPins = priorPins.length > 0 || Object.values(mcp.pins?.tools ?? {}).some(({ pin }) => pin);
@@ -142,14 +152,8 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
       cwd: workspace,
       instructions,
     }, context);
-    if (memory) {
-      memory.attach(harness, root);
-      try {
-        await memory.initialize(context);
-      } catch (error) {
-        throw memoryStartupError(error);
-      }
-    }
+    // Session skips empty writes, so flush storage-owned metadata after the final registration.
+    await durableStorage.commit([], context);
     return {
       // This signal stops the host's wait during shutdown; close() preserves recovery.
       async reply(request: TextRequest, signal: AbortSignal): Promise<string> {
