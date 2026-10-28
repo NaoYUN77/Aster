@@ -14,6 +14,7 @@ import type { TextRequest } from "./messages.js";
 import { createMemoryIntegration, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry } from "./tools.js";
+import { withToolLedger } from "./tool-ledger.js";
 
 const context = BACKGROUND_CONTEXT;
 // Failures the request can recover from in-process; anything else thrown by the durable calls means the Session is unusable.
@@ -99,7 +100,10 @@ Your final response will be delivered to Telegram as plain text. Do not claim an
 
   let harness: Awaited<ReturnType<typeof Harness.open>>;
   try {
-    harness = await Harness.open(storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite")), {
+    const durableStorage = await withToolLedger(
+      storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite")), registry, context,
+    );
+    harness = await Harness.open(durableStorage, {
       models,
       registry,
       settings: {

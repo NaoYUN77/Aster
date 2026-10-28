@@ -35,6 +35,7 @@ import {
 import { Compile } from "typebox/compile";
 import type { McpAuthConfig, McpFileConfig, McpHttpServerConfig, McpServerConfig } from "./mcp-config.js";
 import { FileOAuthStateStore } from "./mcp-oauth-store.js";
+import type { GovernedTool, ToolGovernance } from "./tools.js";
 
 const CLIENT_NAME = "personal-agent-base-durable";
 const CLIENT_VERSION = "0.1.0";
@@ -413,10 +414,15 @@ export function buildMcpTool(
   connection: McpConnection,
   info: McpToolInfo,
   name: string,
-): ToolRegistration | undefined {
+): GovernedTool | undefined {
   const schema = normalizeSchema(info.inputSchema);
   if (schema === undefined) return undefined;
-  return defineTool({
+  const governance: ToolGovernance = {
+    source: { kind: "mcp", server: server.name },
+    trust: "untrusted",
+    authz: "write",
+  };
+  return Object.assign(defineTool({
     name,
     description: sanitizeDescription(info.description, info.name),
     parameters: Type.Unsafe<Record<string, unknown>>(schema),
@@ -439,7 +445,7 @@ export function buildMcpTool(
         details: { server: server.name, tool: info.name },
       };
     },
-  });
+  }), { governance });
 }
 
 /**
