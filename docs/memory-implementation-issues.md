@@ -1,6 +1,6 @@
 # Memory 与 Context：实施 issues 和验收
 
-状态：MEM-01～MEM-06 的 module 已实现并通过各自本地验收；MEM-07、MEM-08 待实施，全部能力尚未接入运行中的 agent（MEM-07 负责组合）。编制日期：2026-10-25。架构与 Interface 语义以 [实施方案](memory-and-context-design.md) 为唯一来源；本文负责拆分任务、依赖、交接产物和完成条件。
+状态：MEM-01～MEM-06 的 module 已实现并通过各自本地验收；MEM-07 已完成组合接入并通过本地验收，记忆能力已注册到运行中的 agent；MEM-08 待实施。编制日期：2026-10-25。架构与 Interface 语义以 [实施方案](memory-and-context-design.md) 为唯一来源；本文负责拆分任务、依赖、交接产物和完成条件。
 
 ## 接手方式
 
@@ -413,13 +413,58 @@ MEM-01 验证失败的接入点必须有具体替代方案和对应验收后才�
 
 **验收**：
 
-- [ ] 07-A：同 requestId 恢复不新增投影／模型调用／归档触发；投影已写、输入未提交时找回原文。相同文本不同 requestId 仍是独立请求。
-- [ ] 07-B：新用户请求、工具后续、重启恢复和显式重置后的首次模型调用都包含有效系统提示与必要 working；禁止靠无记录 hook 注入达标。
-- [ ] 07-C：检索结果有来源、分页、未扫描范围和错误语义，累计预算生效；既有快照已包含同版内容时不重复加载整份工作台或日记。
-- [ ] 07-D：归档失败时正常聊天仍可完成并保存回复；投递失败只重投原回复，不重做记忆更新或业务执行。
-- [ ] 07-E：从已有 SQLite、旧 compaction、非空 MEMORY.md 和未完成工具调用升级，数据保留且恢复语义不变；首次启动不触发无限历史回填。
-- [ ] 07-F：配置参数有 schema 和有效范围；缺失／损坏／超限与正常空状态分别处理。关闭会停止实际 I/O 并保留任务恢复状态。
-- [ ] 07-G：`src/agent.ts` 不出现摘要提示、Markdown 拼接、归档游标算法或私有 SDK 导入；Telegram、inbox、投递 modules 不导入 memory 内部实现。
+- [x] 07-A：同 requestId 恢复不新增投影／模型调用／归档触发；投影已写、输入未提交时找回原文。相同文本不同 requestId 仍是独立请求。
+- [x] 07-B：新用户请求、工具后续、重启恢复和显式重置后的首次模型调用都包含有效系统提示与必要 working；禁止靠无记录 hook 注入达标。
+- [x] 07-C：检索结果有来源、分页、未扫描范围和错误语义，累计预算生效；既有快照已包含同版内容时不重复加载整份工作台或日记。
+- [x] 07-D：归档失败时正常聊天仍可完成并保存回复；投递失败只重投原回复，不重做记忆更新或业务执行。
+- [x] 07-E：从已有 SQLite、旧 compaction、非空 MEMORY.md 和未完成工具调用升级，数据保留且恢复语义不变；首次启动不触发无限历史回填。
+- [x] 07-F：配置参数有 schema 和有效范围；缺失／损坏／超限与正常空状态分别处理。关闭会停止实际 I/O 并保留任务恢复状态。
+- [x] 07-G：`src/agent.ts` 不出现摘要提示、Markdown 拼接、归档游标算法或私有 SDK 导入；Telegram、inbox、投递 modules 不导入 memory 内部实现。
+
+**交接记录（2026-10-27）**
+
+基线：基于 main（`25fb280`，MEM-01～MEM-06 全部合并后）在分支 `feat/memory-integration` 开发；基线全量测试为 182 项 179 过、3 跳过、0 失败（干净环境）。
+
+交付物：
+
+- `src/memory/integration.ts`：组合入口与其 Interface——`createMemoryIntegration(options)` 构造 `MemoryIntegration`：`extensions()`（working 工具、检索工具、压缩 Adapter、归档 Task 的固定注册顺序）、`initialize()`（迁移记录＋归档起点＋补扫）、`prepareRequest()`（按持久化回执分类 replay／recover／新请求，投影复用与规划执行）、`afterRequest()`（计数、评估、补扫）、`resetConversation()`、`close()`、`memoryAppError()`／`isMemoryError()`。文件头写明输入、输出、错误、副作用与顺序；实现结论见实施方案第 18 节。
+- `src/memory/memory-tools.ts`：原生检索工具 `memory_search`／`memory_read` 与 `memoryToolsExtension`：宿主绑定 Daily store 根目录与预算；结果带来源（date＋id）、分页游标（`mc1.` 前缀，正文可见）、未扫描范围与预算余量；零命中、目标不存在、损坏文件、预算超限四种语义分开；单请求累计预算按持久化工具结果重算。
+- `src/config.ts`：新增 `readMemoryConfig(env)` 与 `MemoryConfig`：`MEMORY_ENABLED`（默认开）、预算六项覆盖、评估间隔、reserve、时区（经 `eventDate` 校验）、归档超时；每项有范围校验。`readConfig` 的返回结构未变，记忆配置由 `agent.ts` 结构化读取，避免破坏既有测试对返回字面量的标注。
+- `src/agent.ts`：只经组合入口接线——instructions 提取为常量并原样传入、记忆扩展在 MCP 之前注册、压缩设置由 `nativeCompactionPolicy` 派生（仅启用时）、`reply()` 在 resume 后 prepare、完成回执后 afterRequest、`MEMORY_*` 错误透传、新增 `reset()`、关闭先关组合入口。`MEMORY_ENABLED=0` 时与接入前逐项一致。每日 store 根按实施方案第 3 节取数据根目录（`DATA_DIR/memory/daily`）。
+- `test/memory-integration.test.ts`：07-A～07-G 与组合接缝共 15 个用例，全部用真实 `Harness` + Node SQLite + faux provider，分别经完整 `openAgent` 与 raw 组合装配两种方式，临时目录。
+- `docs/memory-and-context-design.md`：新增第 18 节（MEM-07 实现结论与接入语义），原第 18 节顺延为第 19 节；文首状态与第 2 节同步 MEM-07 状态。`README.md`、`docs/mvp.md`、`.env.example` 同步新能力与配置说明。
+
+执行命令与结果：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run check` | 通过，无输出 |
+| `npm run build` | 通过，无输出 |
+| `npx tsx --test test/memory-integration.test.ts` | 15/15 通过 |
+| `env -u SSL_CERT_FILE -u SSL_CERT_DIR -u NODE_EXTRA_CA_CERTS -u CURL_CA_BUNDLE -u REQUESTS_CA_BUNDLE -u GIT_SSL_CAINFO -u AWS_CA_BUNDLE npm test` | 197 项：194 通过、3 跳过、0 失败（基线 182 项无回归，新增 15 项全过；本机默认环境的既有 CA 污染失败见下） |
+
+逐项结论：
+
+- 07-A：同 requestId 重放在进程内与跨重启两种情况下 Entries、模型调用次数、归档状态逐项不变；投影已写、输入未提交的窗口用 fake-timers 冻结在提交边界后重开应用，原请求按原 requestId 完成且只写一份投影（投影复用按 `memory:projection:<requestId>` 的持久化幂等键判定）；相同文本不同 requestId 各自独立计数与回执。
+- 07-B：新请求、工具后续（含 `working_update` 后）、关闭重开后的恢复请求、显式重置后的首个请求，transcript 均含 instructions section 与 `<cycle-snapshot>`；周期内 working 修订只以修订投影进入，不重发整份 B；`prepareRequest` 的 replay／recover 分类保证恢复不重做投影。facts 变化（instructions 改版）优先走压缩采用新 facts，无可压缩内容时显式重启周期（`facts-restart`），新 B 的摘要取新版摘要、旧周期以 `pi.reset` 结束（07-B/11 用例）。
+- 07-C：搜索结果带 date＋id 来源、游标（同游标续页不重不漏）、`scannedFrom`／`unread`／`available`；目标日期无文件是「不存在」成功结果、损坏文件是 `MEMORY_CORRUPT_STATE` 错误结果、零命中是带扫描信息的成功结果，三者互不混淆；单结果截断带显式标注；累计预算跨重启按持久化工具结果重算并在超限时返回 `MEMORY_BUDGET_EXCEEDED`（07-C 三个用例）。快照已含同版 working 时不写修订投影（07-B 断言）；日记从不自动整份载入，只经检索按需进入 C。
+- 07-D：提取模型持续故障时归档失败状态持久化、游标不前进，两条聊天请求照常完成并保存回复，原请求重放不产生新投影、模型调用或归档工作（07-D 用例）；投递失败只重投原回复的语义由既有 inbox／boundaries 用例继续覆盖，本项未改动投递路径。
+- 07-E：手工构造的旧库（旧原生 compaction 摘要、非空 MEMORY.md、旧每日事实、未完成的 write 工具调用）在首次 MEM-07 启动后：原生摘要保持 narrative 可读、MEMORY.md 逐字不变、旧事实可检索、未完成请求按原输入以原 requestId 完成；origin 冻结在升级链尾，归档范围为空、每日目录无新文件（07-E 用例）。
+- 07-F：配置默认值、逐项覆盖、五类非法值（非布尔、零、负数、超上限、非法时区）与错误消息内容均断言；计划级拒绝以 `MEMORY_BUDGET_EXCEEDED` 抛出、cause 保留冻结业务码、请求不被 admission（07-F/11 用例；应用 instructions 约 243 token 低于配置下限 256，故在 raw 装配层以更长 rules 文本触发同一规划分支）；损坏每日文件的处理见 07-C；关闭后 `prepareRequest` 以 `MEMORY_CANCELLED` 拒绝，重开后轮数、归档游标、快照 baseline 全部从持久化状态恢复（07-F 用例）；`MEMORY_ENABLED=0` 时无记忆工具注册、无投影、无归档状态（07-F disabled 用例）。
+- 07-G：静态检查用例断言 `agent.ts` 源码不含摘要系统提示字面量、`memory/daily` 路径拼接、`archivedThrough` 游标算法与 `@earendil-works/pi-durable/dist` 私有导入，且只经 `createMemoryIntegration` 接入；telegram／inbox／telegram-delivery 三个 module 不含 `memory/` 导入（07-G 用例，随全量测试常跑）。
+
+接缝用例（无编号，属组合验证）：2 个完成请求触发评估 → 原生压缩经 Adapter 发布新 B 并成为 head（摘要用量记入 `app/summary`）→ 下一请求边界确认切换并把覆盖范围交给归档、游标前进；全程只用请求边界的持久化补扫，无测试侧捷径。
+
+未覆盖／受限：
+
+- 真实模型摘要与事件提取质量、真实窗口阈值标定、目标提供商云端缓存命中：待验证（MEM-08），本项不宣称通过。
+- Telegram 层没有 `/reset` 命令：显式重置只在组合层（`app.reset()`）提供并验证，未接 Telegram 命令面。
+- 检索累计预算的单请求扫描上限为 1,000 条工具结果 Entry，超过按已扫描部分计数（病理量级），未单独构造用例。
+- working 同版冗余：`working_update` 后、下一次修订投影写入前，同版内容可能以修订形式与 B 并存一次；内容相同、有界。组合层按第 14.5 节接缝只认已记录投影判定 `workingInContext`，不解析工具结果正文。
+- 摘要「已持久化未发布」崩溃窗口的复用沿用 MEM-06 交接结论（key 单元覆盖，无端到端场景），本项没有新增。
+- 本机默认环境的 `test/agent-vault.test.ts` CA 污染失败为既有问题（PR #16 review 已确认），本次未改动该测试；干净环境下全量 0 失败。
+
+对下游的解锁条件：MEM-07 已完成。MEM-08 做真实模型端到端验收时直接使用运行中的 agent：检索工具名为 `memory_search`／`memory_read`，预算与评估间隔经 `MEMORY_*` 环境变量调整（见 `.env.example`），关闭整套能力用 `MEMORY_ENABLED=0`；周期切换与归档状态只认持久化事实（`personal.cycle` 投影、`personal.archive` 文档与原生 Task），不要用日志推断。
 
 ## MEM-08：故障恢复、质量与资源验收
 
