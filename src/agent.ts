@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { AssistantEntry, Harness, SessionFailed, type Storage } from "@earendil-works/pi-durable";
+import { AssistantEntry, Harness, ResetEntry, SessionFailed, type Storage } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readMemoryConfig, type MemoryConfig, type readConfig } from "./config.js";
@@ -14,7 +14,8 @@ import type { TextRequest } from "./messages.js";
 import { createMemoryIntegration, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry } from "./tools.js";
-import { withToolLedger } from "./tool-ledger.js";
+import { readResidentTools, withToolLedger } from "./tool-ledger.js";
+import { installMcpTools } from "./tool-pins.js";
 
 const context = BACKGROUND_CONTEXT;
 // Failures the request can recover from in-process; anything else thrown by the durable calls means the Session is unusable.
@@ -96,12 +97,13 @@ Your final response will be delivered to Telegram as plain text. Do not claim an
     : undefined;
   if (memory) for (const extension of memory.extensions()) registry.install(extension);
   const mcp = options.mcp ?? await openMcpHost(config, registry, options.signal);
-  for (const extension of mcp.extensions) registry.install(extension);
   const unsubscribeMcp = mcp.subscribeAvailability((server, state) => registry.setMcpAvailability(server, state));
+  for (const extension of mcp.extensions) registry.install(extension);
 
   let harness: Awaited<ReturnType<typeof Harness.open>>;
+  let durableStorage: Storage;
   try {
-    const durableStorage = await withToolLedger(
+    durableStorage = await withToolLedger(
       storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite")), registry, context,
     );
     harness = await Harness.open(durableStorage, {
@@ -121,6 +123,19 @@ Your final response will be delivered to Telegram as plain text. Do not claim an
 
   try {
     const root = await harness.root(context);
+    const priorPins = await readResidentTools(durableStorage, root.id, context);
+    const inspection = await harness.inspect(context);
+    const recovering = inspection.tasks.length > 0 || inspection.submissions.length > 0;
+    if (recovering && (priorPins.length > 0 || Object.values(mcp.pins?.tools ?? {}).some(({ pin }) => pin))) {
+      console.error("MCP pin configuration deferred until an idle restart (TOOL_PIN_RECOVERY)");
+    }
+    const pins = installMcpTools(registry, mcp.extensions, mcp.pins, console.error, recovering ? priorPins : undefined);
+    if (!recovering && JSON.stringify(pins) !== JSON.stringify(priorPins)) {
+      // Atomic context head and ledger settlement, with scheduling still paused. Never reset live work.
+      await root.commit(async (tx) => {
+        await tx.appendEntry(root.id, { kind: ResetEntry.kind, head: "self" });
+      }, context);
+    }
     await root.configure({
       model: { provider: config.provider, modelId: config.model },
       cwd: workspace,

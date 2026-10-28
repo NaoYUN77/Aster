@@ -56,7 +56,13 @@ export type McpHttpServerConfig = {
 };
 
 export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
-export type McpFileConfig = { readonly servers: readonly McpServerConfig[] };
+export const DEFAULT_RESIDENT_TOOL_BUDGET_TOKENS = 8_192;
+export type McpFileConfig = {
+  readonly servers: readonly McpServerConfig[];
+  /** Registered names, as exposed by tool_search; server discovery does not grant pinning. */
+  readonly tools?: Readonly<Record<string, { readonly pin: boolean }>>;
+  readonly residentToolBudgetTokens?: number;
+};
 export type McpConfigReadResult = {
   readonly config?: McpFileConfig;
   readonly warnings: readonly string[];
@@ -103,9 +109,14 @@ export function validateMcpConfig(raw: unknown, env: NodeJS.ProcessEnv = process
 
 function collectServers(raw: unknown, env: NodeJS.ProcessEnv): McpConfigReadResult {
   if (!isRecord(raw)) throw new McpConfigError("MCP config must be a JSON object");
-  const unknownRoot = Object.keys(raw).filter((key) => key !== "servers");
+  const unknownRoot = Object.keys(raw).filter((key) => !["servers", "tools", "residentToolBudgetTokens"].includes(key));
   if (unknownRoot.length > 0) throw new McpConfigError(`Unknown MCP config key: ${unknownRoot[0]}`);
   if (!Array.isArray(raw.servers)) throw new McpConfigError("MCP config must contain a servers array");
+  const tools = parseToolOptions(raw.tools);
+  const budget = raw.residentToolBudgetTokens === undefined ? DEFAULT_RESIDENT_TOOL_BUDGET_TOKENS : raw.residentToolBudgetTokens;
+  if (!Number.isInteger(budget) || (budget as number) < 1 || (budget as number) > 1_048_576) {
+    throw new McpConfigError("residentToolBudgetTokens must be an integer between 1 and 1048576");
+  }
 
   const warnings: string[] = [];
   const servers: McpServerConfig[] = [];
@@ -141,7 +152,23 @@ function collectServers(raw: unknown, env: NodeJS.ProcessEnv): McpConfigReadResu
     }
   }
 
-  return { config: { servers }, warnings };
+  return { config: { servers, tools, residentToolBudgetTokens: budget as number }, warnings };
+}
+
+function parseToolOptions(value: unknown): NonNullable<McpFileConfig["tools"]> {
+  if (value === undefined) return {};
+  if (!isRecord(value) || Object.keys(value).length > 800) {
+    throw new McpConfigError("tools must be an object with at most 800 registered tool names");
+  }
+  for (const [name, options] of Object.entries(value)) {
+    if (!/^mcp__[A-Za-z0-9_-]+$/.test(name) || name.length > 64) {
+      throw new McpConfigError("tools keys must be registered MCP tool names (mcp__..., at most 64 characters)");
+    }
+    if (!isRecord(options) || Object.keys(options).some((key) => key !== "pin") || typeof options.pin !== "boolean") {
+      throw new McpConfigError(`tools.${name} must contain only a boolean pin`);
+    }
+  }
+  return value as NonNullable<McpFileConfig["tools"]>;
 }
 
 function parseServer(value: unknown, env: NodeJS.ProcessEnv): McpServerConfig {
