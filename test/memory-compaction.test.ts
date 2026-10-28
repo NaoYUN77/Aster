@@ -49,6 +49,7 @@ import {
   recordCompletedUserRequest,
   requestPrefixFingerprint,
   summaryBodyOfEntry,
+  SUMMARY_SYSTEM_PROMPT,
   SUMMARY_USAGE_KEY,
   type CompactionObservation,
 } from "../src/memory/compaction.js";
@@ -941,4 +942,10 @@ test("06-D: deriveCompactionKey is stable per range and changes when the cycle c
     "a compaction chaining after a published cycle must not reuse its snapshot",
   );
   assert.notEqual(deriveCompactionKey(base), deriveCompactionKey({ ...base, anchor: 6 as EntryId }));
+});
+
+// F-2 regression guard (found by the MEM-08 live run): a real summary model completed a
+// month-and-day deadline with an invented year. The summary prompt must order date fidelity.
+test("06-H: the summary prompt forbids inventing or completing dates", () => {
+  assert.match(SUMMARY_SYSTEM_PROMPT, /never invent or complete a missing year, month, or day/);
 });
