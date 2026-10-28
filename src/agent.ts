@@ -11,11 +11,11 @@ import { ConfigurationError } from "./errors.js";
 import { connectMcp, type McpHost } from "./mcp.js";
 import { readMcpConfig } from "./mcp-config.js";
 import type { TextRequest } from "./messages.js";
-import { createMemoryIntegration, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
+import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry } from "./tools.js";
 import { readResidentTools, withToolLedger } from "./tool-ledger.js";
-import { installMcpTools } from "./tool-pins.js";
+import { installMcpTools, orderedMcpExtensions } from "./tool-pins.js";
 
 const context = BACKGROUND_CONTEXT;
 // Failures the request can recover from in-process; anything else thrown by the durable calls means the Session is unusable.
@@ -96,7 +96,8 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
   if (memory) for (const extension of memory.extensions()) registry.install(extension);
   const mcp = options.mcp ?? await openMcpHost(config, registry, options.signal);
   const unsubscribeMcp = mcp.subscribeAvailability((server, state) => registry.setMcpAvailability(server, state));
-  for (const extension of mcp.extensions) registry.install(extension);
+  const mcpExtensions = orderedMcpExtensions(mcp.extensions);
+  for (const extension of mcpExtensions) registry.install(extension);
 
   let harness: Awaited<ReturnType<typeof Harness.open>>;
   let durableStorage: Storage;
@@ -123,11 +124,13 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
     const root = await harness.root(context);
     const priorPins = await readResidentTools(durableStorage, root.id, context);
     const inspection = await harness.inspect(context);
-    const recovering = inspection.tasks.length > 0 || inspection.submissions.length > 0;
-    if (recovering && (priorPins.length > 0 || Object.values(mcp.pins?.tools ?? {}).some(({ pin }) => pin))) {
+    const hasPins = priorPins.length > 0 || Object.values(mcp.pins?.tools ?? {}).some(({ pin }) => pin);
+    const recovering = inspection.tasks.length > 0 || inspection.submissions.length > 0
+      || (memory !== undefined && hasPins && await hasUnsubmittedMemoryProjection(durableStorage, root.id, context));
+    if (recovering && hasPins) {
       console.error("MCP pin configuration deferred until an idle restart (TOOL_PIN_RECOVERY)");
     }
-    const pins = installMcpTools(registry, mcp.extensions, mcp.pins, console.error, recovering ? priorPins : undefined);
+    const pins = installMcpTools(registry, mcpExtensions, mcp.pins, console.error, recovering ? priorPins : undefined);
     if (!recovering && JSON.stringify(pins) !== JSON.stringify(priorPins)) {
       // Atomic context head and ledger settlement, with scheduling still paused. Never reset live work.
       await root.commit(async (tx) => {

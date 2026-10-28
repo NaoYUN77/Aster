@@ -188,14 +188,7 @@ export async function withToolLedger(storage: Storage, registry: ToolRegistry, c
       if (copied !== undefined && write.type === "document.copy") continue;
       append(ledger, additions, registry);
       if (existing !== undefined && additions.length === 0) continue;
-      if (copied !== undefined) {
-        result.splice(result.indexOf(copied), 1, {
-          type: "document.create", record: copied.record,
-          content: { version: VERSION, kind: "base", value: ledger as unknown as JsonObject },
-        });
-      } else {
-        changes.set(conversationId, { ledger, existing });
-      }
+      changes.set(conversationId, { ledger, existing });
     }
     // Pin changes settle with an explicit context head, never with an ordinary model/tool commit.
     const boundaries = new Set(writes.flatMap((write) =>
@@ -204,7 +197,10 @@ export async function withToolLedger(storage: Storage, registry: ToolRegistry, c
     const resident = registry.records().filter((record) => record.source.kind === "mcp" && record.tier === 1)
       .map(({ name }) => name).sort();
     for (const conversationId of boundaries) {
-      const existing = changes.get(conversationId)?.existing ?? await find(storage, ledgerAddress(conversationId), context);
+      const copied = copiedLedgers.get(conversationId);
+      const existing = changes.get(conversationId)?.existing ?? (copied === undefined
+        ? await find(storage, ledgerAddress(conversationId), context)
+        : await storage.document(copied.source.id, copied.source.at, context));
       const ledger = changes.get(conversationId)?.ledger ?? (existing === undefined
         ? { sequence: 0, epoch: 0, loads: {} } : value<Ledger>(existing));
       if (JSON.stringify(ledger.resident ?? []) === JSON.stringify(resident)) continue;
@@ -213,7 +209,16 @@ export async function withToolLedger(storage: Storage, registry: ToolRegistry, c
       changes.set(conversationId, { ledger, existing });
     }
     for (const [conversationId, { ledger, existing }] of changes) {
-      result.push(await ledgerWrite(storage, conversationId, ledger, existing, context));
+      const copied = copiedLedgers.get(conversationId);
+      if (copied === undefined) {
+        result.push(await ledgerWrite(storage, conversationId, ledger, existing, context));
+      } else {
+        // Preserve the historical high water mark and identity staged by the native fork.
+        result.splice(result.indexOf(copied), 1, {
+          type: "document.create", record: copied.record,
+          content: { version: VERSION, kind: "base", value: ledger as unknown as JsonObject },
+        });
+      }
     }
     const seq = await storage.commit(result, context);
     persistedRevision = atRevision;

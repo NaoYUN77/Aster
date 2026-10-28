@@ -6,6 +6,13 @@ import type { ToolRegistry } from "./tools.js";
 
 export type ToolPinConfig = Pick<McpFileConfig, "tools" | "residentToolBudgetTokens">;
 
+/** Apply before the first install: native registry replacements retain their original slots. */
+export function orderedMcpExtensions(extensions: readonly Extension[]): Extension[] {
+  return [...extensions].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+    .map((extension) => ({ ...extension, tools: extension.tools === undefined ? undefined
+      : [...extension.tools].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0) }));
+}
+
 /** Startup only, while scheduling is paused and health has been replayed. */
 export function installMcpTools(
   registry: ToolRegistry,
@@ -14,10 +21,7 @@ export function installMcpTools(
   log: (line: string) => void = console.error,
   recovering?: readonly string[],
 ): readonly string[] {
-  // Keep resident declaration order independent of JSON server/option insertion order.
-  const ordered = [...extensions].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
-    .map((extension) => ({ ...extension, tools: extension.tools === undefined ? undefined
-      : [...extension.tools].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0) }));
+  const ordered = orderedMcpExtensions(extensions);
   for (const extension of ordered) registry.install(extension);
   const resident = registry.snapshot().tools().map(({ tool }) => tool)
     .filter((tool) => tool.deferred !== true && (tool.callers === undefined || tool.callers.includes("model")));

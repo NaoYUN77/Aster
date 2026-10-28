@@ -41,7 +41,7 @@
 
 启动时健康快照先进入 Register，`installMcpTools()` 按 extension 名及工具注册名固定排序，再按注册名依次验证 pin 的存在性、available 状态和剩余预算。预算按 `estimateTextTokens(JSON.stringify(declarations))` 计算，声明通过原生 `toToolDeclaration()` 转换，包含内置、记忆、搜索工具及接受的 pin 的 name／description／parameters 等模型字段；使用 pi-ai 1.3.0 的字符估算，与提供商精确 token 数有差异。基础集合已超预算时拒绝所有新增 pin，不移除内置工具。失败记录 `TOOL_NOT_FOUND`／`TOOL_UNAVAILABLE`／`TOOL_BUDGET_EXCEEDED`；已注册且可用的 MCP 工具仍可按需搜索。
 
-本期只在启动结算，不监听配置文件、自动晋升或自动降级。底座开启后尚未恢复调度时检查未完成任务和提交：有未完成工作则按账本恢复旧常驻集，延迟新配置到下一次空闲重启，记录 `TOOL_PIN_RECOVERY`；恢复旧集不重新套用新预算或因掉线撤销已发出的声明。没有未完成工作且集合改变时，在一次原生提交中追加 `pi.reset` 上下文头并结算账本 epoch／resident 字段，下一请求发布完整基线，旧记录保留。此边界不启动任务，也不取消未完成请求；初次 pin 从 epoch 0 到 1，无变化重启不增加。`resident` 是常驻决策元数据，缺省等同旧版本的空集合，由存储适配层管理，可通过 `readResidentTools()` 查询。
+本期只在启动结算，不监听配置文件、自动晋升或自动降级。底座开启后尚未恢复调度时检查未完成任务、提交，以及记忆投影已落盘但输入尚未接收的请求；投影收据通过原生提交记录分页读取，不复制另一套请求状态。有未完成工作则按账本恢复旧常驻集，延迟新配置到下一次空闲重启，记录 `TOOL_PIN_RECOVERY`；恢复旧集不重新套用新预算或因掉线撤销已发出的声明。没有未完成工作且集合改变时，在一次原生提交中追加 `pi.reset` 上下文头并结算账本 epoch／resident 字段，下一请求发布完整基线，旧记录保留。此边界不启动任务，也不取消未完成请求；初次 pin 从 epoch 0 到 1，无变化重启不增加。`resident` 是常驻决策元数据，缺省等同旧版本的空集合，由存储适配层管理，可通过 `readResidentTools()` 查询。
 
 晋升仅去掉原生 `deferred` 属性，保留工具参数、执行函数、健康拦截、`replay`、trust 和 authz。默认会话选择因此自动包含常驻工具；底座显式 `tools`／`modelTools` 过滤仍有优先权。取消 pin 不删除原生已加载选择，过去由搜索加载的工具不会自动卸载。所有 pin 配置改动均需重启，健康状态仍实时变化且不增加声明 epoch。
 

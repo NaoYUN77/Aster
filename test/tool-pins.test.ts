@@ -9,7 +9,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { getCurrentTools, toToolDeclaration } from "@earendil-works/pi-ai/utils/transcript";
-import { defineTool, type Storage } from "@earendil-works/pi-durable";
+import { defineTool, type Storage, type StorageWrite } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { openAgent } from "../src/agent.js";
@@ -73,6 +73,105 @@ async function ledger(storage: Storage) {
   const page = await storage.scanConversations({}, 10, undefined, context);
   return readToolLedger(storage, page.items[0]!.id, context);
 }
+
+test("production startup keeps declaration order when server configuration order changes", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tool-pin-order-"));
+  const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  let storage: Storage | undefined;
+  let declarations: string | undefined;
+  try {
+    for (const names of [["b", "a"], ["a", "b"]]) {
+      await writeFile(join(directory, "mcp.json"), JSON.stringify({
+        servers: names.map((name) => ({ name, transport: "stdio", command: process.execPath,
+          args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] })),
+        tools: { mcp__a__echo: { pin: true }, mcp__b__echo: { pin: true } },
+      }));
+      const current = models();
+      current.faux.setResponses([(transcript) => {
+        const tools = getCurrentTools(transcript.messages);
+        assert.deepEqual(tools.filter(({ name }) => name.startsWith("mcp__")).map(({ name }) => name), ["mcp__a__echo", "mcp__b__echo"]);
+        const bytes = JSON.stringify(tools);
+        if (declarations !== undefined) assert.equal(bytes, declarations);
+        declarations = bytes;
+        return fauxAssistantMessage("stable");
+      }]);
+      storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+      app = await openAgent(config, current.models, storage);
+      assert.equal((await ledger(storage))?.epoch, 1);
+      assert.equal(await app.reply({ requestId: `telegram:order:${names.join("")}`, conversationId: "test", senderId: "1", text: "hello" }, new AbortController().signal), "stable");
+      await app.close(); app = undefined; storage = undefined;
+    }
+  } finally {
+    if (app) await app.close(); else await storage?.close(context);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pin changes preserve a committed memory projection whose input was not admitted", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tool-pin-memory-"));
+  const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
+    args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
+  const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({}) };
+  const request = { requestId: "telegram:pin:projection", conversationId: "test", senderId: "1", text: "hello" };
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  let storage: Storage | undefined;
+  try {
+    await writeFile(join(directory, "mcp.json"), JSON.stringify(raw));
+    const initial = models();
+    const backend = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+    storage = new Proxy(backend, {
+      get(target, property) {
+        if (property === "commit") return async (writes: readonly StorageWrite[], callContext: typeof context) => {
+          if (writes.some((write) => write.type === "submission" && write.value.type === "input" && write.value.requestId === request.requestId)) {
+            throw new Error("stop before input admission");
+          }
+          return target.commit(writes, callContext);
+        };
+        const member = Reflect.get(target, property, target);
+        return typeof member === "function" ? member.bind(target) : member;
+      },
+    });
+    app = await openAgent(config, initial.models, storage);
+    await assert.rejects(app.reply(request, new AbortController().signal), { code: "AGENT_SESSION_FAILED" });
+    assert.equal(initial.faux.state.callCount, 0);
+    await app.close(); app = undefined; storage = undefined;
+    raw.tools.mcp__s__echo.pin = true;
+    await writeFile(join(directory, "mcp.json"), JSON.stringify(raw));
+
+    const recovered = models();
+    recovered.faux.setResponses([(transcript) => {
+      assert.match(JSON.stringify(transcript.messages), /<cycle-snapshot>/);
+      assert.ok(!getCurrentTools(transcript.messages).some(({ name }) => name === "mcp__s__echo"));
+      return fauxAssistantMessage("projection recovered");
+    }]);
+    storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+    app = await openAgent(config, recovered.models, storage);
+    assert.equal(recovered.faux.state.callCount, 0);
+    assert.equal((await ledger(storage))?.epoch, 0);
+    assert.equal(await app.reply(request, new AbortController().signal), "projection recovered");
+    const page = await storage.scanConversations({}, 10, undefined, context);
+    const entries = await storage.scanEntries({ conversationId: page.items[0]!.id }, 100, undefined, context);
+    assert.equal(entries.items.filter(({ kind }) => kind === "personal.cycle").length, 1, "the original projection is reused without recomputing");
+    await app.close(); app = undefined; storage = undefined;
+
+    const settled = models();
+    settled.faux.setResponses([(transcript) => {
+      assert.match(JSON.stringify(transcript.messages), /<cycle-snapshot>/);
+      assert.ok(getCurrentTools(transcript.messages).some(({ name }) => name === "mcp__s__echo"));
+      return fauxAssistantMessage("pin settled");
+    }]);
+    storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
+    app = await openAgent(config, settled.models, storage);
+    assert.equal((await ledger(storage))?.epoch, 1);
+    assert.equal(await app.reply({ ...request, requestId: "telegram:pin:after-projection" }, new AbortController().signal), "pin settled");
+  } finally {
+    if (app) await app.close(); else await storage?.close(context);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("pin changes wait through recovery and preserve loaded tools and their sequences", { timeout: 30_000 }, async () => {
   for (const priorPin of [false, true]) {
