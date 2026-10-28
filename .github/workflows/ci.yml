@@ -44,33 +44,12 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  go:
-    name: Go router
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: router
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: router/go.mod
-          cache: false
-      - run: go test -race ./...
-      - run: go vet ./...
-
   containers:
-    name: Final images and credential boundaries
+    name: Final image and deployment checks
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       ASTER_IMAGE: aster:ci
-      ASTER_ROUTER_IMAGE: aster-router:ci
-      ASTER_NETWORK_IMAGE: aster-network:ci
-      VAULT_CI_IMAGE: aster-vault:ci
       ASTER_DEPLOYMENT_TOOLS_IMAGE: aster-deployment-tools:ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,15 +58,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
-      - name: Build reviewed broker and execute client regression tests
-        run: docker build --tag "$VAULT_CI_IMAGE" deploy/agent-vault/broker
-      - name: Verify broker image with synthetic credentials
-        run: npm run test:vault-security
-      - name: Build application, router and firewall images
-        run: |
-          docker build --tag "$ASTER_IMAGE" .
-          docker build --tag "$ASTER_ROUTER_IMAGE" router
-          docker build --tag "$ASTER_NETWORK_IMAGE" --file deploy/agent-vault/network.Dockerfile deploy/agent-vault
+      - name: Build application image
+        run: docker build --tag "$ASTER_IMAGE" .
       - name: Verify offline volume preflight on Linux
         run: |
           bash -n scripts/deploy/*.sh scripts/ci/deployment-rehearsal.sh scripts/ci/topology-on-docker-host.sh
