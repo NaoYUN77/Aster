@@ -1,6 +1,6 @@
 import { constants, type Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -12,8 +12,7 @@ const codes = [
   "VOLUME_OWNER_MISMATCH", "VOLUME_MODE_UNSAFE", "STATE_UNREADABLE", "STATE_NOT_REGULAR_FILE",
   "STATE_TOO_LARGE", "STATE_OWNER_MISMATCH", "STATE_MODE_UNSAFE", "SYMLINK_NOT_ALLOWED",
   "SQLITE_UNREADABLE", "SQLITE_NOT_INITIALIZED", "SQLITE_OFFLINE_STATE_REQUIRED",
-  "BROKER_SCHEMA_UNKNOWN", "BROKER_MASTER_KEY_MISSING", "BROKER_PLAINTEXT_DEK",
-  "BROKER_WRAPPED_DEK_INVALID", "APP_SCHEMA_UNKNOWN", "APP_DIAGNOSTICS_LIMIT",
+  "APP_SCHEMA_UNKNOWN", "APP_DIAGNOSTICS_LIMIT",
   "INTERNAL_ERROR",
 ] as const;
 type Code = typeof codes[number];
@@ -30,7 +29,6 @@ function fail(code: Code): never {
 
 export interface DeploymentVolumePreflightOptions {
   appVolume: string;
-  brokerVolume: string;
   inboxDiagnostics?: boolean;
 }
 export interface InboxCounts {
@@ -161,39 +159,6 @@ function isTable(db: DatabaseSync, name: string): boolean {
   return db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ? AND rootpage > 0").get(name) !== undefined;
 }
 
-// Source of this narrow schema: Infisical/agent-vault commit 872578e4cdf9e03d5e3bcb5512023a70bf90ed65,
-// internal/store/038_master_key_kek_dek.go; lengths/KDF from internal/auth/auth.go and internal/crypto/{crypto,kdf}.go.
-const masterColumns = [
-  ["id", "INTEGER", 0, 1], ["sentinel", "BLOB", 1, 0], ["sentinel_nonce", "BLOB", 1, 0],
-  ["dek_ciphertext", "BLOB", 0, 0], ["dek_nonce", "BLOB", 0, 0], ["dek_plaintext", "BLOB", 0, 0],
-  ["salt", "BLOB", 0, 0], ["kdf_time", "INTEGER", 0, 0], ["kdf_memory", "INTEGER", 0, 0],
-  ["kdf_threads", "INTEGER", 0, 0], ["created_at", "TEXT", 1, 0],
-];
-function inspectBroker(db: DatabaseSync): void {
-  if (!isTable(db, "master_key")) fail("BROKER_SCHEMA_UNKNOWN");
-  const columns = db.prepare("SELECT name, type, [notnull], pk, hidden FROM pragma_table_xinfo('master_key') LIMIT 12").all();
-  if (columns.length !== masterColumns.length || columns.some((column, i) => {
-    const expected = masterColumns[i]!;
-    return column.name !== expected[0] || column.type !== expected[1] || column.notnull !== expected[2]
-      || column.pk !== expected[3] || column.hidden !== 0;
-  })) fail("BROKER_SCHEMA_UNKNOWN");
-  // SQL returns only booleans/counts; key bytes, salts and ciphertext never enter JS or errors.
-  const rows = db.prepare(`SELECT id = 1 AS expected_id, dek_plaintext IS NULL AS no_plaintext,
-    (typeof(sentinel) = 'blob' AND length(sentinel) = 44
-      AND typeof(sentinel_nonce) = 'blob' AND length(sentinel_nonce) = 12
-      AND typeof(dek_ciphertext) = 'blob' AND length(dek_ciphertext) = 48
-      AND typeof(dek_nonce) = 'blob' AND length(dek_nonce) = 12
-      AND typeof(salt) = 'blob' AND length(salt) = 16
-      AND typeof(kdf_time) = 'integer' AND kdf_time = 3
-      AND typeof(kdf_memory) = 'integer' AND kdf_memory = 65536
-      AND typeof(kdf_threads) = 'integer' AND kdf_threads = 4) AS wrapped_shape
-    FROM master_key LIMIT 2`).all();
-  if (rows.length === 0) fail("BROKER_MASTER_KEY_MISSING");
-  if (rows.length !== 1 || rows[0]!.expected_id !== 1) fail("BROKER_SCHEMA_UNKNOWN");
-  if (rows[0]!.no_plaintext !== 1) fail("BROKER_PLAINTEXT_DEK");
-  if (rows[0]!.wrapped_shape !== 1) fail("BROKER_WRAPPED_DEK_INVALID");
-}
-
 function inspectInbox(db: DatabaseSync, diagnostics: boolean): InboxCounts | undefined {
   if (!["checkpoint", "identity", "inbox", "deliveries", "failures"].every((name) => isTable(db, name))) fail("APP_SCHEMA_UNKNOWN");
   if (!diagnostics) return undefined;
@@ -219,7 +184,7 @@ function inspectInbox(db: DatabaseSync, diagnostics: boolean): InboxCounts | und
   return counts;
 }
 
-/** Offline metadata only. The caller must stop all writers and mount both sources read-only.
+/** Offline metadata only. The caller must stop all writers and mount the volume read-only.
  * No password verification, decryption, migrations, recovery, ACL audit or full-volume integrity claim.
  */
 export async function preflightDeploymentVolumes(options: DeploymentVolumePreflightOptions): Promise<{
@@ -228,17 +193,11 @@ export async function preflightDeploymentVolumes(options: DeploymentVolumePrefli
   productionAdmission: "not-evaluated";
   inbox?: InboxCounts;
 }> {
-  if (![options.appVolume, options.brokerVolume].every((path) => typeof path === "string" && isAbsolute(path) && !path.includes("\0"))
+  if (!(typeof options.appVolume === "string" && isAbsolute(options.appVolume) && !options.appVolume.includes("\0"))
     || (options.inboxDiagnostics !== undefined && typeof options.inboxDiagnostics !== "boolean")) fail("ARGUMENTS_INVALID");
   const app = resolve(options.appVolume);
-  const broker = resolve(options.brokerVolume);
-  if (app === broker || app.startsWith(`${broker}${sep}`) || broker.startsWith(`${app}${sep}`)) fail("ARGUMENTS_INVALID");
-  // Check each component below the explicit volume roots; never walk arbitrary volume contents.
+  // Check each component below the explicit volume root; never walk arbitrary volume contents.
   await directory(app, 1000);
-  await directory(broker, 65532);
-  const vault = join(broker, ".agent-vault");
-  await directory(vault, 65532, true);
-  await inspectDatabase(join(vault, "agent-vault.db"), 65532, true, inspectBroker);
   await inspectDatabase(join(app, "agent.sqlite"), 1000, false, (db) => {
     if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND rootpage > 0 LIMIT 1").get()) fail("SQLITE_NOT_INITIALIZED");
   });
@@ -247,9 +206,9 @@ export async function preflightDeploymentVolumes(options: DeploymentVolumePrefli
 }
 
 const help = `Usage: node dist/src/deployment-volume-preflight.js \\
-  --app-volume /app-data --broker-volume /broker-data [--inbox-diagnostics]
-Run in the application image with both initialized volumes mounted read-only and all writers stopped.
-Checks selected file ownership/mode and pinned broker wrapped-DEK metadata; never verifies a password or decrypts data.
+  --app-volume /app-data [--inbox-diagnostics]
+Run in the application image with the initialized volume mounted read-only and all writers stopped.
+Checks selected file ownership/mode and the app databases' shape; never verifies a password or decrypts data.
 Optional inbox counts report sending/uncertain/failed delivery parts without blocking backup or changing them.
 Nonempty WAL requires a verified Linux read-only mount; recovery-dependent databases fail closed.
 Exit 0 is offline metadata success only; productionAdmission is always not-evaluated.`;
@@ -257,15 +216,15 @@ Exit 0 is offline metadata success only; productionAdmission is always not-evalu
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const { values, tokens } = parseArgs({
-      options: { "app-volume": { type: "string" }, "broker-volume": { type: "string" }, "inbox-diagnostics": { type: "boolean" }, help: { type: "boolean" } },
+      options: { "app-volume": { type: "string" }, "inbox-diagnostics": { type: "boolean" }, help: { type: "boolean" } },
       strict: true, allowPositionals: false, tokens: true,
     });
     if (new Set(tokens.map((token) => token.kind === "option" ? token.name : "")).size !== tokens.length) fail("ARGUMENTS_INVALID");
     if (values.help === true && tokens.length === 1) console.log(help);
     else {
-      if (values.help || !values["app-volume"] || !values["broker-volume"]) fail("ARGUMENTS_INVALID");
+      if (values.help || !values["app-volume"]) fail("ARGUMENTS_INVALID");
       console.log(JSON.stringify(await preflightDeploymentVolumes({
-        appVolume: values["app-volume"], brokerVolume: values["broker-volume"], inboxDiagnostics: values["inbox-diagnostics"],
+        appVolume: values["app-volume"], inboxDiagnostics: values["inbox-diagnostics"],
       })));
     }
   } catch (error) {

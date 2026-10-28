@@ -14,8 +14,8 @@ const Image = Type.String({
   maxLength: 512,
   pattern: `^${label}(?:\\.${label})+(?::[1-9][0-9]{0,4})?/${component}(?:/${component})*@sha256:[0-9a-f]{64}$`,
 });
-const Images = Type.Object({ app: Image, router: Image, network: Image, broker: Image }, { additionalProperties: false });
-const ComposePaths = ["docker-compose.agent-vault.yml", "docker-compose.router.yml"] as const;
+const Images = Type.Object({ app: Image }, { additionalProperties: false });
+const ComposePaths = ["docker-compose.yml"] as const;
 
 /** Partial release contract: bindings only, never a signature or production admission result. */
 export const ReleaseManifestSchema = Type.Object({
@@ -26,7 +26,6 @@ export const ReleaseManifestSchema = Type.Object({
   images: Images,
   compose: Type.Tuple([
     Type.Object({ path: Type.Literal(ComposePaths[0]), sha256: Sha256 }, { additionalProperties: false }),
-    Type.Object({ path: Type.Literal(ComposePaths[1]), sha256: Sha256 }, { additionalProperties: false }),
   ]),
   policy: Type.Object({ sha256: Sha256 }, { additionalProperties: false }),
 }, { additionalProperties: false });
@@ -96,7 +95,7 @@ export async function preflightRelease(options: ReleasePreflightOptions): Promis
   if (!Value.Check(ExpectedSchema, options.expected) || !validPorts(options.expected.images)) fail("EXPECTED_INVALID");
   const manifest = parseReleaseManifest(await readBounded(options.manifestPath, 64 * 1024, "MANIFEST"));
   if (manifest.sourceCommit !== options.expected.sourceCommit) fail("COMMIT_MISMATCH");
-  for (const role of ["app", "router", "network", "broker"] as const) {
+  for (const role of ["app"] as const) {
     if (manifest.images[role] !== options.expected.images[role]) fail(`IMAGE_${role.toUpperCase()}_MISMATCH`);
   }
   for (const [index, path] of ComposePaths.entries()) {

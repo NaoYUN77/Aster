@@ -1,5 +1,4 @@
 import { resolveMcpConfigPaths } from "./config.js";
-import { initializeAgentVault } from "./agent-vault.js";
 import { mcpErrorCode, openMcpConnection } from "./mcp.js";
 import { readMcpConfig } from "./mcp-config.js";
 
@@ -49,7 +48,6 @@ function printable(value: string): string {
 }
 
 try {
-  initializeAgentVault();
   await main();
 } catch {
   // The error may carry a URL or server response; report the failure without the payload.
