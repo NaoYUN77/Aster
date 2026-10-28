@@ -22,8 +22,10 @@ async function telegramCall<T>(signal: AbortSignal, call: (signal: TelegramSigna
 export class TelegramClient {
   private readonly api: Api;
 
-  constructor(token: string) {
-    this.api = new Api(token);
+  constructor(token: string, apiRoot?: string) {
+    this.api = new Api(token, {
+      ...(apiRoot ? { apiRoot } : {}),
+    });
   }
 
   async identity(signal: AbortSignal): Promise<string> {

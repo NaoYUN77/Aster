@@ -12,7 +12,7 @@ process.once("SIGTERM", () => shutdown.abort());
 
 try {
   const config = readConfig();
-  const client = new TelegramClient(config.token);
+  const client = new TelegramClient(config.token, config.telegramApiRoot);
   const botId = await client.identity(shutdown.signal);
   await mkdir(config.dataDir, { recursive: true });
   const inbox = new Inbox(join(config.dataDir, "inbox.sqlite"));
