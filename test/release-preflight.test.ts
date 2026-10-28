@@ -16,19 +16,19 @@ import {
 
 const sha = (bytes: string | Uint8Array) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 const image = (role: string, digit: string) => `ghcr.io/example/${role}@sha256:${digit.repeat(64)}`;
-const files = ["docker-compose.agent-vault.yml", "docker-compose.router.yml"] as const;
+const files = ["docker-compose.yml"] as const;
 const cli = fileURLToPath(new URL("../src/release-preflight.ts", import.meta.url));
 const checkout = fileURLToPath(new URL("../", import.meta.url));
 const policyBytes = '{"synthetic":"binding fixture only; not a security policy"}\n';
 
-function manifestFor(compose: readonly [string, string]): ReleaseManifest {
+function manifestFor(compose: string): ReleaseManifest {
   return {
     schemaVersion: 1,
     kind: "aster.release-bindings",
     sourceCommit: "a".repeat(40),
     platform: "linux/amd64",
-    images: { app: image("app", "1"), router: image("router", "2"), network: image("network", "3"), broker: image("broker", "4") },
-    compose: [{ path: files[0], sha256: sha(compose[0]) }, { path: files[1], sha256: sha(compose[1]) }],
+    images: { app: image("app", "1") },
+    compose: [{ path: files[0], sha256: sha(compose) }],
     policy: { sha256: sha(policyBytes) },
   };
 }
@@ -41,11 +41,8 @@ function errorCode(code: string) {
 async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const directory = await mkdtemp(join(tmpdir(), "aster-release-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  // Use the real two production Compose files, without rendering private env/secrets.
-  const compose: [string, string] = [
-    await readFile(join(checkout, files[0]), "utf8"),
-    await readFile(join(checkout, files[1]), "utf8"),
-  ];
+  // Use the real production Compose file, without rendering private env/secrets.
+  const compose = await readFile(join(checkout, files[0]), "utf8");
   const manifest = manifestFor(compose);
   const options: ReleasePreflightOptions = {
     manifestPath: join(directory, "release.json"),
@@ -55,8 +52,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   };
   await Promise.all([
     writeFile(options.manifestPath, JSON.stringify(manifest)),
-    writeFile(join(directory, files[0]), compose[0]),
-    writeFile(join(directory, files[1]), compose[1]),
+    writeFile(join(directory, files[0]), compose),
     writeFile(options.policyPath, policyBytes),
   ]);
   return { directory, manifest, options, compose };
@@ -72,11 +68,11 @@ function args(options: ReleasePreflightOptions): string[] {
 function runCli(argv: string[]) {
   return spawnSync(process.execPath, ["--import", "tsx", cli, ...argv], {
     cwd: checkout, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ASTER_IMAGE: "ignored:mutable", ASTER_VAULT_IMAGE: "ignored:mutable" },
+    env: { ...process.env, ASTER_IMAGE: "ignored:mutable" },
   });
 }
 
-test("offline check binds the actual Compose pair, caller-selected policy, commit and all four images without writing files", async (t) => {
+test("offline check binds the actual Compose file, caller-selected policy, commit and the app image without writing files", async (t) => {
   const { options } = await fixture(t);
   const paths = [options.manifestPath, options.policyPath, ...files.map((file) => join(options.composeRoot, file))];
   const before = await Promise.all(paths.map((path) => readFile(path)));
@@ -89,7 +85,7 @@ test("offline check binds the actual Compose pair, caller-selected policy, commi
 });
 
 test("manifest schema rejects unsupported versions, platforms, fields, shapes and noncanonical digest/commit strings", () => {
-  const good = manifestFor(["base", "override"]);
+  const good = manifestFor("base");
   const bad: unknown[] = [
     null, [], {},
     { ...good, schemaVersion: "1" }, { ...good, schemaVersion: 2 },
@@ -97,23 +93,22 @@ test("manifest schema rejects unsupported versions, platforms, fields, shapes an
     { ...good, signatureVerified: true }, { ...good, evidence: { accepted: true } },
     { ...good, sourceCommit: "a".repeat(39) }, { ...good, sourceCommit: "A".repeat(40) },
     { ...good, sourceCommit: `${good.sourceCommit}\n` },
-    { ...good, policy: null }, { ...good, policy: { ...good.policy, path: "../../private/vault.env" } },
+    { ...good, policy: null }, { ...good, policy: { ...good.policy, path: "../../private/app.env" } },
     { ...good, policy: { sha256: good.policy.sha256.toUpperCase() } },
     { ...good, policy: { sha256: `${good.policy.sha256}\n` } },
     { ...good, images: { ...good.images, extra: good.images.app } },
-    { ...good, images: { app: good.images.app, router: good.images.router, broker: good.images.broker } },
-    { ...good, compose: [...good.compose].reverse() },
-    { ...good, compose: [good.compose[0]] },
+    { ...good, images: {} },
+    { ...good, compose: [] },
     { ...good, compose: [...good.compose, good.compose[0]] },
-    { ...good, compose: [{ ...good.compose[0], path: "../docker-compose.agent-vault.yml" }, good.compose[1]] },
-    { ...good, compose: [{ ...good.compose[0], optional: true }, good.compose[1]] },
+    { ...good, compose: [{ ...good.compose[0], path: "../docker-compose.yml" }] },
+    { ...good, compose: [{ ...good.compose[0], optional: true }] },
   ];
   assert.deepEqual(parse(good), good);
   for (const value of bad) assert.throws(() => parse(value), errorCode("MANIFEST_INVALID_SCHEMA"));
 });
 
-test("each image role requires an explicit registry, untagged repository and lowercase sha256 digest", () => {
-  const good = manifestFor(["base", "override"]);
+test("the app image requires an explicit registry, untagged repository and lowercase sha256 digest", () => {
+  const good = manifestFor("base");
   const bad = [
     "aster:local", `aster@sha256:${"1".repeat(64)}`, `example/app@sha256:${"1".repeat(64)}`,
     good.images.app.replace("@", ":latest@"), good.images.app.replace("ghcr.io", "https://ghcr.io"),
@@ -123,16 +118,14 @@ test("each image role requires an explicit registry, untagged repository and low
     good.images.app.replace("sha256:", "sha512:"), good.images.app.slice(0, -1),
     `${good.images.app}\n`, `${good.images.app}?token=secret`, `${good.images.app}#fragment`,
   ];
-  for (const role of ["app", "router", "network", "broker"] as const) {
-    for (const reference of bad) {
-      assert.throws(() => parse({ ...good, images: { ...good.images, [role]: reference } }), errorCode("MANIFEST_INVALID_SCHEMA"));
-    }
+  for (const reference of bad) {
+    assert.throws(() => parse({ ...good, images: { app: reference } }), errorCode("MANIFEST_INVALID_SCHEMA"));
   }
-  parse({ ...good, images: { ...good.images, app: good.images.app.replace("ghcr.io", "registry.example.com:5000") } });
+  parse({ ...good, images: { app: good.images.app.replace("ghcr.io", "registry.example.com:5000") } });
 });
 
 test("ambiguous duplicate keys, including escaped aliases, are rejected at every nesting level", () => {
-  const good = JSON.stringify(manifestFor(["base", "override"]));
+  const good = JSON.stringify(manifestFor("base"));
   const duplicate = [
     good.replace('"schemaVersion":1', '"schemaVersion":2,"schemaVersion":1'),
     good.replace('"schemaVersion":1', '"schemaVersion":2,"schema\\u0056ersion":1'),
@@ -150,27 +143,25 @@ test("invalid JSON, BOM, malformed UTF-8 and oversized input fail with bounded d
   assert.throws(() => parseReleaseManifest(Buffer.alloc(64 * 1024 + 1)), errorCode("MANIFEST_TOO_LARGE"));
 });
 
-test("expected commit and role-specific repository/digest are independent requirements", async (t) => {
+test("expected commit and the app repository/digest are independent requirements", async (t) => {
   const { options, manifest } = await fixture(t);
   await assert.rejects(preflightRelease({ ...options, expected: { ...options.expected, sourceCommit: "b".repeat(40) } }), errorCode("COMMIT_MISMATCH"));
-  for (const role of ["app", "router", "network", "broker"] as const) {
-    for (const reference of [image(role, "9"), manifest.images[role].replace("/example/", "/attacker/")]) {
-      await assert.rejects(preflightRelease({ ...options, expected: {
-        ...options.expected, images: { ...options.expected.images, [role]: reference },
-      } }), errorCode(`IMAGE_${role.toUpperCase()}_MISMATCH`));
-    }
+  for (const reference of [image("app", "9"), manifest.images.app.replace("/example/", "/attacker/")]) {
+    await assert.rejects(preflightRelease({ ...options, expected: {
+      ...options.expected, images: { app: reference },
+    } }), errorCode("IMAGE_APP_MISMATCH"));
   }
   await assert.rejects(preflightRelease({ ...options, expected: {
-    ...options.expected, images: { ...options.expected.images, app: "mutable:tag" },
+    ...options.expected, images: { app: "mutable:tag" },
   } }), errorCode("EXPECTED_INVALID"));
 });
 
 test("every local byte binding rejects drift, including line endings and policy edits", async (t) => {
   const { options, compose } = await fixture(t);
   for (const [index, path] of files.entries()) {
-    await writeFile(join(options.composeRoot, path), compose[index]!.replace(/\r?\n/g, "\r\n") + "\n");
+    await writeFile(join(options.composeRoot, path), compose.replace(/\r?\n/g, "\r\n") + "\n");
     await assert.rejects(preflightRelease(options), errorCode(`COMPOSE_${index}_DIGEST_MISMATCH`));
-    await writeFile(join(options.composeRoot, path), compose[index]!);
+    await writeFile(join(options.composeRoot, path), compose);
   }
   await writeFile(options.policyPath, `${policyBytes} `);
   await assert.rejects(preflightRelease(options), errorCode("POLICY_DIGEST_MISMATCH"));
@@ -190,8 +181,8 @@ test("missing, empty, oversized and non-file policies cannot silently satisfy th
 
 test("missing Compose and manifest files fail closed without selecting another deployment mode", async (t) => {
   const { options } = await fixture(t);
-  await rm(join(options.composeRoot, files[1]));
-  await assert.rejects(preflightRelease(options), errorCode("COMPOSE_1_UNREADABLE"));
+  await rm(join(options.composeRoot, files[0]));
+  await assert.rejects(preflightRelease(options), errorCode("COMPOSE_0_UNREADABLE"));
   await rm(options.manifestPath);
   await assert.rejects(preflightRelease(options), errorCode("MANIFEST_UNREADABLE"));
 });
