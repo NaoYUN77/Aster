@@ -10,8 +10,15 @@
 // beyond what the model itself just wrote. A rejected update returns `isError` so the model can
 // correct it; it never fails the request.
 
+import type { Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
+import {
+  defineExtension,
+  defineTool,
+  type ConversationId,
+  type EntryId,
+  type ToolRegistration,
+} from "@earendil-works/pi-durable";
 import {
   activeTask,
   applyWorkingUpdate,
@@ -63,19 +70,56 @@ function structuredState(state: WorkingState) {
   };
 }
 
+/** How many recent user entries are offered as citable evidence ids. */
+const EVIDENCE_HINT_LIMIT = 5;
+
+/**
+ * Numeric ids of the newest committed user entries in this conversation, oldest first.
+ * Entry ids are host-assigned and never appear in the transcript the model reads, so without
+ * this list the model cannot cite evidence at all: the MEM-08 live run showed a real model
+ * guessing `evidence: [1]` on every attempt and being rejected every time (finding F-1).
+ * Best-effort: a scan failure yields no hint, never a failed tool call.
+ */
+async function recentUserEntryIds(
+  committer: Committer,
+  conversationId: ConversationId,
+  context: Context,
+): Promise<EntryId[]> {
+  try {
+    return await committer.commit(async (tx) => {
+      const page = await tx.scanEntries({ conversationId, order: "descending" }, 500);
+      return page.items
+        .filter((entry) => entry.kind === "pi.user")
+        .slice(0, EVIDENCE_HINT_LIMIT)
+        .map((entry) => entry.id)
+        .reverse();
+    }, context);
+  } catch {
+    return [];
+  }
+}
+
+function evidenceHint(ids: readonly EntryId[]): string {
+  return `recent user entries (newest last): ${ids.join(", ")}`;
+}
+
 /** Working tools bound to the calling conversation; no parameter can select another one. */
 export function workingTools(): ToolRegistration[] {
   const read = defineTool({
     name: "working_read",
     description:
-      "Read the current working state: the active task, its progress and blockers, and the preferences that outlive it. Call it before updating so the revision you pass is current.",
+      "Read the current working state: the active task, its progress and blockers, and the preferences that outlive it. Call it before updating so the revision you pass is current. The result also lists the numeric entry ids of recent user messages: cite those ids as evidence in working_update, never guess an entry id.",
     parameters: Type.Object({}, { additionalProperties: false }),
     structuredOutputSchema: structuredStateSchema,
     replay: "safe",
     execute: async (_args, api, context) => {
       const state = await readWorking(api, api.conversationId, context);
+      const ids = await recentUserEntryIds(api as unknown as Committer, api.conversationId, context);
+      const text = ids.length === 0
+        ? renderState(state)
+        : `${renderState(state)}\nevidence: cite entry ids of user messages from this conversation; ${evidenceHint(ids)}`;
       return {
-        output: [{ type: "text", text: renderState(state) }],
+        output: [{ type: "text", text }],
         structuredOutput: structuredState(state),
       };
     },
@@ -84,7 +128,7 @@ export function workingTools(): ToolRegistration[] {
   const update = defineTool({
     name: "working_update",
     description:
-      "Change the working state. Pass the revision you read and the entry ids that evidence the change. A task change needs at least one evidence entry; preferences need the entry where the user asked for them. The update is ignored when the revision is stale, and repeating the same call does not apply it twice.",
+      "Change the working state. Pass the revision you read and the entry ids that evidence the change, taken from the list working_read returns (numeric ids of user messages in this conversation; never guess an entry id). A task change needs at least one evidence entry; preferences need the entry where the user asked for them. The update is ignored when the revision is stale, and repeating the same call does not apply it twice.",
     parameters: WorkingUpdateArgsSchema,
     replay: "safe",
     execute: async (args, api, context) => {
@@ -113,9 +157,18 @@ export function workingTools(): ToolRegistration[] {
         // Only a business rejection is correctable. A storage or Session failure is not the model's to
         // fix: rethrow it so the call fails visibly instead of looking like a rejected argument.
         if (!(error instanceof MemoryError)) throw error;
+        let text = `${error.code}: ${error.message}`;
+        if (error.code === "missing-evidence") {
+          // The rejection alone leaves the model nothing to correct with: it cannot see entry
+          // ids in its transcript. Name real citable ids so the retry can succeed (F-1).
+          const ids = await recentUserEntryIds(api as unknown as Committer, api.conversationId, context);
+          if (ids.length > 0) {
+            text += `\nEvidence must cite entries committed in this conversation. ${evidenceHint(ids)}. Retry with one of these ids.`;
+          }
+        }
         return {
           isError: true,
-          output: [{ type: "text", text: `${error.code}: ${error.message}` }],
+          output: [{ type: "text", text }],
           diagnostics: [{ severity: "warn", code: error.code, message: error.message }],
         };
       }

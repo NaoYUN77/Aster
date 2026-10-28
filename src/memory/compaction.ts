@@ -645,11 +645,11 @@ export function createHarnessConfirmDeps(harness: Harness): CompactionConfirmDep
 // The beforeCompact adapter
 // ---------------------------------------------------------------------------
 
-const SUMMARY_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a continuity narrative that another LLM will use to continue the work.
+export const SUMMARY_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a continuity narrative that another LLM will use to continue the work.
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the narrative.
 
-Preserve, in concise prose or short lists: the goal, key decisions and their rationale, constraints and preferences, what is done, what is in progress, what is blocked, the next steps, and critical references (exact file paths, function names, error messages). If the conversation starts with an earlier summary, preserve its information and fold the newer messages into it. Do not invent facts, and do not emit any structured state block: the host appends the exact working state separately.`;
+Preserve, in concise prose or short lists: the goal, key decisions and their rationale, constraints and preferences, what is done, what is in progress, what is blocked, the next steps, and critical references (exact file paths, function names, error messages). If the conversation starts with an earlier summary, preserve its information and fold the newer messages into it. Do not invent facts. Preserve dates and times exactly as stated: never invent or complete a missing year, month, or day — when the source gives only a month and a day, write only the month and the day. Do not emit any structured state block: the host appends the exact working state separately.`;
 
 /** Longest tool-result text the serialized summary source keeps; truncation is always marked. */
 const TOOL_RESULT_MAX_CHARS = 2_000;

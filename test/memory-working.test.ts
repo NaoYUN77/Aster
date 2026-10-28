@@ -617,3 +617,53 @@ test("02-G: an unsupported stored value is an explicit error, not a default", { 
     await dispose(fixture);
   }
 });
+
+// 02-H: entry ids never appear in the transcript the model reads, so the tools must tell the
+// model which ids it may cite. Regression test for the MEM-08 live finding F-1, where a real
+// model guessed `evidence: [1]` on every attempt and working state never persisted: working_read
+// now lists the recent user entry ids, and a missing-evidence rejection names them too.
+test("02-H: working_read lists citable entry ids and a missing-evidence rejection names them", { timeout: 60_000 }, async () => {
+  const fixture = await openFixture("memory-02h-");
+  try {
+    const first = await userEntry(fixture, "Track the release task.");
+    const second = await userEntry(fixture, "The release ships on Friday.");
+    fixture.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("working_read", {}, { id: "read-first" }), { stopReason: "toolUse" }),
+      // An id that is not committed in this conversation, as a model guessing ids would pass.
+      fauxAssistantMessage(fauxToolCall("working_update", {
+        expectedRevision: 1,
+        evidence: [999_999],
+        changes: [{ op: "task.set", task: taskDraft("Ship the fix") }],
+      }, { id: "bad-evidence" }), { stopReason: "toolUse" }),
+      // The correction, citing an id the read listed.
+      fauxAssistantMessage(fauxToolCall("working_update", {
+        expectedRevision: 1,
+        evidence: [second],
+        changes: [{ op: "task.set", task: taskDraft("Ship the fix") }],
+      }, { id: "corrected" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("Task tracked."),
+    ]);
+    assert.equal((await (await fixture.root.submit({ type: "input", content: "Track the release task.", requestId: "02h" }, context)).wait(context)).status, "done");
+
+    const results = toolResults((await fixture.root.entries({ order: "ascending" }, 200, undefined, context)).items);
+    const byId = new Map(results.map((message) => [message.toolCallId, message]));
+
+    const read = byId.get("read-first")!;
+    assert.equal(read.isError, false);
+    assert.match(textOf(read), new RegExp(`recent user entries \\(newest last\\): ${first}, ${second}`));
+
+    const rejected = byId.get("bad-evidence")!;
+    assert.equal(rejected.isError, true);
+    assert.match(textOf(rejected), /missing-evidence/);
+    assert.match(textOf(rejected), /Retry with one of these ids/);
+    assert.match(textOf(rejected), new RegExp(`${second}`));
+
+    const corrected = byId.get("corrected")!;
+    assert.equal(corrected.isError, false);
+    const state = await readWorking(fixture.harness, fixture.root.id, context);
+    assert.equal(state.revision, 2, "the corrected call applies the update");
+    assert.deepEqual(activeTask(state)?.sources, [{ conversationId: fixture.root.id, entryId: second }]);
+  } finally {
+    await dispose(fixture);
+  }
+});
