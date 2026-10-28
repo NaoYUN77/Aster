@@ -4,23 +4,7 @@
   "environment": "test",
   "composeProject": "aster-test",
   "volumes": {
-    "app": "aster-test-app-data",
-    "broker": "aster-test-vault-data"
-  },
-  "network": {
-    "name": "aster-test-vault",
-    "subnet": "172.31.82.0/24",
-    "brokerAddress": "172.31.82.2"
-  },
-  "broker": {
-    "managementPort": 15321
-  },
-  "privateDirectory": "/srv/aster/test/private",
-  "privateFiles": {
-    "apiPolicy": "api-policy.yaml",
-    "ca": "ca.pem",
-    "telegramOwnerId": "telegram-owner-id",
-    "routerDirectory": "router"
+    "app": "aster-test-app-data"
   },
   "identity": {
     "botId": "1000000001"

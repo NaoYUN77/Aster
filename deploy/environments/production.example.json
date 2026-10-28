@@ -4,23 +4,7 @@
   "environment": "production",
   "composeProject": "aster-production",
   "volumes": {
-    "app": "personal-agent-data",
-    "broker": "personal-agent-vault-data"
-  },
-  "network": {
-    "name": "aster-production-vault",
-    "subnet": "172.30.82.0/24",
-    "brokerAddress": "172.30.82.2"
-  },
-  "broker": {
-    "managementPort": 14321
-  },
-  "privateDirectory": "/srv/aster/production/private",
-  "privateFiles": {
-    "apiPolicy": "api-policy.yaml",
-    "ca": "ca.pem",
-    "telegramOwnerId": "telegram-owner-id",
-    "routerDirectory": "router"
+    "app": "personal-agent-data"
   },
   "identity": {
     "botId": "1000000002"
