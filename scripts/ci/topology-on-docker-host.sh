@@ -2,9 +2,6 @@
 set -Eeuo pipefail
 
 : "${ASTER_IMAGE:?Set the local application image}"
-: "${ASTER_ROUTER_IMAGE:?Set the local router image}"
-: "${ASTER_NETWORK_IMAGE:?Set the local firewall image}"
-: "${VAULT_CI_IMAGE:?Set the local broker image}"
 : "${ASTER_DEPLOYMENT_TOOLS_IMAGE:?Set the local disposable operator image}"
 
 source_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
@@ -28,20 +25,20 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir -p "$run_root/source/scripts/ci" "$run_root/runtime"
-# Only public Compose definitions and synthetic fixtures enter the operator.
+# Only public Compose definitions and the acceptance driver enter the operator.
 # Identical host/container paths let Docker resolve the generated bind sources.
-for file in docker-compose.agent-vault.yml docker-compose.router.yml \
-  scripts/ci/compose-topology.mjs scripts/ci/topology-fixture.mjs scripts/ci/topology-probe.mjs; do
+for file in docker-compose.yml docker-compose.build.yml \
+  scripts/ci/compose-topology.mjs; do
   cp -- "$source_root/$file" "$run_root/source/$file"
 done
-for image in "$ASTER_IMAGE" "$ASTER_ROUTER_IMAGE" "$ASTER_NETWORK_IMAGE" "$VAULT_CI_IMAGE" "$ASTER_DEPLOYMENT_TOOLS_IMAGE"; do
+for image in "$ASTER_IMAGE" "$ASTER_DEPLOYMENT_TOOLS_IMAGE"; do
   docker image inspect "$image" >/dev/null
 done
 docker run --rm --name "$container" --pull never --network none --read-only \
   --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
   --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 512m \
   --env "HOME=$run_root/runtime" --env "TMPDIR=$run_root/runtime" \
-  --env ASTER_IMAGE --env ASTER_ROUTER_IMAGE --env ASTER_NETWORK_IMAGE --env VAULT_CI_IMAGE \
+  --env ASTER_IMAGE \
   --env ASTER_DEPLOYMENT_TOOLS_IMAGE \
   --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
   --mount "type=bind,source=$run_root/source,target=$run_root/source,readonly" \
