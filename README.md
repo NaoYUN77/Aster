@@ -1,24 +1,40 @@
 # Aster
 
-基于官方 `@earendil-works/pi-durable` 的个人任务助手：从 Telegram 私聊接收文本，运行 agent 和工具，然后回复。远端模型负责推理；应用面向 4 核 CPU、4 GB 内存云服务器部署。
+单 owner 的个人 AI agent：从 Telegram 私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。
 
-## 开始运行
+基于 `@earendil-works/pi-durable`（1.3.0）构建。**已于 2026-10 在腾讯云完成首次真实部署并持续运行**（单容器，模型 DeepSeek，记忆系统开启）；此前的 Docker 部署链在此之前从未在真实云服务器完整上线过，部署细节见 [部署指南](docs/deployment-test-guide.md)。
 
-需要 Node.js 24.19.0，以及可访问 Telegram 和所选模型服务的网络。
+## 特性
+
+- **Durable 执行**：会话、工具调用与执行进度全部持久化；进程被杀或重启后按 checkpoint 恢复，未完成的请求不会丢。
+- **长期记忆**：工作状态（working）、每日事件归档（daily）与周期上下文快照三层结构，配套检索工具与压缩预算，见下文「记忆系统」。
+- **工具系统**：内置文件/命令工具常驻；MCP 工具按需经 `tool_search` 检索加载，不占常驻上下文。
+- **多提供商**：注册表内置 12 个显式 API key 的模型提供商，配置只认一个 key，启动前校验模型 id。
+- **投递可靠性**：回复先落盘再发送，分段确认；结果未知的发送不自动重发，提供人工核查与补发命令。
+- **单 owner 安全边界**：只接受指定 Telegram 用户的私聊文本；群聊与他人消息不触发模型。
+
+## 快速开始
+
+需要 Node.js 24.19.0+，以及可访问 Telegram 与所选模型服务的网络。
 
 ```sh
 npm ci
 cp .env.example .env
+# 填写 .env（见下）
+npm run check
+npm test
+npm run build
+npm start
 ```
 
-在 `.env` 中填写：
+开发运行用 `npm run dev`。测试全部离线（faux 模型 + 本地 SQLite），不调用收费模型或 Telegram。
+
+`.env` 必填项：
 
 - `TELEGRAM_BOT_TOKEN`：BotFather 创建的 bot token。
 - `TELEGRAM_OWNER_ID`：允许使用 bot 的个人 Telegram 数字用户 ID。
-- `MODEL_PROVIDER`：注册表内的提供商 id，见下表。
-- `MODEL_ID`：该提供商在 pi-ai 1.3.0 模型目录中的 id；不自动替换，写错时启动前报错并列出示例。
-- 所选提供商对应的 API key 环境变量，见下表。
-- `DATA_DIR`：持久化数据目录，默认 `./data`。
+- `MODEL_PROVIDER` / `MODEL_ID`：注册表内的提供商 id 与该提供商在 pi-ai 1.3.0 模型目录中的 id；写错时启动前报错并列出示例，不自动替换。
+- 所选提供商对应的 API key（见下表；只要求当前所选的那个，其余留空不算缺项）。
 
 | `MODEL_PROVIDER` | API key 变量 |
 | --- | --- |
@@ -34,89 +50,66 @@ cp .env.example .env
 | `zai` | `ZAI_API_KEY` |
 | `openrouter` | `OPENROUTER_API_KEY` |
 
-只要求**当前所选提供商**的 key；其他 key 留空不算缺项。注册表定义在 `src/providers.ts`，是支持范围的唯一来源。
+注册表定义在 `src/providers.ts`，是支持范围的唯一来源。本应用只支持显式 API key 的提供商：不含 OAuth/订阅登录、云厂商环境凭据（Bedrock、Vertex），暂不支持自定义 base URL 的 OpenAI 兼容端点。
 
-本应用只支持显式 API key 的提供商，不包含 OAuth／订阅登录、云厂商环境凭据（如 Bedrock、Vertex）以及需要额外端点参数的提供商。提供商连接由 pi-ai 负责，不承诺支持任意 OpenAI 兼容地址或自定义 base URL。
+常用可选项（均有默认值，完整清单见 `.env.example`）：
 
-```sh
-npm run check
-npm test
-npm run build
-npm start
-```
+- `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。
+- `TELEGRAM_API_ROOT`：Telegram Bot API 的根地址覆盖。服务器无法直连 `api.telegram.org` 时，可指向自建反向代理（须为 https）；现网部署即经 Cloudflare Worker 反代使用此项。
+- `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭，行为与接入前一致（回滚开关）。其余 `MEMORY_*` 为预算与时区配置。
+- `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
 
-开发运行使用 `npm run dev`；单独执行一组测试：`npx tsx --test test/boundaries.test.ts`。测试使用离线模型替身和本地 SQLite，不调用收费模型或 Telegram。
+私聊 bot 后直接发送文字即可。bot 若已配置 webhook，应用会拒绝启动，需先在原部署中停用 webhook。
 
-私聊 bot 后直接发送文字即可。只接受指定用户的私聊文本；群聊和其他用户不触发模型。bot 如果已经配置 webhook，应用会拒绝启动，需先在原有部署中停用 webhook。
+## 架构
 
-## 架构与持久化
+一条消息的路径：Telegram 长轮询 → 渠道层收件箱落盘 → 运行时恢复/推进会话 → 记忆层组装上下文 → 模型层调用提供商 → 工具层执行 → 回复落盘后分段发送。
 
-Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID 将其提交给 pi durable。底座负责完整 agent loop 和工具执行。最终结果保存后再发送，分段回复记录每段确认。
+| 层 | 职责 | 主要文件 |
+| --- | --- | --- |
+| 入口与部署 | 组合接线、部署渲染、环境预检、发布清单 | `src/main.ts`、`src/deployment-*.ts`、`src/release-*.ts` |
+| 渠道 | Telegram 长轮询与所有者过滤；持久化收件箱（offset 检查点、分段投递与对账） | `src/telegram.ts`、`src/inbox.ts` |
+| 运行时 | 基于 pi-durable 的 Session：durable 执行、checkpoint、replay 恢复 | `src/agent.ts` |
+| 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具 | `src/memory/` |
+| 工具 | 工具注册表（常驻 + deferred）、MCP 接入与 OAuth 凭据保管 | `src/tools.ts`、`src/mcp*.ts` |
+| 模型 | 提供商注册表与模型解析、启动前目录校验 | `src/providers.ts` |
+| 配置 | `.env` 解析与严格校验（缺项/错项启动前失败） | `src/config.ts` |
+| 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`inbox.sqlite` |
 
-数据目录包括：
+数据目录内容：
 
 | 路径 | 内容 |
 | --- | --- |
-| `workspace/MEMORY.md` | 用户明确要求保存的长期事实（语义不变，仍由模型经文件工具按需读写） |
-| `workspace/` | agent 的任务文件 |
-| `memory/daily/YYYY-MM-DD.md` | 每日事件记忆：归档任务从已确认的会话范围提取，经检索工具按需读取 |
-| `agent.sqlite` 及其 WAL 文件 | 底座会话与执行恢复状态，以及记忆系统的 working 状态、周期快照投影、归档进度与轮数计数 |
-| `inbox.sqlite` 及其 WAL 文件 | 请求消费位置、身份绑定和投递状态 |
-| `mcp.json`（可选） | MCP server 配置；默认路径，可用 `MCP_CONFIG` 覆盖 |
+| `agent.sqlite`（及 WAL） | 底座会话与执行恢复状态；记忆系统的 working 状态、周期快照投影、归档进度与轮数计数 |
+| `inbox.sqlite`（及 WAL） | 请求消费位置、身份绑定与投递状态 |
+| `workspace/` | agent 的任务文件；含 `workspace/MEMORY.md`（用户明确要求保存的长期事实，由模型经文件工具按需读写） |
+| `memory/daily/YYYY-MM-DD.md` | 每日事件记忆：归档任务从已确认的会话范围增量提取 |
+| `mcp.json`（可选） | MCP server 配置 |
 | `mcp-oauth/<server>.json`（可选） | 远程 MCP server 的 OAuth token，仅属主可读 |
 
-同一个数据目录只允许一个应用进程使用。数据目录绑定 bot 和 owner，不能直接更换身份后继续使用原会话。部署更新保留整个目录；备份时先停止服务，再复制数据目录，包含 SQLite 相关文件。
+约束：同一数据目录只允许一个应用进程（镜像入口以 `flock` 互斥）；数据目录绑定 bot 与 owner，不能换身份续用；当前为单会话、串行请求、顺序工具执行，单个请求等待上限 5 分钟，超时向底座请求取消（外部副作用不保证可撤销）。接入每次最多取 10 条 update，处理完本地待办再轮询，不构造无限内存队列。
 
-当前使用一个会话、串行用户请求及顺序工具执行。单个请求等待上限为 5 分钟；执行超时后向底座请求取消。此上限不代表任意外部副作用可被撤销。正常进程关闭保留未完成请求，重启后恢复。
+## 记忆系统
 
-接入每次最多取得 10 条 update，处理完本地待办后再轮询，不构造无限内存队列。长期繁忙时，消息仍滞留 Telegram；这不是高吞吐或长期离线收件箱。
+在既有会话之上分三区组装每次请求的上下文：A 区为稳定规则（系统提示与工具声明，保持不变以利用提供商前缀缓存）；B 区为周期快照（连续性摘要与 working 基线，只在压缩或重置正式生效时切换）；C 区为实时尾巴（近期原文、工具结果与本轮检索结果）。
 
-## 自定义工具
-
-在 `src/tools.ts` 使用底座 `defineTool` 定义工具，并加入 `personalTools.tools`。现有 `current_time` 是最小示例。参数由 TypeBox schema 定义，底座负责执行前校验；名称冲突在注册时拒绝。
-
-内置工具为 `read/write/edit/bash`，由 pi durable 提供。工具并非文件系统沙箱，生产环境使用独立的低权限系统用户；部署示例约束写入持久化目录。
-
-工具契约、错误语义、重放与升级兼容性见 [设计文档](docs/contracts-and-lifecycle.md)。仓库级约束见 [CLAUDE.md](CLAUDE.md)，MVP 范围见 [docs/mvp.md](docs/mvp.md)。
-
-## 记忆系统（MEM-01～MEM-07，已接入）
-
-在既有会话之上增加三层结构：稳定规则（系统提示）＋周期快照 B（连续性摘要与 working 基线，只在压缩或重置正式生效时切换）＋追加流水 C（近期原文、工具结果与检索结果）。模型可用的记忆工具：
+模型可用的记忆工具：
 
 | 工具 | 用途 |
 | --- | --- |
-| `working_get` / `working_update` | 读取／按预期版本更新当前任务状态（目标、进度、待办、偏好等结构化 JSON） |
+| `working_read` / `working_update` | 读取 / 按预期版本更新当前任务状态（目标、约束、进度、待办等结构化状态） |
 | `memory_search` | 按关键词与日期范围检索每日事件记忆，带来源、分页游标与未扫描范围 |
-| `memory_read` | 按日期＋段落 id 精确读取一条每日事件 |
+| `memory_read` | 按日期 + 段落 id 精确读取一条每日事件 |
 
-已确认的会话范围会被后台归档任务增量提取为 `memory/daily/*.md`；归档失败只记录状态，不影响聊天与回复。检索有预算：单次结果与单请求累计都有 token 上限（默认约 4 Ki／8 Ki），超限返回明确错误而不是静默截断。`workspace/MEMORY.md` 的语义不变。设计与实现结论见 [Memory 与 Context 实施方案](docs/memory-and-context-design.md)。
+运行机制：已确认的会话范围由后台归档任务增量提取为 `memory/daily/*.md`，归档失败只记录状态、不影响聊天；上下文达到预算阈值时触发压缩并发布新快照。检索有双层预算（单次结果与单请求累计，默认约 4 Ki / 8 Ki tokens），超限返回明确错误而不是静默截断。
 
-可选配置（`.env`，均有默认值与范围校验，见 `.env.example`）：`MEMORY_ENABLED`（默认开）、`MEMORY_BACKGROUND_TARGET_TOKENS`、`MEMORY_RECENT_VERBATIM_TOKENS`、`MEMORY_SNAPSHOT_TOKENS`、`MEMORY_NARRATIVE_TOKENS`、`MEMORY_INSTRUCTIONS_TOKENS`、`MEMORY_SEARCH_RESULT_TOKENS`、`MEMORY_REQUEST_SEARCH_TOKENS`、`MEMORY_EVALUATE_AFTER_USER_TURNS`（默认 20）、`MEMORY_RESERVE_TOKENS`、`MEMORY_TIMEZONE`、`MEMORY_ARCHIVE_TIMEOUT_MS`。设 `MEMORY_ENABLED=0` 可整体关闭记忆系统，应用行为与接入前一致（回滚开关）。
+状态：MEM-01～MEM-08 已全部完成并合并。MEM-08 真实模型验收（DeepSeek pro 与 flash）结论：多轮对话的目标/约束/进度保留良好，云端前缀缓存命中约 87%；验收中发现并已修复「working 状态因 entry id 不可见而无法落盘」与「摘要日期捏造」两处问题。设计见 [Memory 与 Context 实施方案](docs/memory-and-context-design.md)，验收记录见 [记忆系统验收](docs/memory-verification.md)。
 
-状态：接入、恢复、预算、错误映射与升级路径已由本地自动化测试覆盖（`test/memory-integration.test.ts` 等，离线 faux 模型）；**真实模型的摘要与事件提取质量、真实窗口下的阈值标定、提供商缓存命中尚未验证**，属于 MEM-08 的验收范围，不要据此宣称线上效果。
+## 工具与 MCP
 
-## 工具凭证与部署检查
+常驻工具：`bash`、`read`、`write`、`edit`（pi-durable 提供）、`current_time`，以及记忆开启时的 `memory_search`、`memory_read`、`working_read`、`working_update`。工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。在 `src/tools.ts` 用底座 `defineTool` 定义新工具并注册，名称冲突在注册时直接拒绝。工具契约、错误语义与重放规则见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
 
-工具的 API token、API key、用户名和密码由部署环境直接提供：Bot token、模型提供商 API key 与 owner ID 放在应用的 env 文件中（文件权限应受限，例如 600），MCP 配置通过 `${ENV}` 引用进程环境中的值；应用只做存在性与形状校验，不将秘密写入工具参数或 durable 状态。MCP 外部 OAuth 保留现有授权流程和本地 token 状态。
-
-同一台主机上的 `test` 与 `production` 由各自的版本化环境描述区分项目名、应用卷名与所消费的 bot；`npm run deployment:environment` 提供渲染核对、宿主资源冲突检查与跨环境重叠检查。字段与用法见 [部署环境描述](docs/deployment-environments.md)。
-
-CI/CD 的安全关卡、实施顺序与当前进度见 [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)。基础 CI 成功不等于已获得生产部署准入。`npm run release:preflight` 提供版本化清单、本地 Compose／显式策略文件摘要及预期应用镜像 digest 引用的离线绑定检查；[契约与用法](scripts/ci/README.md#离线发布清单绑定预检ci-07-基础)说明其边界，通过不代表已验签、策略安全或生产预检完成。主机基线、停止写入后的卷元数据预检与整卷备份入口见 [CI-07 主机准备与离线备份](scripts/deploy/README.md)。
-
-## MCP 服务器（可选）
-
-通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG` 指定的路径）接入 MCP server，无需改代码。默认文件不存在表示不启用；显式指定的文件缺失、不是合法 JSON 或顶层结构错误时启动失败，默认路径上的文件级错误只禁用 MCP 并记录原因。离线校验该文件、不连接 server 的命令是 `npm run build && node dist/src/check-config.js`（`npm run check` 只做类型检查）。
-
-配置好之后用 `npm run build && npm run mcp:check` 做一次连接冒烟测试：它按 bot 相同的方式读取配置和环境变量，逐个连接 server、列出工具名后关闭，不启动 Telegram 和模型。输出示例：
-
-```text
-github (stdio): 12 tools
-  create_issue
-  search_repositories
-calendar: unavailable (MCP_AUTH_REQUIRED)
-```
-
-任一 server 失败时退出码为 1；单个 server 失败不影响其他 server 的输出。它打印的是 server 自报的工具，包含 agent 之后会因 schema 或重名跳过的工具；它不打印 URL、header、env 或 token。
+MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代码。文件不存在表示不启用；默认路径上的文件级错误只禁用 MCP 并记录原因，显式指定路径的错误使启动失败。
 
 ```json
 {
@@ -126,137 +119,94 @@ calendar: unavailable (MCP_AUTH_REQUIRED)
       "transport": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
-      "cwd": "/var/lib/personal-agent/workspace",
+      "cwd": "/data/workspace",
       "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
       "timeoutMs": 60000,
       "connectTimeoutMs": 10000
     },
     {
-      "name": "calendar",
+      "name": "notion",
       "transport": "http",
-      "url": "https://mcp.example.com/mcp",
-      "headers": { "X-Client": "personal-agent" },
-      "auth": { "type": "oauth", "scope": "calendar.read", "redirectPort": 8765 }
+      "url": "https://mcp.notion.com/mcp",
+      "auth": { "type": "oauth" }
     }
   ]
 }
 ```
 
-- `name` 唯一，匹配 `^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$`；最多 8 个 server，其中 stdio 最多 4 个。超出数量的条目被忽略并记录告警，其余条目照常生效。
-- stdio：`command` 必填；`args`、`env` 为字符串数组／映射；`cwd` 必须是存在的绝对路径。默认 `inheritEnv: false`，子进程只得到 `PATH` 等运行所需变量加 `env` 中的条目，bot 的模型与 Telegram 凭据不会传入 server。
-- http：必须是 `https`，仅回环地址允许 `http`；`headers` 键不得含控制字符，值在 `${NAME}` 解析后必须只含制表符、可见 ASCII 或 Latin-1 字符（Fetch 不接受其他字符，如换行或中文）；`auth.type` 目前只支持 `oauth`。
-- `args`、env 值、header 值和 `clientSecret` 中的 `${NAME}` 从应用环境解析，缺失变量只禁用该条目并只报告变量名。
-- 单条无效、重名、超出数量或缺失变量只跳过该条目并记录告警，不影响其他 server。顶层结构错误、未知顶层键、不是合法 JSON 属于文件级错误。文件可带 UTF-8 BOM。
+配置要点：
+
+- `name` 唯一，匹配 `^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$`；最多 8 个 server（stdio 最多 4 个），超出的条目忽略并告警。
+- stdio：`command` 必填；`cwd` 必须是存在的绝对路径；默认 `inheritEnv: false`，子进程只得到运行所需变量加 `env` 条目，bot 的凭据不会传入。
+- http：必须是 `https`（仅回环允许 `http`）；`auth.type` 目前只支持 `oauth`。
+- `args`、env 值、header 值中的 `${NAME}` 从应用环境解析；缺失变量只禁用该条目并只报告变量名。单条无效、重名只跳过该条，不影响其他 server。
 - 配置文件含凭据引用，部署时设为 `600`，不要提交仓库。
 
-工具以 `mcp__<server>__<tool>` 命名，默认**不直接提供给模型**。系统提示只列出已连接的 server 和工具数量；模型先调用 `tool_search` 加载需要的工具，之后才能调用，已加载的工具随该会话保存。server 返回的参数 schema 必须能表示为 object 且有界（16 KiB、深度 12、属性 256 个、无 `$ref`），否则跳过该工具；名称冲突时用固定哈希后缀避免与内置工具重名，同一 server 的工具按原始名称排序后分配，重启不会改变归属。每个 server 最多登记 100 个工具、10 页，且整次工具发现限时 30 秒；发生截断时日志会记录。图片结果超过 4 MiB 时替换为文字说明，不进入会话记录。
+工具以 `mcp__<server>__<tool>` 命名，默认不直接提供给模型：系统提示只列出已连接的 server 与工具数量，模型先调 `tool_search` 检索并加载需要的工具，之后才能调用，已加载集合随会话保存。MCP 调用一律按不可重放处理（`replay: "unsafe"`），进程中断后不自动重跑，避免重复外部副作用。启动时连不上的 server 只记录错误码并跳过；运行中掉线不自动重连，调用返回 `MCP_CLOSED`，重启后重连。
 
-MCP 调用一律按不可重放处理（`replay: "unsafe"`）：进程中断后不会自动重跑，避免重复外部副作用。启动时某个 server 不可用只记录安全错误码（如 `MCP_TIMEOUT`、`MCP_HTTP_401`）并跳过；运行中掉线的工具保留，调用返回 `MCP_CLOSED`，重启进程后重连，不做自动重连。
+离线检查配置用 `npm run build && node dist/src/check-config.js`；连接冒烟测试用 `npm run build && npm run mcp:check`（逐个连接、列出工具名后关闭，不启动 Telegram 与模型）。
 
-`auth.authorizationServerMetadataUrl` 可指定授权服务器的 metadata 文档，用于 MCP server 公布的授权服务器有误或不可达时；`mcp:auth` 与 bot 的刷新路径使用同一配置。
+OAuth 首次授权或重新授权时先停 bot，再执行 `npm run build && DATA_DIR=./data npm run mcp:auth -- <server>`，打开打印的 URL 在浏览器登录并同意，回到终端等待回调；headless 服务器需先建 SSH 端口转发（如 `ssh -L 8765:127.0.0.1:8765 user@host`）。支持 RFC 7591 动态注册的授权服务器（如 Notion）会自动完成客户端注册，`client_id` 与 token 一起保存在 `mcp-oauth/<server>.json`——不要删除该文件，重新注册会让已有授权失效。refresh token 失效后工具调用会报 `MCP_AUTH_REQUIRED`，这是预期行为，重新执行 `mcp:auth` 即可，不要反复重启。
 
-OAuth：bot 只使用和刷新 `DATA_DIR/mcp-oauth/<server>.json` 中的 token，不在 bot 进程内开回调端口。首次授权或需要重新授权时，先停止 bot（避免两个进程竞争 token 文件），再执行：
-
-```sh
-npm run build
-DATA_DIR=./data npm run mcp:auth -- calendar
-```
-
-`mcp:auth` 与 bot 读取同一组 `DATA_DIR`、`MCP_CONFIG` 环境变量；用 `MCP_CONFIG` 指定过路径时，授权命令也要带上同样的值。生产容器的维护命令与 OAuth 回调转发见 [部署指南](docs/deployment-test-guide.md)。
-
-打开命令打印的 URL 完成授权，回到终端等待回调。服务器没有入站端口时，先建立到配置端口的 SSH 端口转发，例如 `ssh -L 8765:127.0.0.1:8765 user@host`。命令只打印 server 名和工具数量，不打印 token。运行中需要重新授权时，该工具调用返回 `MCP_AUTH_REQUIRED`，按上述步骤处理后重启。
-
-### 需要浏览器登录账号的 server（如 Notion）
-
-这类 server 的 OAuth 就是普通网页登录：授权 URL 打开后，用户在浏览器里登录自己的账号并点击同意，回调带回授权码。客户端侧无需预注册，配置里只写 URL 和 `auth`：
-
-```json
-{
-  "name": "notion",
-  "transport": "http",
-  "url": "https://mcp.notion.com/mcp",
-  "auth": { "type": "oauth" }
-}
-```
-
-流程与上一节相同：`npm run mcp:auth -- notion` 打印授权 URL，浏览器打开、登录并同意，回到终端等待回调，最后打印工具数量。具体行为：
-
-- **客户端注册**：授权服务器支持 RFC 7591 动态注册时自动完成（Notion 支持），回调地址固定为 `http://127.0.0.1:<redirectPort>/callback`。注册得到的 `client_id` 与 token 一起保存在 `DATA_DIR/mcp-oauth/<server>.json`，再次授权会复用；**不要删除该文件**，重新注册会让已有授权失效。
-- **登录范围**：授权以点击同意的那个账号为界，能访问的内容就是该账号在 Notion 里的权限。换账号或换 workspace 需要重新授权。
-- **token 生命周期**：访问令牌约 8 小时，401 后自动用 refresh token 刷新；refresh token 每次刷新都会轮换，同一授权文件不能被两个进程同时刷新（所以授权和排查前先停 bot）。refresh token 在首次授权后 180 天、或连续 30 天未使用时失效，下一次刷新返回 `invalid_grant`，应用清除旧 token 并把工具调用报为 `MCP_AUTH_REQUIRED`。**这是预期行为**，重新执行 `mcp:auth` 即可，不要反复重启。
-- **headless 服务器**：授权 URL 在操作者的电脑上打开，回调需要到达服务器，因此先 `ssh -L <redirectPort>:127.0.0.1:<redirectPort> user@host`。授权服务器只接受 loopback 回调，不能用公网地址替代。
-- **企业策略**：若 workspace 强制由管理员预配（Notion 的 enterprise-managed authorization），动态注册会被拒绝；此时需要管理员提供 `clientId`／`clientSecret` 并在其后台登记上面的回调地址。
-
-MCP server 与应用使用同一系统用户，不构成安全边界；stdio server 的代码和配置应视为受信任组件。不要把无关凭据放进 `env` 或 `headers`。远程 HTTP + OAuth 的隔离更强，优先选用。
-
-部署注意：
-
-- Aster 镜像自带 Bash 和 npm，`HOME=/data`、`NPM_CONFIG_CACHE=/data/.npm`，缓存与 OAuth 状态均可持久化。MCP 配置使用容器内路径，例如 `/data/workspace`。
-- stdio server 的依赖宜在派生镜像中预装；运行时临时从 npm registry 安装会把可用性绑到外部网络。把 MCP 配置放在数据卷内，不要把含 secret 的配置写进镜像。
-- 每个 stdio server 都会增加常驻进程和内存占用；4 GB 主机上优先少而稳的 server。
+部署注意：容器内路径是卷内路径（`cwd` 等写 `/data/...`）；stdio server 依赖宜在派生镜像中预装，运行时从 npm registry 临时安装会把可用性绑到外部网络；每个 stdio server 都增加常驻进程与内存，4 GB 主机上优先少而稳。
 
 ## 投递核查与补发
 
-网络超时可能发生在 Telegram 已收到消息之后，因此应用不会自动重发结果未知的消息。明确拒绝的发送与未知发送分别保存；程序不丢弃已生成回复。
-
-构建后可查看请求 ID、从 0 开始的分段编号和错误码：
+网络超时可能发生在 Telegram 已收到消息之后，因此结果未知的发送不会自动重发。先停应用，查看待核查分段：
 
 ```sh
 npm run deliveries -- list
 ```
 
-先停止应用，核对 Telegram 实际收到的内容，再处理相应分段：
+核对 Telegram 实际收到的内容后二选一（命令只改本地投递状态，重启应用后才继续发送，不会重新执行 agent）：
 
 ```sh
-# 确认需要重新发送：可能重复已送达但未获确认的该分段
-npm run deliveries -- retry telegram:123:456 1
-
-# 已确认该分段送达：继续后面的分段
-npm run deliveries -- sent telegram:123:456 1
+npm run deliveries -- retry telegram:123:456 1   # 确认需要重发该分段（可能与已送达的重复）
+npm run deliveries -- sent telegram:123:456 1    # 已确认该分段送达，继续后面的分段
 ```
 
-这些命令只修改本地投递状态，重新启动应用才会发送待投递内容。不会重新执行 agent 或工具。命令在列出或修改前会先执行恢复：进程在发送中被强杀的分段会转为 `uncertain` 并出现在列表中；`sending` 不会直接出现在输出里。本地记录只清理已送达请求，保留最新 100 条；未完成或待核查请求不会被清理。底座会话的历史管理仍由底座负责。
+## Docker 部署
 
-## Linux 云服务器
-
-生产交付统一使用 Docker 镜像 **Aster**（镜像仓库名 `aster`）。服务器只需 Docker Engine 24+ 与 Compose 2.24.4+，不需要主机 Node.js 或 Go。开发运行仍可使用上文的 npm 命令。
-
-先在构建机生成本地镜像：
+生产交付统一使用 Docker 镜像（仓库名 `aster`），服务器只需 Docker Engine 24+ 与 Compose 2.24.4+，不需要主机 Node.js 或 Go。当前拓扑为单服务 `personal-agent`：
 
 ```sh
 docker build -t aster:local .
-cp .env.example .env
-# 填写 .env 中的 bot、owner、模型和 API key
+cp .env.example .env   # 填写 bot、owner、模型与 key，chmod 600
 docker compose run --rm --no-deps personal-agent node dist/src/check-config.js
 docker compose up -d
 docker compose logs --tail 50 personal-agent
 ```
 
-也可使用显式构建覆盖：`docker compose -f docker-compose.yml -f docker-compose.build.yml build`。生产 Compose 本身只引用镜像；仓库尚未发布公共镜像。通过镜像仓库或 `docker save` / `docker load` 把产物交付到服务器，不在生产主机上强制构建。
+也可使用构建覆盖 `docker compose -f docker-compose.yml -f docker-compose.build.yml build`。生产 Compose 本身只引用镜像、不含 `build`；通过镜像仓库或 `docker save` / `docker load` 交付产物，不在生产主机上强制构建。更新时在 `.env` 指定不可变镜像引用（`ASTER_IMAGE=仓库/aster@sha256:<digest>`），`docker compose pull` 后停旧起新；数据卷 `personal-agent-data` 保持不变，禁止用 `down -v` 代替普通停服。容器内固定 `/data`（uid 1000），应用默认内存上限 1 GB、128 进程/线程、45 秒停止宽限。`running` 只表示进程存在，仍需核对启动日志与真实 Telegram 往返才算验收。
 
-生产发布在 `.env` 中指定实际镜像摘要，例如 `ASTER_IMAGE=registry.example.com/team/aster@sha256:<digest>`，然后拉取、停止旧实例并更新：
+服务器无法直连 Telegram 时（例如中国区云主机），用 `TELEGRAM_API_ROOT` 指向自建反向代理即可，现网即以 Cloudflare Worker 反代运行；注意同一个 bot token 只能有一个实例在轮询，迁移或演练时不要让新旧实例同时在线。
 
-```sh
-docker compose pull
-docker compose stop personal-agent
-docker compose up -d --no-build personal-agent
-docker compose logs --tail 50 personal-agent
-```
+同一主机的 `test` 与 `production` 环境由版本化环境描述区分（项目名、卷名、所消费的 bot），`npm run deployment:environment` 做渲染与冲突检查，见 [部署环境描述](docs/deployment-environments.md)。整卷备份、还原、维护命令与上线验收清单见 [部署指南](docs/deployment-test-guide.md)。
 
-`running` 只表示进程存在，仍需核对初始化日志、重启次数及真实 Telegram 验收；当前没有应用就绪探针。不要对同一 bot 或数据卷启动多个实例。
+凭据只经部署环境提供：bot token、提供商 key 与 owner ID 放在权限受限的 env 文件中，MCP 配置以 `${ENV}` 引用进程环境；应用只做存在性与形状校验，不把秘密写入工具参数或 durable 状态。
 
-持久化卷继续使用 `personal-agent-data`，不随 Aster 改名；容器内固定 `/data`，由 uid 1000 读写。应用默认内存上限 1 GB、128 个进程/线程、45 秒停止宽限；这些是配置上限，4 核／4 GB 目标机峰值仍待验收。更新不删除数据卷，禁止用 `down -v` 代替普通停服。
-
-维护命令在停服后通过同一 Compose 配置执行：
+## 开发与验证边界
 
 ```sh
-docker compose stop personal-agent
-docker compose run --rm --no-deps personal-agent node dist/src/deliveries.js list
-docker compose up -d personal-agent
+npm run check   # 类型检查
+npm run build   # 构建
+npm test        # 全量离线测试
 ```
 
-完整的镜像交付、备份恢复、MCP/OAuth、systemd 旧数据迁移及上线验收见 [部署指南](docs/deployment-test-guide.md)。
+已验证：类型、构建与全量离线测试通过；记忆系统经真实模型验收（见上）；Docker 单服务部署已在腾讯云真实上线并通过端到端验收（对话往返、记忆落盘、容器重启恢复）。
 
-## 验证边界
+未验证 / 已知限制：
 
-本地自动化验证覆盖类型、构建、消息边界、分段投递、工具重放、取消及底座离线恢复；真实 Telegram/模型联调需要有效配置。测试通过不代表已部署，仓库不包含真实凭据。历史 MVP 用例记录见 [docs/mvp-verification.md](docs/mvp-verification.md)，本次镜像迁移的实测结果与阻塞见 [Docker 验证记录](docs/docker-verification.md)。
+- 其余提供商（DeepSeek 以外）的真实模型摘要与归档质量未逐个实测。
+- 已知缺陷：回复已持久化但请求收尾未执行时进程被杀，该轮的轮数计数会永久滞后一轮（回复与状态一致，仅压缩评估触发点后移），已用测试钉住当前行为，修复方案待定。
+- 单会话串行处理，不是高吞吐或长期离线收件箱；长期繁忙时消息滞留在 Telegram 侧。
+
+## 文档索引
+
+- [部署指南](docs/deployment-test-guide.md)：镜像交付、备份恢复、维护命令、上线验收
+- [部署环境描述](docs/deployment-environments.md)：test / production 环境描述字段
+- [契约与生命周期](docs/contracts-and-lifecycle.md)：工具契约、错误语义、重放与升级兼容性
+- [Memory 与 Context 实施方案](docs/memory-and-context-design.md) / [记忆系统验收](docs/memory-verification.md)
+- [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)：安全关卡、实施顺序与当前进度
+- [MVP 范围](docs/mvp.md) / [Docker 验证记录](docs/docker-verification.md)
+- 仓库级约束见 [CLAUDE.md](CLAUDE.md)
