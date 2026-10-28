@@ -82,7 +82,7 @@ npm start
 | --- | --- |
 | `agent.sqlite`（及 WAL） | 底座会话与执行恢复状态；记忆系统的 working 状态、周期快照投影、归档进度与轮数计数 |
 | `inbox.sqlite`（及 WAL） | 请求消费位置、身份绑定与投递状态 |
-| `workspace/` | agent 的任务文件；含 `workspace/MEMORY.md`（用户明确要求保存的长期事实，由模型经文件工具按需读写） |
+| `workspace/` | agent 的任务文件 |
 | `memory/daily/YYYY-MM-DD.md` | 每日事件记忆：归档任务从已确认的会话范围增量提取 |
 | `mcp.json`（可选） | MCP server 配置 |
 | `mcp-oauth/<server>.json`（可选） | 远程 MCP server 的 OAuth token，仅属主可读 |
