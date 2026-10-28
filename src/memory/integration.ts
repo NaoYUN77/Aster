@@ -406,10 +406,12 @@ export class MemoryIntegration {
 
   /**
    * Facts B is built from. The instructions are one: B is rendered to sit behind this exact
-   * block A, so an upgraded prompt ends the cycle (§14.2). MEMORY.md is not: this application
-   * never loads it into B — the model reads it per request through the file tools, into C — so
-   * there is no memory version B depends on, and `memoryDigest` is honestly `null`. A host that
-   * ever loads memory content into B must supply its digest here and accept cycle invalidation.
+   * block A, so an upgraded prompt ends the cycle (§14.2). There is no external memory file:
+   * workspace/MEMORY.md was retired (ADR-0004); long-term facts live in the working state and
+   * daily archives this integration manages, whose changes flow through the cycle machinery
+   * itself — so there is no memory version B depends on, and `memoryDigest` is honestly
+   * `null`. A host that ever loads external memory content into B must supply its digest
+   * here and accept cycle invalidation.
    */
   async currentFacts(): Promise<SnapshotFacts> {
     return { instructionsDigest: digestText(this.#options.instructions), memoryDigest: null };

@@ -1,5 +1,7 @@
 # Memory 与 Context 实施方案
 
+> 2026-10-28 变更（ADR-0004）：`workspace/MEMORY.md` 已退役——应用不再创建该文件，instructions 不再指示模型经文件工具读写它，「用户明确要求保存的长期事实」统一由本文的 working 状态与每日归档承担。下文涉及 MEMORY.md 的分工描述（第 1 节表格、相关段落）与 `memoryDigest: null` 的原始理由为历史设计，现状以 ADR-0004 为准；存量文件保留不删。
+
 状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节），MEM-05 已实现可恢复的增量归档（结论见第 16 节），MEM-06 已实现原生压缩接入与周期快照切换（结论见第 17 节），MEM-07 已完成组合接入并注册到运行中的 agent（结论见第 18 节）；MEM-08 已完成本地验收（结论见第 19 节，真实模型质量与目标环境数据仍待验证）。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
 
 本轮是当前 MVP 之后的增量工作，不表示这些能力已经上线。现有运行范围见 [mvp.md](mvp.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.3.0 为准。

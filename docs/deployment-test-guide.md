@@ -108,7 +108,7 @@ docker compose logs --tail 50 personal-agent
 docker compose exec personal-agent ls -la /data /data/workspace
 ```
 
-`inbox.sqlite`、`agent.sqlite`、`workspace/` 应存在；`workspace/MEMORY.md` 在第一次明确要求记忆后出现。
+`inbox.sqlite`、`agent.sqlite`、`workspace/` 应存在。
 
 ### 生产更新（不可变引用）
 

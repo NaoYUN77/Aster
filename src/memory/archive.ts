@@ -1,6 +1,6 @@
 // Archive extraction boundary: bounded native Entries in, validated daily segments out.
 // Only original events are eligible. IDs, dates, source ranges and publication pages belong to
-// the host; automatic archival never changes Working preferences or MEMORY.md.
+// the host; automatic archival never changes Working preferences.
 import { UserEntry, AssistantEntry, ToolResultEntry, type EntryRecord } from "@earendil-works/pi-durable";
 import { Type, type Static } from "typebox";
 import {
