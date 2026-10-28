@@ -11,7 +11,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, Harness, UsageDoc, type EntryId, type TaskId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { archiveSource, ARCHIVE_LIMITS } from "../src/memory/archive.js";
+import { archiveSource, ARCHIVE_INSTRUCTIONS, ARCHIVE_LIMITS } from "../src/memory/archive.js";
 import { createArchiveTask, initializeArchive, readArchive, reconcileArchive, requestArchive, retryArchive,
   type ArchiveTaskOptions } from "../src/memory/archive-task.js";
 import { openDaily, searchDaily } from "../src/memory/daily.js";
@@ -328,4 +328,10 @@ test("05-F: oversized source is rejected without a coverage gap or model I/O", a
     assert.equal(state.archivedThrough, null);
     assert.equal(f.calls.length, 0);
   } finally { await f.close(); }
+});
+
+// F-2 regression guard (found by the MEM-08 live run): a real extraction model completed a
+// month-and-day deadline with an invented year. The extraction prompt must order date fidelity.
+test("05-H: the archive instructions forbid inventing or completing dates", () => {
+  assert.match(ARCHIVE_INSTRUCTIONS, /never invent or complete a missing year, month, or day/);
 });
