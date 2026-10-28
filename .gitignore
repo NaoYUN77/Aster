@@ -3,4 +3,3 @@ dist/
 .env
 data/
 *.log
-deploy/agent-vault/private/

@@ -12,12 +12,6 @@ import { DeploymentVolumePreflightError, preflightDeploymentVolumes } from "../s
 const posix = process.platform !== "win32";
 const root = posix && process.getuid?.() === 0;
 const cli = fileURLToPath(new URL(`../src/deployment-volume-preflight.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`, import.meta.url));
-const ddl = `CREATE TABLE master_key (
-  id INTEGER PRIMARY KEY CHECK (id = 1), sentinel BLOB NOT NULL, sentinel_nonce BLOB NOT NULL,
-  dek_ciphertext BLOB, dek_nonce BLOB, dek_plaintext BLOB, salt BLOB,
-  kdf_time INTEGER, kdf_memory INTEGER, kdf_threads INTEGER,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-)`;
 const marker = "DO_NOT_PRINT_SYNTHETIC_DATABASE_VALUE";
 function errorCode(code: string) {
   return (error: unknown) => error instanceof DeploymentVolumePreflightError && error.code === code;
@@ -41,17 +35,9 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const parent = await mkdtemp(join(tmpdir(), "aster-volume-preflight-"));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const appVolume = join(parent, "app");
-  const brokerVolume = join(parent, "broker");
-  const vault = join(brokerVolume, ".agent-vault");
   await mkdir(appVolume, { mode: 0o755 });
-  await mkdir(brokerVolume, { mode: 0o755 });
-  await mkdir(vault, { mode: 0o700 });
-  const brokerDb = join(vault, "agent-vault.db");
   const inboxDb = join(appVolume, "inbox.sqlite");
   const agentDb = join(appVolume, "agent.sqlite");
-  update(brokerDb, `${ddl}; INSERT INTO master_key
-    (id,sentinel,sentinel_nonce,dek_ciphertext,dek_nonce,dek_plaintext,salt,kdf_time,kdf_memory,kdf_threads)
-    VALUES(1,zeroblob(44),zeroblob(12),zeroblob(48),zeroblob(12),NULL,zeroblob(16),3,65536,4)`);
   update(inboxDb, `
     CREATE TABLE checkpoint(id INTEGER PRIMARY KEY CHECK(id=1), offset INTEGER NOT NULL);
     CREATE TABLE identity(id INTEGER PRIMARY KEY CHECK(id=1), botId TEXT NOT NULL, ownerId TEXT NOT NULL);
@@ -66,88 +52,52 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
     INSERT INTO deliveries(requestId,part,text,status) VALUES('synthetic',0,'${marker}','pending');
   `);
   update(agentDb, "CREATE TABLE synthetic_agent_state(id INTEGER PRIMARY KEY)");
-  await Promise.all([chown(appVolume, 1000, 1000), chown(brokerVolume, 65532, 65532), chown(vault, 65532, 65532)]);
-  for (const [path, uid] of [[brokerDb, 65532], [agentDb, 1000], [inboxDb, 1000]] as const) {
-    await chown(path, uid, uid);
+  await chown(appVolume, 1000, 1000);
+  for (const path of [agentDb, inboxDb]) {
+    await chown(path, 1000, 1000);
     await chmod(path, 0o600);
   }
-  return { parent, appVolume, brokerVolume, vault, brokerDb, inboxDb, agentDb, options: { appVolume, brokerVolume, inboxDiagnostics: true } };
+  return { parent, appVolume, inboxDb, agentDb, options: { appVolume, inboxDiagnostics: true } };
 }
 
 // Ownership is part of the real contract, so these fixtures require POSIX root to assign
-// both service UIDs. Run the compiled file in the Linux app image as root to exercise them.
+// the service UID. Run the compiled file in the Linux app image as root to exercise them.
 const integration = { skip: !root };
 
-test("wrapped metadata and bounded inbox counts succeed without changing bytes, modes, mtime or directory entries", integration, async (t) => {
-  const { parent, options, brokerDb } = await fixture(t);
-  update(brokerDb, "PRAGMA journal_mode=WAL");
+test("app metadata and bounded inbox counts succeed without changing bytes, modes, mtime or directory entries", integration, async (t) => {
+  const { parent, options, agentDb } = await fixture(t);
+  update(agentDb, "PRAGMA journal_mode=WAL");
   const before = await snapshot(parent);
   assert.deepEqual(await preflightDeploymentVolumes(options), {
     status: "offline-volume-metadata-ok", code: "VOLUME_METADATA_OK", productionAdmission: "not-evaluated",
     inbox: { requests: 1, deliveryParts: 1, sending: 0, uncertain: 0, failed: 0 },
   });
   assert.deepEqual(await snapshot(parent), before);
-  const result = runCli(["--app-volume", options.appVolume, "--broker-volume", options.brokerVolume, "--inbox-diagnostics"]);
+  const result = runCli(["--app-volume", options.appVolume, "--inbox-diagnostics"]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).productionAdmission, "not-evaluated");
   assert.equal((result.stdout + result.stderr).includes(marker), false);
   assert.deepEqual(await snapshot(parent), before);
 });
 
-test("plaintext DEK is rejected including empty BLOB, text, and hybrid wrapped/plaintext rows", integration, async (t) => {
-  const { options, brokerDb } = await fixture(t);
-  for (const value of ["zeroblob(32)", "zeroblob(0)", "''", `'${marker}'`]) {
-    update(brokerDb, `UPDATE master_key SET dek_plaintext = ${value}`);
-    await assert.rejects(preflightDeploymentVolumes(options), errorCode("BROKER_PLAINTEXT_DEK"));
-  }
-});
-
-test("wrapped fields require pinned SQL storage types, exact lengths and KDF metadata", integration, async (t) => {
-  const { options, brokerDb } = await fixture(t);
-  for (const change of [
-    "dek_ciphertext = NULL", "dek_ciphertext = zeroblob(47)", "dek_ciphertext = printf('%048d',0)",
-    "dek_nonce = zeroblob(11)", "sentinel = zeroblob(43)", "sentinel_nonce = zeroblob(13)",
-    "salt = zeroblob(15)", "kdf_time = 0", "kdf_memory = 65535", "kdf_threads = 5",
-  ]) {
-    update(brokerDb, `UPDATE master_key SET ${change}`);
-    await assert.rejects(preflightDeploymentVolumes(options), errorCode("BROKER_WRAPPED_DEK_INVALID"));
-    update(brokerDb, "UPDATE master_key SET sentinel=zeroblob(44),sentinel_nonce=zeroblob(12),dek_ciphertext=zeroblob(48),dek_nonce=zeroblob(12),salt=zeroblob(16),kdf_time=3,kdf_memory=65536,kdf_threads=4");
-  }
-});
-
-test("unknown master schema, a view, missing or multiple records fail closed", integration, async (t) => {
-  const { options, brokerDb } = await fixture(t);
-  update(brokerDb, "ALTER TABLE master_key ADD COLUMN future_field BLOB");
-  await assert.rejects(preflightDeploymentVolumes(options), errorCode("BROKER_SCHEMA_UNKNOWN"));
-  update(brokerDb, "ALTER TABLE master_key DROP COLUMN future_field; DELETE FROM master_key");
-  await assert.rejects(preflightDeploymentVolumes(options), errorCode("BROKER_MASTER_KEY_MISSING"));
-  update(brokerDb, "DROP TABLE master_key; CREATE VIEW master_key AS SELECT 1 AS id");
-  await assert.rejects(preflightDeploymentVolumes(options), errorCode("BROKER_SCHEMA_UNKNOWN"));
-  update(brokerDb, `DROP VIEW master_key; ${ddl.replace(" CHECK (id = 1)", "")}; INSERT INTO master_key(id,sentinel,sentinel_nonce) VALUES(1,zeroblob(44),zeroblob(12)),(2,zeroblob(44),zeroblob(12))`);
-  await assert.rejects(preflightDeploymentVolumes(options), errorCode("BROKER_SCHEMA_UNKNOWN"));
-});
-
 test("wrong owners and unsafe or owner-inaccessible modes fail even when the operator is root", integration, async (t) => {
-  const { options, appVolume, brokerDb, vault, agentDb } = await fixture(t);
+  const { options, appVolume, agentDb } = await fixture(t);
   await chown(appVolume, 0, 0);
   await assert.rejects(preflightDeploymentVolumes(options), errorCode("VOLUME_OWNER_MISMATCH"));
   await chown(appVolume, 1000, 1000);
   await chmod(appVolume, 0o777);
   await assert.rejects(preflightDeploymentVolumes(options), errorCode("VOLUME_MODE_UNSAFE"));
   await chmod(appVolume, 0o755);
-  await chmod(vault, 0o755);
-  await assert.rejects(preflightDeploymentVolumes(options), errorCode("VOLUME_MODE_UNSAFE"));
-  await chmod(vault, 0o700);
-  await chown(brokerDb, 1000, 1000);
+  await chown(agentDb, 0, 0);
   await assert.rejects(preflightDeploymentVolumes(options), errorCode("STATE_OWNER_MISMATCH"));
-  await chown(brokerDb, 65532, 65532);
-  for (const mode of [0o644, 0o400, 0o000]) {
-    await chmod(brokerDb, mode);
+  await chown(agentDb, 1000, 1000);
+  // The app databases are not confidential: group/other write bits or a missing owner
+  // write bit are unsafe, while plain group/other read (0o644) is acceptable for them.
+  for (const mode of [0o622, 0o400, 0o000]) {
+    await chmod(agentDb, mode);
     await assert.rejects(preflightDeploymentVolumes(options), errorCode("STATE_MODE_UNSAFE"));
   }
-  await chmod(brokerDb, 0o600);
-  await chmod(agentDb, 0o666);
-  await assert.rejects(preflightDeploymentVolumes(options), errorCode("STATE_MODE_UNSAFE"));
+  await chmod(agentDb, 0o600);
 });
 
 test("pre-recovery sending and uncertain deliveries and legacy uncertain requests are reported without mutation", integration, async (t) => {
@@ -232,7 +182,7 @@ test("WAL on writable mount and nonempty rollback journals are rejected without 
 
 // Opt in after npm run build with ASTER_TEST_DOCKER_VOLUME_PREFLIGHT=1. This fixture
 // uses a unique Docker volume, a pinned local runtime tag, no network and no production mounts.
-test("Docker read-only residual WAL is read, plaintext only in WAL is rejected, and all source files remain unchanged", {
+test("Docker read-only residual WAL is read, an unknown status committed only in WAL is rejected, and all source files remain unchanged", {
   skip: process.env.ASTER_TEST_DOCKER_VOLUME_PREFLIGHT !== "1",
 }, () => {
   const volume = `aster-preflight-wal-test-${randomUUID()}`;
@@ -247,20 +197,17 @@ test("Docker read-only residual WAL is read, plaintext only in WAL is rejected, 
   const create = `
     import {mkdirSync,chmodSync,chownSync} from 'node:fs';
     import {DatabaseSync} from 'node:sqlite';
-    for(const [p,u,m] of [['/fixture/app',1000,0o755],['/fixture/broker',65532,0o755],['/fixture/broker/.agent-vault',65532,0o700]]) {
-      mkdirSync(p); chownSync(p,u,u); chmodSync(p,m);
-    }
-    function create(p,sql,u) {const d=new DatabaseSync(p);d.exec(sql);d.close();chownSync(p,u,u);chmodSync(p,0o600);}
-    create('/fixture/app/agent.sqlite','CREATE TABLE state(id INTEGER PRIMARY KEY)',1000);
-    create('/fixture/app/inbox.sqlite','CREATE TABLE checkpoint(id INTEGER); CREATE TABLE identity(id INTEGER); CREATE TABLE inbox(status TEXT); CREATE TABLE deliveries(status TEXT); CREATE TABLE failures(code TEXT)',1000);
-    create('/fixture/broker/.agent-vault/agent-vault.db',${JSON.stringify(`${ddl}; INSERT INTO master_key(id,sentinel,sentinel_nonce,dek_ciphertext,dek_nonce,dek_plaintext,salt,kdf_time,kdf_memory,kdf_threads) VALUES(1,zeroblob(44),zeroblob(12),zeroblob(48),zeroblob(12),NULL,zeroblob(16),3,65536,4)`)},65532);
+    mkdirSync('/fixture/app'); chownSync('/fixture/app',1000,1000); chmodSync('/fixture/app',0o755);
+    function create(p,sql) {const d=new DatabaseSync(p);d.exec(sql);d.close();chownSync(p,1000,1000);chmodSync(p,0o600);}
+    create('/fixture/app/agent.sqlite','CREATE TABLE state(id INTEGER PRIMARY KEY)');
+    create('/fixture/app/inbox.sqlite',"CREATE TABLE checkpoint(id INTEGER PRIMARY KEY, offset INTEGER NOT NULL); CREATE TABLE identity(id INTEGER PRIMARY KEY, botId TEXT, ownerId TEXT); CREATE TABLE inbox(requestId TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending'); CREATE TABLE deliveries(requestId TEXT NOT NULL, part INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(requestId,part)); CREATE TABLE failures(requestId TEXT PRIMARY KEY, code TEXT); INSERT INTO checkpoint VALUES(1,0); INSERT INTO inbox VALUES('synthetic','ready'); INSERT INTO deliveries VALUES('synthetic',0,'pending')");
   `;
-  const crash = (plaintext: boolean) => {
+  const crash = (invalidStatus: boolean) => {
     const writer = `
       import {chmodSync,chownSync} from 'node:fs'; import {DatabaseSync} from 'node:sqlite';
-      const p='/fixture/broker/.agent-vault/agent-vault.db'; const d=new DatabaseSync(p);
-      d.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE master_key SET ${plaintext ? "dek_plaintext=zeroblob(32)" : "created_at='synthetic-wal-commit'"}");
-      for(const s of ['-wal','-shm']) {chownSync(p+s,65532,65532);chmodSync(p+s,0o600);}
+      const p='/fixture/app/inbox.sqlite'; const d=new DatabaseSync(p);
+      d.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ${invalidStatus ? "UPDATE deliveries SET status='future-state'" : "UPDATE inbox SET status='sent'"}");
+      for(const s of ['-wal','-shm']) {chownSync(p+s,1000,1000);chmodSync(p+s,0o600);}
       process.kill(process.pid,'SIGKILL');
     `;
     // A container's PID 1 has special signal semantics, so kill a writer child.
@@ -281,22 +228,22 @@ test("Docker read-only residual WAL is read, plaintext only in WAL is rejected, 
   function probe(expected: number) {
     return docker(["run", "--rm", "--pull", "never", "--network", "none", "--user", "0:0", "--read-only", "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE",
       "--mount", `${mount},readonly`, "--mount", `type=bind,source=${dist},target=/probe,readonly`, image,
-      "node", "/probe/src/deployment-volume-preflight.js", "--app-volume", "/fixture/app", "--broker-volume", "/fixture/broker", "--inbox-diagnostics"], expected);
+      "node", "/probe/src/deployment-volume-preflight.js", "--app-volume", "/fixture/app", "--inbox-diagnostics"], expected);
   }
   docker(["volume", "create", volume]);
   try {
     execute(create);
     execute(crash(false), false, 137);
-    const wrappedBefore = execute(snapshotScript, true).stdout;
+    const cleanBefore = execute(snapshotScript, true).stdout;
     assert.equal(JSON.parse(probe(0).stdout).code, "VOLUME_METADATA_OK");
-    assert.equal(execute(snapshotScript, true).stdout, wrappedBefore);
+    assert.equal(execute(snapshotScript, true).stdout, cleanBefore);
     execute(crash(true), false, 137);
-    const plaintextBefore = execute(snapshotScript, true).stdout;
+    const invalidBefore = execute(snapshotScript, true).stdout;
     const result = probe(1);
     assert.deepEqual(JSON.parse(result.stderr), {
-      status: "offline-volume-metadata-failed", code: "BROKER_PLAINTEXT_DEK", productionAdmission: "not-evaluated",
+      status: "offline-volume-metadata-failed", code: "APP_SCHEMA_UNKNOWN", productionAdmission: "not-evaluated",
     });
-    assert.equal(execute(snapshotScript, true).stdout, plaintextBefore);
+    assert.equal(execute(snapshotScript, true).stdout, invalidBefore);
   } finally {
     docker(["volume", "rm", volume]);
   }
@@ -311,9 +258,9 @@ test("CLI sanitizes corrupt DB and raw arguments; all failures preserve not-eval
     assert.equal(JSON.parse(result.stderr).productionAdmission, "not-evaluated");
   }
   if (root) {
-    const { options, brokerDb } = await fixture(t);
-    await writeFile(brokerDb, marker);
-    const result = runCli(["--app-volume", options.appVolume, "--broker-volume", options.brokerVolume]);
+    const { options, agentDb } = await fixture(t);
+    await writeFile(agentDb, marker);
+    const result = runCli(["--app-volume", options.appVolume]);
     assert.equal(result.status, 1);
     assert.deepEqual(JSON.parse(result.stderr), { status: "offline-volume-metadata-failed", code: "SQLITE_UNREADABLE", productionAdmission: "not-evaluated" });
     assert.equal((result.stdout + result.stderr).includes(marker), false);

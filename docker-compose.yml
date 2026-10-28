@@ -23,5 +23,7 @@ services:
 
 volumes:
   personal-agent-data:
-    # Keep the deployed volume name across the Aster image rename.
-    name: personal-agent-data
+    # Keep the deployed volume name across the Aster image rename. The deployment environment
+    # check renders with ASTER_APP_VOLUME set from the environment description; the default
+    # keeps the name existing deployments already use.
+    name: ${ASTER_APP_VOLUME:-personal-agent-data}

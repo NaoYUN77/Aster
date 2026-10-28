@@ -155,23 +155,6 @@ test("configuration failures name the missing or invalid setting", () => {
   }), /Missing configuration: TELEGRAM_BOT_TOKEN/);
 });
 
-test("the owner ID can come from a file without entering the environment", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "pa-owner-"));
-  try {
-    const file = join(directory, "owner-id");
-    await writeFile(file, " 42\n");
-    const base = { TELEGRAM_BOT_TOKEN: "token", MODEL_PROVIDER: "openai", MODEL_ID: "m", OPENAI_API_KEY: "key" };
-    assert.equal(readConfig({ ...base, TELEGRAM_OWNER_ID_FILE: file }).ownerId, "42");
-    assert.throws(() => readConfig({ ...base, TELEGRAM_OWNER_ID: "42", TELEGRAM_OWNER_ID_FILE: file }), /not both/);
-    assert.throws(() => readConfig({ ...base, TELEGRAM_OWNER_ID_FILE: "relative" }), /absolute path/);
-    assert.throws(() => readConfig({ ...base, TELEGRAM_OWNER_ID_FILE: join(directory, "missing") }), /readable file/);
-    await writeFile(file, "not-a-number\n");
-    assert.throws(() => readConfig({ ...base, TELEGRAM_OWNER_ID_FILE: file }), /positive numeric user ID/);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
 test("the provider registry only names providers shipped with pi-ai", () => {
   const builtin = new Set(builtinProviders().map((provider) => provider.id));
   for (const [id, entry] of Object.entries(PROVIDERS)) {

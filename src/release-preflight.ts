@@ -3,9 +3,7 @@ import { preflightRelease, ReleasePreflightError } from "./release-manifest.js";
 
 const help = `Usage: npm run release:preflight -- \\
   --manifest <release.json> --compose-root <checkout> --policy <local-policy> \\
-  --commit <40 lowercase hex> --app <registry/repo@sha256:...> \\
-  --router <registry/repo@sha256:...> --network <registry/repo@sha256:...> \\
-  --broker <registry/repo@sha256:...>
+  --commit <40 lowercase hex> --app <registry/repo@sha256:...>
 Read-only offline binding check. Exit 0 is NOT signature verification or production admission.
 Use independently selected expected references; copying them from the manifest provides no independent check.`;
 
@@ -17,9 +15,6 @@ try {
       policy: { type: "string" },
       commit: { type: "string" },
       app: { type: "string" },
-      router: { type: "string" },
-      network: { type: "string" },
-      broker: { type: "string" },
       help: { type: "boolean" },
     },
     allowPositionals: false,
@@ -33,7 +28,7 @@ try {
     console.log(help);
   } else {
     if (values.help || !values.manifest || !values["compose-root"] || !values.policy || !values.commit
-      || !values.app || !values.router || !values.network || !values.broker) {
+      || !values.app) {
       throw new ReleasePreflightError("ARGUMENTS_INVALID");
     }
     const result = await preflightRelease({
@@ -42,7 +37,7 @@ try {
       policyPath: values.policy,
       expected: {
         sourceCommit: values.commit,
-        images: { app: values.app, router: values.router, network: values.network, broker: values.broker },
+        images: { app: values.app },
       },
     });
     console.log(JSON.stringify(result));

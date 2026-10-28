@@ -4,7 +4,6 @@ import {
   OAuthError,
 } from "@earendil-works/pi-mcp/oauth";
 import { resolveMcpConfigPaths } from "./config.js";
-import { initializeAgentVault } from "./agent-vault.js";
 import { createOAuthProvider, mcpAuthFlowOptions, openMcpConnection } from "./mcp.js";
 import { readMcpConfig, type McpAuthConfig, type McpServerConfig } from "./mcp-config.js";
 
@@ -101,7 +100,6 @@ function isOAuthServer(server: McpServerConfig): server is OAuthServer {
 }
 
 try {
-  initializeAgentVault();
   await main();
 } catch (error) {
   // Errors can carry URLs and server responses; print the kind, not the payload.

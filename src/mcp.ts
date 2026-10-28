@@ -35,7 +35,6 @@ import {
 import { Compile } from "typebox/compile";
 import type { McpAuthConfig, McpFileConfig, McpHttpServerConfig, McpServerConfig } from "./mcp-config.js";
 import { FileOAuthStateStore } from "./mcp-oauth-store.js";
-import { readAgentVaultEnvironment } from "./agent-vault.js";
 
 const CLIENT_NAME = "personal-agent-base-durable";
 const CLIENT_VERSION = "0.1.0";
@@ -513,8 +512,6 @@ function sanitizeSegment(value: string): string {
 }
 
 function childEnvironment(server: Extract<McpServerConfig, { transport: "stdio" }>, env: NodeJS.ProcessEnv): Record<string, string> {
-  const proxyEnv = readAgentVaultEnvironment(env);
-  if (proxyEnv && server.inheritEnv) throw new Error("Agent Vault does not allow full MCP environment inheritance");
   if (server.inheritEnv) return { ...env, ...server.env } as Record<string, string>;
   const names = [
     "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "NPM_CONFIG_CACHE", "npm_config_cache",
@@ -525,7 +522,7 @@ function childEnvironment(server: Extract<McpServerConfig, { transport: "stdio" 
     const value = env[name];
     if (value !== undefined) inherited[name] = value;
   }
-  return { ...inherited, ...server.env, ...proxyEnv };
+  return { ...inherited, ...server.env };
 }
 
 async function connectWithTimeout(

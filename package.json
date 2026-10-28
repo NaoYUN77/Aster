@@ -12,7 +12,6 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "start": "node --env-file=.env dist/src/main.js",
     "test": "tsx --test test/*.test.ts",
-    "test:vault-security": "node scripts/ci/vault-security.mjs",
     "test:topology": "node scripts/ci/compose-topology.mjs",
     "release:preflight": "tsx src/release-preflight.ts",
     "deployment:environment": "node dist/src/deployment-environment-check.js",

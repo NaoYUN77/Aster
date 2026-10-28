@@ -2,6 +2,8 @@
 
 日期：2026-10-26。环境：Windows 11、Node.js 24.19.0、Go 1.25.6、Docker Desktop Linux engine、Compose 5.3.1。仅使用本地镜像、临时容器和临时卷，未连接生产数据或发布镜像，未部署目标服务器。
 
+注：2026-10-28 起 Agent Vault 子系统与 egress router 已整体移除。本文是当日的验证记录，涉及 router、Vault 组合与 broker 的条目保留为历史事实，不再代表当前单服务拓扑。
+
 ## 已通过
 
 | 检查 | 结果 |
