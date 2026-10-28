@@ -10,6 +10,31 @@
 
 凭据、已认证用户、工作目录和服务客户端属于宿主上下文，不能由模型参数指定。工具负责将外部 API 格式转换为内部概念，并按底座原生结果契约返回。
 
+### 注册元数据
+
+`createToolRegistry()` 仍实现底座原生 `Registry` 接口，安装入口统一检查工具名冲突（包括启动后安装的 extension）。同名 extension 按底座语义整体替换；先验证新注册，失败不发布任何变更。
+
+宿主通过只读 `lookup(name)` 和 `records()` 查询注册记录。未知或已卸载工具返回 `undefined`；记录及其 source 不可修改。字段由宿主或适配器提供，不加入模型参数、工具声明或工具结果：
+
+| 字段 | 语义 |
+| --- | --- |
+| source | 内置工具记录 `kind: builtin` 与 extension；MCP 适配器记录 `kind: mcp` 与 server。预留 plugin 来源，不提供插件加载器。 |
+| tier | 原生 `deferred` 工具为 2，其余为 1；不改变加载行为。 |
+| trust | 内置工具为 trusted，MCP 工具为 untrusted；外部描述不成为可信指令。 |
+| replay | 原生工具策略，未声明时为 unsafe；不从 authz 推断重放安全性。 |
+| authz | read 或 write。内置查询与搜索工具为 read，其余保守标记 write；MCP 一律 write，不采信外部 annotations。本期只记录，不执行授权检查。 |
+| schemaHash | 参数 schema 的 SHA-256，小写十六进制。对象键递归排序、数组顺序保留，不含 TypeBox symbol；只记录，不处理版本漂移。 |
+| state | 本期安装成功的工具为 available；连接健康状态接线另行实现。 |
+
+加载账本与注册目录使用同一个 `agent.sqlite` 的底座 document 存储，不新增数据库表或文件。`withToolLedger()` 在 `Harness.open` 前迁移存量会话，保存当前注册目录；运行时在底座 `Storage.commit` 边界，把 `pi.agent` 的变更与附属账本一次提交。工具搜索及其 `control.addTools` 仍由底座执行。
+
+- `pi.agent.modelTools` 是已加载选择及顺序的唯一来源。账本只保存会话内序号高水位、当前 epoch，以及各工具最近一次加载的元数据；不复制工具声明。`readToolLedger(storage, conversationId, context)` 按原生存储顺序返回加载记录，`readToolCatalog(storage, context)` 返回上次持久化的注册目录。
+- 初始高水位和 epoch 为 0。一次原生提交中追加一个或多个新名称，epoch 增加 1，新增名称按追加顺序取得连续的 `loadSequence`；同批共享 epoch。重复加载、已完成请求重放、重启、reset 和 compaction 不增加编号。删除后再次加入的名称取得更大的序号；历史高水位不回退。仅移除或重排不增加 epoch，本期不实现新的声明变更纪律。
+- 对象形式按原始 `modelTools.add` 记账，包括当前未注册或被 remove 遮蔽的名字；状态及展示过滤仍由底座负责。显式数组形式按完整选择顺序记账，包含调用方显式选择的常驻工具；未显式选择的常驻工具不分配加载序号。
+- 旧会话缺少账本时，按已保存名称顺序去重并补连续序号；非空集合统一使用基线 epoch 1，空集合为 0。无法恢复过去的追加批次，不能把补录值当作真实历史纪元。加载时保存注册快照；迁移时找不到工具则快照为 null，不伪造来源。之后重启或移除注册不重写旧快照。
+- 附属账本为 conversation / rewindable / asOf 文档，分叉沿用对应历史点；若分叉点早于迁移，则从该点原生选择重建基线。新建非分叉会话按其初始选择独立编号。注册目录是 session 文档，启动时由代码与 MCP 适配器重建；运行期注册变化在下次原生存储提交时同步。
+- 这些附属文档由存储适配层独占读写，必须经上述只读函数访问，不经 Session 的 `tx.doc`、snapshot 或 watch API。pi durable 1.3.0 无通用事务扩展钩子，Session 不发布适配层追加的文档变更，混用会读到过期缓存。适配层只接受该固定版本 `pi.agent` 的完整 checkpoint，格式不兼容时显式失败。
+
 ### 结果与失败
 
 面向模型的结果描述实际发生的事情。需要程序继续处理时，保留有明确定义的结构化结果；普通文本工具无需为统一外形增加重复的 JSON 包装。
