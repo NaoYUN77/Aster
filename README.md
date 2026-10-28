@@ -14,7 +14,7 @@ cp .env.example .env
 在 `.env` 中填写：
 
 - `TELEGRAM_BOT_TOKEN`：BotFather 创建的 bot token。
-- `TELEGRAM_OWNER_ID`：允许使用 bot 的个人 Telegram 数字用户 ID；也可用 `TELEGRAM_OWNER_ID_FILE` 指向只读文件，二者只能设置一个。
+- `TELEGRAM_OWNER_ID`：允许使用 bot 的个人 Telegram 数字用户 ID。
 - `MODEL_PROVIDER`：注册表内的提供商 id，见下表。
 - `MODEL_ID`：该提供商在 pi-ai 1.3.0 模型目录中的 id；不自动替换，写错时启动前报错并列出示例。
 - 所选提供商对应的 API key 环境变量，见下表。
@@ -95,17 +95,13 @@ Telegram 适配层将 update 转换为内部请求；应用使用稳定请求 ID
 
 状态：接入、恢复、预算、错误映射与升级路径已由本地自动化测试覆盖（`test/memory-integration.test.ts` 等，离线 faux 模型）；**真实模型的摘要与事件提取质量、真实窗口下的阈值标定、提供商缓存命中尚未验证**，属于 MEM-08 的验收范围，不要据此宣称线上效果。
 
-## 工具凭证与 Agent Vault
+## 工具凭证与部署检查
 
-工具的 API token、API key、用户名和密码可由开源 Agent Vault 从 Infisical Secret Management 同步，再在 HTTP(S) 出口注入；应用只持有占位值。启用方式、`${vault:KEY}` 引用、Basic/Bearer 配置及独立隔离部署见 [Agent Vault 运行说明](docs/agent-vault.md)。模型提供商的 API key、Telegram Bot token 和 owner ID 的存放方式也在该文档中说明；`MODEL_PROVIDER`、`MODEL_ID` 等非秘密配置仍留在应用环境。MCP 外部 OAuth 保留现有授权流程和本地 token 状态，不要求迁入 Vault。
+工具的 API token、API key、用户名和密码由部署环境直接提供：Bot token、模型提供商 API key 与 owner ID 放在应用的 env 文件中（文件权限应受限，例如 600），MCP 配置通过 `${ENV}` 引用进程环境中的值；应用只做存在性与形状校验，不将秘密写入工具参数或 durable 状态。MCP 外部 OAuth 保留现有授权流程和本地 token 状态。
 
-使用独立 `docker-compose.agent-vault.yml` 启动这一模式，不与默认 Compose 合并。Aster 与防火墙容器共享网络命名空间，broker 独立运行；真实 Infisical 联调与容器出口验收尚需在目标机完成。
+同一台主机上的 `test` 与 `production` 由各自的版本化环境描述区分项目名、应用卷名与所消费的 bot；`npm run deployment:environment` 提供渲染核对、宿主资源冲突检查与跨环境重叠检查。字段与用法见 [部署环境描述](docs/deployment-environments.md)。
 
-不同基础设施的密钥按 Infisical 文件夹拆分时，每个文件夹对应一个 vault。叠加 `docker-compose.router.yml`，使用独立 `aster-router` 镜像按目标 `host:port` 选择 vault。配置和运行方法见 [router/README.md](router/README.md)。
-
-同一台主机上的 `test` 与 `production` 由各自的版本化环境描述区分项目名、卷、网络、broker 地址、管理端口和私有目录；`npm run deployment:environment` 提供渲染核对、router 核对、宿主资源冲突检查与跨环境重叠检查。字段与用法见 [部署环境描述](docs/deployment-environments.md)。
-
-CI/CD 的安全关卡、实施顺序与当前进度见 [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)。Agent Vault 受审构建及虚构凭据回归用于验证已确认的取密重定向与日志问题，基础 CI 成功不等于已获得生产部署准入。`npm run release:preflight` 提供版本化清单、两份本地 Compose／显式策略文件摘要及预期四镜像 digest 引用的离线绑定检查；[契约与用法](scripts/ci/README.md#离线发布清单绑定预检ci-07-基础)说明其边界，通过不代表已验签、策略安全或生产预检完成。主机基线、停止写入后的卷元数据预检与整卷备份入口见 [CI-07 主机准备与离线备份](scripts/deploy/README.md)。
+CI/CD 的安全关卡、实施顺序与当前进度见 [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)。基础 CI 成功不等于已获得生产部署准入。`npm run release:preflight` 提供版本化清单、本地 Compose／显式策略文件摘要及预期应用镜像 digest 引用的离线绑定检查；[契约与用法](scripts/ci/README.md#离线发布清单绑定预检ci-07-基础)说明其边界，通过不代表已验签、策略安全或生产预检完成。主机基线、停止写入后的卷元数据预检与整卷备份入口见 [CI-07 主机准备与离线备份](scripts/deploy/README.md)。
 
 ## MCP 服务器（可选）
 
@@ -196,7 +192,7 @@ MCP server 与应用使用同一系统用户，不构成安全边界；stdio ser
 部署注意：
 
 - Aster 镜像自带 Bash 和 npm，`HOME=/data`、`NPM_CONFIG_CACHE=/data/.npm`，缓存与 OAuth 状态均可持久化。MCP 配置使用容器内路径，例如 `/data/workspace`。
-- stdio server 的依赖宜在派生镜像中预装；隔离 Vault 模式不会自动放行 npm registry。把 MCP 配置放在数据卷内，不要把含 secret 的配置写进镜像。
+- stdio server 的依赖宜在派生镜像中预装；运行时临时从 npm registry 安装会把可用性绑到外部网络。把 MCP 配置放在数据卷内，不要把含 secret 的配置写进镜像。
 - 每个 stdio server 都会增加常驻进程和内存占用；4 GB 主机上优先少而稳的 server。
 
 ## 投递核查与补发
@@ -259,7 +255,7 @@ docker compose run --rm --no-deps personal-agent node dist/src/deliveries.js lis
 docker compose up -d personal-agent
 ```
 
-完整的镜像交付、备份恢复、MCP/OAuth、systemd 旧数据迁移及上线验收见 [部署指南](docs/deployment-test-guide.md)。Vault 隔离及多 vault router 使用各自 Compose 组合，见 [Agent Vault](docs/agent-vault.md)；不要与普通 Compose 混合。
+完整的镜像交付、备份恢复、MCP/OAuth、systemd 旧数据迁移及上线验收见 [部署指南](docs/deployment-test-guide.md)。
 
 ## 验证边界
 
