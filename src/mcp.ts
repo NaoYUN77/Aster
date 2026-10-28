@@ -359,7 +359,7 @@ export async function connectMcp(
         log(`MCP server ${server.name}: tool skipped (name collision)`);
         continue;
       }
-      const tool = buildMcpTool(server, connection, info, name);
+      const tool = buildMcpTool(server, connection, info, name, config?.tools?.[name]?.authz);
       if (tool === undefined) {
         log(`MCP server ${server.name}: tool skipped (unsupported schema)`);
         continue;
@@ -444,13 +444,14 @@ export function buildMcpTool(
   connection: McpConnection,
   info: McpToolInfo,
   name: string,
+  authz: ToolGovernance["authz"] = "write",
 ): GovernedTool | undefined {
   const schema = normalizeSchema(info.inputSchema);
   if (schema === undefined) return undefined;
   const governance: ToolGovernance = {
     source: { kind: "mcp", server: server.name },
     trust: "untrusted",
-    authz: "write",
+    authz,
   };
   return Object.assign(defineTool({
     name,

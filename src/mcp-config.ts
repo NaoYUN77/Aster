@@ -59,8 +59,8 @@ export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
 export const DEFAULT_RESIDENT_TOOL_BUDGET_TOKENS = 8_192;
 export type McpFileConfig = {
   readonly servers: readonly McpServerConfig[];
-  /** Registered names, as exposed by tool_search; server discovery does not grant pinning. */
-  readonly tools?: Readonly<Record<string, { readonly pin: boolean }>>;
+  /** Host-owned options by registered name; remote annotations never grant access. */
+  readonly tools?: Readonly<Record<string, { readonly pin?: boolean; readonly authz?: "read" | "write" }>>;
   readonly residentToolBudgetTokens?: number;
 };
 export type McpConfigReadResult = {
@@ -164,8 +164,11 @@ function parseToolOptions(value: unknown): NonNullable<McpFileConfig["tools"]> {
     if (!/^mcp__[A-Za-z0-9_-]+$/.test(name) || name.length > 64) {
       throw new McpConfigError("tools keys must be registered MCP tool names (mcp__..., at most 64 characters)");
     }
-    if (!isRecord(options) || Object.keys(options).some((key) => key !== "pin") || typeof options.pin !== "boolean") {
-      throw new McpConfigError(`tools.${name} must contain only a boolean pin`);
+    if (!isRecord(options) || Object.keys(options).length === 0
+      || Object.keys(options).some((key) => key !== "pin" && key !== "authz")
+      || (Object.hasOwn(options, "pin") && typeof options.pin !== "boolean")
+      || (Object.hasOwn(options, "authz") && options.authz !== "read" && options.authz !== "write")) {
+      throw new McpConfigError(`tools.${name} accepts only pin (boolean) and authz (read or write), with at least one option`);
     }
   }
   return value as NonNullable<McpFileConfig["tools"]>;

@@ -22,9 +22,9 @@
 | tier | 原生 `deferred` 工具为 2，其余为 1；启动结算通过的 MCP pin 去掉 `deferred`，成为常驻工具。 |
 | trust | 内置工具为 trusted，MCP 工具为 untrusted；外部描述不成为可信指令。 |
 | replay | 原生工具策略，未声明时为 unsafe；不从 authz 推断重放安全性。 |
-| authz | read 或 write。内置查询与搜索工具为 read，其余保守标记 write；MCP 一律 write，不采信外部 annotations。本期只记录，不执行授权检查。 |
+| authz | read 或 write。内置查询与搜索工具为 read，其余保守标记 write；MCP 默认 write，仅宿主配置可逐个覆盖，不采信外部 annotations。执行时与宿主权限复核。 |
 | schemaHash | 参数 schema 的 SHA-256，小写十六进制。对象键递归排序、数组顺序保留，不含 TypeBox symbol；只记录，不处理版本漂移。 |
-| state | available 或 unavailable。MCP 连接状态按 server 批量更新；内置工具安装后为 available。 |
+| state | available、unavailable 或 disabled。MCP 连接状态按 server 批量更新；内置工具安装后为 available。宿主 `setDisabled(name, boolean)` 只在当前进程禁用工具，优先于健康状态；解除禁用后恢复当前连接状态，不因健康恢复自动启用。 |
 
 加载账本与注册目录使用同一个 `agent.sqlite` 的底座 document 存储，不新增数据库表或文件。`withToolLedger()` 在 `Harness.open` 前迁移存量会话，保存当前注册目录；运行时在底座 `Storage.commit` 边界，把 `pi.agent` 的变更与附属账本一次提交。工具搜索及其 `control.addTools` 仍由底座执行。
 
@@ -37,13 +37,30 @@
 
 ### 手动 pin 与声明边界
 
-`mcp.json` 顶层 `tools` 是按注册名索引的对象（最多 800 项），值必须为 `{ pin: boolean }`，未知字段拒绝；`residentToolBudgetTokens` 默认 8192，范围 1～1048576。参数校验及默认值以 `src/mcp-config.ts` 为准。配置是宿主输入，不读取远端 annotations，不允许模型调用注册或晋升接口。
+`mcp.json` 顶层 `tools` 是按注册名索引的对象（最多 800 项），每项允许 `pin: boolean` 和 `authz: "read" | "write"`，至少设置其中一项，未知字段拒绝；未设 pin 等同未请求晋升，未设 authz 的 MCP 工具默认 write。`residentToolBudgetTokens` 默认 8192，范围 1～1048576。参数校验及默认值以 `src/mcp-config.ts` 为准。配置是宿主输入，不读取远端 annotations，不允许模型调用注册或晋升接口。
 
 启动时健康快照先进入 Register，`installMcpTools()` 按 extension 名及工具注册名固定排序，再按注册名依次验证 pin 的存在性、available 状态和剩余预算。预算按 `estimateTextTokens(JSON.stringify(declarations))` 计算，声明通过原生 `toToolDeclaration()` 转换，包含内置、记忆、搜索工具及接受的 pin 的 name／description／parameters 等模型字段；使用 pi-ai 1.3.0 的字符估算，与提供商精确 token 数有差异。基础集合已超预算时拒绝所有新增 pin，不移除内置工具。失败记录 `TOOL_NOT_FOUND`／`TOOL_UNAVAILABLE`／`TOOL_BUDGET_EXCEEDED`；已注册且可用的 MCP 工具仍可按需搜索。
 
 本期只在启动结算，不监听配置文件、自动晋升或自动降级。底座开启后尚未恢复调度时，先初始化记忆并补扫已发布压缩，持久化归档目标，避免 pin 切换覆盖尚待确认的上下文头；再检查未完成任务（包括补扫新建的归档任务）、提交，以及记忆投影已落盘但输入尚未接收的请求；投影收据通过原生提交记录分页读取，不复制另一套请求状态。有未完成工作则按账本恢复旧常驻集，延迟新配置到下一次空闲重启，记录 `TOOL_PIN_RECOVERY`；恢复旧集不重新套用新预算或因掉线撤销已发出的声明。没有未完成工作且集合改变时，在一次原生提交中追加 `pi.reset` 上下文头并结算账本 epoch／resident 字段，下一请求发布完整基线，旧记录保留。此边界不启动任务，也不取消未完成请求；初次 pin 从 epoch 0 到 1，无变化重启不增加。`resident` 是常驻决策元数据，缺省等同旧版本的空集合，由存储适配层管理，可通过 `readResidentTools()` 查询。
 
 晋升仅去掉原生 `deferred` 属性，保留工具参数、执行函数、健康拦截、`replay`、trust 和 authz。默认会话选择因此自动包含常驻工具；底座显式 `tools`／`modelTools` 过滤仍有优先权。取消 pin 不删除原生已加载选择，过去由搜索加载的工具不会自动卸载。所有 pin 配置改动均需重启，健康状态仍实时变化且不增加声明 epoch。
+
+### 执行复核与宿主权限
+
+`createToolRegistry(extensions, { authority, log })` 在每个原生工具执行函数外统一复核 Register，顺序为精确名称存在、state 为 available、当前权限足够，然后才进入工具实现。取消信号先检查；参数修复和参数校验仍由底座执行，参数不合法时不会到达复核执行器。内置、MCP、后装工具和 `api.executeTool()` 嵌套调用共用此边界。安全重放进入执行函数时再次使用当前状态和权限；unsafe 工具仍按底座规则报告执行结果未知，不因权限变化重跑。
+
+权限由宿主固定为 `owner`（默认，可执行 read 和 write）或 `restricted`（仅 read）。生产 `openAgent()` 通过 `toolAuthority` 注入，作用于整个实例的所有会话、任务及恢复；模型参数、MCP 描述和 annotations 均不能提升权限。现有 Telegram 入口已认证为所有者，使用默认 owner。本期只预留受限实例入口，不提供请求间动态切换、多级身份系统或 destructive 二次确认。authz 配置在启动时应用，包括未完成任务的后续执行；它不改变工具声明字节、加载编号、epoch、trust 或 replay。
+
+| 拒绝原因 | 结果与恢复提示 |
+| --- | --- |
+| 名称未注册 | 原生分发按精确名称返回 `Tool <name> is not available`，不执行、不模糊匹配；复核日志记 `TOOL_NOT_FOUND`。 |
+| unavailable | `TOOL_UNAVAILABLE`，提示恢复服务并重启连接；未发送调用。 |
+| disabled | `TOOL_DISABLED`，提示请所有者启用；未发送调用。 |
+| restricted 调用 write | `TOOL_AUTHZ_DENIED`，提示由所有者执行；不进入工具实现。 |
+
+执行器拒绝返回原生 `isError`、文本恢复提示、`details.code` 和 diagnostic。底座 1.3.0 对未向模型提供的名称会直接拒绝而不创建工具任务，应用通过 `GenerationTask.afterResponse` 观察未知名称；嵌套未知名称在转交原生 `executeTool()` 时记录。两者保留底座的错误结果与调用关联，不自建工具任务或绕过参数校验。已注册但被原生会话过滤排除的工具继续由底座拒绝。
+
+`tool_review` 日志使用 JSON 行，默认 stderr，宿主可注入 logger；包含 conversationId、taskId、callId、注册名（最多 128 字符）、authority、可取得的 authz／state、allow／deny 及原因码，成功复核为 `TOOL_ALLOWED`。未知嵌套名称日志的标识指向发起调用的父工具，其他执行日志指向实际工具任务。日志不含参数、凭据或工具结果，也不承诺重启后恰好记录一次；它是未来 Trace 的接入点，不另建持久化审计数据库。
 
 ### 结果与失败
 

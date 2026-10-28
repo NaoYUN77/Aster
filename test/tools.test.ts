@@ -36,7 +36,10 @@ test("registration exposes immutable governance without changing native tools", 
   assert.equal(Object.isFrozen(clock), true);
   assert.equal(Object.isFrozen(clock.source), true);
   assert.equal(Object.isFrozen(registry.records()), true);
-  assert.equal(registry.snapshot().tools().find(({ tool }) => tool.name === "current_time")?.tool, currentTime);
+  const native = registry.snapshot().tools().find(({ tool }) => tool.name === "current_time")!.tool;
+  assert.equal(native.parameters, currentTime.parameters);
+  assert.equal(native.replay, currentTime.replay);
+  assert.equal(native.description, currentTime.description);
 });
 
 test("late installs reject collisions atomically and retain native replace/uninstall semantics", () => {

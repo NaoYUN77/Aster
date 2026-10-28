@@ -93,7 +93,8 @@ test("tool pin options use registered names and bounded integer budgets", () => 
     assert.match(validateMcpConfig({ servers: [], residentToolBudgetTokens: invalid }).error ?? "", /residentToolBudgetTokens/);
   }
   for (const invalid of [[], null, { read: { pin: true } }, { "mcp__s__bad name": { pin: true } },
-    { mcp__s__echo: { pin: "true" } }, { mcp__s__echo: { pin: true, authz: "read" } }, { mcp__s__echo: {} }]) {
+    { mcp__s__echo: { pin: "true" } }, { mcp__s__echo: { pin: true, authz: "admin" } }, { mcp__s__echo: {} },
+    { mcp__s__echo: { authz: null } }, { mcp__s__echo: { authz: "read", extra: true } }]) {
     assert.match(validateMcpConfig({ servers: [], tools: invalid }).error ?? "", /tools/);
   }
 });

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
-import { createRegistry, defineExtension, defineTool, type Extension, type Registry, type ToolRegistration } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, GenerationTask, hook, type Extension, type Registry, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 
@@ -40,7 +40,14 @@ export type ToolRecord = ToolGovernance & {
   readonly tier: 1 | 2;
   readonly replay: "safe" | "unsafe";
   readonly schemaHash: string;
-  readonly state: ToolAvailability;
+  readonly state: ToolAvailability | "disabled";
+};
+
+/** Fixed by the host for one agent instance, including its recovered and nested calls. */
+export type ToolAuthority = "owner" | "restricted";
+export type ToolRegistryOptions = {
+  readonly authority?: ToolAuthority;
+  readonly log?: (line: string) => void;
 };
 
 export interface ToolRegistry extends Registry {
@@ -48,6 +55,8 @@ export interface ToolRegistry extends Registry {
   lookup(name: string): ToolRecord | undefined;
   records(): readonly ToolRecord[];
   setMcpAvailability(server: string, state: ToolAvailability): void;
+  /** Host-only switch; disabling does not remove declarations or alter replay policy. */
+  setDisabled(name: string, disabled: boolean): void;
 }
 
 const READ_TOOLS = new Set(["read", "current_time", "working_read", "memory_search", "memory_read", "tool_search"]);
@@ -76,36 +85,85 @@ function registration(extension: Extension, tool: GovernedTool): ToolRecord {
   });
 }
 
-export function createToolRegistry(extensions: readonly Extension[] = [CodingTools, personalTools]): ToolRegistry {
+export function createToolRegistry(
+  extensions: readonly Extension[] = [CodingTools, personalTools],
+  options: ToolRegistryOptions = {},
+): ToolRegistry {
   const registry = createRegistry();
+  const authority = options.authority ?? "owner";
+  const log = options.log ?? console.error;
   let records = new Map<string, ToolRecord>();
   const availability = new Map<string, ToolAvailability>();
+  const disabled = new Set<string>();
   const listeners = new Set<() => void>();
   const notify = () => { for (const listener of [...listeners]) listener(); };
-  function executionTool(tool: GovernedTool): ToolRegistration {
-    if (tool.name === TOOL_SEARCH_TOOL_NAME) return {
-      ...tool,
-      execute: (args, api, context) => tool.execute(args, {
-        ...api,
-        agent: async (context) => {
-          const agent = await api.agent(context);
-          return { ...agent, deferred: agent.deferred.filter(({ name }) => records.get(name)?.state === "available") };
-        },
-      }, context),
+  type CallIdentity = Pick<ToolExecutionApi, "conversationId" | "taskId" | "callId">;
+  function audit(name: string, call: CallIdentity, code: string, record?: ToolRecord) {
+    log(JSON.stringify({ event: "tool_review", ...call, tool: name.slice(0, 128), authority,
+      authz: record?.authz, state: record?.state, decision: code === "TOOL_ALLOWED" ? "allow" : "deny", code }));
+  }
+  function review(name: string, call: CallIdentity): ToolExecutionResult | undefined {
+    const record = records.get(name);
+    let code: string;
+    let message: string;
+    if (record === undefined) {
+      code = "TOOL_NOT_FOUND";
+      message = `Tool ${name} is not registered. Use an exact registered name from tool_search.`;
+    } else if (record.state === "disabled") {
+      code = "TOOL_DISABLED";
+      message = `Tool ${name} is disabled; this call was not sent. Ask the owner to enable it.`;
+    } else if (record.state === "unavailable") {
+      code = "TOOL_UNAVAILABLE";
+      const source = record.source.kind === "mcp" ? `MCP server ${record.source.server}` : `Tool ${name}`;
+      message = `${source} is unavailable; this call was not sent. Restore the service and restart to reconnect.`;
+    } else if (authority !== "owner" && record.authz !== "read") {
+      code = "TOOL_AUTHZ_DENIED";
+      message = `Tool ${name} requires ${record.authz} authority; this restricted agent permits read tools only. Ask the owner to perform this action.`;
+    } else {
+      audit(name, call, "TOOL_ALLOWED", record);
+      return undefined;
+    }
+    audit(name, call, code, record);
+    return {
+      isError: true,
+      output: [{ type: "text", text: message }],
+      details: { code, ...(record?.source.kind === "mcp" ? { server: record.source.server } : {}), tool: name },
+      diagnostics: [{ severity: "error", code, message }],
     };
-    if (tool.governance?.source.kind !== "mcp") return tool;
-    const server = tool.governance.source.server;
+  }
+  // Unknown model calls never get a ToolTask in 1.3.0. Observe them without changing native admission.
+  const observer = defineExtension({ name: "tool-governance", hooks: [hook(GenerationTask, {
+    afterResponse(message, api) {
+      if (message.stopReason !== "toolUse") return;
+      for (const call of message.content) {
+        if (call.type === "toolCall" && !records.has(call.name)) {
+          review(call.name, { conversationId: api.conversationId, taskId: api.taskId, callId: call.id });
+        }
+      }
+    },
+  })] });
+  registry.install(observer);
+  function executionTool(tool: GovernedTool): ToolRegistration {
     return {
       ...tool,
-      execute: (args, api, context) => {
+      execute: async (args, api, context) => {
         context.abortSignal?.throwIfAborted();
-        if (records.get(tool.name)?.state === "unavailable") return Promise.resolve({
-          isError: true,
-          output: [{ type: "text", text: `MCP server ${server} is unavailable; this call was not sent.` }],
-          details: { code: "TOOL_UNAVAILABLE", server, tool: tool.name },
-          diagnostics: [{ severity: "error", code: "TOOL_UNAVAILABLE", message: `MCP server ${server} is unavailable` }],
-        });
-        return tool.execute(args, api, context);
+        const rejected = review(tool.name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId });
+        if (rejected !== undefined) return rejected;
+        return tool.execute(args, {
+          ...api,
+          executeTool: (name, args, context, options) => {
+            // Native resolution rejects missing nested names before hooks or an executor can run.
+            if (!records.has(name)) review(name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId });
+            return api.executeTool(name, args, context, options);
+          },
+          ...(tool.name === TOOL_SEARCH_TOOL_NAME ? {
+            agent: async (context: Parameters<ToolExecutionApi["agent"]>[0]) => {
+              const agent = await api.agent(context);
+              return { ...agent, deferred: agent.deferred.filter(({ name }) => records.get(name)?.state === "available") };
+            },
+          } : {}),
+        }, context);
       },
     };
   }
@@ -116,6 +174,7 @@ export function createToolRegistry(extensions: readonly Extension[] = [CodingToo
       return () => { listeners.delete(listener); };
     },
     install(extension) {
+      if (extension.name === observer.name) throw new Error(`Reserved extension name: ${extension.name}`);
       const next = new Map<string, ToolRecord>();
       for (const installed of registry.snapshot().installed()) {
         if (installed.name === extension.name) continue;
@@ -125,7 +184,8 @@ export function createToolRegistry(extensions: readonly Extension[] = [CodingToo
         // pi-durable permits shadowing across extensions; this application requires unique names.
         if (next.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
         const record = registration(extension, tool);
-        const state = record.source.kind === "mcp" ? availability.get(record.source.server) ?? "available" : "available";
+        const state = disabled.has(tool.name) ? "disabled"
+          : record.source.kind === "mcp" ? availability.get(record.source.server) ?? "available" : "available";
         next.set(tool.name, state === record.state ? record : Object.freeze({ ...record, state }));
       }
       registry.install({ ...extension, tools: extension.tools?.map(executionTool) });
@@ -133,6 +193,7 @@ export function createToolRegistry(extensions: readonly Extension[] = [CodingToo
       notify();
     },
     uninstall(extension) {
+      if (extension.name === observer.name) throw new Error(`Reserved extension name: ${extension.name}`);
       if (registry.snapshot().extension(extension.name) === undefined) return;
       const removed = registry.snapshot().extension(extension.name)!;
       registry.uninstall(extension);
@@ -143,11 +204,22 @@ export function createToolRegistry(extensions: readonly Extension[] = [CodingToo
       availability.set(server, state);
       let changed = false;
       for (const [name, record] of records) {
-        if (record.source.kind !== "mcp" || record.source.server !== server || record.state === state) continue;
+        if (record.source.kind !== "mcp" || record.source.server !== server || disabled.has(name) || record.state === state) continue;
         records.set(name, Object.freeze({ ...record, state }));
         changed = true;
       }
       if (changed) notify();
+    },
+    setDisabled(name, value) {
+      const record = records.get(name);
+      if (record === undefined) throw new Error(`Tool ${name} is not registered`);
+      if (value) disabled.add(name);
+      else disabled.delete(name);
+      const state = value ? "disabled"
+        : record.source.kind === "mcp" ? availability.get(record.source.server) ?? "available" : "available";
+      if (record.state === state) return;
+      records.set(name, Object.freeze({ ...record, state }));
+      notify();
     },
     lookup: (name) => records.get(name),
     records: () => Object.freeze(registry.snapshot().tools().map(({ tool }) => records.get(tool.name)!)),
