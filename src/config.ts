@@ -28,6 +28,7 @@ export function resolveMcpConfigPaths(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env) {
+  const telegramApiRoot = readTelegramApiRoot(env);
   const required = (key: string) => {
     const value = env[key]?.trim();
     if (!value) throw new ConfigurationError(`Missing configuration: ${key}`);
@@ -45,8 +46,30 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     ownerId,
     provider,
     model: required("MODEL_ID"),
+    telegramApiRoot,
     ...resolveMcpConfigPaths(env),
   };
+}
+
+/**
+ * Optional Telegram Bot API root override (a reverse proxy, e.g. a Cloudflare Worker) for hosts
+ * that cannot reach api.telegram.org directly. The value is a URL prefix: the client appends
+ * /bot<token>/<method> to it. It must be an https URL without query or fragment; trailing
+ * slashes are dropped so the join is exact. Unset means the default api.telegram.org root.
+ * It conflicts with Agent Vault, whose broker proxies api.telegram.org itself.
+ */
+function readTelegramApiRoot(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.TELEGRAM_API_ROOT?.trim();
+  if (!raw) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigurationError("TELEGRAM_API_ROOT must be a valid URL");
+  }
+  if (url.protocol !== "https:") throw new ConfigurationError("TELEGRAM_API_ROOT must be an https URL");
+  if (url.search || url.hash) throw new ConfigurationError("TELEGRAM_API_ROOT must not contain a query or fragment");
+  return url.href.replace(/\/+$/, "");
 }
 
 /** Memory wiring (MEM-07): budgets, the compaction reserve, the archive timezone and timeout. */
