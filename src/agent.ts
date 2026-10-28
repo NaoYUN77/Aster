@@ -97,6 +97,7 @@ Your final response will be delivered to Telegram as plain text. Do not claim an
   if (memory) for (const extension of memory.extensions()) registry.install(extension);
   const mcp = options.mcp ?? await openMcpHost(config, registry, options.signal);
   for (const extension of mcp.extensions) registry.install(extension);
+  const unsubscribeMcp = mcp.subscribeAvailability((server, state) => registry.setMcpAvailability(server, state));
 
   let harness: Awaited<ReturnType<typeof Harness.open>>;
   try {
@@ -113,6 +114,7 @@ Your final response will be delivered to Telegram as plain text. Do not claim an
       env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? workspace }),
     }, context);
   } catch (error) {
+    unsubscribeMcp();
     await mcp.close().catch(() => {});
     throw error;
   }
@@ -196,6 +198,7 @@ Your final response will be delivered to Telegram as plain text. Do not claim an
         try {
           await harness.close(context);
         } finally {
+          unsubscribeMcp();
           await mcp.close();
         }
       },
@@ -205,6 +208,7 @@ Your final response will be delivered to Telegram as plain text. Do not claim an
     try {
       await harness.close(context);
     } finally {
+      unsubscribeMcp();
       await mcp.close().catch(() => {});
     }
     throw error;
@@ -225,7 +229,7 @@ async function openMcpHost(
   if (read.error !== undefined) {
     if (config.mcpConfigExplicit) throw new ConfigurationError(read.error);
     console.error(`MCP disabled (MCP_CONFIG_INVALID): ${read.error}`);
-    return { extensions: [], close: async () => {} };
+    return { extensions: [], subscribeAvailability: () => () => {}, close: async () => {} };
   }
   return connectMcp(read.config, {
     dataDir: config.dataDir,

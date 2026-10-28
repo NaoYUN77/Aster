@@ -35,7 +35,7 @@ import {
 import { Compile } from "typebox/compile";
 import type { McpAuthConfig, McpFileConfig, McpHttpServerConfig, McpServerConfig } from "./mcp-config.js";
 import { FileOAuthStateStore } from "./mcp-oauth-store.js";
-import type { GovernedTool, ToolGovernance } from "./tools.js";
+import type { GovernedTool, ToolAvailability, ToolGovernance } from "./tools.js";
 
 const CLIENT_NAME = "personal-agent-base-durable";
 const CLIENT_VERSION = "0.1.0";
@@ -69,7 +69,8 @@ export interface McpConnection {
     options: { readonly signal?: AbortSignal; readonly timeoutMs: number },
   ): Promise<CallToolResult>;
   close(): Promise<void>;
-  onClose(listener: () => void): () => void;
+  /** Synchronously reports current availability, then observed connection changes. */
+  subscribeAvailability(listener: (state: ToolAvailability) => void): () => void;
 }
 
 export type McpConnectContext = {
@@ -86,6 +87,8 @@ export type McpConnector = (server: McpServerConfig, context: McpConnectContext)
 
 export type McpHost = {
   readonly extensions: readonly Extension[];
+  /** Replays every discovered server's state before returning. */
+  subscribeAvailability(listener: (server: string, state: ToolAvailability) => void): () => void;
   close(): Promise<void>;
 };
 
@@ -214,7 +217,12 @@ function wrapConnection(
       closed = true;
       await client.close();
     },
-    onClose: (listener) => client.onClose(listener),
+    subscribeAvailability(listener) {
+      const unsubscribe = client.onClose(() => listener("unavailable"));
+      // onClose is not replayed by the SDK; discovery may already have observed a closure.
+      listener(client.connectionState === "connected" ? "available" : "unavailable");
+      return unsubscribe;
+    },
   };
 }
 
@@ -323,7 +331,14 @@ export async function connectMcp(
 
   const used = new Set(options.reserved);
   const extensions: Extension[] = [];
-  const live: { connection: McpConnection; closed: boolean }[] = [];
+  const live: { connection: McpConnection; unsubscribe: () => void }[] = [];
+  const availability = new Map<string, ToolAvailability>();
+  const listeners = new Set<(server: string, state: ToolAvailability) => void>();
+  const update = (server: string, state: ToolAvailability) => {
+    if (availability.get(server) === state) return;
+    availability.set(server, state);
+    for (const listener of [...listeners]) listener(server, state);
+  };
   const summary: string[] = [];
 
   for (const result of results) {
@@ -355,11 +370,14 @@ export async function connectMcp(
       log(`MCP server ${server.name} provides no usable tools`);
       continue;
     }
-    const record = { connection, closed: false };
-    connection.onClose(() => {
-      if (!record.closed) log(`MCP server ${server.name} disconnected`);
+    const unsubscribe = connection.subscribeAvailability((state) => {
+      const previous = availability.get(server.name);
+      update(server.name, state);
+      if (previous !== state && (previous !== undefined || state === "unavailable")) {
+        log(`MCP server ${server.name} ${state === "available" ? "reconnected" : "disconnected"}`);
+      }
     });
-    live.push(record);
+    live.push({ connection, unsubscribe });
     // Installing an extension with an existing name replaces it, so the server-derived names must never
     // coincide with the summary extension below. SERVER_NAME allows "info", and the prefix differs.
     extensions.push(defineExtension({ name: `mcp-server-${server.name}`, tools: registrations }));
@@ -380,11 +398,20 @@ export async function connectMcp(
   let closed = false;
   return {
     extensions,
+    subscribeAvailability(listener) {
+      listeners.add(listener);
+      for (const [server, state] of availability) listener(server, state);
+      return () => { listeners.delete(listener); };
+    },
     async close() {
       if (closed) return;
       closed = true;
+      for (const record of live) {
+        record.unsubscribe();
+        update(record.connection.serverName, "unavailable");
+      }
+      listeners.clear();
       await Promise.all(live.map(async (record) => {
-        record.closed = true;
         await record.connection.close().catch(() => {});
       }));
     },

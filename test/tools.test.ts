@@ -6,7 +6,7 @@ import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { connectMcp } from "../src/mcp.js";
-import { createToolRegistry, currentTime, personalTools } from "../src/tools.js";
+import { createToolRegistry, currentTime, personalTools, type GovernedTool } from "../src/tools.js";
 
 const example = (name: string, parameters = Type.Object({})) => defineTool({
   name,
@@ -64,6 +64,36 @@ test("late installs reject collisions atomically and retain native replace/unins
   assert.equal(notifications, 2);
 });
 
+test("MCP availability changes are atomic per server and preserve native declarations and old records", () => {
+  const mcpTool = (name: string, server: string): GovernedTool => Object.assign(example(name), {
+    governance: { source: { kind: "mcp" as const, server }, trust: "untrusted" as const, authz: "write" as const },
+  });
+  const registry = createToolRegistry([personalTools]);
+  registry.install({ name: "one", tools: [mcpTool("alpha", "one"), mcpTool("beta", "one")] });
+  registry.install({ name: "two", tools: [mcpTool("gamma", "two")] });
+  const snapshot = registry.snapshot();
+  const original = registry.lookup("alpha")!;
+  let changes = 0;
+  registry.subscribe(() => {
+    changes++;
+    assert.equal(registry.lookup("alpha")?.state, registry.lookup("beta")?.state);
+  });
+  registry.setMcpAvailability("one", "unavailable");
+  registry.setMcpAvailability("one", "unavailable");
+  assert.equal(changes, 1);
+  assert.equal(registry.lookup("gamma")?.state, "available");
+  assert.equal(registry.lookup("current_time")?.state, "available");
+  assert.equal(original.state, "available", "published records are immutable snapshots");
+  assert.deepEqual(registry.lookup("alpha"), { ...original, state: "unavailable" });
+  assert.equal(registry.snapshot(), snapshot, "health does not republish native registrations");
+  registry.setMcpAvailability("one", "available");
+  assert.equal(changes, 2);
+  assert.deepEqual(registry.lookup("alpha"), original);
+  registry.setMcpAvailability("early", "unavailable");
+  registry.install({ name: "early", tools: [mcpTool("delta", "early")] });
+  assert.equal(registry.lookup("delta")?.state, "unavailable", "an install inherits observed server state");
+});
+
 test("schema hashes ignore object key order and retain schema differences", () => {
   const registry = createToolRegistry([]);
   const hash = (parameters: ReturnType<typeof Type.Object>) => {
@@ -89,7 +119,7 @@ test("MCP registrations use the same records with adapter-owned source and conse
       listTools: async () => [{ name: "events", inputSchema: { type: "object" } }],
       callTool: async () => ({ content: [] }),
       close: async () => {},
-      onClose: () => () => {},
+      subscribeAvailability: (listener) => { listener("available"); return () => {}; },
     }),
   });
   try {

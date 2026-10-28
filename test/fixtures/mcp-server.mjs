@@ -39,6 +39,8 @@ function handle(message) {
         },
       ] } };
     case "tools/call": {
+      // Test-only fault injection; intentionally absent from tools/list.
+      if (message.params?.name === "exit") process.exit(23);
       const args = message.params?.arguments ?? {};
       if (message.params?.name === "echo") {
         return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: String(args.text ?? "") }] } };
