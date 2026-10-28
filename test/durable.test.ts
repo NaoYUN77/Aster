@@ -54,16 +54,16 @@ function modelFixture(provider = "faux") {
   return { faux, models };
 }
 
-test("agent memory tools survive reopening and completed requests are not executed again", { timeout: 15_000 }, async () => {
+test("agent file tools survive reopening and completed requests are not executed again", { timeout: 15_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "personal-agent-memory-test-"));
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
     const first = modelFixture("openai");
     first.faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("read", { path: "MEMORY.md" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("read", { path: "notes.md" }), { stopReason: "toolUse" }),
       fauxAssistantMessage([
-        fauxToolCall("write", { path: "MEMORY.md", content: "Favorite color: blue.\n" }, { id: "save" }),
-        fauxToolCall("read", { path: "MEMORY.md" }, { id: "read-after-save" }),
+        fauxToolCall("write", { path: "notes.md", content: "Favorite color: blue.\n" }, { id: "save" }),
+        fauxToolCall("read", { path: "notes.md" }, { id: "read-after-save" }),
         fauxToolCall("current_time", {}, { id: "clock" }),
       ], { stopReason: "toolUse" }),
       (transcript) => {
@@ -86,7 +86,7 @@ test("agent memory tools survive reopening and completed requests are not execut
     assert.equal(await app.reply(request, running), "Remembered: blue.");
     assert.equal(second.faux.state.callCount, 0);
     second.faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("read", { path: "MEMORY.md" }, { id: "reopened-memory" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("read", { path: "notes.md" }, { id: "reopened-memory" }), { stopReason: "toolUse" }),
       (transcript) => {
         const memory = transcript.messages.find((message) => message.role === "toolResult" && message.toolCallId === "reopened-memory");
         assert.ok(memory?.role === "toolResult" && !memory.isError);
