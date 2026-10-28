@@ -6,7 +6,8 @@ import test from "node:test";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import type { ToolExecutionApi } from "@earendil-works/pi-durable";
+import type { Message } from "@earendil-works/pi-ai";
+import { MemoryStorage, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import {
   McpAbortError,
   McpConnectionClosedError,
@@ -16,10 +17,12 @@ import {
 } from "@earendil-works/pi-mcp";
 import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
 import { openAgent } from "../src/agent.js";
-import { readConfig } from "../src/config.js";
+import { readConfig, readMemoryConfig } from "../src/config.js";
 import { buildMcpTool, connectMcp, mcpToolName, openMcpConnection, type McpConnection, type McpToolInfo } from "../src/mcp.js";
 import type { McpFileConfig, McpServerConfig } from "../src/mcp-config.js";
 import type { TextRequest } from "../src/messages.js";
+import { readToolCatalog, readToolLedger } from "../src/tool-ledger.js";
+import { createToolRegistry } from "../src/tools.js";
 
 const unusedApi = undefined as unknown as ToolExecutionApi;
 
@@ -28,6 +31,7 @@ type Call = { name: string; args: Record<string, unknown>; signal?: AbortSignal;
 interface FakeConnection extends McpConnection {
   readonly calls: Call[];
   readonly closedCount: number;
+  setAvailability(state: "available" | "unavailable"): void;
 }
 
 function fakeConnection(
@@ -39,8 +43,13 @@ function fakeConnection(
   } = {},
 ): FakeConnection {
   const calls: Call[] = [];
-  const listeners: (() => void)[] = [];
+  const listeners = new Set<(state: "available" | "unavailable") => void>();
+  let availability: "available" | "unavailable" = "available";
   let closedCount = 0;
+  const setAvailability = (state: typeof availability) => {
+    availability = state;
+    for (const listener of [...listeners]) listener(state);
+  };
   return {
     serverName,
     calls,
@@ -52,13 +61,15 @@ function fakeConnection(
       calls.push({ name, args, ...(request.signal === undefined ? {} : { signal: request.signal }), timeoutMs: request.timeoutMs });
       return options.call?.(name, args, request.signal) ?? { content: [{ type: "text", text: "ok" }] };
     },
+    setAvailability,
     async close() {
       closedCount++;
-      for (const listener of listeners) listener();
+      setAvailability("unavailable");
     },
-    onClose(listener) {
-      listeners.push(listener);
-      return () => {};
+    subscribeAvailability(listener) {
+      listeners.add(listener);
+      listener(availability);
+      return () => { listeners.delete(listener); };
     },
   };
 }
@@ -424,6 +435,25 @@ test("a server that drops after connecting keeps its tools and says so", async (
   }
 });
 
+test("a close during discovery is replayed to late health subscribers and shutdown detaches listeners", async () => {
+  const connection = fakeConnection("s", [tool("t")], {
+    list: async () => { connection.setAvailability("unavailable"); return [tool("t")]; },
+  });
+  const host = await connectMcp(config(stdioServer("s")), {
+    dataDir: tmpdir(), reserved: new Set(), log: () => {}, connect: async () => connection,
+  });
+  const changes: string[] = [];
+  host.subscribeAvailability((server, state) => changes.push(`${server}:${state}`));
+  assert.deepEqual(changes, ["s:unavailable"]);
+  connection.setAvailability("available");
+  connection.setAvailability("available");
+  assert.deepEqual(changes, ["s:unavailable", "s:available"]);
+  await host.close();
+  assert.deepEqual(changes, ["s:unavailable", "s:available", "s:unavailable"]);
+  connection.setAvailability("available");
+  assert.equal(changes.length, 3, "late connection events cannot revive a closed host");
+});
+
 test("a real stdio server connects, lists, calls, and withholds the host environment", { timeout: 20_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-mcp-"));
   const server: McpServerConfig = {
@@ -440,7 +470,10 @@ test("a real stdio server connects, lists, calls, and withholds the host environ
     dataDir: directory,
     env: { ...process.env, SECRET_TOKEN: "leak-me" },
   });
+  const states: string[] = [];
+  const unsubscribe = connection.subscribeAvailability((state) => states.push(state));
   try {
+    assert.deepEqual(states, ["available"]);
     assert.deepEqual((await connection.listTools()).map((entry) => entry.name), ["echo", "env", "bad_schema"]);
     assert.deepEqual((await connection.callTool("echo", { text: "hello" }, { timeoutMs: 5_000 })).content, [{ type: "text", text: "hello" }]);
 
@@ -448,10 +481,17 @@ test("a real stdio server connects, lists, calls, and withholds the host environ
     assert.deepEqual(leaked.content, [{ type: "text", text: "" }], "the bot's environment does not reach MCP children");
     const shared = await connection.callTool("env", { key: "SHARED" }, { timeoutMs: 5_000 });
     assert.deepEqual(shared.content, [{ type: "text", text: "yes" }], "the configured environment does reach the child");
+    await assert.rejects(connection.callTool("exit", {}, { timeoutMs: 5_000 }), McpConnectionClosedError);
+    assert.deepEqual(states, ["available", "unavailable"], "unexpected process exit reports unavailability");
   } finally {
     await connection.close();
   }
   await connection.close();
+  assert.deepEqual(states, ["available", "unavailable"]);
+  const late: string[] = [];
+  connection.subscribeAvailability((state) => late.push(state))();
+  assert.deepEqual(late, ["unavailable"], "SDK close events are replayed by the adapter snapshot");
+  unsubscribe();
   await rm(directory, { recursive: true, force: true });
 });
 
@@ -504,6 +544,97 @@ test("an MCP tool is hidden until tool_search loads it, then callable", { timeou
     const request: TextRequest = { requestId: "telegram:test:1", conversationId: "telegram:test", senderId: "1", text: "Echo something." };
     assert.equal(await app.reply(request, new AbortController().signal), "done");
     assert.equal(connection.calls.length, 1, "the MCP server was called once");
+  } finally {
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("MCP health filters native search and blocks loaded calls without changing declarations or load epochs", { timeout: 20_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-mcp-health-"));
+  const storage = new MemoryStorage();
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    const connection = fakeConnection("s", [tool("alpha", {
+      type: "object", properties: { value: { type: "string" } }, required: ["value"],
+    }), tool("beta")]);
+    const host = await connectMcp(config(stdioServer("s")), {
+      dataDir: directory, reserved: new Set(), log: () => {}, connect: async () => connection,
+    });
+    const faux = fauxProvider({ provider: "openai" });
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const declarations = (messages: readonly Message[]) => JSON.stringify(messages.flatMap((message) =>
+      message.role === "system" && (message.toolsAdded?.length || message.toolsRemoved?.length)
+        ? [{ added: message.toolsAdded, removed: message.toolsRemoved }] : []
+    ));
+    const lastResult = (messages: readonly Message[]) => messages.findLast((message) => message.role === "toolResult");
+    let stable: string;
+    let baseline: Awaited<ReturnType<typeof readToolLedger>>;
+    const ledger = async () => {
+      const conversations = await storage.scanConversations({}, 10, undefined, BACKGROUND_CONTEXT);
+      return readToolLedger(storage, conversations.items[0]!.id, BACKGROUND_CONTEXT);
+    };
+    faux.setResponses([
+      () => fauxAssistantMessage(fauxToolCall("tool_search", { query: "alpha", limit: 1 }), { stopReason: "toolUse" }),
+      async (transcript) => {
+        stable = declarations(transcript.messages);
+        baseline = await ledger();
+        assert.equal(baseline?.sequence, 1);
+        connection.setAvailability("unavailable");
+        return fauxAssistantMessage(fauxToolCall("mcp__s__alpha", {}), { stopReason: "toolUse" });
+      },
+      (transcript) => {
+        const result = lastResult(transcript.messages);
+        assert.ok(result?.isError);
+        assert.match(JSON.stringify(result.content), /value/);
+        assert.equal(result.details, undefined, "native schema validation precedes the availability guard");
+        assert.equal(connection.calls.length, 0);
+        return fauxAssistantMessage(fauxToolCall("mcp__s__alpha", { value: "blocked" }), { stopReason: "toolUse" });
+      },
+      async (transcript) => {
+        assert.equal(declarations(transcript.messages), stable);
+        const result = lastResult(transcript.messages);
+        assert.ok(result?.role === "toolResult" && result.isError);
+        assert.deepEqual(result.details, { code: "TOOL_UNAVAILABLE", server: "s", tool: "mcp__s__alpha" });
+        assert.match(JSON.stringify(result.content), /unavailable; this call was not sent/);
+        assert.equal(connection.calls.length, 0, "unavailable calls never reach the connection");
+        assert.deepEqual(await ledger(), baseline);
+        const catalog = await readToolCatalog(storage, BACKGROUND_CONTEXT);
+        assert.equal(catalog.find(({ name }) => name === "mcp__s__alpha")?.state, "unavailable");
+        assert.equal(catalog.find(({ name }) => name === "mcp__s__beta")?.state, "unavailable");
+        return fauxAssistantMessage(fauxToolCall("tool_search", { query: "beta" }), { stopReason: "toolUse" });
+      },
+      async (transcript) => {
+        assert.equal(declarations(transcript.messages), stable);
+        assert.deepEqual(lastResult(transcript.messages)?.details, { loaded: [] });
+        assert.deepEqual(await ledger(), baseline);
+        connection.setAvailability("available");
+        return fauxAssistantMessage(fauxToolCall("tool_search", { query: "alpha" }), { stopReason: "toolUse" });
+      },
+      async (transcript) => {
+        assert.equal(declarations(transcript.messages), stable, "restoration does not redeclare loaded tools");
+        assert.deepEqual(await ledger(), baseline);
+        return fauxAssistantMessage(fauxToolCall("tool_search", { query: "beta", limit: 1 }), { stopReason: "toolUse" });
+      },
+      (transcript) => {
+        assert.deepEqual(lastResult(transcript.messages)?.details, { loaded: ["mcp__s__beta"] }, "restored tools return to native search");
+        return fauxAssistantMessage(fauxToolCall("mcp__s__alpha", { value: "recovered" }), { stopReason: "toolUse" });
+      },
+      async (transcript) => {
+        assert.equal(lastResult(transcript.messages)?.isError, false);
+        assert.equal(connection.calls.length, 1);
+        assert.equal((await ledger())?.epoch, 2, "only loading beta advances the epoch");
+        assert.equal((await readToolCatalog(storage, BACKGROUND_CONTEXT)).find(({ name }) => name === "mcp__s__alpha")?.state, "available");
+        return fauxAssistantMessage("recovered");
+      },
+    ]);
+    const appConfig = { ...readConfig({
+      TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai", MODEL_ID: "faux-1",
+      OPENAI_API_KEY: "test", DATA_DIR: directory,
+    }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+    app = await openAgent(appConfig, models, storage, { mcp: host });
+    assert.equal(await app.reply({ requestId: "telegram:health:1", conversationId: "test", senderId: "1", text: "use alpha" }, new AbortController().signal), "recovered");
   } finally {
     await app?.close();
     await rm(directory, { recursive: true, force: true });

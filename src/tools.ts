@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, type Extension, type Registry, type ToolRegistration } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 
 export const currentTime = defineTool({
   name: "current_time",
@@ -32,18 +33,21 @@ export type ToolGovernance = {
 
 export type GovernedTool = ToolRegistration & { readonly governance?: ToolGovernance };
 
+export type ToolAvailability = "available" | "unavailable";
+
 export type ToolRecord = ToolGovernance & {
   readonly name: string;
   readonly tier: 1 | 2;
   readonly replay: "safe" | "unsafe";
   readonly schemaHash: string;
-  readonly state: "available";
+  readonly state: ToolAvailability;
 };
 
 export interface ToolRegistry extends Registry {
   /** Immutable registration metadata. Unknown/uninstalled names return undefined. */
   lookup(name: string): ToolRecord | undefined;
   records(): readonly ToolRecord[];
+  setMcpAvailability(server: string, state: ToolAvailability): void;
 }
 
 const READ_TOOLS = new Set(["read", "current_time", "working_read", "memory_search", "memory_read", "tool_search"]);
@@ -75,7 +79,36 @@ function registration(extension: Extension, tool: GovernedTool): ToolRecord {
 export function createToolRegistry(extensions: readonly Extension[] = [CodingTools, personalTools]): ToolRegistry {
   const registry = createRegistry();
   let records = new Map<string, ToolRecord>();
+  const availability = new Map<string, ToolAvailability>();
   const listeners = new Set<() => void>();
+  const notify = () => { for (const listener of [...listeners]) listener(); };
+  function executionTool(tool: GovernedTool): ToolRegistration {
+    if (tool.name === TOOL_SEARCH_TOOL_NAME) return {
+      ...tool,
+      execute: (args, api, context) => tool.execute(args, {
+        ...api,
+        agent: async (context) => {
+          const agent = await api.agent(context);
+          return { ...agent, deferred: agent.deferred.filter(({ name }) => records.get(name)?.state === "available") };
+        },
+      }, context),
+    };
+    if (tool.governance?.source.kind !== "mcp") return tool;
+    const server = tool.governance.source.server;
+    return {
+      ...tool,
+      execute: (args, api, context) => {
+        context.abortSignal?.throwIfAborted();
+        if (records.get(tool.name)?.state === "unavailable") return Promise.resolve({
+          isError: true,
+          output: [{ type: "text", text: `MCP server ${server} is unavailable; this call was not sent.` }],
+          details: { code: "TOOL_UNAVAILABLE", server, tool: tool.name },
+          diagnostics: [{ severity: "error", code: "TOOL_UNAVAILABLE", message: `MCP server ${server} is unavailable` }],
+        });
+        return tool.execute(args, api, context);
+      },
+    };
+  }
   const result: ToolRegistry = {
     snapshot: () => registry.snapshot(),
     subscribe(listener) {
@@ -91,18 +124,30 @@ export function createToolRegistry(extensions: readonly Extension[] = [CodingToo
       for (const tool of extension.tools ?? []) {
         // pi-durable permits shadowing across extensions; this application requires unique names.
         if (next.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
-        next.set(tool.name, registration(extension, tool));
+        const record = registration(extension, tool);
+        const state = record.source.kind === "mcp" ? availability.get(record.source.server) ?? "available" : "available";
+        next.set(tool.name, state === record.state ? record : Object.freeze({ ...record, state }));
       }
-      registry.install(extension);
+      registry.install({ ...extension, tools: extension.tools?.map(executionTool) });
       records = next;
-      for (const listener of [...listeners]) listener();
+      notify();
     },
     uninstall(extension) {
       if (registry.snapshot().extension(extension.name) === undefined) return;
       const removed = registry.snapshot().extension(extension.name)!;
       registry.uninstall(extension);
       for (const tool of removed.tools ?? []) records.delete(tool.name);
-      for (const listener of [...listeners]) listener();
+      notify();
+    },
+    setMcpAvailability(server, state) {
+      availability.set(server, state);
+      let changed = false;
+      for (const [name, record] of records) {
+        if (record.source.kind !== "mcp" || record.source.server !== server || record.state === state) continue;
+        records.set(name, Object.freeze({ ...record, state }));
+        changed = true;
+      }
+      if (changed) notify();
     },
     lookup: (name) => records.get(name),
     records: () => Object.freeze(registry.snapshot().tools().map(({ tool }) => records.get(tool.name)!)),

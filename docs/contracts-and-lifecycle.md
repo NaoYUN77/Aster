@@ -24,7 +24,7 @@
 | replay | 原生工具策略，未声明时为 unsafe；不从 authz 推断重放安全性。 |
 | authz | read 或 write。内置查询与搜索工具为 read，其余保守标记 write；MCP 一律 write，不采信外部 annotations。本期只记录，不执行授权检查。 |
 | schemaHash | 参数 schema 的 SHA-256，小写十六进制。对象键递归排序、数组顺序保留，不含 TypeBox symbol；只记录，不处理版本漂移。 |
-| state | 本期安装成功的工具为 available；连接健康状态接线另行实现。 |
+| state | available 或 unavailable。MCP 连接状态按 server 批量更新；内置工具安装后为 available。 |
 
 加载账本与注册目录使用同一个 `agent.sqlite` 的底座 document 存储，不新增数据库表或文件。`withToolLedger()` 在 `Harness.open` 前迁移存量会话，保存当前注册目录；运行时在底座 `Storage.commit` 边界，把 `pi.agent` 的变更与附属账本一次提交。工具搜索及其 `control.addTools` 仍由底座执行。
 
@@ -74,16 +74,19 @@ MCP 工具由入口配置声明，不由模型注册。`src/mcp-config.ts` 在�
 - 启动时按配置并行连接 server。单个 server 失败只记录安全错误码并跳过，不阻止 bot 启动。`connectTimeoutMs` 默认 10s；超时以 `MCP_TIMEOUT` 记录，并关闭客户端以回收子进程或请求。
 - 每个 server 安装一个 extension，名称为 `mcp-server-<server>`；汇总 section 的 extension 名为 `mcp-servers`，两者不会因 server 命名而重名（同名 extension 是替换语义）。
 - 工具名为 `mcp__<server>__<tool>`，清洗为 `[A-Za-z0-9_-]`、总长 ≤64；截断和冲突后缀只由 server 名与原始工具名决定，因此重启后能定位同一工具。同一 server 的工具按原始名称排序后分配，清洗后重名的两个工具不会因 server 的列举顺序而互换名称。
-- 所有工具 `deferred: true`。系统提示只渲染已连接 server 与工具数量，模型通过 `tool_search` 加载；至少有一个工具时才安装 `tool_search`。工具描述来自外部 server，视为不可信数据，不能作为放宽权限的依据。
+- 所有工具 `deferred: true`。系统提示渲染启动发现的 server 与工具数量，模型通过 `tool_search` 加载；至少有一个工具时才安装 `tool_search`。该汇总为启动快照，健康翻转不重写提示。工具描述来自外部 server，视为不可信数据，不能作为放宽权限的依据。
+- 连接与 host 的 `subscribeAvailability()` 同步报告当前状态，再推送变化，避免发现期间关闭或晚订阅漏掉状态。host 按 server 去重，`openAgent()` 将状态交给注册表的 `setMcpAvailability()`，一次批量更新该 server 的不可变工具记录；重复状态不触发通知。恢复事件自动使工具重新可用。
+- `tool_search` 仅在原生候选投影中保留 available 工具，排名、参数校验与加载控制仍由底座完成。健康翻转不卸载工具、不替换原生注册快照、不修改已发出的 tools 声明，也不改变加载序号、epoch 或历史加载快照；当前注册目录在下次原生存储提交时同步。
+- 已加载 MCP 工具在实际发送前读取最新状态；unavailable 时返回原生 `isError: true` 结果：`output` 说明调用未发送，`details` 为 `{ code: "TOOL_UNAVAILABLE", server, tool }`（tool 为注册名），`diagnostics` 含同名错误码。不调用 MCP，不暴露底层连接异常。参数仍先经过底座校验，取消信号在检查处生效。已经发送的调用不改写为“未执行”。
 - 参数 schema 必须缺省或为 `type: "object"`、深度 ≤12、属性总数 ≤256、不含 `$ref`，并通过 TypeBox 编译；深度检查先于字节检查，因为序列化本身是递归的。序列化 ≤16 KiB；不满足则跳过该工具。执行前的参数校验仍由底座完成。
 - `replay: "unsafe"`；`outputLimits` 为 32 KiB、1000 行、保留头部。`execute` 把 `context.abortSignal` 传给 MCP 请求，结果经 `toLlmContent` 转为底座内容类型；底座只约束文本，因此单张图片超过 4 MiB 时替换为文字说明，避免不受限的数据进入持久化会话。`isError` 保留为工具结果失败。异常映射为 `MCP_TIMEOUT`、`MCP_CLOSED`、`MCP_PROTOCOL`、`MCP_AUTH_REQUIRED`、`MCP_HTTP_<status>` 或 `MCP_FAILED`，不携带 header、args、env、stderr 或 server 消息。
 - stdio 子进程使用 `inheritEnv: false` 加允许列表（`PATH` 等运行所需变量），再合并配置的 `env`；stderr 只保留有界缓冲，不写日志。日志只有 server 名、工具数量和错误码。
 - 列工具自行翻页，每 server 100 个工具、10 页，且整次发现限时 30 秒；不调用会跟随全部分页的 `listTools()`。发生截断时记录日志，不静默丢弃。
 - HTTP 响应体按 1 MiB 上限读取（传输层只约束 SSE 事件，JSON 响应整体读取）。
 
-关闭顺序：先关闭底座（取消工具上下文），再关闭 MCP 连接（stdio 先关 stdin，超时后终止进程组）。顺序反过来会让正常停机被记录成工具失败。
+关闭顺序：先关闭底座（取消工具上下文），再解除应用健康订阅并关闭 MCP host。host 先解除连接事件订阅、将状态置为 unavailable，再关闭连接（stdio 先关 stdin，超时后终止进程组），避免重复断线日志或迟到的恢复事件。顺序反过来会让正常停机被记录成工具失败。
 
-恢复：MCP 工具永不自动重放。启动时不可用的 server 不安装工具，遗留调用在恢复中表现为工具不可用；运行中断开的调用以 `MCP_CLOSED` 失败。改名、改 schema 或删除 server 都是不兼容变更，需要先收敛未完成调用。
+恢复：MCP 工具永不自动重放。启动时不可用的 server 不安装工具，遗留调用在恢复中表现为工具不可用；运行时已经发送的调用遇到连接关闭仍以 `MCP_CLOSED` 失败，已知不可用时的新调用按上述契约拦截。当前 SDK 最终关闭后必须重启创建新连接；本应用不增加重连、ping 探活或运行期 `listTools` 对账。改名、改 schema 或删除 server 都是不兼容变更，需要先收敛未完成调用。
 
 OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、临时文件后原子替换），不进入模型上下文、工具参数或日志。一次写入失败只影响该次调用，不使后续读写持续失败。bot 只读取和刷新；交互授权由 `npm run mcp:auth` 在独立进程完成，bot 不监听回调端口。`mcp:auth` 与 bot 通过同一函数解析 `DATA_DIR` 和 `MCP_CONFIG`；配置的 `authorizationServerMetadataUrl` 同时用于 CLI 流程与运行时 401 后的重新授权，避免两者落在不同授权服务器。
 
@@ -155,6 +158,8 @@ Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不�
 `@earendil-works/pi-mcp` 1.3.0 中与本实现相关的行为：
 
 - `McpClient.connect()` 不接受取消信号。连接超时由宿主用 `Promise.race` 截止，随后必须 `close()`，否则可能遗留子进程或请求。
+- `McpClient.onClose()` 表示最终关闭，晚订阅者不会收到重播；适配器用 `connectionState` 补当前快照。关闭后的 client 不能再次 `connect()`，SDK 没有公开恢复订阅。`onError()` 也可能来自协议或处理器错误，不作为不可用证据。
+- HTTP GET SSE 的断开与重连在 transport 内部处理，不公开状态事件，也不改变 client 的 connected 状态；GET 不支持或重连耗尽不代表 POST 工具调用一定不可用。因此本实现只根据公开连接关闭信号翻转健康状态，不宣称检测静默假死或 SSE 恢复。
 - `StdioTransport` 在 `inheritEnv: false` 时传给子进程的环境恰好是 `env` 选项；`close()` 按关闭 stdin、SIGTERM、SIGKILL 的顺序回收进程组。
 - `StreamableHttpTransport` 把 401 交给 `adaptOAuthProvider`；无法用已存 token 或 refresh token 恢复时抛 `McpOAuthAuthorizationRequiredError`。
 - `toLlmContent()` 把文本、图片、嵌入资源和结构化结果转换为 pi-ai 的 text/image 内容，可直接作为工具 `output`。

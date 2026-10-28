@@ -142,7 +142,9 @@ MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代
 - `args`、env 值、header 值中的 `${NAME}` 从应用环境解析；缺失变量只禁用该条目并只报告变量名。单条无效、重名只跳过该条，不影响其他 server。
 - 配置文件含凭据引用，部署时设为 `600`，不要提交仓库。
 
-工具以 `mcp__<server>__<tool>` 命名，默认不直接提供给模型：系统提示只列出已连接的 server 与工具数量，模型先调 `tool_search` 检索并加载需要的工具，之后才能调用，已加载集合随会话保存。MCP 调用一律按不可重放处理（`replay: "unsafe"`），进程中断后不自动重跑，避免重复外部副作用。启动时连不上的 server 只记录错误码并跳过；运行中掉线不自动重连，调用返回 `MCP_CLOSED`，重启后重连。
+工具以 `mcp__<server>__<tool>` 命名，默认不直接提供给模型：系统提示列出启动时发现的 server 与工具数量，模型先调 `tool_search` 检索并加载需要的工具，之后才能调用，已加载集合随会话保存。观察到连接关闭后，该 server 的工具从搜索候选中移除；已加载声明保留，新调用在发送前返回 `TOOL_UNAVAILABLE`。适配器报告恢复时自动恢复搜索和调用，健康变化不改声明或加载 epoch。
+
+MCP 调用一律按不可重放处理（`replay: "unsafe"`），进程中断后不自动重跑，避免重复外部副作用。启动时连不上的 server 只记录错误码并跳过；连接关闭时已发送的调用仍可能返回 `MCP_CLOSED`。当前 SDK 只公开最终关闭事件，关闭后需重启建立新连接；HTTP SSE 的内部重连不提供健康事件。本应用不增加探活或自动重连策略，具体边界见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
 
 离线检查配置用 `npm run build && node dist/src/check-config.js`；连接冒烟测试用 `npm run build && npm run mcp:check`（逐个连接、列出工具名后关闭，不启动 Telegram 与模型）。
 
