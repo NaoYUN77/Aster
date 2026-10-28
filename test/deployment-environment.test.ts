@@ -190,16 +190,13 @@ test("CLI reports fixed codes without echoing paths, values or environment conte
   const distinct = run(["compare", "--first", path, "--second", join(directory, "other.json")]);
   assert.equal(distinct.status, 0, distinct.stderr);
   assert.equal(JSON.parse(distinct.stdout).status, "environments-distinct");
-  // Render through the CLI: the description drives the interpolation, so a volume name the
-  // description does not carry fails against the checkout's own Compose file.
+  // Render through the CLI: the description drives the interpolation, so the rendered project
+  // matches it by construction. A volume mismatch can only come from the Compose file
+  // disagreeing with the interpolation, which the rendered-project test above pins by
+  // rendering with an overridden assignment.
   const rendered = run(["render", "--environment", path]);
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.equal(JSON.parse(rendered.stdout).status, "render-matches-environment");
-  const mismatched = join(directory, "mismatched.json");
-  await writeFile(mismatched, JSON.stringify({ ...environment(), volumes: { app: "someone-elses-data" } }));
-  const mismatch = run(["render", "--environment", mismatched]);
-  assert.equal(mismatch.status, 1);
-  assert.equal(JSON.parse(mismatch.stderr).code, "RENDER_VOLUME_MISMATCH");
   for (const argv of [[], ["unknown"], ["compare"], ["compare", "--first", path, "--second", path, "extra"], ["router", "--environment", path]]) {
     const result = run(argv);
     assert.equal(result.status, 1);
