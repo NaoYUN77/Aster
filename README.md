@@ -1,6 +1,6 @@
 # Aster
 
-[![CI](https://github.com/NaoYUN77/Aster/actions/workflows/ci.yml/badge.svg)](https://github.com/NaoYUN77/Aster/actions/workflows/ci.yml)
+[![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![Telegram](https://img.shields.io/badge/Telegram-grammY_1.46.0-26A5E4?logo=telegram&logoColor=white)](https://grammy.dev/) [![SQLite](https://img.shields.io/badge/SQLite-node:sqlite-003B57?logo=sqlite&logoColor=white)](https://nodejs.org/api/sqlite.html) [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/) [![MCP](https://img.shields.io/badge/MCP-pi--mcp_1.3.0-111111)](docs/mcp.md) [![pi-durable](https://img.shields.io/badge/pi--durable-1.3.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
 
 单 owner 的个人 AI agent：从 Telegram 私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。
 
@@ -164,7 +164,7 @@ npm test        # 全量离线测试
 - [工具与 MCP](docs/mcp.md)
 - [部署环境描述](docs/deployment-environments.md)
 - [契约与生命周期](docs/contracts-and-lifecycle.md)
-- [ADR-0004](docs/adr/0004-retire-workspace-memory-md.md)
+- [ADR](docs/adr/)
 - [Memory 与 Context 实施方案](docs/memory-and-context-design.md) / [记忆系统验收](docs/memory-verification.md)
 - [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)
 - [MVP 范围](docs/mvp.md) / [Docker 验证记录](docs/docker-verification.md)
