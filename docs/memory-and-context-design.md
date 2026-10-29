@@ -28,7 +28,7 @@
 
 本轮增加 working JSON、周期快照、每日 Markdown 归档和有界检索。移除独立的应用 history 记忆层；底座原始 Entries 继续保留为恢复记录和证据，通过来源定位读取。上下文压缩不删除持久化历史。
 
-MEM-01～08 的原实施包未包含向量检索、自动用户画像、定时推送、多用户记忆、插件平台、磁盘历史清理或独立于模型窗口的严格 64K 输入上限。这些任务排除项不限制后续功能开发；具体扩展按 [临时 spec 约定](README.md#按功能的临时规格) 设计。agent loop 继续复用 pi-durable，遵循 [ADR-0013](adr/0013-pi-durable-agent-loop.md)。
+MEM-01～08 的原实施包未包含向量检索、自动用户画像、定时推送、多用户记忆、插件平台、磁盘历史清理或独立于模型窗口的严格 64K 输入上限。这些任务排除项不限制后续功能开发；具体扩展按 [临时 spec 约定](README.md#按功能的临时规格) 设计。agent loop 继续复用 pi-durable，遵循 [ADR-0013](adr/0013-pi-durable-agent-loop.md)。观察期的用户画像见 [ADR-0016](adr/0016-user-profile-working-memory.md)：存在 working 状态里，从每日归档提取，不另起模型循环。
 
 ## 2. 当前实现与需要新增的能力
 
@@ -95,6 +95,8 @@ working、B 和每日记忆中可以出现同一事实，但各自回答不同�
 working 保存当前目标、范围、约束、已确认进度、阻塞、下一步、简短近期说明和关键来源。成功状态须引用已提交的工具证据；工具是否执行、generation 是否运行、Telegram 是否送达仍由其原生记录决定。
 
 跨任务偏好与当前任务分别建字段。偏好必须有明确用户来源、适用范围及必要的有效期；任务完成只清理任务状态，不清理有效偏好。自动事件归档不自动建立永久偏好。默认值、事实和授权保持原有语义，旧授权不能因检索被重新授予。
+
+用户画像在观察期也放在同一份 `personal.working` 里（[ADR-0016](adr/0016-user-profile-working-memory.md)）。`profile` 的每条有 `id`、`text`、`category`、指向每日归档分段的 `evidence`（`date`、分段 `id`、`page`）和 `updatedAt`。条数上限是 `MEMORY_LIMITS.profile`（与偏好相同，32），类别长度上限是 `MEMORY_LIMITS.category`（与标识符相同，64）。来源是 `DATA_DIR/memory/daily/` 的每日日志。画像随 working 基线进入周期快照，和任务、偏好共用 `snapshotTokens`（`MEMORY_BUDGET_DEFAULTS` 为 `6 * 1024`）。条目的 `updatedAt` 与状态自身的 `updatedAt` 一样不进入渲染。存量文档由 `WorkingDoc` 的结构版本 2（`migrateWorkingDocument`）补上空 `profile`；JSON 里的 `version` 仍是 schema 版本 1。周期快照正文里缺 `baseline.profile` 的旧基线在解码时补空数组。从每日分段抽出草稿的函数是 `extractProfileDrafts`（`src/memory/profile.ts`）：只保留正文已经放得进画像条目的当前 `user-requirement`，不调用模型，也不由归档任务写回。
 
 拟议工具名为 `working_read`、`working_update`。schema 与执行定义一起维护，更新要求 `expectedRevision`、明确 changes 和证据引用；身份、操作 ID、目录均由宿主提供。Interface 返回成功后的 revision 与有界修订，或明确的校验／冲突／证据错误。
 
@@ -340,7 +342,7 @@ B 格式、working schema、归档批次和已持久化工具参数均是跨版�
 
 - 业务错误（`invalid-input`、`revision-conflict`、`missing-evidence`、`corrupt-state`）返回 `isError: true` 的结果，模型可据后续有效调用修正；**非 `MemoryError`（存储或 Session 失败）直接抛出**，不伪装成参数问题。
 - 参数级拒绝（未知字段、空 changes、超界）由底座 schema 校验在 `execute` 之前拦下，同样是可修正的错误结果。
-- 工具结果只含 revision、任务与偏好的文本视图和有界 `structuredOutput`，不含 `conversationId`、锚点或来源 ID；这些只出现在应用内部契约里。
+- 工具结果只含 revision、任务、偏好与画像的文本视图和有界 `structuredOutput`，不含 `conversationId`、锚点或来源 ID；这些只出现在应用内部契约里。画像文本列出 id、正文、类别和每日分段引用。
 
 ## 14. MEM-03 实现结论与 Context 规划语义
 
@@ -383,7 +385,7 @@ B 格式、working schema、归档批次和已持久化工具参数均是跨版�
 - 两种写入都带稳定 `digest`（`sha256(canonicalJson({baseline, facts}))` 前 16 位），`reuseWrite` 对同一 digest 的已提交写入原样复用：写入可能已落库但输入尚未提交，重算会用新内容覆盖旧写入。
 - 周期内绝不重渲染 B。`snapshotTextFor` 在快照已是活跃周期时返回 `undefined`，从调用侧就排除了重复投影 B 的可能。
 - 新 B 只由压缩产生，且必须用切分边界处的状态：`buildSnapshot` 接受的是调用方按锚点读出的 `baseline`，不是最新状态。
-- 渲染确定性：叙事在前，随后是键排序的规范 JSON；不含时钟、不含 `updatedAt`。`WorkingBaseline` 就是去掉 `updatedAt` 的 `WorkingState`——写入时间属于状态自身历史，渲染出的快照不带每次写入的时间。渲染后的整体文本受 `MEMORY_LIMITS.snapshotText` 约束：叙事与基线共用这一个上限，超限抛 `budget-exceeded`，不截断（截断的基线等于断言错误的状态）。`renderSnapshot` 对直接调用者保持抛错语义；规划层捕获并转换成错误计划，数据条件不会以异常形式穿出 `planRequest`。
+- 渲染确定性：叙事在前，随后是键排序的规范 JSON；不含时钟、不含 `updatedAt`。`WorkingBaseline` 就是去掉状态 `updatedAt` 和画像条目 `updatedAt` 的 `WorkingState`——写入时间属于状态自身历史，渲染出的快照不带每次写入的时间。基线含 `profile`（id、正文、类别、每日分段证据）。渲染后的整体文本受 `MEMORY_LIMITS.snapshotText` 约束，并且仍受 `snapshotTokens` 约束：叙事与基线共用这一个上限，超限抛 `budget-exceeded`，不截断（截断的基线等于断言错误的状态）。`renderSnapshot` 对直接调用者保持抛错语义；规划层捕获并转换成错误计划，数据条件不会以异常形式穿出 `planRequest`。
 
 ### 14.4 预算
 
