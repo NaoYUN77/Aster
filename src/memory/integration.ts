@@ -30,6 +30,9 @@ import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
   defineDocFamily,
   type Conversation,
+  type ConversationId,
+  type Cursor,
+  type Storage,
   type EntryId,
   type EntryRecord,
   type Extension,
@@ -406,10 +409,12 @@ export class MemoryIntegration {
 
   /**
    * Facts B is built from. The instructions are one: B is rendered to sit behind this exact
-   * block A, so an upgraded prompt ends the cycle (§14.2). MEMORY.md is not: this application
-   * never loads it into B — the model reads it per request through the file tools, into C — so
-   * there is no memory version B depends on, and `memoryDigest` is honestly `null`. A host that
-   * ever loads memory content into B must supply its digest here and accept cycle invalidation.
+   * block A, so an upgraded prompt ends the cycle (§14.2). There is no external memory file:
+   * workspace/MEMORY.md was retired (ADR-0004); long-term facts live in the working state and
+   * daily archives this integration manages, whose changes flow through the cycle machinery
+   * itself — so there is no memory version B depends on, and `memoryDigest` is honestly
+   * `null`. A host that ever loads external memory content into B must supply its digest
+   * here and accept cycle invalidation.
    */
   async currentFacts(): Promise<SnapshotFacts> {
     return { instructionsDigest: digestText(this.#options.instructions), memoryDigest: null };
@@ -480,6 +485,22 @@ export class MemoryIntegration {
 /** Construct the composition root; the application owns the returned object's lifecycle. */
 export function createMemoryIntegration(options: MemoryIntegrationOptions): MemoryIntegration {
   return new MemoryIntegration(options);
+}
+
+/** A committed projection is unfinished application work until its input is admitted. */
+export async function hasUnsubmittedMemoryProjection(storage: Storage, conversationId: ConversationId, context: Context): Promise<boolean> {
+  const prefix = projectionRequestId("");
+  let cursor: Cursor | undefined;
+  do {
+    const page = await storage.scanSubmissions({ conversationId, status: "done" }, 100, cursor, context);
+    for (const submission of page.items) {
+      if (submission.type !== "write" || !submission.requestId?.startsWith(prefix)) continue;
+      const input = await storage.submissionByRequest(conversationId, submission.requestId.slice(prefix.length), context);
+      if (input === undefined) return true;
+    }
+    cursor = page.next;
+  } while (cursor !== undefined);
+  return false;
 }
 
 /** The submission key of one request's context projection; stable across its retries. */

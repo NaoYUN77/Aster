@@ -10,6 +10,58 @@
 
 凭据、已认证用户、工作目录和服务客户端属于宿主上下文，不能由模型参数指定。工具负责将外部 API 格式转换为内部概念，并按底座原生结果契约返回。
 
+### 注册元数据
+
+`createToolRegistry()` 仍实现底座原生 `Registry` 接口，安装入口统一检查工具名冲突（包括启动后安装的 extension）。同名 extension 按底座语义整体替换；先验证新注册，失败不发布任何变更。
+
+宿主通过只读 `lookup(name)` 和 `records()` 查询注册记录。未知或已卸载工具返回 `undefined`；记录及其 source 不可修改。字段由宿主或适配器提供，不加入模型参数、工具声明或工具结果：
+
+| 字段 | 语义 |
+| --- | --- |
+| source | 内置工具记录 `kind: builtin` 与 extension；MCP 适配器记录 `kind: mcp` 与 server。预留 plugin 来源，不提供插件加载器。 |
+| tier | 原生 `deferred` 工具为 2，其余为 1；启动结算通过的 MCP pin 去掉 `deferred`，成为常驻工具。 |
+| trust | 内置工具为 trusted，MCP 工具为 untrusted；外部描述不成为可信指令。 |
+| replay | 原生工具策略，未声明时为 unsafe；不从 authz 推断重放安全性。 |
+| authz | read 或 write。内置查询与搜索工具为 read，其余保守标记 write；MCP 默认 write，仅宿主配置可逐个覆盖，不采信外部 annotations。执行时与宿主权限复核。 |
+| schemaHash | 参数 schema 的 SHA-256，小写十六进制。对象键递归排序、数组顺序保留，不含 TypeBox symbol；只记录，不处理版本漂移。 |
+| state | available、unavailable 或 disabled。MCP 连接状态按 server 批量更新；内置工具安装后为 available。宿主 `setDisabled(name, boolean)` 只在当前进程禁用工具，优先于健康状态；解除禁用后恢复当前连接状态，不因健康恢复自动启用。 |
+
+加载账本与注册目录使用同一个 `agent.sqlite` 的底座 document 存储，不新增数据库表或文件。`withToolLedger()` 在 `Harness.open` 前迁移存量会话，保存当前注册目录；运行时在底座 `Storage.commit` 边界，把 `pi.agent` 的变更与附属账本一次提交。工具搜索及其 `control.addTools` 仍由底座执行。
+
+- `pi.agent.modelTools` 是已加载选择及顺序的唯一来源。账本只保存会话内序号高水位、当前 epoch，以及各工具最近一次加载的元数据；不复制工具声明。`readToolLedger(storage, conversationId, context)` 按原生存储顺序返回加载记录，`readToolCatalog(storage, context)` 返回上次持久化的注册目录。
+- 初始高水位和 epoch 为 0。一次原生提交中追加一个或多个新名称，epoch 增加 1，新增名称按追加顺序取得连续的 `loadSequence`；同批共享 epoch。重复加载、已完成请求重放、相同配置重启、reset 和 compaction 不增加编号。删除后再次加入的名称取得更大的序号；历史高水位不回退。仅移除或重排不增加 epoch。启动结算的常驻 MCP 集合变化则在上下文边界增加一次 epoch，保留已有加载序号与注册快照；自动常驻工具不另造一份 `modelTools` 选择。
+- 对象形式按原始 `modelTools.add` 记账，包括当前未注册或被 remove 遮蔽的名字；状态及展示过滤仍由底座负责。显式数组形式按完整选择顺序记账，包含调用方显式选择的常驻工具；未显式选择的常驻工具不分配加载序号。
+- 旧会话缺少账本时，按已保存名称顺序去重并补连续序号；非空集合统一使用基线 epoch 1，空集合为 0。无法恢复过去的追加批次，不能把补录值当作真实历史纪元。加载时保存注册快照；迁移时找不到工具则快照为 null，不伪造来源。之后重启或移除注册不重写旧快照。
+- 附属账本为 conversation / rewindable / asOf 文档，分叉沿用对应历史点；若分叉点早于迁移，则从该点原生选择重建基线。新建非分叉会话按其初始选择独立编号。注册目录是 session 文档，启动时由代码与 MCP 适配器重建，最终常驻集确定后显式同步；即使配置无变化、不产生上下文写入，启动返回时目录也与最终注册一致，目录同步不增加声明 epoch。运行期注册变化在下次原生存储提交时同步。
+- 这些附属文档由存储适配层独占读写，必须经上述只读函数访问，不经 Session 的 `tx.doc`、snapshot 或 watch API。pi durable 1.3.0 无通用事务扩展钩子，Session 不发布适配层追加的文档变更，混用会读到过期缓存。适配层只接受该固定版本 `pi.agent` 的完整 checkpoint，格式不兼容时显式失败。
+
+### 手动 pin 与声明边界
+
+`mcp.json` 顶层 `tools` 是按注册名索引的对象（最多 800 项），每项允许 `pin: boolean` 和 `authz: "read" | "write"`，至少设置其中一项，未知字段拒绝；未设 pin 等同未请求晋升，未设 authz 的 MCP 工具默认 write。`residentToolBudgetTokens` 默认 8192，范围 1～1048576。参数校验及默认值以 `src/mcp-config.ts` 为准。配置是宿主输入，不读取远端 annotations，不允许模型调用注册或晋升接口。
+
+启动时健康快照先进入 Register，`installMcpTools()` 按 extension 名及工具注册名固定排序，再按注册名依次验证 pin 的存在性、available 状态和剩余预算。预算按 `estimateTextTokens(JSON.stringify(declarations))` 计算，声明通过原生 `toToolDeclaration()` 转换，包含内置、记忆、搜索工具及接受的 pin 的 name／description／parameters 等模型字段；使用 pi-ai 1.3.0 的字符估算，与提供商精确 token 数有差异。基础集合已超预算时拒绝所有新增 pin，不移除内置工具。失败记录 `TOOL_NOT_FOUND`／`TOOL_UNAVAILABLE`／`TOOL_BUDGET_EXCEEDED`；已注册且可用的 MCP 工具仍可按需搜索。
+
+本期只在启动结算，不监听配置文件、自动晋升或自动降级。底座开启后尚未恢复调度时，先初始化记忆并补扫已发布压缩，持久化归档目标，避免 pin 切换覆盖尚待确认的上下文头；再检查未完成任务（包括补扫新建的归档任务）、提交，以及记忆投影已落盘但输入尚未接收的请求；投影收据通过原生提交记录分页读取，不复制另一套请求状态。有未完成工作则按账本恢复旧常驻集，延迟新配置到下一次空闲重启，记录 `TOOL_PIN_RECOVERY`；恢复旧集不重新套用新预算或因掉线撤销已发出的声明。没有未完成工作且集合改变时，在一次原生提交中追加 `pi.reset` 上下文头并结算账本 epoch／resident 字段，下一请求发布完整基线，旧记录保留。此边界不启动任务，也不取消未完成请求；初次 pin 从 epoch 0 到 1，无变化重启不增加。`resident` 是常驻决策元数据，缺省等同旧版本的空集合，由存储适配层管理，可通过 `readResidentTools()` 查询。
+
+晋升仅去掉原生 `deferred` 属性，保留工具参数、执行函数、健康拦截、`replay`、trust 和 authz。默认会话选择因此自动包含常驻工具；底座显式 `tools`／`modelTools` 过滤仍有优先权。取消 pin 不删除原生已加载选择，过去由搜索加载的工具不会自动卸载。所有 pin 配置改动均需重启，健康状态仍实时变化且不增加声明 epoch。
+
+### 执行复核与宿主权限
+
+`createToolRegistry(extensions, { authority, log })` 在每个原生工具执行函数外统一复核 Register，顺序为精确名称存在、state 为 available、当前权限足够，然后才进入工具实现。取消信号先检查；参数修复和参数校验仍由底座执行，参数不合法时不会到达复核执行器。内置、MCP、后装工具和 `api.executeTool()` 嵌套调用共用此边界。安全重放进入执行函数时再次使用当前状态和权限；unsafe 工具仍按底座规则报告执行结果未知，不因权限变化重跑。
+
+权限由宿主固定为 `owner`（默认，可执行 read 和 write）或 `restricted`（仅 read）。生产 `openAgent()` 通过 `toolAuthority` 注入，作用于整个实例的所有会话、任务及恢复；模型参数、MCP 描述和 annotations 均不能提升权限。现有 Telegram 入口已认证为所有者，使用默认 owner。本期只预留受限实例入口，不提供请求间动态切换、多级身份系统或 destructive 二次确认。authz 配置在启动时应用，包括未完成任务的后续执行；它不改变工具声明字节、加载编号、epoch、trust 或 replay。
+
+| 拒绝原因 | 结果与恢复提示 |
+| --- | --- |
+| 名称未注册 | 原生分发按精确名称返回 `Tool <name> is not available`，不执行、不模糊匹配；复核日志记 `TOOL_NOT_FOUND`。 |
+| unavailable | `TOOL_UNAVAILABLE`，提示恢复服务并重启连接；未发送调用。 |
+| disabled | `TOOL_DISABLED`，提示请所有者启用；未发送调用。 |
+| restricted 调用 write | `TOOL_AUTHZ_DENIED`，提示由所有者执行；不进入工具实现。 |
+
+执行器拒绝返回原生 `isError`、文本恢复提示、`details.code` 和 diagnostic。底座 1.3.0 对未向模型提供的名称会直接拒绝而不创建工具任务，应用通过 `GenerationTask.afterResponse` 观察未知名称；嵌套未知名称在转交原生 `executeTool()` 时记录。两者保留底座的错误结果与调用关联，不自建工具任务或绕过参数校验。已注册但被原生会话过滤排除的工具继续由底座拒绝。
+
+`tool_review` 日志使用 JSON 行，默认 stderr，宿主可注入 logger；包含 conversationId、taskId、callId、注册名（最多 128 字符）、authority、可取得的 authz／state、allow／deny 及原因码，成功复核为 `TOOL_ALLOWED`。未知嵌套名称日志的标识指向发起调用的父工具，其他执行日志指向实际工具任务。日志不含参数、凭据或工具结果，也不承诺重启后恰好记录一次；它是未来 Trace 的接入点，不另建持久化审计数据库。
+
 ### 结果与失败
 
 面向模型的结果描述实际发生的事情。需要程序继续处理时，保留有明确定义的结构化结果；普通文本工具无需为统一外形增加重复的 JSON 包装。
@@ -48,17 +100,20 @@ MCP 工具由入口配置声明，不由模型注册。`src/mcp-config.ts` 在�
 
 - 启动时按配置并行连接 server。单个 server 失败只记录安全错误码并跳过，不阻止 bot 启动。`connectTimeoutMs` 默认 10s；超时以 `MCP_TIMEOUT` 记录，并关闭客户端以回收子进程或请求。
 - 每个 server 安装一个 extension，名称为 `mcp-server-<server>`；汇总 section 的 extension 名为 `mcp-servers`，两者不会因 server 命名而重名（同名 extension 是替换语义）。
-- 工具名为 `mcp__<server>__<tool>`，清洗为 `[A-Za-z0-9_-]`、总长 ≤64；截断和冲突后缀只由 server 名与原始工具名决定，因此重启后能定位同一工具。同一 server 的工具按原始名称排序后分配，清洗后重名的两个工具不会因 server 的列举顺序而互换名称。
-- 所有工具 `deferred: true`。系统提示只渲染已连接 server 与工具数量，模型通过 `tool_search` 加载；至少有一个工具时才安装 `tool_search`。工具描述来自外部 server，视为不可信数据，不能作为放宽权限的依据。
+- 工具名为 `mcp__<server>__<tool>`，清洗为 `[A-Za-z0-9_-]`、总长 ≤64；截断和冲突后缀只由 server 名与原始工具名决定，因此重启后能定位同一工具。清洗后同名的整个碰撞组均使用原始身份哈希后缀，新增同组工具不会接管旧工具的注册名或宿主配置。
+- 所有工具 `deferred: true`。系统提示渲染启动发现的 server 与工具数量，模型通过 `tool_search` 加载；至少有一个工具时才安装 `tool_search`。该汇总为启动快照，健康翻转不重写提示。工具描述来自外部 server，视为不可信数据，不能作为放宽权限的依据。
+- 连接与 host 的 `subscribeAvailability()` 同步报告当前状态，再推送变化，避免发现期间关闭或晚订阅漏掉状态。host 按 server 去重，`openAgent()` 将状态交给注册表的 `setMcpAvailability()`，一次批量更新该 server 的不可变工具记录；重复状态不触发通知。恢复事件自动使工具重新可用。
+- `tool_search` 仅在原生候选投影中保留 available 工具，排名、参数校验与加载控制仍由底座完成。健康翻转不卸载工具、不替换原生注册快照、不修改已发出的 tools 声明，也不改变加载序号、epoch 或历史加载快照；当前注册目录在下次原生存储提交时同步。
+- 已加载 MCP 工具在实际发送前读取最新状态；unavailable 时返回原生 `isError: true` 结果：`output` 说明调用未发送，`details` 为 `{ code: "TOOL_UNAVAILABLE", server, tool }`（tool 为注册名），`diagnostics` 含同名错误码。不调用 MCP，不暴露底层连接异常。参数仍先经过底座校验，取消信号在检查处生效。已经发送的调用不改写为“未执行”。
 - 参数 schema 必须缺省或为 `type: "object"`、深度 ≤12、属性总数 ≤256、不含 `$ref`，并通过 TypeBox 编译；深度检查先于字节检查，因为序列化本身是递归的。序列化 ≤16 KiB；不满足则跳过该工具。执行前的参数校验仍由底座完成。
 - `replay: "unsafe"`；`outputLimits` 为 32 KiB、1000 行、保留头部。`execute` 把 `context.abortSignal` 传给 MCP 请求，结果经 `toLlmContent` 转为底座内容类型；底座只约束文本，因此单张图片超过 4 MiB 时替换为文字说明，避免不受限的数据进入持久化会话。`isError` 保留为工具结果失败。异常映射为 `MCP_TIMEOUT`、`MCP_CLOSED`、`MCP_PROTOCOL`、`MCP_AUTH_REQUIRED`、`MCP_HTTP_<status>` 或 `MCP_FAILED`，不携带 header、args、env、stderr 或 server 消息。
 - stdio 子进程使用 `inheritEnv: false` 加允许列表（`PATH` 等运行所需变量），再合并配置的 `env`；stderr 只保留有界缓冲，不写日志。日志只有 server 名、工具数量和错误码。
 - 列工具自行翻页，每 server 100 个工具、10 页，且整次发现限时 30 秒；不调用会跟随全部分页的 `listTools()`。发生截断时记录日志，不静默丢弃。
 - HTTP 响应体按 1 MiB 上限读取（传输层只约束 SSE 事件，JSON 响应整体读取）。
 
-关闭顺序：先关闭底座（取消工具上下文），再关闭 MCP 连接（stdio 先关 stdin，超时后终止进程组）。顺序反过来会让正常停机被记录成工具失败。
+关闭顺序：先关闭底座（取消工具上下文），再解除应用健康订阅并关闭 MCP host。host 先解除连接事件订阅、将状态置为 unavailable，再关闭连接（stdio 先关 stdin，超时后终止进程组），避免重复断线日志或迟到的恢复事件。顺序反过来会让正常停机被记录成工具失败。
 
-恢复：MCP 工具永不自动重放。启动时不可用的 server 不安装工具，遗留调用在恢复中表现为工具不可用；运行中断开的调用以 `MCP_CLOSED` 失败。改名、改 schema 或删除 server 都是不兼容变更，需要先收敛未完成调用。
+恢复：MCP 工具永不自动重放。启动时不可用的 server 不安装工具，遗留调用在恢复中表现为工具不可用；运行时已经发送的调用遇到连接关闭仍以 `MCP_CLOSED` 失败，已知不可用时的新调用按上述契约拦截。当前 SDK 最终关闭后必须重启创建新连接；本应用不增加重连、ping 探活或运行期 `listTools` 对账。改名、改 schema 或删除 server 都是不兼容变更，需要先收敛未完成调用。
 
 OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、临时文件后原子替换），不进入模型上下文、工具参数或日志。一次写入失败只影响该次调用，不使后续读写持续失败。bot 只读取和刷新；交互授权由 `npm run mcp:auth` 在独立进程完成，bot 不监听回调端口。`mcp:auth` 与 bot 通过同一函数解析 `DATA_DIR` 和 `MCP_CONFIG`；配置的 `authorizationServerMetadataUrl` 同时用于 CLI 流程与运行时 401 后的重新授权，避免两者落在不同授权服务器。
 
@@ -130,6 +185,8 @@ Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不�
 `@earendil-works/pi-mcp` 1.3.0 中与本实现相关的行为：
 
 - `McpClient.connect()` 不接受取消信号。连接超时由宿主用 `Promise.race` 截止，随后必须 `close()`，否则可能遗留子进程或请求。
+- `McpClient.onClose()` 表示最终关闭，晚订阅者不会收到重播；适配器用 `connectionState` 补当前快照。关闭后的 client 不能再次 `connect()`，SDK 没有公开恢复订阅。`onError()` 也可能来自协议或处理器错误，不作为不可用证据。
+- HTTP GET SSE 的断开与重连在 transport 内部处理，不公开状态事件，也不改变 client 的 connected 状态；GET 不支持或重连耗尽不代表 POST 工具调用一定不可用。因此本实现只根据公开连接关闭信号翻转健康状态，不宣称检测静默假死或 SSE 恢复。
 - `StdioTransport` 在 `inheritEnv: false` 时传给子进程的环境恰好是 `env` 选项；`close()` 按关闭 stdin、SIGTERM、SIGKILL 的顺序回收进程组。
 - `StreamableHttpTransport` 把 401 交给 `adaptOAuthProvider`；无法用已存 token 或 refresh token 恢复时抛 `McpOAuthAuthorizationRequiredError`。
 - `toLlmContent()` 把文本、图片、嵌入资源和结构化结果转换为 pi-ai 的 text/image 内容，可直接作为工具 `output`。

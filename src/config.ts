@@ -41,12 +41,14 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   }
   required(PROVIDERS[provider].apiKeyEnv);
   const token = required("TELEGRAM_BOT_TOKEN");
+  const webApiKey = env.DEEPSEEK_WEB_API_KEY?.trim();
   return {
     token,
     ownerId,
     provider,
     model: required("MODEL_ID"),
     telegramApiRoot,
+    ...(webApiKey ? { webApiKey } : {}),
     ...resolveMcpConfigPaths(env),
   };
 }
@@ -56,7 +58,6 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
  * that cannot reach api.telegram.org directly. The value is a URL prefix: the client appends
  * /bot<token>/<method> to it. It must be an https URL without query or fragment; trailing
  * slashes are dropped so the join is exact. Unset means the default api.telegram.org root.
- * It conflicts with Agent Vault, whose broker proxies api.telegram.org itself.
  */
 function readTelegramApiRoot(env: NodeJS.ProcessEnv): string | undefined {
   const raw = env.TELEGRAM_API_ROOT?.trim();

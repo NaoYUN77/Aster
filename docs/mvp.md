@@ -8,7 +8,7 @@
 
 本文件记录当前 MVP 的范围和设计，具体功能决策不写入仓库级 CLAUDE.md。
 
-后续的三块上下文、working memory 和每日记忆归档见 [Memory 与 Context 实施方案](memory-and-context-design.md)，任务拆分见 [实施 issues](memory-implementation-issues.md)。MEM-01～MEM-07 已全部完成：数据契约、Working Module、Context 规划与快照渲染、每日 Markdown 发布与检索、可恢复增量归档、原生压缩接入均已实现，并已由 MEM-07 在组合入口注册到运行中的 agent（`memory_search`／`memory_read`／`working_get`／`working_update` 工具、周期快照投影、归档触发与 `MEMORY_*` 配置，`MEMORY_ENABLED=0` 可整体关闭）。本文仍描述 MVP 基线范围；记忆系统的实际状态以实施方案第 18 节为准，其中真实模型质量与缓存命中尚未验证（MEM-08）。
+后续的三块上下文、working memory 和每日记忆归档见 [Memory 与 Context 实施方案](memory-and-context-design.md)，任务拆分见 [实施 issues](memory-implementation-issues.md)。MEM-01～MEM-08 的机制已接入运行中的 agent：`memory_search`、`memory_read`、`working_read`、`working_update`，以及周期快照、归档和 `MEMORY_*` 配置（`MEMORY_ENABLED=0` 可整体关闭）。真实模型证据只有 [记忆系统验收](memory-verification.md) 里的 DeepSeek 补测（该次 28 次调用中 27 次前缀缓存命中）。轮数计数在一个崩溃窗口会滞后一轮，见 issue #26。本文描述当前范围，不把这次补测写成生产部署。
 
 ## 当前范围
 
@@ -16,7 +16,7 @@
 - Telegram 长轮询接入，不要求对公网开放 webhook。
 - pi durable 提供 agent loop、会话状态及恢复能力；按底座接口接入文件读写和编辑工具。
 - 自定义工具通过代码显式注册，使用底座兼容的参数 schema，执行前完成参数校验。
-- 长期记忆先存放在一个 Markdown 文件中；读取和修改复用文件工具。
+- 长期记忆是分层的：常驻目标、约束和偏好在 working 状态，过去的事实在每日归档。应用不再创建或指示模型读写 `workspace/MEMORY.md`，见 [ADR-0004](adr/0004-retire-workspace-memory-md.md)。存量文件保留不删。
 - 同一会话依次处理请求。初始全局 agent 并发为 1，避免消息交错和共享文件并发写入。
 - 只将最终可展示文本发送给用户，长回复由 Telegram 适配层分段。
 
@@ -32,9 +32,9 @@
 
 ## 记忆与运行状态
 
-长期记忆与会话历史是不同的数据：长期记忆存放在独立文件，会话和恢复状态使用底座自身机制。不能用一个记忆文件替代执行日志。
+长期记忆与会话历史是不同的数据：长期记忆由 MEM-07 接入的分层记忆承担（working 状态、周期快照、每日事件归档），会话和恢复状态使用底座自身机制。不能用一个记忆文件替代执行日志。
 
-长期记忆仅保存用户要求记住的事实，不把每条聊天自动追加为记忆。没有记忆文件时按空记忆处理；其他读取失败必须显式报告。偏好文件 PREFERENCE、自动偏好提取、向量检索不在本次范围。MEM-07 接入的分层记忆（working 状态、周期快照、每日事件归档）是独立于 `MEMORY.md` 的增量能力：每日归档只从已确认的会话范围提取事件，不改变 `MEMORY.md` 的写入语义；其范围与状态见实施方案。
+长期记忆的写入语义见实施方案：常驻目标、约束与偏好经 working 状态保存，事实经每日归档从已确认的会话范围提取。偏好文件 PREFERENCE、向量检索不在本次范围。早期的 `workspace/MEMORY.md` 已于 2026-10-28 退役，决定见 [ADR-0004](adr/0004-retire-workspace-memory-md.md)。
 
 运行目录必须持久化。底座使用 Node 内置 SQLite 保存会话和执行状态，接入与投递使用独立 SQLite 文件；无需数据库服务。部署更新不能覆盖记忆、会话和消息处理状态。
 
@@ -48,14 +48,14 @@
 - 不在 4 GB 服务器上运行本地大模型；暂不引入向量数据库或独立缓存服务。
 - 为输入大小、工具输出、执行时长和待处理请求设置明确上限；不能静默截断用户输入。
 - 使用独立的运行工作目录；Telegram token 和模型凭据通过部署环境注入，不写入仓库或日志。
-- 由 Compose 负责重启策略与优雅退出，停止宽限期 45 秒。云服务器操作系统和底座兼容性需在部署前核实。部署方法见 [Docker 部署运行手册](deployment-test-guide.md)。
+- 由 Compose 负责重启策略与优雅退出，停止宽限期 45 秒。云服务器操作系统和底座兼容性需在部署前核实。部署方法见 [Docker 部署运行手册](deployment-test-guide.md)。该手册第 9 节没有已勾选的上线项，本文件不把 MVP 写成已在云上运行。
 
 ## 验收
 
 1. 配置凭据后，授权用户可从 Telegram 发送文本并收到 agent 回复。
 2. 连续两条消息共享会话上下文；并发到达时保持顺序。
 3. 一个自定义工具可被注册、被 agent 调用并返回结果；非法参数不能触发执行。
-4. 用户要求记住的内容写入记忆文件，重启后仍可读取。
+4. 用户要求记住的内容写入 working 状态或每日归档，重启后仍可读取。离线测试覆盖这条路径；真实 Telegram 上的同一次检查没有部署记录。
 5. 非授权用户的请求不触发模型或工具执行。
 6. 模型失败、工具失败和 Telegram 发送失败有可区分的诊断信息。
 7. 使用真实底座验证重启与恢复行为，并记录尚未覆盖的交付窗口。

@@ -13,3 +13,6 @@
 ## 索引
 
 - [ADR-0001：生产环境 MCP 接入以 stdio + token 型为主，OAuth 型走带外授权](0001-mcp-access-stdio-first-oauth-out-of-band.md) — Accepted，2026-10-28
+- [ADR-0004：退役 `workspace/MEMORY.md`，长期事实只走分层记忆](0004-retire-workspace-memory-md.md) — Accepted，2026-10-28
+
+ADR-0002 与 ADR-0003 尚未写入本分支。编号 0004 与提交 `b59e0cf` 的说明一致，不为了连续编号而改掉已有引用。

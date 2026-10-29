@@ -34,6 +34,13 @@ function appConfig(dataDir: string) {
   return readConfig({ TELEGRAM_BOT_TOKEN: "offline-test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "offline-test", DATA_DIR: dataDir });
 }
 
+function webAppConfig(dataDir: string) {
+  return readConfig({
+    TELEGRAM_BOT_TOKEN: "offline-test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "offline-test", DEEPSEEK_WEB_API_KEY: "web-test", DATA_DIR: dataDir,
+  });
+}
+
 const context = BACKGROUND_CONTEXT;
 const agent = { model: { provider: "faux", modelId: "faux-1" } };
 
@@ -54,16 +61,56 @@ function modelFixture(provider = "faux") {
   return { faux, models };
 }
 
-test("agent memory tools survive reopening and completed requests are not executed again", { timeout: 15_000 }, async () => {
+test("web tools are absent unless the host configures their credential", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-no-web-tools-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    const fixture = modelFixture("openai");
+    fixture.faux.setResponses([(transcript) => {
+      const tools = transcript.messages.flatMap((message) => message.role === "system"
+        ? message.toolsAdded?.map(({ name }) => name) ?? []
+        : []);
+      assert.equal(tools.includes("web_search"), false);
+      assert.equal(tools.includes("web_fetch"), false);
+      return fauxAssistantMessage("Web tools are disabled.");
+    }]);
+    app = await openAgent(appConfig(directory), fixture.models);
+    assert.equal(await app.reply({ ...request, requestId: "telegram:no-web:1", text: "List web tools." }, running), "Web tools are disabled.");
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("configured built-in web tools are declared through the production composition root", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-web-tools-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    const fixture = modelFixture("openai");
+    fixture.faux.setResponses([(transcript) => {
+      const tools = transcript.messages.flatMap((message) => message.role === "system"
+        ? message.toolsAdded?.map(({ name }) => name) ?? []
+        : []);
+      assert.ok(tools.includes("web_search"));
+      assert.ok(tools.includes("web_fetch"));
+      return fauxAssistantMessage("Web tools are available.");
+    }]);
+    app = await openAgent(webAppConfig(directory), fixture.models);
+    assert.equal(await app.reply({ ...request, requestId: "telegram:web:1", text: "List web tools." }, running), "Web tools are available.");
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("agent file tools survive reopening and completed requests are not executed again", { timeout: 15_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "personal-agent-memory-test-"));
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
     const first = modelFixture("openai");
     first.faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("read", { path: "MEMORY.md" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("read", { path: "notes.md" }), { stopReason: "toolUse" }),
       fauxAssistantMessage([
-        fauxToolCall("write", { path: "MEMORY.md", content: "Favorite color: blue.\n" }, { id: "save" }),
-        fauxToolCall("read", { path: "MEMORY.md" }, { id: "read-after-save" }),
+        fauxToolCall("write", { path: "notes.md", content: "Favorite color: blue.\n" }, { id: "save" }),
+        fauxToolCall("read", { path: "notes.md" }, { id: "read-after-save" }),
         fauxToolCall("current_time", {}, { id: "clock" }),
       ], { stopReason: "toolUse" }),
       (transcript) => {
@@ -86,7 +133,7 @@ test("agent memory tools survive reopening and completed requests are not execut
     assert.equal(await app.reply(request, running), "Remembered: blue.");
     assert.equal(second.faux.state.callCount, 0);
     second.faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("read", { path: "MEMORY.md" }, { id: "reopened-memory" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("read", { path: "notes.md" }, { id: "reopened-memory" }), { stopReason: "toolUse" }),
       (transcript) => {
         const memory = transcript.messages.find((message) => message.role === "toolResult" && message.toolCallId === "reopened-memory");
         assert.ok(memory?.role === "toolResult" && !memory.isError);
