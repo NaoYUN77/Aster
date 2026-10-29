@@ -140,6 +140,27 @@ test("builtin and nested calls use the same authority while native schema valida
   }
 });
 
+test("unknown-call audit remains selected with an explicit extension list", async () => {
+  const audit = logs();
+  const only = defineTool({ name: "only", description: "only", parameters: Type.Object({}),
+    execute: async () => ({ output: [] }) });
+  const extension = { name: "only-extension", tools: [only] };
+  const registry = createToolRegistry([extension], { log: audit.log });
+  const fixture = models();
+  fixture.faux.setResponses([call("missing"), () => fauxAssistantMessage("done")]);
+  const harness = await Harness.open(new MemoryStorage(), {
+    registry, models: fixture.models, settings: { extensions: [extension] },
+  }, context);
+  try {
+    const root = await harness.root(context);
+    await root.configure({ model: { provider: "faux", modelId: "faux-1" } }, context);
+    assert.equal((await (await root.submit({ type: "input", content: "unknown" }, context)).wait(context)).status, "done");
+    assert.deepEqual(audit.events.map(({ tool, code }) => [tool, code]), [["missing", "TOOL_NOT_FOUND"]]);
+  } finally {
+    await harness.close(context);
+  }
+});
+
 test("safe execution recovery rechecks the current host authority after intent was persisted", { timeout: 20_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "tool-authz-recovery-"));
   const database = join(directory, "agent.sqlite");

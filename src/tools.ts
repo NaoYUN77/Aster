@@ -93,6 +93,7 @@ export function createToolRegistry(
   const authority = options.authority ?? "owner";
   const log = options.log ?? console.error;
   let records = new Map<string, ToolRecord>();
+  let registrations = new Map<string, object>();
   const availability = new Map<string, ToolAvailability>();
   const disabled = new Set<string>();
   const listeners = new Set<() => void>();
@@ -102,13 +103,16 @@ export function createToolRegistry(
     log(JSON.stringify({ event: "tool_review", ...call, tool: name.slice(0, 128), authority,
       authz: record?.authz, state: record?.state, decision: code === "TOOL_ALLOWED" ? "allow" : "deny", code }));
   }
-  function review(name: string, call: CallIdentity): ToolExecutionResult | undefined {
+  function review(name: string, call: CallIdentity, registration?: object): ToolExecutionResult | undefined {
     const record = records.get(name);
     let code: string;
     let message: string;
     if (record === undefined) {
       code = "TOOL_NOT_FOUND";
       message = `Tool ${name} is not registered. Use an exact registered name from tool_search.`;
+    } else if (registration !== undefined && registrations.get(name) !== registration) {
+      code = "TOOL_REGISTRATION_CHANGED";
+      message = `Tool ${name} changed after this call was admitted; the old implementation was not executed. Retry the request.`;
     } else if (record.state === "disabled") {
       code = "TOOL_DISABLED";
       message = `Tool ${name} is disabled; this call was not sent. Ask the owner to enable it.`;
@@ -131,9 +135,14 @@ export function createToolRegistry(
       diagnostics: [{ severity: "error", code, message }],
     };
   }
-  // Unknown model calls never get a ToolTask in 1.3.0. Observe them without changing native admission.
-  const observer = defineExtension({ name: "tool-governance", hooks: [hook(GenerationTask, {
+  // Unknown model calls never get a ToolTask in 1.3.0. Put the observer on every selectable
+  // extension so an explicit extension list cannot accidentally remove the host review boundary.
+  // The same response runs through each selected extension, so observe its object only once.
+  const observed = new WeakSet<object>();
+  const observer = hook(GenerationTask, {
     afterResponse(message, api) {
+      if (observed.has(message)) return;
+      observed.add(message);
       if (message.stopReason !== "toolUse") return;
       for (const call of message.content) {
         if (call.type === "toolCall" && !records.has(call.name)) {
@@ -141,14 +150,13 @@ export function createToolRegistry(
         }
       }
     },
-  })] });
-  registry.install(observer);
-  function executionTool(tool: GovernedTool): ToolRegistration {
+  });
+  function executionTool(tool: GovernedTool, registration: object): ToolRegistration {
     return {
       ...tool,
       execute: async (args, api, context) => {
         context.abortSignal?.throwIfAborted();
-        const rejected = review(tool.name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId });
+        const rejected = review(tool.name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId }, registration);
         if (rejected !== undefined) return rejected;
         return tool.execute(args, {
           ...api,
@@ -174,12 +182,19 @@ export function createToolRegistry(
       return () => { listeners.delete(listener); };
     },
     install(extension) {
-      if (extension.name === observer.name) throw new Error(`Reserved extension name: ${extension.name}`);
+      if (extension.wraps?.some((wrap) => "tool" in wrap)) {
+        throw new Error(`Tool wrappers are not supported by the governed registry: ${extension.name}`);
+      }
       const next = new Map<string, ToolRecord>();
+      const nextRegistrations = new Map<string, object>();
       for (const installed of registry.snapshot().installed()) {
         if (installed.name === extension.name) continue;
-        for (const tool of installed.tools ?? []) next.set(tool.name, records.get(tool.name)!);
+        for (const tool of installed.tools ?? []) {
+          next.set(tool.name, records.get(tool.name)!);
+          nextRegistrations.set(tool.name, registrations.get(tool.name)!);
+        }
       }
+      const installedTools: ToolRegistration[] = [];
       for (const tool of extension.tools ?? []) {
         // pi-durable permits shadowing across extensions; this application requires unique names.
         if (next.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
@@ -187,17 +202,23 @@ export function createToolRegistry(
         const state = disabled.has(tool.name) ? "disabled"
           : record.source.kind === "mcp" ? availability.get(record.source.server) ?? "available" : "available";
         next.set(tool.name, state === record.state ? record : Object.freeze({ ...record, state }));
+        const identity = {};
+        nextRegistrations.set(tool.name, identity);
+        installedTools.push(executionTool(tool, identity));
       }
-      registry.install({ ...extension, tools: extension.tools?.map(executionTool) });
+      registry.install({ ...extension, tools: installedTools, hooks: [...extension.hooks ?? [], observer] });
       records = next;
+      registrations = nextRegistrations;
       notify();
     },
     uninstall(extension) {
-      if (extension.name === observer.name) throw new Error(`Reserved extension name: ${extension.name}`);
       if (registry.snapshot().extension(extension.name) === undefined) return;
       const removed = registry.snapshot().extension(extension.name)!;
       registry.uninstall(extension);
-      for (const tool of removed.tools ?? []) records.delete(tool.name);
+      for (const tool of removed.tools ?? []) {
+        records.delete(tool.name);
+        registrations.delete(tool.name);
+      }
       notify();
     },
     setMcpAvailability(server, state) {

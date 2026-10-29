@@ -100,7 +100,7 @@ MCP 工具由入口配置声明，不由模型注册。`src/mcp-config.ts` 在�
 
 - 启动时按配置并行连接 server。单个 server 失败只记录安全错误码并跳过，不阻止 bot 启动。`connectTimeoutMs` 默认 10s；超时以 `MCP_TIMEOUT` 记录，并关闭客户端以回收子进程或请求。
 - 每个 server 安装一个 extension，名称为 `mcp-server-<server>`；汇总 section 的 extension 名为 `mcp-servers`，两者不会因 server 命名而重名（同名 extension 是替换语义）。
-- 工具名为 `mcp__<server>__<tool>`，清洗为 `[A-Za-z0-9_-]`、总长 ≤64；截断和冲突后缀只由 server 名与原始工具名决定，因此重启后能定位同一工具。同一 server 的工具按原始名称排序后分配，清洗后重名的两个工具不会因 server 的列举顺序而互换名称。
+- 工具名为 `mcp__<server>__<tool>`，清洗为 `[A-Za-z0-9_-]`、总长 ≤64；截断和冲突后缀只由 server 名与原始工具名决定，因此重启后能定位同一工具。清洗后同名的整个碰撞组均使用原始身份哈希后缀，新增同组工具不会接管旧工具的注册名或宿主配置。
 - 所有工具 `deferred: true`。系统提示渲染启动发现的 server 与工具数量，模型通过 `tool_search` 加载；至少有一个工具时才安装 `tool_search`。该汇总为启动快照，健康翻转不重写提示。工具描述来自外部 server，视为不可信数据，不能作为放宽权限的依据。
 - 连接与 host 的 `subscribeAvailability()` 同步报告当前状态，再推送变化，避免发现期间关闭或晚订阅漏掉状态。host 按 server 去重，`openAgent()` 将状态交给注册表的 `setMcpAvailability()`，一次批量更新该 server 的不可变工具记录；重复状态不触发通知。恢复事件自动使工具重新可用。
 - `tool_search` 仅在原生候选投影中保留 available 工具，排名、参数校验与加载控制仍由底座完成。健康翻转不卸载工具、不替换原生注册快照、不修改已发出的 tools 声明，也不改变加载序号、epoch 或历史加载快照；当前注册目录在下次原生存储提交时同步。

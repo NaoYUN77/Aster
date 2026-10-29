@@ -22,7 +22,7 @@ import { buildMcpTool, connectMcp, mcpToolName, openMcpConnection, type McpConne
 import type { McpFileConfig, McpServerConfig } from "../src/mcp-config.js";
 import type { TextRequest } from "../src/messages.js";
 import { readToolCatalog, readToolLedger } from "../src/tool-ledger.js";
-import { createToolRegistry } from "../src/tools.js";
+import { createToolRegistry, type GovernedTool } from "../src/tools.js";
 
 const unusedApi = undefined as unknown as ToolExecutionApi;
 
@@ -342,25 +342,32 @@ test("a server named like the summary extension keeps its tools", async () => {
   }
 });
 
-test("colliding raw names are resolved by name, not by the server's listing order", async () => {
+test("colliding raw names are resolved by identity, not listing order or bare-name config", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-mcp-"));
   try {
-    const connectIn = (order: string[]) => connectMcp(config(stdioServer("s")), {
+    const connectIn = (order: string[]) => connectMcp({
+      ...config(stdioServer("s")),
+      tools: { mcp__s__a_b: { authz: "read" } },
+    }, {
       dataDir: directory,
       reserved: new Set(),
       log: () => {},
       connect: async (server) => fakeConnection(server.name, order.map((name) => tool(name))),
     });
-    const namesFor = async (order: string[]) => {
+    const toolsFor = async (order: string[]) => {
       const host = await connectIn(order);
-      const names = Object.fromEntries(host.extensions[0]!.tools!.map((built) => [built.name, true]));
+      const tools = host.extensions[0]!.tools! as GovernedTool[];
       await host.close();
-      return names;
+      return tools;
     };
-    const first = await namesFor(["a.b", "a_b"]);
-    const second = await namesFor(["a_b", "a.b"]);
-    assert.deepEqual(first, second, "a restart that reorders tools/list yields the same names");
-    assert.equal(Object.keys(first).length, 2, "both tools get a name");
+    const first = await toolsFor(["a.b", "a_b"]);
+    const second = await toolsFor(["a_b", "a.b"]);
+    assert.deepEqual(first.map(({ name }) => name), second.map(({ name }) => name),
+      "a restart that reorders tools/list yields the same names");
+    assert.equal(first.length, 2, "both tools get a name");
+    assert.ok(first.every(({ name }) => name !== "mcp__s__a_b"), "the collision group does not expose an unstable bare name");
+    assert.ok(first.every(({ governance }) => governance?.authz === "write"),
+      "configuration for a former bare name cannot transfer to a newly colliding identity");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
