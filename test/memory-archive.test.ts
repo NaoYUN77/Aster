@@ -14,7 +14,10 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { archiveSource, ARCHIVE_INSTRUCTIONS, ARCHIVE_LIMITS } from "../src/memory/archive.js";
 import { createArchiveTask, initializeArchive, readArchive, reconcileArchive, requestArchive, retryArchive,
   type ArchiveTaskOptions } from "../src/memory/archive-task.js";
+import { MEMORY_LIMITS } from "../src/memory/contracts.js";
 import { openDaily, searchDaily } from "../src/memory/daily.js";
+import { profileOperationId } from "../src/memory/profile.js";
+import { applyWorkingUpdate, readWorking } from "../src/memory/working.js";
 
 const context = BACKGROUND_CONTEXT;
 const model = { provider: "faux", modelId: "faux-1" };
@@ -334,4 +337,115 @@ test("05-F: oversized source is rejected without a coverage gap or model I/O", a
 // month-and-day deadline with an invented year. The extraction prompt must order date fidelity.
 test("05-H: the archive instructions forbid inventing or completing dates", () => {
   assert.match(ARCHIVE_INSTRUCTIONS, /never invent or complete a missing year, month, or day/);
+});
+
+function userRequirementResponse() {
+  return (transcript: { messages: readonly { role: string; content: unknown }[] }) => {
+    const input = transcript.messages.find((item) => item.role === "user")!;
+    const text = typeof input.content === "string" ? input.content : (input.content as { text: string }[])[0]!.text;
+    const sources = JSON.parse(text) as { entryId: number }[];
+    return fauxAssistantMessage(JSON.stringify({
+      segments: sources.map((source) => ({
+        sourceEntryId: source.entryId,
+        kind: "user-requirement",
+        status: "confirmed",
+        text: "Answers in Chinese",
+        supersedes: [],
+      })),
+    }));
+  };
+}
+
+test("a confirmed batch writes the profile with the cursor, and a crash before that commit applies it once", async () => {
+  const reached = Promise.withResolvers<void>();
+  let paused = false;
+  let f = await fixture({ boundary: async (name, signal) => {
+    if (name !== "before-cursor" || paused) return;
+    paused = true;
+    reached.resolve();
+    await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  } });
+  const directory = f.directory;
+  try {
+    f.faux.setResponses([userRequirementResponse()]);
+    const [id] = await f.append(1);
+    const taskId = await requestArchive(f.harness, f.root.id, id!, f.task, context);
+    f.harness.resume();
+    await reached.promise;
+    assert.deepEqual((await readWorking(f.harness, f.root.id, context)).profile, []);
+    assert.equal((await readArchive(f.harness, f.root.id, context))!.archivedThrough, null);
+    await f.harness.close(context);
+    f = await fixture({}, directory);
+    assert.equal((await f.wait(taskId)).state.outcome.status, "completed");
+    assert.equal(f.calls.length, 0, "the saved body is reused, so extraction does not run again");
+    const restored = await readWorking(f.harness, f.root.id, context);
+    assert.equal(restored.revision, 2);
+    assert.equal(restored.profile.length, 1);
+    assert.equal(restored.profile[0]?.text, "Answers in Chinese");
+    assert.equal(restored.profile[0]?.evidence[0]?.date, "2026-10-24");
+    assert.equal((await readArchive(f.harness, f.root.id, context))!.archivedThrough, id);
+    const replay = await applyWorkingUpdate(f.harness, {
+      conversationId: f.root.id,
+      operationId: profileOperationId(`archive:${f.root.id}:0:${id}`),
+      expectedRevision: 1,
+      evidence: [],
+      changes: [{
+        op: "profile.put",
+        item: {
+          id: "other",
+          text: "Answers in English",
+          category: "user-requirement",
+          evidence: [{ date: "2026-10-24", id: "other", page: 1 }],
+        },
+      }],
+      resolveProfileEvidence: async () => {},
+      now: 9,
+    }, context);
+    assert.equal(replay.changed, true);
+    assert.equal(replay.revision, 2, "the archive operation id replays its receipt instead of applying again");
+    assert.equal((await readWorking(f.harness, f.root.id, context)).profile[0]?.text, "Answers in Chinese");
+    assert.equal(await requestArchive(f.harness, f.root.id, id!, f.task, context), null);
+  } finally { await f.close(); }
+});
+
+test("profile extraction can be turned off without stopping the archive cursor", async () => {
+  const f = await fixture({ profile: false });
+  try {
+    f.faux.setResponses([userRequirementResponse()]);
+    const [id] = await f.append(1);
+    assert.equal((await f.wait(await requestArchive(f.harness, f.root.id, id!, f.task, context))).state.outcome.status, "completed");
+    assert.equal((await readArchive(f.harness, f.root.id, context))!.archivedThrough, id);
+    assert.deepEqual((await readWorking(f.harness, f.root.id, context)).profile, []);
+  } finally { await f.close(); }
+});
+
+test("a full profile does not block the archive cursor or drop stored items", async () => {
+  const f = await fixture();
+  try {
+    await applyWorkingUpdate(f.harness, {
+      conversationId: f.root.id,
+      operationId: "seed-profile",
+      expectedRevision: 1,
+      evidence: [],
+      changes: Array.from({ length: MEMORY_LIMITS.profile }, (_, index) => ({
+        op: "profile.put" as const,
+        item: {
+          id: `p${index + 1}`,
+          text: `fact ${index + 1}`,
+          category: "user-requirement",
+          evidence: [{ date: "2026-10-25", id: `seed-${index + 1}`, page: 1 }],
+        },
+      })),
+      resolveProfileEvidence: async () => {},
+      now: 1,
+    }, context);
+    f.faux.setResponses([userRequirementResponse()]);
+    const [id] = await f.append(1);
+    assert.equal((await f.wait(await requestArchive(f.harness, f.root.id, id!, f.task, context))).state.outcome.status, "completed");
+    const state = await readWorking(f.harness, f.root.id, context);
+    assert.equal((await readArchive(f.harness, f.root.id, context))!.archivedThrough, id);
+    assert.equal(state.revision, 2);
+    assert.equal(state.profile.length, MEMORY_LIMITS.profile);
+    assert.equal(state.profile.some((item) => item.text === "Answers in Chinese"), false);
+  } finally { await f.close(); }
 });

@@ -16,10 +16,11 @@
 // Errors: `invalid-input` (self-inconsistent change, already-expired preference, preference or
 // profile limit, a profile evidence date that is not a real calendar day, removing an unknown id),
 // `revision-conflict` (`expectedRevision` is not the stored revision), `missing-evidence` (an
-// evidence entry or preference source is not committed in this conversation, or a `task.set` has
-// none), `corrupt-state` (a stored value fails its schema). A rejection writes nothing.
-// Profile evidence is a daily-segment ref, checked here for shape and calendar date. This module
-// does not open daily files, so a well-formed ref is not resolved to a stored segment.
+// evidence entry or preference source is not committed in this conversation, a `task.set` has
+// none, or a `profile.put` has no resolver or the resolver rejects a ref), `corrupt-state` (a
+// stored value fails its schema). A rejection writes nothing.
+// Profile evidence is a daily-segment ref. This module checks its shape and calendar date, then
+// asks the injected resolver whether that segment is current. It does not open daily files.
 //
 // Side effects: one commit holding the state write, the anchor entry, the completion entry when a
 // task was cleared, and the receipt. A replay of a known `operationId` returns its receipt and
@@ -44,6 +45,7 @@ import {
   WorkingStateSchema,
   WorkingUpdateArgsSchema,
   type ActiveTask,
+  type DailySegmentRef,
   type ProfileItem,
   type ProfileItemDraft,
   type SourceRef,
@@ -113,7 +115,16 @@ export type WorkingUpdateRequest = {
   readonly changes: readonly WorkingChangeDraft[];
   /** Host clock in milliseconds. */
   readonly now: number;
+  /**
+   * Required when `changes` contain `profile.put`. Called inside the commit, after the receipt
+   * replay check, so a retry of a committed operation does not re-resolve evidence. The resolver
+   * rejects a ref that is missing or no longer current. This module does not open daily files.
+   */
+  readonly resolveProfileEvidence?: (refs: readonly DailySegmentRef[]) => Promise<void>;
 };
+
+/** Host check that profile evidence names current daily-log segments. */
+export type ProfileEvidenceResolver = NonNullable<WorkingUpdateRequest["resolveProfileEvidence"]>;
 
 /**
  * Seed of a receipt member that does not exist yet. A stored receipt always has a non-negative
@@ -130,14 +141,31 @@ export async function applyWorkingUpdate(
   request: WorkingUpdateRequest,
   context: Context,
 ): Promise<WorkingReceipt> {
-  const { conversationId } = request;
-  const args = assertSchema<{ expectedRevision: number; evidence: EntryId[]; changes: WorkingChangeDraft[] }>(
+  const args = validatedUpdate(request);
+  return committer.commit((tx) => applyWorkingUpdateInTx(tx, request, args), context);
+}
+
+/** Schema check shared by the session commit and a caller that already holds a transaction. */
+function validatedUpdate(request: WorkingUpdateRequest) {
+  return assertSchema<{ expectedRevision: number; evidence: EntryId[]; changes: WorkingChangeDraft[] }>(
     WorkingUpdateArgsSchema,
     { expectedRevision: request.expectedRevision, evidence: request.evidence, changes: request.changes },
     "invalid-input",
   );
-  return committer.commit(async (tx) => {
-    // A replay returns the stored result without re-checking the revision or touching the state. The
+}
+
+/**
+ * Apply one update on a transaction the caller owns. A task runtime must use this inside its own
+ * `commit`: returning the receipt from that callback would be read as the task's next state.
+ * The caller commits; this function does not.
+ */
+export async function applyWorkingUpdateInTx(
+  tx: Tx,
+  request: WorkingUpdateRequest,
+  args: { expectedRevision: number; evidence: EntryId[]; changes: WorkingChangeDraft[] } = validatedUpdate(request),
+): Promise<WorkingReceipt> {
+  const { conversationId } = request;
+  // A replay returns the stored result without re-checking the revision or touching the state. The
     // draft cannot leave the commit — it is revoked once the commit settles — so the receipt is copied.
     const slot = await tx.doc(WorkingReceiptDoc, conversationId, request.operationId, UNSET_RECEIPT);
     if ((slot as WorkingReceipt).at !== UNSET_RECEIPT.at) {
@@ -151,6 +179,13 @@ export async function applyWorkingUpdate(
       throw new MemoryError("revision-conflict", `Working state is at revision ${current.revision}`, {
         detail: { expectedRevision: args.expectedRevision, revision: current.revision },
       });
+    }
+    const profileRefs = args.changes.flatMap((change) => change.op === "profile.put" ? change.item.evidence : []);
+    if (profileRefs.length > 0) {
+      if (request.resolveProfileEvidence === undefined) {
+        throw new MemoryError("missing-evidence", "Profile evidence was not resolved");
+      }
+      await request.resolveProfileEvidence(profileRefs);
     }
     const referenced = new Set<EntryId>([
       ...args.evidence,
@@ -191,9 +226,8 @@ export async function applyWorkingUpdate(
       completedEntryId,
       at: request.now,
     };
-    Object.assign(slot, receipt);
-    return receipt;
-  }, context);
+  Object.assign(slot, receipt);
+  return receipt;
 }
 
 function completionOf(task: ActiveTask, operationId: string, revision: number, now: number): WorkingCompleted {

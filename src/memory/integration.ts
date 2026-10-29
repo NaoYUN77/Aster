@@ -55,7 +55,8 @@ import {
   snapshotOfProjection,
 } from "./context.js";
 import { readWorking } from "./working.js";
-import { workingExtension } from "./working-tools.js";
+import { requireCurrentProfileEvidence } from "./profile.js";
+import { createWorkingExtension } from "./working-tools.js";
 import { openDaily } from "./daily.js";
 import { createArchiveTask, initializeArchive, readArchive, reconcileArchive, requestArchive, type ArchiveTask } from "./archive-task.js";
 import {
@@ -82,6 +83,8 @@ export type MemoryIntegrationOptions = {
   readonly reserveTokens: number;
   readonly timezone: string;
   readonly archiveTimeoutMs?: number;
+  /** When false, confirmed archive batches do not update the working profile. Default true. */
+  readonly profile?: boolean;
   /** Identifiers-and-codes-only observation; defaults to a one-line stderr log. */
   readonly log?: (event: MemoryLogEvent) => void;
 };
@@ -159,6 +162,7 @@ export class MemoryIntegration {
       store: this.#store,
       model: options.model,
       ...(options.archiveTimeoutMs === undefined ? {} : { timeoutMs: options.archiveTimeoutMs }),
+      ...(options.profile === undefined ? {} : { profile: options.profile }),
     });
   }
 
@@ -182,7 +186,9 @@ export class MemoryIntegration {
       commit: (change, context) => this.#session().commit(change, context),
     };
     return [
-      workingExtension,
+      createWorkingExtension({
+        resolveProfileEvidence: (refs) => requireCurrentProfileEvidence(this.#store, refs),
+      }),
       memoryToolsExtension({ store: this.#store, budget: this.#options.budget }),
       createCompactionExtension({
         commit,

@@ -57,9 +57,10 @@ import {
   snapshotOfProjection,
   type PlanInput,
 } from "../src/memory/context.js";
-import { extractProfileDrafts, profilePutChanges } from "../src/memory/profile.js";
+import { openDaily, publishSegments } from "../src/memory/daily.js";
+import { extractProfileDrafts, profilePutChanges, requireCurrentProfileEvidence } from "../src/memory/profile.js";
 import { applyWorkingUpdate, readWorking, readWorkingAt } from "../src/memory/working.js";
-import { workingExtension } from "../src/memory/working-tools.js";
+import { createWorkingExtension } from "../src/memory/working-tools.js";
 
 const context = BACKGROUND_CONTEXT;
 const conversationId = 1 as ConversationId;
@@ -302,7 +303,10 @@ async function openFixture(name: string): Promise<Fixture> {
   const models = createModels();
   models.setProvider(faux.provider);
   const registry = createRegistry();
-  registry.install(workingExtension);
+  const store = openDaily(directory);
+  registry.install(createWorkingExtension({
+    resolveProfileEvidence: (refs) => requireCurrentProfileEvidence(store, refs),
+  }));
   const harness = await Harness.open(await openNodeSqliteStorage(join(directory, "agent.sqlite")), { models, registry }, context);
   const root = await harness.root(context, { agent: { model: { provider: "faux", modelId: "faux-1" } } });
   harness.resume();
@@ -314,7 +318,10 @@ async function reopen(fixture: Fixture): Promise<void> {
   const models = createModels();
   models.setProvider(fixture.faux.provider);
   const registry = createRegistry();
-  registry.install(workingExtension);
+  const store = openDaily(fixture.directory);
+  registry.install(createWorkingExtension({
+    resolveProfileEvidence: (refs) => requireCurrentProfileEvidence(store, refs),
+  }));
   fixture.harness = await Harness.open(
     await openNodeSqliteStorage(join(fixture.directory, "agent.sqlite")),
     { models, registry },
@@ -377,6 +384,24 @@ test("a stored version 1 working document loads, and profile ops follow preferen
     assert.deepEqual(atSeed.profile, []);
     assert.equal(atSeed.revision, 3);
 
+    await assert.rejects(applyWorkingUpdate(fixture.harness, {
+      conversationId: fixture.root.id,
+      operationId: "tool:profile-unresolved",
+      expectedRevision: 3,
+      evidence: [],
+      changes: [{
+        op: "profile.put",
+        item: {
+          id: "lang",
+          text: "Answers in Chinese",
+          category: "user-requirement",
+          evidence: [{ date: "2026-10-25", id: "seg-lang", page: 1 }],
+        },
+      }],
+      now: 50,
+    }, context), isMemoryError("missing-evidence"));
+    assert.equal((await readWorking(fixture.harness, fixture.root.id, context)).revision, 3);
+
     const item = {
       id: "lang",
       text: "Answers in Chinese",
@@ -389,6 +414,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: 3,
       evidence: [],
       changes: [{ op: "profile.put", item }],
+      resolveProfileEvidence: async () => {},
       now: 100,
     }, context);
     assert.equal(put.changed, true);
@@ -403,6 +429,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: 3,
       evidence: [],
       changes: [{ op: "profile.put", item: { ...item, text: "Answers in English" } }],
+      resolveProfileEvidence: async () => {},
       now: 999,
     }, context);
     assert.deepEqual(replay, put, "the same operation id does not apply a second time");
@@ -413,6 +440,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: 4,
       evidence: [],
       changes: [{ op: "profile.put", item }],
+      resolveProfileEvidence: async () => {},
       now: 200,
     }, context);
     assert.equal(again.changed, false);
@@ -425,6 +453,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: 2,
       evidence: [],
       changes: [{ op: "profile.put", item }],
+      resolveProfileEvidence: async () => {},
       now: 300,
     }, context), isMemoryError("revision-conflict"));
 
@@ -434,6 +463,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: 4,
       evidence: [],
       changes: [{ op: "profile.put", item: { ...item, id: "bad-date", evidence: [{ date: "2026-02-31", id: "seg-x", page: 1 }] } }],
+      resolveProfileEvidence: async () => {},
       now: 300,
     }, context), isMemoryError("invalid-input"));
 
@@ -443,6 +473,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: 4,
       evidence: [],
       changes: [{ op: "profile.remove", id: "missing" }],
+      resolveProfileEvidence: async () => {},
       now: 300,
     }, context), isMemoryError("invalid-input"));
     assert.equal((await readWorking(fixture.harness, fixture.root.id, context)).revision, 4);
@@ -453,6 +484,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: 4,
       evidence: [],
       changes: [{ op: "profile.put", item: { ...item, text: "Answers in Chinese, briefly" } }],
+      resolveProfileEvidence: async () => {},
       now: 400,
     }, context);
     assert.equal(replaced.revision, 5);
@@ -464,6 +496,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: 5,
       evidence: [seeded],
       changes: [{ op: "task.set", task: taskDraft("Ship the fix") }],
+      resolveProfileEvidence: async () => {},
       now: 500,
     }, context);
     const cleared = await applyWorkingUpdate(fixture.harness, {
@@ -472,6 +505,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: task.revision,
       evidence: [],
       changes: [{ op: "task.clear" }],
+      resolveProfileEvidence: async () => {},
       now: 600,
     }, context);
     const afterClear = await readWorking(fixture.harness, fixture.root.id, context);
@@ -485,6 +519,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
       expectedRevision: afterClear.revision,
       evidence: [],
       changes: [{ op: "profile.remove", id: "lang" }],
+      resolveProfileEvidence: async () => {},
       now: 700,
     }, context);
     assert.deepEqual((await readWorking(fixture.harness, fixture.root.id, context)).profile, []);
@@ -503,6 +538,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
           evidence: [{ date: "2026-10-25", id: `seg-${index + 1}`, page: 1 }],
         },
       })),
+      resolveProfileEvidence: async () => {},
       now: 800,
     }, context);
     assert.equal((await readWorking(fixture.harness, fixture.root.id, context)).profile.length, MEMORY_LIMITS.profile);
@@ -520,6 +556,7 @@ test("a stored version 1 working document loads, and profile ops follow preferen
           evidence: [{ date: UNKNOWN_DATE, id: "seg-over", page: 2 }],
         },
       }],
+      resolveProfileEvidence: async () => {},
       now: 900,
     }, context), isMemoryError("invalid-input"));
     assert.equal((await readWorking(fixture.harness, fixture.root.id, context)).profile.length, MEMORY_LIMITS.profile);
@@ -537,9 +574,78 @@ function textOf(message: { readonly content: readonly { readonly type: string }[
   return message.content.flatMap((part) => (part.type === "text" ? [(part as unknown as { text: string }).text] : [])).join("\n");
 }
 
+test("profile.put rejects evidence that is missing, on the wrong page, or no longer current", { timeout: 60_000 }, async () => {
+  const fixture = await openFixture("memory-profile-evidence-");
+  try {
+    const store = openDaily(fixture.directory);
+    const kept = segment({ id: "kept", kind: "user-requirement", text: "Answers in Chinese", date: "2026-10-25" });
+    const replaced = segment({ id: "old", kind: "user-requirement", text: "Use English", date: "2026-10-24" });
+    await publishSegments(store, [kept, replaced]);
+    await publishSegments(store, [segment({
+      id: "new",
+      kind: "user-requirement",
+      text: "Answers in Chinese",
+      date: "2026-10-26",
+      supersedes: ["old"],
+    })]);
+    const cite = (id: string, date: string, page = 1) => ({
+      id,
+      text: "Answers in Chinese",
+      category: "user-requirement",
+      evidence: [{ date, id, page }],
+    });
+    const resolveProfileEvidence = (refs: Parameters<typeof requireCurrentProfileEvidence>[1]) =>
+      requireCurrentProfileEvidence(store, refs);
+    await assert.rejects(applyWorkingUpdate(fixture.harness, {
+      conversationId: fixture.root.id,
+      operationId: "tool:missing",
+      expectedRevision: 1,
+      evidence: [],
+      changes: [{ op: "profile.put", item: cite("absent", "2026-10-25") }],
+      resolveProfileEvidence,
+      now: 1,
+    }, context), isMemoryError("missing-evidence"));
+    await assert.rejects(applyWorkingUpdate(fixture.harness, {
+      conversationId: fixture.root.id,
+      operationId: "tool:page",
+      expectedRevision: 1,
+      evidence: [],
+      changes: [{ op: "profile.put", item: cite("kept", "2026-10-25", 2) }],
+      resolveProfileEvidence,
+      now: 2,
+    }, context), isMemoryError("missing-evidence"));
+    await assert.rejects(applyWorkingUpdate(fixture.harness, {
+      conversationId: fixture.root.id,
+      operationId: "tool:stale-segment",
+      expectedRevision: 1,
+      evidence: [],
+      changes: [{ op: "profile.put", item: cite("old", "2026-10-24") }],
+      resolveProfileEvidence,
+      now: 3,
+    }, context), isMemoryError("missing-evidence"));
+    assert.equal((await readWorking(fixture.harness, fixture.root.id, context)).revision, 1);
+    const accepted = await applyWorkingUpdate(fixture.harness, {
+      conversationId: fixture.root.id,
+      operationId: "tool:current",
+      expectedRevision: 1,
+      evidence: [],
+      changes: [{ op: "profile.put", item: cite("kept", "2026-10-25") }],
+      resolveProfileEvidence,
+      now: 4,
+    }, context);
+    assert.equal(accepted.revision, 2);
+    assert.equal((await readWorking(fixture.harness, fixture.root.id, context)).profile[0]?.id, "kept");
+  } finally {
+    await dispose(fixture);
+  }
+});
+
 test("working_read and working_update show and accept the profile", { timeout: 60_000 }, async () => {
   const fixture = await openFixture("memory-profile-tool-");
   try {
+    await publishSegments(openDaily(fixture.directory), [
+      segment({ id: "seg-lang", kind: "user-requirement", text: "Answers in Chinese", date: "2026-10-25" }),
+    ]);
     fixture.faux.setResponses([
       fauxAssistantMessage(fauxToolCall("working_update", {
         expectedRevision: 1,
@@ -555,6 +661,19 @@ test("working_read and working_update show and accept the profile", { timeout: 6
         }],
       }, { id: "put-profile" }), { stopReason: "toolUse" }),
       fauxAssistantMessage(fauxToolCall("working_read", {}, { id: "read-profile" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("working_update", {
+        expectedRevision: 2,
+        evidence: [],
+        changes: [{
+          op: "profile.put",
+          item: {
+            id: "missing",
+            text: "Not in the log",
+            category: "user-requirement",
+            evidence: [{ date: "2026-10-25", id: "seg-missing", page: 1 }],
+          },
+        }],
+      }, { id: "put-missing" }), { stopReason: "toolUse" }),
       fauxAssistantMessage("Noted."),
     ]);
     assert.equal((await (await fixture.root.submit({
@@ -575,8 +694,13 @@ test("working_read and working_update show and accept the profile", { timeout: 6
     assert.equal(put.isError, false);
     assert.match(textOf(put), /profile: lang: Answers in Chinese \(user-requirement; 2026-10-25\/seg-lang p1\)/);
     assert.match(textOf(read), /profile: lang: Answers in Chinese \(user-requirement; 2026-10-25\/seg-lang p1\)/);
+    const missing = byId.get("put-missing");
+    assert.ok(missing);
+    assert.equal(missing.isError, true);
+    assert.match(textOf(missing), /missing-evidence/);
     const stored = await readWorking(fixture.harness, fixture.root.id, context);
     assert.equal(stored.revision, 2);
+    assert.equal(stored.profile.length, 1);
     assert.equal(stored.profile[0]?.text, "Answers in Chinese");
   } finally {
     await dispose(fixture);
