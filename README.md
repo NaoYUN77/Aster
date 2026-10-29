@@ -170,6 +170,32 @@ OAuth 首次授权或重新授权时先停 bot，再执行 `npm run build && DAT
 
 部署注意：容器内路径是卷内路径（`cwd` 等写 `/data/...`）；stdio server 依赖宜在派生镜像中预装，运行时从 npm registry 临时安装会把可用性绑到外部网络；每个 stdio server 都增加常驻进程与内存，4 GB 主机上优先少而稳。
 
+### 本地 web_search
+
+镜像内置一个窄的 DeepSeek Search stdio server，只暴露 `web_search`。它不会自动启用：先把独立搜索 API key 作为 `SEARCH_DEEPSEEK_API_KEY` 写入部署 `.env`，再在持久化卷的 `/data/mcp.json` 加入：
+
+```json
+{
+  "servers": [{
+    "name": "web",
+    "transport": "stdio",
+    "command": "/usr/local/bin/node",
+    "args": ["/app/dist/src/web-search-mcp.js"],
+    "inheritEnv": false,
+    "env": { "SEARCH_DEEPSEEK_API_KEY": "${SEARCH_DEEPSEEK_API_KEY}" },
+    "timeoutMs": 30000,
+    "connectTimeoutMs": 10000
+  }],
+  "tools": {
+    "mcp__web__web_search": { "authz": "read" }
+  }
+}
+```
+
+重启 Aster 后用 `npm run mcp:check` 或启动日志确认发现 `mcp__web__web_search`；运行中修改配置仍不会热加载。工具输入为 `query`（1～128 个 Unicode 字符）和可选 `maxResults`（1～10，默认 5），返回 DeepSeek 的来源 URL、摘要、站点与发布时间的规范化结果。一次调用最多 20 秒上游等待、256 KiB 响应和 24 KiB 结构化输出，同时最多 2 个搜索；不自动重试、不抓取结果网页、不把 key 放进模型参数或日志。
+
+此 key 与模型使用的 `DEEPSEEK_API_KEY` 分开，避免无意共享权限。stdio 子进程与 Aster 同属一个容器用户，因此环境注入是参数隔离，不是针对内置 `bash` 工具的秘密隔离。供应商选择和价格／限制依据见 [web_search 提供商调研](docs/web-search-provider-research.md)；目前未用真实 key 验证生产网络与检索质量，上线前须从实际镜像执行一次真实查询。
+
 ## 投递核查与补发
 
 网络超时可能发生在 Telegram 已收到消息之后，因此结果未知的发送不会自动重发。先停应用，查看待核查分段：
