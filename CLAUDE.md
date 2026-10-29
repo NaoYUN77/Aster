@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 技术基线与版本
 
-本项目以 pi durable 为 agent 底座，复用其 agent loop、工具执行及持久化能力。模型调用通过底座接入，应用层不另建一套 agent loop。
+本项目以 pi durable 为 agent 底座，复用其 agent loop、工具执行及持久化能力。模型调用通过底座接入，应用层不另建一套 agent loop。取舍见 [ADR-0013](docs/adr/0013-pi-durable-agent-loop.md)。
 
 部署基线为单台 4 核 CPU、4 GB 内存的云服务器，模型推理由远端服务提供。组件选择须符合该资源约束。
 
@@ -31,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 构建、检查、测试与启动命令以 package.json 为准，使用方法见 README.md。接口与恢复设计见 [docs/contracts-and-lifecycle.md](docs/contracts-and-lifecycle.md)。
 
-支持的模型提供商以 `src/providers.ts` 的注册表为唯一来源：只登记可用单个显式 API key 配置的提供商，不包含 OAuth／订阅登录、云厂商环境凭据或需要额外端点参数的提供商。文档与部署脚本引用该注册表，不另行维护一份名单。
+支持的模型提供商以 `src/providers.ts` 的注册表为唯一来源：只登记可用单个显式 API key 配置的提供商，不包含 OAuth／订阅登录、云厂商环境凭据或需要额外端点参数的提供商。文档与部署脚本引用该注册表，不另行维护一份名单。取舍见 [ADR-0006](docs/adr/0006-explicit-api-key-providers.md)。
 
 ## 数据边界
 
@@ -73,7 +73,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - CLAUDE.md：仓库级工程约束及技术基线。
 - README.md：项目入口、实际可用的配置与运行方法。
-- docs/：产品范围、设计决策、接口说明及部署说明，按主题拆分。
+- docs/：部署、运行和架构设计。接口说明与验收记录也放在这里。
+- docs/adr/：只放决策记录。技术选型、取舍和代价写在 ADR，不写进本文件。
 - issue 或任务文档：具体功能的实施步骤、调查过程和验收记录。
 
 每项定义有明确的权威来源，其他文档引用它，不复制维护。区分已实现、拟采用与待验证的内容。修改契约或技术基线时更新对应文档；不把单次任务结果追加到本文件。
