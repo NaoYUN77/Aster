@@ -2,7 +2,7 @@
 
 生产交付统一使用 Docker 镜像 **Aster**（镜像仓库名 `aster`）。服务器只需要 Docker Engine 24+ 和 Compose 2.24.4+，不需要主机 Node.js 或 Go。开发运行仍可使用 README 中的 npm 命令。
 
-状态：本手册依据本地镜像构建、Compose 配置渲染和主机测试编写，尚未在真实云服务器执行完整上线。文中的“预期”是验收标准，不是已完成的部署记录。原 systemd 部署已停止支持，只保留[迁移路径](#7-从-systemd-迁移)。
+状态：本手册是部署步骤和验收标准。所有者确认 Aster 已部署在腾讯云服务器上并持续运行。文中的“预期”是操作时的核对标准。第 9 节的脱敏记录（日期、镜像 digest、场景、结果）是可选项，没有它也不改变已部署这一事实。原 systemd 部署已停止支持，只保留[迁移路径](#7-从-systemd-迁移)。
 
 ## 1. 交付物与镜像
 
@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | `personal-agent` | 1 GB | 128 |
 
-应用容器以 uid 1000 运行，可写卷 `/data`；它的根文件系统并非只读。镜像内置 Bash、`flock`、npm 和 Node 24.19.0，并设置 `HOME=/data`、`NPM_CONFIG_CACHE=/data/.npm`。
+停止宽限 45 秒（`docker-compose.yml` 的 `stop_grace_period`）。应用容器以 uid 1000 运行，可写卷 `/data`；它的根文件系统并非只读。镜像内置 Bash、`flock`、npm 和 Node 24.19.0，并设置 `HOME=/data`、`NPM_CONFIG_CACHE=/data/.npm`。
 
 ### 同一数据卷的单实例保护
 
@@ -28,6 +28,8 @@
 - 不同数据卷、同一个 bot token 或同一个 owner 的两个实例不会被镜像检测。Telegram 长轮询会互相争抢，可能产生重复回复。
 - 迁移、回滚或演练期间不要让旧实例和新实例同时消费同一个 bot。
 - 同一数据卷只允许一个容器使用；不要用 `docker compose up --scale` 扩容。
+
+同一主机上的 `test` 与 `production` 共用这份 Compose，由版本化环境描述区分项目名、卷和 bot 身份。检查入口是 `npm run deployment:environment`。字段见 [部署环境描述](deployment-environments.md)。渲染通过不等于两环境已经隔离验收。
 
 ## 2. 配置
 
@@ -46,6 +48,7 @@ chmod 600 .env
 - `MODEL_PROVIDER`：`src/providers.ts` 注册表内的 id。
 - `MODEL_ID`：该提供商在 pi-ai 1.3.0 模型目录中的 id。
 - 当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`）；其他提供商的 key 留空。
+- `TELEGRAM_API_ROOT`（可选）：https 前缀，无 query 或 fragment。供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理。未设置时使用官方根地址。仓库没有记录这项是否在某台机器上使用。
 
 只检查键是否存在，不要在终端或日志中回显值：
 
@@ -64,7 +67,7 @@ docker compose run --rm --no-deps personal-agent node dist/src/check-config.js
 
 预期输出 `Configuration OK: MODEL_PROVIDER=... MODEL_ID=... MCP_SERVERS=...`。缺失项会打印 `Missing configuration: <KEY>`，提供商或模型 id 错误会打印候选列表；先修配置，不要反复重启。bot 已有 webhook 时应用拒绝启动，需先在原部署中停用。
 
-MCP 配置默认读取 `DATA_DIR/mcp.json`，即卷内 `/data/mcp.json`；文件不存在表示关闭。默认路径上的文件级错误只禁用 MCP，`MCP_CONFIG` 显式指定的文件错误会使检查失败。配置格式见 README 的 MCP 章节。
+MCP 配置默认读取 `DATA_DIR/mcp.json`，即卷内 `/data/mcp.json`；文件不存在表示关闭。默认路径上的文件级错误只禁用 MCP，`MCP_CONFIG` 显式指定的文件错误会使检查失败。配置格式见 [工具与 MCP](mcp.md)。
 
 容器内的绝对路径是卷内路径，不是旧主机路径：`cwd`、stdio `command`/`args` 必须指向 `/data/...` 或镜像内已有程序。迁移 systemd 配置时，把 `/var/lib/personal-agent/...` 改为 `/data/...`，并把 `command` 改为镜像内可用的绝对路径（如 `/usr/local/bin/node`）。镜像不会自动安装 stdio server 的依赖；需要在派生镜像中预装，或显式允许并审计运行时下载。
 
@@ -153,7 +156,7 @@ docker compose run --rm --no-deps personal-agent node dist/src/mcp-check.js
 docker compose start personal-agent
 ```
 
-`deliveries.js list` 输出 `blocked` 与 `failures` 两个数组；该命令会先执行恢复，强杀时处于 `sending` 的分段会以 `uncertain` 出现。先核对 Telegram 实际收到的内容，再决定 `retry` 或 `sent`。
+`deliveries.js list` 输出 `blocked` 与 `failures` 两个数组；该命令会先执行恢复，强杀时处于 `sending` 的分段会以 `uncertain` 出现。先核对 Telegram 实际收到的内容，再决定 `retry` 或 `sent`。命令语义见 [投递核查与补发](deliveries.md)。这两条命令只改本地投递状态，不重新执行 agent。
 
 ### MCP OAuth
 
@@ -300,4 +303,10 @@ docker compose logs --tail 50 personal-agent
 - [ ] 日志中没有凭据或完整消息内容。
 - [ ] 记录了镜像 digest、Compose 版本、真实模型和当日费用。
 
-本仓库当前已验证：应用镜像可构建；基础 Compose 与 build 覆盖可渲染；主机测试通过。未验证：真实云服务器上线、真实 Telegram／模型联调。这些项目不能写成“已上线”或“已验证”。
+仓库里能核对的范围：应用镜像可构建；基础 Compose 与 build 覆盖可渲染；主机测试和 GitHub Actions 的单服务拓扑通过。拓扑不覆盖真实 Telegram／模型链路，见 [CI/CD 实施计划的当前事实](ci-cd-implementation-plan.md#当前事实)。所有者确认生产环境已在腾讯云运行。上面的清单是可选核对项，未勾选不否定已部署。
+
+### 部署记录
+
+> **TODO（维护者填写，可选）**  
+> 可在这里追加一条脱敏记录，至少包括：日期、镜像 digest（`repository@sha256:…`）、场景（例如 owner 私聊、记忆跨重启、容器重启）、结果。不要粘贴 token、聊天原文或日志全文。  
+> 没有这条记录时，仍以所有者确认为准：Aster 已部署在腾讯云并持续运行。记忆验收里的腾讯云机器是测试补测，见 [记忆系统验收](memory-verification.md)，不能代替本条生产说明。

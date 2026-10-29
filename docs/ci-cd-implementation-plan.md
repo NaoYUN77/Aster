@@ -4,6 +4,16 @@
 
 本文记录本次 CI/CD 的设计、任务与验收进度。运行命令以 `package.json` 和相应脚本为准；部署步骤见 [部署指南](deployment-test-guide.md)。本文的待办项不代表已实现或已获生产准入。
 
+## 当前事实
+
+以下句子描述 2026-10-29 在仓库里能核对的状态。下文按日期保存的 Vault、router、broker、Go job 和「18/18 拓扑」是当时的记录。它们不表示当前流水线仍在跑这些检查，也不表示已经上线。
+
+- 运行拓扑是单个 `personal-agent` 服务（`docker-compose.yml`）。仓库里没有 `release.yml` 和 `deploy.yml`。
+- `.github/workflows/ci.yml` 有两个 job：Node.js（`npm ci`、`check`、`test`、`build`）和最终镜像（构建、Linux 卷预检、只读 WAL、`scripts/ci/topology-on-docker-host.sh`）。2026-10-29 的 main 运行 [40826470475](https://github.com/NaoYUN77/Aster/actions/runs/40826470475) 成功。Node job 为 235 项、227 过、0 失败、8 跳过；这 8 项在镜像 job 里另有 root 或 Docker 开关下的覆盖。拓扑日志为 6 项通过，并写明 **NOT COVERED: live Telegram/model business flow**。
+- `npm run release:preflight` 成功时仍输出 `productionAdmission: "not-evaluated"`。本文件不是生产部署记录。脱敏上线记录的空位在 [部署指南第 9 节](deployment-test-guide.md#9-上线判定与验证边界)。
+
+记忆验收在腾讯云 4 核机器上做过测试补测，见 [记忆系统验收](memory-verification.md)。那次记录不能代替上面的部署记录。
+
 ## 目标与交付边界
 
 交付单位是一组已验收的镜像与 Compose。CI 验证代码、最终运行镜像与密钥边界；发布绑定受测产物的 digest；部署验证真实环境条件。生产密钥只留在部署环境，普通 PR 不接触真实 Telegram 或模型凭据。
@@ -21,6 +31,8 @@
 Actions 固定完整 commit SHA。PR 不通过 `pull_request_target` 携带秘密执行贡献者代码。没有完整准入结果时，基础 CI 成功只能说明其实际覆盖的检查成功。
 
 ## 最终镜像与架构验收
+
+下面是设计目标，不是当前 `ci.yml` 的覆盖范围。现行检查见上文「当前事实」：单服务 6 项，不含 Telegram→模型业务链。
 
 验收链路为：最终应用镜像 → 模拟 Telegram／模型／工具 API（fixture）。
 
@@ -72,7 +84,7 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 | --- | --- | --- | --- |
 | CI-01 | 方案保存、来源及验收边界 | 本文、README 入口 | 已完成 |
 | CI-03 | Linux 基础 CI | Node check/test/build，文件失败测试修正 | 已完成（本地与托管均通过） |
-| CI-04 | 完整最终镜像拓扑 | 临时资源、业务链路、恢复用例 | 18/18 本机与托管均通过（托管运行 40493637513；当时的多服务拓扑已随 Vault 移除简化为基础栈） |
+| CI-04 | 完整最终镜像拓扑 | 临时资源、业务链路、恢复用例 | 历史：多服务拓扑 18/18（托管运行 40493637513）。当前 `ci.yml` 只跑单服务 6 项检查，不含 Telegram→模型业务链。不要把 18/18 当成现行 CI 或上线证据 |
 | CI-06 | 发布与供应链验证 | 同产物扫描、签名、发布清单 | 待实现 |
 | CI-07 | 部署预检与 CD | 真实最小权限、卷保护、备份更新与业务检查 | 离线发布绑定、卷元数据预检及整卷备份已实现；本地演练与目标机准备见下文，真实准入与 CD 待实现 |
 
