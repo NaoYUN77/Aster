@@ -2,7 +2,7 @@
 
 生产交付统一使用 Docker 镜像 **Aster**（镜像仓库名 `aster`）。服务器只需要 Docker Engine 24+ 和 Compose 2.24.4+，不需要主机 Node.js 或 Go。开发运行仍可使用 README 中的 npm 命令。
 
-状态：本手册是部署步骤和验收标准。所有者确认 Aster 已部署在腾讯云服务器上并持续运行。文中的“预期”是操作时的核对标准。第 9 节的脱敏记录（日期、镜像 digest、场景、结果）是可选项，没有它也不改变已部署这一事实。原 systemd 部署已停止支持，只保留[迁移路径](#7-从-systemd-迁移)。
+状态：本手册是部署步骤和验收标准。所有者确认 Aster 已部署在腾讯云服务器上并持续运行。文中的“预期”是操作时的核对标准。第 9 节的脱敏记录（日期、镜像 digest、场景、结果）是可选项，没有它也不改变已部署这一事实。原 systemd 部署已停止支持，只保留[迁移路径](#7-从-systemd-迁移)。决定见 [ADR-0012](adr/0012-docker-replaces-systemd.md)。删除 Agent Vault、改成单服务的决定见 [ADR-0005](adr/0005-remove-agent-vault-single-service.md)。
 
 ## 1. 交付物与镜像
 

@@ -2,7 +2,7 @@
 
 历史 PR 正文草稿：保留当时的实现与验证描述，其中 systemd 部署已退役。当前 Aster 镜像交付以 [部署指南](deployment-test-guide.md) 为准。
 
-基线：`57ef390`。执行范围与要求见 [docs/review-fix-plan.md](docs/review-fix-plan.md)，逐项记录见 [docs/mvp-verification.md](docs/mvp-verification.md)。
+基线：`57ef390`。执行范围与要求见 [docs/review-fix-plan.md](review-fix-plan.md)，逐项记录见 [docs/mvp-verification.md](mvp-verification.md)。
 
 ## 已完成
 
@@ -64,7 +64,7 @@
 
 ## 后续补充（2026-10-21，Docker 与安装脚本演练）
 
-- **F3 的 Docker 备份／还原演练已执行**（Windows Docker Desktop 29.7.2 / Compose v5.3.1）：镜像构建成功；`docker compose config` 确认卷名为 `personal-agent-data`；按 README 的 `alpine tar` 命令备份，归档内容核对通过；删改数据后按 README 还原，文件内容与属主恢复，应用自己的 `Inbox` 与 SQLite 存储可正常打开；容器内投递 CLI 的 `list` 与 `sending → uncertain` 恢复行为符合预期。详见 [mvp-verification.md](docs/mvp-verification.md) 的 F3 与阶段 F。
+- **F3 的 Docker 备份／还原演练已执行**（Windows Docker Desktop 29.7.2 / Compose v5.3.1）：镜像构建成功；`docker compose config` 确认卷名为 `personal-agent-data`；按 README 的 `alpine tar` 命令备份，归档内容核对通过；删改数据后按 README 还原，文件内容与属主恢复，应用自己的 `Inbox` 与 SQLite 存储可正常打开；容器内投递 CLI 的 `list` 与 `sending → uncertain` 恢复行为符合预期。详见 [mvp-verification.md](mvp-verification.md) 的 F3 与阶段 F。
 - **`deploy/install-systemd.sh` 在容器中演练并修复五个缺陷**（`systemctl` 为桩，unit 未实际启动）：
   - 只要求**所选提供商**的 API key，`openai` 配置下留空的 `ANTHROPIC_API_KEY` 不再被误判为“配置仍为空”。
   - 配置校验移到构建前与 `systemctl` 之前，避免留下重启循环。

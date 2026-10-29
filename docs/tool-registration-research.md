@@ -2,7 +2,7 @@
 
 状态：调研记录；阶段 3（MCP 客户端）已实现，设计与运行方式见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md) 和 [README.md](../README.md)。日期：2026-10-22。
 
-本文回答两个问题：其他 personal agent 是否让模型自己注册工具；用户要接入课表、活动这类私有数据时，凭据和实现放在哪里。结论用于后续决策；模型仍不能在运行时自注册可执行工具。
+本文回答两个问题：其他 personal agent 是否让模型自己注册工具；用户要接入课表、活动这类私有数据时，凭据和实现放在哪里。结论见 [ADR-0014](adr/0014-humans-register-tools.md)。模型仍不能在运行时自注册可执行工具。
 
 ## 1. 结论
 

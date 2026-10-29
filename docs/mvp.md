@@ -13,7 +13,7 @@
 ## 当前范围
 
 - 单用户、Telegram 私聊、文本消息。
-- Telegram 长轮询接入，不要求对公网开放 webhook。
+- Telegram 长轮询接入，不要求对公网开放 webhook。见 [ADR-0011](adr/0011-telegram-long-polling.md)。
 - pi durable 提供 agent loop、会话状态及恢复能力；按底座接口接入文件读写和编辑工具。
 - 自定义工具通过代码显式注册，使用底座兼容的参数 schema，执行前完成参数校验。
 - 长期记忆是分层的：常驻目标、约束和偏好在 working 状态，过去的事实在每日归档。应用不再创建或指示模型读写 `workspace/MEMORY.md`，见 [ADR-0004](adr/0004-retire-workspace-memory-md.md)。存量文件保留不删。
@@ -36,7 +36,7 @@
 
 长期记忆的写入语义见实施方案：常驻目标、约束与偏好经 working 状态保存，事实经每日归档从已确认的会话范围提取。偏好文件 PREFERENCE、向量检索不在本次范围。早期的 `workspace/MEMORY.md` 已于 2026-10-28 退役，决定见 [ADR-0004](adr/0004-retire-workspace-memory-md.md)。
 
-运行目录必须持久化。底座使用 Node 内置 SQLite 保存会话和执行状态，接入与投递使用独立 SQLite 文件；无需数据库服务。部署更新不能覆盖记忆、会话和消息处理状态。
+运行目录必须持久化。底座使用 Node 内置 SQLite 保存会话和执行状态，接入与投递使用独立 SQLite 文件；无需数据库服务。见 [ADR-0010](adr/0010-sqlite-no-extra-data-services.md)。部署更新不能覆盖记忆、会话和消息处理状态。
 
 ## 工具契约
 

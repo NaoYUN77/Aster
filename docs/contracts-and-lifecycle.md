@@ -165,7 +165,7 @@ OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、
 | 已发送、确认尚未保存 | 标记结果未知；不能保证自动重发不会重复 |
 | 部分分段已确认 | 保留每段状态，不重新发送已确认段落 |
 
-Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不承诺端到端恰好一次。对于结果未知的发送，MVP 保留记录并提供诊断，不自动重发整条回复。
+Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不承诺端到端恰好一次。对于结果未知的发送，MVP 保留记录并提供诊断，不自动重发整条回复。取舍见 [ADR-0007](adr/0007-delivery-not-exactly-once.md)。
 
 ### 超时与关闭
 
@@ -177,7 +177,7 @@ Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不�
 
 - 工具结果的 `output` 给模型读取，`structuredOutput` 给程序化调用方，`details` 给 UI 消费者；三者不能互相替代。业务失败可返回 `isError: true`，执行异常由底座转换成错误工具结果。
 - 默认 `replay` 为 `unsafe`。执行意图已保存的工具，仅在持久化策略与当前工具策略都为 `safe` 时重跑。恢复使用当前实现与已保存参数，跳过首次参数修复和验证，因此工具升级必须兼容尚未完成调用的旧参数；不兼容变更需保留旧工具或在升级前收敛未完成任务。
-- 工具默认可以并行执行。MVP 已显式配置 `toolExecution: "sequential"`，同一回合的工具调用不会重叠；测试 `sequential tool execution prevents overlapping calls in one round` 验证该行为。内置 write/edit 已有进程内同文件写入队列，但不能保护 bash 写入，也不能把分开的读取和写入变成事务。
+- 工具默认可以并行执行。MVP 已显式配置 `toolExecution: "sequential"`，同一回合的工具调用不会重叠；测试 `sequential tool execution prevents overlapping calls in one round` 验证该行为。取舍见 [ADR-0009](adr/0009-sequential-tool-execution.md)。内置 write/edit 已有进程内同文件写入队列，但不能保护 bash 写入，也不能把分开的读取和写入变成事务。
 - 请求去重键是 `(底座 conversationId, requestId)`。相同键与相同提交类型返回旧请求，即使文本已改变，也不会检查内容冲突；接入层必须保证请求标识稳定且不被复用。
 - 输入提交状态为 `queued → placed → done | unanswered`，其中排队请求也可能直接成为 unanswered。`done` 带最终答案引用；`unanswered` 带原因。应用必须显式区分。
 - 取消 `wait()` 只取消等待。取消已开始的执行需使用底座执行取消机制；会话级 abort 会影响该会话的普通任务范围，不能假定它只影响一条请求。

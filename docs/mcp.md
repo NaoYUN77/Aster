@@ -59,7 +59,7 @@ MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代
 
 MCP 工具默认定级 `write`，不采信远端 annotations 的只读声明。所有者确认工具用途后，可按精确注册名配置 `authz: "read"`。此选项可单独使用，也可与 `pin` 合用，重启后生效。pin 只决定是否常驻，不授予权限。当前 Telegram 入口只接收所有者请求，拥有 read／write 全权。宿主 API 预留 `toolAuthority: "restricted"`，该实例及其恢复和嵌套调用只允许 read 工具。每次实际执行前复核注册、可用状态和授权。拒绝调用不发送外部请求。复核决定及原因码以 `tool_review` JSON 行写入 stderr，不含工具参数或结果。
 
-MCP 调用一律按不可重放处理（`replay: "unsafe"`）。进程中断后不自动重跑，避免重复外部副作用。启动时连不上的 server 只记录错误码并跳过。连接关闭时已发送的调用仍可能返回 `MCP_CLOSED`。当前 SDK 只公开最终关闭事件，关闭后需重启建立新连接。HTTP SSE 的内部重连不提供健康事件。本应用不增加探活或自动重连策略，具体边界见 [契约与生命周期](contracts-and-lifecycle.md)。
+MCP 调用一律按不可重放处理（`replay: "unsafe"`，见 [ADR-0008](adr/0008-unsafe-tool-replay.md)）。进程中断后不自动重跑，避免重复外部副作用。启动时连不上的 server 只记录错误码并跳过。连接关闭时已发送的调用仍可能返回 `MCP_CLOSED`。当前 SDK 只公开最终关闭事件，关闭后需重启建立新连接。HTTP SSE 的内部重连不提供健康事件。本应用不增加探活或自动重连策略，具体边界见 [契约与生命周期](contracts-and-lifecycle.md)。
 
 ## 检查与 OAuth
 

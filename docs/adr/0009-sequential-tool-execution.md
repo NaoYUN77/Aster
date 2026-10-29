@@ -1,0 +1,23 @@
+# ADR-0009：同一回合的工具顺序执行
+
+- **状态**：Accepted
+- **日期**：2026-10-21
+
+## 上下文
+
+`docs/contracts-and-lifecycle.md` 写明底座默认可以并行执行工具。MVP 在 `src/agent.ts` 把 `toolExecution` 设为 `sequential`。`docs/mvp.md` 的范围是同一会话依次处理请求，全局 agent 并发为 1，避免消息交错和共享文件并发写入。
+
+## 决策
+
+一个回合里的工具调用不重叠。测试名 `sequential tool execution prevents overlapping calls in one round` 钉住这个行为。请求本身也是单会话串行。
+
+## 备选方案
+
+- **沿用底座的并行工具执行。** 契约指出 write／edit 只有进程内同文件队列，保护不了 bash，也不能把分开的读和写变成事务。并行会让共享工作目录上的读写交错。仓库没有记录并行能省下的时延数字。
+- **多会话并发。** `docs/mvp.md` 把多用户放到后续范围。没有容量或费用对比。
+
+## 后果
+
+- 同一回合的工具延迟相加，而不是重叠。
+- 长期繁忙时，还没取走的消息留在 Telegram 侧。接入每次最多 10 条 update。
+- 顺序执行仍然不能把多次 bash 写成一个事务。

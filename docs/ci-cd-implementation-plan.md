@@ -68,7 +68,7 @@ CI 无法证明生产机器身份和旧数据卷状态。目标机预检只返�
 
 验证签名清单 → 预检 → 停止并备份持久化状态 → 更新服务 → 业务验收。容器 running、离线配置检查均不能单独证明业务就绪。
 
-离线绑定预检 `npm run release:preflight` 已实现：严格校验版本化清单，核对预期 commit、应用镜像的 `repository@sha256` 引用、一份 Compose 与调用者显式选择的策略文件的原始字节摘要。它只证明本次读取的材料一致，不验签、不扫描、不检查策略内容或目标环境；成功输出固定标注 `productionAdmission: "not-evaluated"`，不能作为部署授权。契约见 [CI 运行入口](../scripts/ci/README.md#离线发布清单绑定预检ci-07-基础)。
+离线绑定预检 `npm run release:preflight` 已实现：严格校验版本化清单，核对预期 commit、应用镜像的 `repository@sha256` 引用、一份 Compose 与调用者显式选择的策略文件的原始字节摘要。它只证明本次读取的材料一致，不验签、不扫描、不检查策略内容或目标环境；成功输出固定标注 `productionAdmission: "not-evaluated"`，不能作为部署授权。契约见 [CI 运行入口](ci-entrypoint.md#离线发布清单绑定预检ci-07-基础)。单服务拓扑的决定见 [ADR-0005](adr/0005-remove-agent-vault-single-service.md)。
 
 回滚需区分镜像与数据兼容性；失败可以停止推进，不能自动恢复旧数据库备份冒充无损回滚。
 
