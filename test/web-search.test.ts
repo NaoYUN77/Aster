@@ -105,6 +105,98 @@ test("DeepSeek requests keep credentials in headers and normalize strict provide
   });
 });
 
+test("DeepSeek-supported empty result text remains a successful search", async () => {
+  const output = await searchWeb({ query: "OpenAI blog latest", maxResults: 5 }, {
+    apiKey: "key",
+    fetch: async () => jsonResponse({ results: [
+      providerResult({
+        title: "",
+        url: "https://b.test",
+        snippet: "",
+        summary: "",
+        site_name: null,
+        site_icon: null,
+        date: null,
+        authority: -1,
+        rerank_score: 1.2,
+      }),
+    ] }),
+  });
+
+  assert.deepEqual(output, {
+    ok: true,
+    provider: "deepseek",
+    query: "OpenAI blog latest",
+    results: [{
+      rank: 1,
+      title: "",
+      url: "https://b.test/",
+      snippet: "",
+      summary: "",
+      siteName: null,
+      publishedAt: null,
+    }],
+  });
+});
+
+test("an omitted optional DeepSeek summary normalizes to empty text", async () => {
+  const result = providerResult();
+  delete result.summary;
+
+  const output = await searchWeb({ query: "missing summary" }, {
+    apiKey: "key",
+    fetch: async () => jsonResponse({ results: [result] }),
+  });
+
+  assert.equal(output.results[0]?.summary, "");
+});
+
+test("an empty DeepSeek date normalizes to an unknown publication date", async () => {
+  const output = await searchWeb({ query: "unknown date" }, {
+    apiKey: "key",
+    fetch: async () => jsonResponse({ results: [providerResult({ date: "" })] }),
+  });
+
+  assert.equal(output.results[0]?.publishedAt, null);
+});
+
+test("unused DeepSeek result metadata cannot invalidate consumed search fields", async () => {
+  const result = providerResult();
+  delete result.rerank_score;
+  delete result.authority;
+  delete result.content;
+  delete result.site_icon;
+
+  const output = await searchWeb({ query: "minimal metadata" }, {
+    apiKey: "key",
+    fetch: async () => jsonResponse({ results: [result] }),
+  });
+
+  assert.equal(output.results[0]?.title, "DeepSeek Search");
+});
+
+test("provider results beyond the requested maximum are not exposed", async () => {
+  const output = await searchWeb({ query: "bounded results", maxResults: 1 }, {
+    apiKey: "key",
+    fetch: async () => jsonResponse({ results: [
+      providerResult({ title: "First" }),
+      providerResult({ title: "Second" }),
+    ] }),
+  });
+
+  assert.deepEqual(output.results.map(({ title }) => title), ["First"]);
+});
+
+test("provider text is governed by total budgets rather than undocumented field limits", async () => {
+  const title = "t".repeat(501);
+  const output = await searchWeb({ query: "long title" }, {
+    apiKey: "key",
+    fetch: async () => jsonResponse({ results: [providerResult({ title })] }),
+  });
+
+  assert.equal(output.results[0]?.title, title);
+});
+
 test("empty results succeed while malformed result fields fail the whole response", async () => {
   assert.deepEqual(await searchWeb({ query: "nothing" }, {
     apiKey: "key",
@@ -112,12 +204,13 @@ test("empty results succeed while malformed result fields fail the whole respons
   }), { ok: true, provider: "deepseek", query: "nothing", results: [] });
 
   for (const result of [
-    providerResult({ authority: 5 }),
+    providerResult({ title: 1 }),
+    providerResult({ snippet: 1 }),
+    providerResult({ summary: null }),
+    providerResult({ site_name: 1 }),
     providerResult({ date: "not-a-date" }),
     providerResult({ date: "2026-02-30T01:02:03Z" }),
     providerResult({ url: "file:///etc/passwd" }),
-    providerResult({ summary: undefined }),
-    providerResult({ title: "  \n\t" }),
   ]) {
     await assert.rejects(
       searchWeb({ query: "x" }, { apiKey: "key", fetch: async () => jsonResponse({ results: [result] }) }),

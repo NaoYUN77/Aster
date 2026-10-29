@@ -1,6 +1,6 @@
 # 内置 Web 工具已知问题
 
-状态：开放。首次记录：2026-10-29。本文记录 `web_search` 与 `web_fetch` 在线使用中已经复现的问题、证据边界和后续验收条件；提供商契约和接入依据仍以 [内置 Web 工具提供商调研](web-search-provider-research.md) 为准。
+状态：WEB-01 已修复（离线），待真实 smoke test；WEB-02 开放。首次记录：2026-10-29。本文记录 `web_search` 与 `web_fetch` 在线使用中已经复现的问题、证据边界和后续验收条件；提供商契约和接入依据仍以 [内置 Web 工具提供商调研](web-search-provider-research.md) 为准。
 
 本文不包含 API key、Authorization header、原始提供商正文或 Telegram 对话全文。
 
@@ -8,7 +8,7 @@
 
 ### 状态与影响
 
-- **状态**：已定位，尚未修复。
+- **状态**：已修复，离线回归测试通过；待获得授权后做一次真实 key 脱敏 smoke test。
 - **用户可见错误**：`UPSTREAM_PROTOCOL_ERROR`，不可重试。
 - **影响**：一条结果包含 Aster 不接受的字段值时，整批搜索结果失败；用户看不到其余有效结果。
 - **已观察场景**：查询 OpenAI blog 最新文章时连续出现该错误。现有运行记录只保存归一化后的错误码，没有保存上游响应字段，不能据此认定线上具体是哪一个字段触发。
@@ -53,6 +53,19 @@ summary=empty: UPSTREAM_PROTOCOL_ERROR
 - 返回结果数不得超过请求的 `count`。
 
 这些限制可能继续把提供商认为成功的响应转换为 `UPSTREAM_PROTOCOL_ERROR`。它们是否应保留、放宽或改为安全截取，需要在修复时逐项决定；本记录不预先指定实现方案。
+
+### 修复结果
+
+修复只改 `src/web-search.ts` 的 DeepSeek 响应适配与 `test/web-search.test.ts`；工具注册、`tool_search`、schemaHash、tool ledger 与输出接口（`title`／`snippet`／`summary` 为字符串，`publishedAt` 为字符串或 null）均不变。
+
+- 空的 `title`、`snippet`、`summary` 归一为 `""`，不再使整批失败。
+- 缺失的 `summary` 归一为 `""`；空字符串 `date` 归一为 `null`。
+- 不再校验未消费的 `rerank_score`、`authority`、`content`、`site_icon`。
+- 上游结果多于请求数量时只取前 N 条，不再整批失败。
+- 移除 schema 未声明的单字段长度上限（title、URL、snippet、summary、site_name）；资源边界由 256 KiB 上游响应预算和 24 KiB 模型输出预算承担，超出仍显式失败。
+- 保留：字段类型错误、非法 Unicode、非法非空日期、非 HTTP(S) 或含凭据的 URL 仍返回 `UPSTREAM_PROTOCOL_ERROR`。
+
+`web_fetch` 经复核不做同类放宽：空标题本就被接受；官方把无法提取正文定义为 HTTP 404，没有第一方成功 fixture 证明 200 加空正文是可用结果，因此空正文仍判为协议错误，1,000 字符标题上限保留。
 
 ### 尚未确认
 
@@ -117,3 +130,4 @@ Aster 对 DeepSeek HTTP 404 到 `CONTENT_UNAVAILABLE` 的映射符合公开契�
 ## 变更记录
 
 - 2026-10-29：首次记录 WEB-01 与 WEB-02。诊断期间未修改实现，未执行真实收费请求。
+- 2026-10-29：修复 WEB-01 的 Search 响应适配（见“修复结果”）；Fetch 维持原约束。未执行真实收费请求。
