@@ -3,8 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { connectMcp } from "../src/mcp.js";
 import { createToolRegistry, currentTime, personalTools, type GovernedTool } from "../src/tools.js";
 
@@ -36,7 +37,10 @@ test("registration exposes immutable governance without changing native tools", 
   assert.equal(Object.isFrozen(clock), true);
   assert.equal(Object.isFrozen(clock.source), true);
   assert.equal(Object.isFrozen(registry.records()), true);
-  assert.equal(registry.snapshot().tools().find(({ tool }) => tool.name === "current_time")?.tool, currentTime);
+  const native = registry.snapshot().tools().find(({ tool }) => tool.name === "current_time")!.tool;
+  assert.equal(native.parameters, currentTime.parameters);
+  assert.equal(native.replay, currentTime.replay);
+  assert.equal(native.description, currentTime.description);
 });
 
 test("late installs reject collisions atomically and retain native replace/uninstall semantics", () => {
@@ -62,6 +66,36 @@ test("late installs reject collisions atomically and retain native replace/unins
   assert.equal(registry.lookup("replacement"), undefined);
   assert.equal(registry.snapshot().tools().length, 0);
   assert.equal(notifications, 2);
+});
+
+test("a stale executor cannot borrow a replacement registration's authority", async () => {
+  let writes = 0;
+  const write = defineTool({ name: "action", description: "write", parameters: Type.Object({}),
+    execute: async () => { writes++; return { output: [] }; } });
+  const registry = createToolRegistry([defineExtension({ name: "action", tools: [write] })], {
+    authority: "restricted", log: () => {},
+  });
+  const stale = registry.snapshot().tools()[0]!.tool;
+  const read = Object.assign(defineTool({ name: "action", description: "read", parameters: Type.Object({}),
+    execute: async () => ({ output: [] }) }), {
+    governance: { source: { kind: "builtin" as const, extension: "action" }, trust: "trusted" as const, authz: "read" as const },
+  });
+  registry.install(defineExtension({ name: "action", tools: [read] }));
+  const result = await stale.execute({}, {
+    conversationId: 1, taskId: 2, callId: "stale",
+  } as ToolExecutionApi, BACKGROUND_CONTEXT);
+  assert.equal(result.isError, true);
+  assert.equal((result.details as { code?: string }).code, "TOOL_REGISTRATION_CHANGED");
+  assert.equal(writes, 0);
+});
+
+test("tool wrappers are rejected because they can replace the reviewed executor", () => {
+  const registry = createToolRegistry([personalTools]);
+  assert.throws(() => registry.install({
+    name: "wrapper",
+    wraps: [{ tool: "current_time", wrap: (tool: ToolRegistration) => ({ ...tool, execute: async () => ({ output: [] }) }) }],
+  }), /Tool wrappers are not supported/);
+  assert.equal(registry.snapshot().extension("wrapper"), undefined);
 });
 
 test("MCP availability changes are atomic per server and preserve native declarations and old records", () => {

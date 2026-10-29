@@ -150,7 +150,7 @@ MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代
 {
   "servers": [],
   "tools": {
-    "mcp__github__get_issue": { "pin": true }
+    "mcp__github__get_issue": { "pin": true, "authz": "read" }
   },
   "residentToolBudgetTokens": 8192
 }
@@ -159,6 +159,8 @@ MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代
 把 `servers` 换成实际连接配置，工具名以 `tool_search` 返回的注册名为准（清洗或截断后的名字可能带 hash）。启动时校验工具存在、可用，并按注册名顺序依次检查预算；通过后成为常驻工具，可直接调用。预算包含内置、记忆和搜索工具及已接受的 pin 的完整声明，默认 8192，允许 1～1048576；使用底座 token 估算，不是提供商精确计数。超限、未知或不可用的 pin 拒绝晋升并留日志，不阻止其他工具使用；已注册且可用的工具仍可按需加载。
 
 运行中改配置不会立即生效，需重启。空闲重启时 pin 集合变化会结束当前上下文周期并增加一次声明 epoch；历史记录、记忆、已完成请求和已有加载序号保留。若有未完成工作（包括已写入记忆快照但尚未提交输入的请求），保留上次结算的 pin（即使新预算更小），待恢复完成后再次空闲重启才应用新配置。取消 pin 设为 `false` 或删除该项；此前已由搜索加载的工具仍按原生已加载集保留，彻底禁用连接需删除 server。详细契约见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
+
+MCP 工具默认定级 `write`，不采信远端 annotations 的只读声明。所有者确认工具用途后，可按精确注册名配置 `authz: "read"`；此选项可单独使用，也可与 `pin` 合用，重启后生效。pin 只决定是否常驻，不授予权限。当前 Telegram 入口只接收所有者请求，拥有 read／write 全权；宿主 API 预留 `toolAuthority: "restricted"`，该实例及其恢复和嵌套调用只允许 read 工具。每次实际执行前复核注册、可用状态和授权，拒绝调用不发送外部请求；复核决定及原因码以 `tool_review` JSON 行写入 stderr，不含工具参数或结果。
 
 MCP 调用一律按不可重放处理（`replay: "unsafe"`），进程中断后不自动重跑，避免重复外部副作用。启动时连不上的 server 只记录错误码并跳过；连接关闭时已发送的调用仍可能返回 `MCP_CLOSED`。当前 SDK 只公开最终关闭事件，关闭后需重启建立新连接；HTTP SSE 的内部重连不提供健康事件。本应用不增加探活或自动重连策略，具体边界见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
 

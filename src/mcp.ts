@@ -349,17 +349,23 @@ export async function connectMcp(
       continue;
     }
     const { server, connection } = result;
-    // Name assignment depends on order when two raw names sanitize alike, so fix the order first: the
-    // server's own listing order is not stable across restarts.
+    // Every member of a sanitized-name collision group gets its identity-derived name. Otherwise a
+    // newly discovered raw name that sorts first could take the old bare name and inherit its config.
     const tools = [...result.tools].sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    const nameCounts = new Map<string, number>();
+    for (const info of tools) {
+      const base = mcpToolNameBase(server.name, info.name);
+      nameCounts.set(base, (nameCounts.get(base) ?? 0) + 1);
+    }
     const registrations: ToolRegistration[] = [];
     for (const info of tools) {
-      const name = mcpToolName(server.name, info.name, used);
+      const base = mcpToolNameBase(server.name, info.name);
+      const name = mcpToolName(server.name, info.name, used, nameCounts.get(base)! > 1);
       if (name === undefined) {
         log(`MCP server ${server.name}: tool skipped (name collision)`);
         continue;
       }
-      const tool = buildMcpTool(server, connection, info, name);
+      const tool = buildMcpTool(server, connection, info, name, config?.tools?.[name]?.authz);
       if (tool === undefined) {
         log(`MCP server ${server.name}: tool skipped (unsupported schema)`);
         continue;
@@ -426,14 +432,22 @@ export async function connectMcp(
  * durable call finds the same tool after a restart. `used` only decides whether a name is available;
  * callers must assign names in a stable order for the bare name to go to the same raw tool.
  */
-export function mcpToolName(serverName: string, rawToolName: string, used: ReadonlySet<string>): string | undefined {
-  const server = sanitizeSegment(serverName);
-  const tool = sanitizeSegment(rawToolName) || "tool";
-  const base = `mcp__${server}__${tool}`;
+function mcpToolNameBase(serverName: string, rawToolName: string): string {
+  return `mcp__${sanitizeSegment(serverName)}__${sanitizeSegment(rawToolName) || "tool"}`;
+}
+
+export function mcpToolName(
+  serverName: string,
+  rawToolName: string,
+  used: ReadonlySet<string>,
+  forceHashed = false,
+): string | undefined {
+  const base = mcpToolNameBase(serverName, rawToolName);
   const suffix = `_${createHash("sha256").update(`${serverName}\0${rawToolName}`).digest("hex").slice(0, 8)}`;
-  // Pick the first candidate that is free. A collision (reserved name, or another raw name that sanitizes
-  // alike) always falls through to the hashed name, which is unique per raw tool name.
-  for (const candidate of [base, `${base.slice(0, MAX_TOOL_NAME - suffix.length)}${suffix}`]) {
+  const hashed = `${base.slice(0, MAX_TOOL_NAME - suffix.length)}${suffix}`;
+  // Collision groups force every member to its raw-identity-derived candidate. For ordinary tools,
+  // retain the readable bare name and use the hash only when it conflicts with a reserved name.
+  for (const candidate of forceHashed ? [hashed] : [base, hashed]) {
     if (candidate.length <= MAX_TOOL_NAME && !used.has(candidate)) return candidate;
   }
   return undefined;
@@ -444,13 +458,14 @@ export function buildMcpTool(
   connection: McpConnection,
   info: McpToolInfo,
   name: string,
+  authz: ToolGovernance["authz"] = "write",
 ): GovernedTool | undefined {
   const schema = normalizeSchema(info.inputSchema);
   if (schema === undefined) return undefined;
   const governance: ToolGovernance = {
     source: { kind: "mcp", server: server.name },
     trust: "untrusted",
-    authz: "write",
+    authz,
   };
   return Object.assign(defineTool({
     name,
