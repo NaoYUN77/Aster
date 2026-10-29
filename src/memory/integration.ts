@@ -30,6 +30,9 @@ import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
   defineDocFamily,
   type Conversation,
+  type ConversationId,
+  type Cursor,
+  type Storage,
   type EntryId,
   type EntryRecord,
   type Extension,
@@ -482,6 +485,22 @@ export class MemoryIntegration {
 /** Construct the composition root; the application owns the returned object's lifecycle. */
 export function createMemoryIntegration(options: MemoryIntegrationOptions): MemoryIntegration {
   return new MemoryIntegration(options);
+}
+
+/** A committed projection is unfinished application work until its input is admitted. */
+export async function hasUnsubmittedMemoryProjection(storage: Storage, conversationId: ConversationId, context: Context): Promise<boolean> {
+  const prefix = projectionRequestId("");
+  let cursor: Cursor | undefined;
+  do {
+    const page = await storage.scanSubmissions({ conversationId, status: "done" }, 100, cursor, context);
+    for (const submission of page.items) {
+      if (submission.type !== "write" || !submission.requestId?.startsWith(prefix)) continue;
+      const input = await storage.submissionByRequest(conversationId, submission.requestId.slice(prefix.length), context);
+      if (input === undefined) return true;
+    }
+    cursor = page.next;
+  } while (cursor !== undefined);
+  return false;
 }
 
 /** The submission key of one request's context projection; stable across its retries. */

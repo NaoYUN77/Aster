@@ -19,6 +19,8 @@ export type ToolLoad = {
 type Ledger = {
   sequence: number;
   epoch: number;
+  /** Startup resident MCP selection; absent in TOOL-01/02 records, meaning no pins. */
+  resident?: string[];
   /** Metadata for the most recent load of each name; membership remains owned by pi.agent. */
   loads: Record<string, ToolLoad>;
 };
@@ -78,6 +80,12 @@ async function ledgerWrite(
     : { type: "document.change", id: existing.record.id, content };
 }
 
+/** Settled resident selection; a restart with live work must preserve it. */
+export async function readResidentTools(storage: Storage, conversationId: ConversationId, context: Context): Promise<readonly string[]> {
+  const document = await find(storage, ledgerAddress(conversationId), context);
+  return document === undefined ? [] : value<Ledger>(document).resident ?? [];
+}
+
 /** Storage-owned diagnostics: use these readers, never Session doc/snapshot/watch APIs. */
 export async function readToolCatalog(storage: Storage, context: Context): Promise<readonly ToolRecord[]> {
   const document = await find(storage, catalogAddress, context);
@@ -131,6 +139,7 @@ export async function withToolLedger(storage: Storage, registry: ToolRegistry, c
     const atRevision = revision;
     const result = [...writes];
     if (persistedRevision !== atRevision) result.push(...await catalogWrites(context));
+    const changes = new Map<ConversationId, { ledger: Ledger; existing: StoredDocument | undefined }>();
     const copiedLedgers = new Map<ConversationId, Extract<StorageWrite, { type: "document.copy" }>>();
     for (const write of writes) {
       if (write.type === "document.copy" && write.record.kind === LEDGER_KIND && write.record.scope.kind === "conversation") {
@@ -179,13 +188,36 @@ export async function withToolLedger(storage: Storage, registry: ToolRegistry, c
       if (copied !== undefined && write.type === "document.copy") continue;
       append(ledger, additions, registry);
       if (existing !== undefined && additions.length === 0) continue;
-      if (copied !== undefined) {
+      changes.set(conversationId, { ledger, existing });
+    }
+    // Pin changes settle with an explicit context head, never with an ordinary model/tool commit.
+    const boundaries = new Set(writes.flatMap((write) =>
+      write.type === "entry" && write.value.kind === "pi.reset" ? [write.value.conversationId] : []
+    ));
+    const resident = registry.records().filter((record) => record.source.kind === "mcp" && record.tier === 1)
+      .map(({ name }) => name).sort();
+    for (const conversationId of boundaries) {
+      const copied = copiedLedgers.get(conversationId);
+      const existing = changes.get(conversationId)?.existing ?? (copied === undefined
+        ? await find(storage, ledgerAddress(conversationId), context)
+        : await storage.document(copied.source.id, copied.source.at, context));
+      const ledger = changes.get(conversationId)?.ledger ?? (existing === undefined
+        ? { sequence: 0, epoch: 0, loads: {} } : value<Ledger>(existing));
+      if (JSON.stringify(ledger.resident ?? []) === JSON.stringify(resident)) continue;
+      ledger.resident = resident;
+      ledger.epoch++;
+      changes.set(conversationId, { ledger, existing });
+    }
+    for (const [conversationId, { ledger, existing }] of changes) {
+      const copied = copiedLedgers.get(conversationId);
+      if (copied === undefined) {
+        result.push(await ledgerWrite(storage, conversationId, ledger, existing, context));
+      } else {
+        // Preserve the historical high water mark and identity staged by the native fork.
         result.splice(result.indexOf(copied), 1, {
           type: "document.create", record: copied.record,
           content: { version: VERSION, kind: "base", value: ledger as unknown as JsonObject },
         });
-      } else {
-        result.push(await ledgerWrite(storage, conversationId, ledger, existing, context));
       }
     }
     const seq = await storage.commit(result, context);

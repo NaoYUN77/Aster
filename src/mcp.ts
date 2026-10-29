@@ -36,6 +36,7 @@ import { Compile } from "typebox/compile";
 import type { McpAuthConfig, McpFileConfig, McpHttpServerConfig, McpServerConfig } from "./mcp-config.js";
 import { FileOAuthStateStore } from "./mcp-oauth-store.js";
 import type { GovernedTool, ToolAvailability, ToolGovernance } from "./tools.js";
+import type { ToolPinConfig } from "./tool-pins.js";
 
 const CLIENT_NAME = "personal-agent-base-durable";
 const CLIENT_VERSION = "0.1.0";
@@ -87,6 +88,7 @@ export type McpConnector = (server: McpServerConfig, context: McpConnectContext)
 
 export type McpHost = {
   readonly extensions: readonly Extension[];
+  readonly pins?: ToolPinConfig;
   /** Replays every discovered server's state before returning. */
   subscribeAvailability(listener: (server: string, state: ToolAvailability) => void): () => void;
   close(): Promise<void>;
@@ -398,6 +400,7 @@ export async function connectMcp(
   let closed = false;
   return {
     extensions,
+    pins: { tools: config?.tools, residentToolBudgetTokens: config?.residentToolBudgetTokens },
     subscribeAvailability(listener) {
       listeners.add(listener);
       for (const [server, state] of availability) listener(server, state);

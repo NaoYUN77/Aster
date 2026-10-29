@@ -83,6 +83,21 @@ test("a file-level problem fails the whole configuration", () => {
   assert.match(validateMcpConfig({ servers: [], extra: true }).error ?? "", /Unknown MCP config key: extra/);
 });
 
+test("tool pin options use registered names and bounded integer budgets", () => {
+  const result = validateMcpConfig({ servers: [], tools: {
+    mcp__s__echo: { pin: true }, mcp__s__other: { pin: false },
+  }, residentToolBudgetTokens: 4_096 });
+  assert.deepEqual(result.config?.tools, { mcp__s__echo: { pin: true }, mcp__s__other: { pin: false } });
+  assert.equal(result.config?.residentToolBudgetTokens, 4_096);
+  for (const invalid of [null, 0, 1.5, "8192", 1_048_577]) {
+    assert.match(validateMcpConfig({ servers: [], residentToolBudgetTokens: invalid }).error ?? "", /residentToolBudgetTokens/);
+  }
+  for (const invalid of [[], null, { read: { pin: true } }, { "mcp__s__bad name": { pin: true } },
+    { mcp__s__echo: { pin: "true" } }, { mcp__s__echo: { pin: true, authz: "read" } }, { mcp__s__echo: {} }]) {
+    assert.match(validateMcpConfig({ servers: [], tools: invalid }).error ?? "", /tools/);
+  }
+});
+
 test("an over-count server list keeps the first eight instead of disabling all of them", () => {
   // http servers, so the stdio budget does not decide which entries survive.
   const http = (index: number) => ({ name: `s${index}`, transport: "http", url: "https://example.com/mcp" });

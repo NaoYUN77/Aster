@@ -10,12 +10,12 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type, type Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { AgentDoc, Harness, MemoryStorage, defineTool, type Storage, type StorageWrite } from "@earendil-works/pi-durable";
+import { AgentDoc, Harness, MemoryStorage, ResetEntry, defineTool, type Storage, type StorageWrite } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { openAgent } from "../src/agent.js";
 import { readConfig } from "../src/config.js";
-import { readToolCatalog, readToolLedger, withToolLedger } from "../src/tool-ledger.js";
+import { readResidentTools, readToolCatalog, readToolLedger, withToolLedger } from "../src/tool-ledger.js";
 import { createToolRegistry } from "../src/tools.js";
 
 const context = BACKGROUND_CONTEXT;
@@ -142,6 +142,37 @@ test("removal and reload preserve the high water mark, and forks keep their as-o
     registry.install({ name: "late", tools: [deferred("delta")] });
     await root.configure({ modelTools: selected("gamma", "beta", "alpha", "delta") }, context);
     assert.ok((await readToolCatalog(storage, context)).some(({ name }) => name === "delta"), "late registrations persist with the next native commit");
+  } finally {
+    await harness.close(context);
+  }
+});
+
+test("fork reset settles pins from the staged historical ledger without losing load sequences", async () => {
+  const { registry, models } = fixture();
+  const storage = await withToolLedger(new MemoryStorage(), registry, context);
+  const harness = await Harness.open(storage, { registry, models }, context);
+  try {
+    const root = await harness.root(context, { agent: { model, modelTools: selected("alpha", "beta") } });
+    const at = await root.commit((tx) => tx.appendEntry(root.id, { kind: "test.point", data: {} }), context);
+    const before = (await readToolLedger(storage, root.id, context))!;
+    await root.configure({ modelTools: selected("alpha", "beta", "gamma") }, context);
+    registry.install({ name: "mcp-resident", tools: [Object.assign(defineTool({
+      name: "mcp__s__echo", description: "echo", parameters: Type.Object({}), execute: async () => ({ output: [] }),
+    }), { governance: { source: { kind: "mcp" as const, server: "s" }, trust: "untrusted" as const, authz: "write" as const } })] });
+    for (const augmented of [false, true]) {
+      const fork = await root.fork(at.id, {
+        ownership: { kind: "ownerless" },
+        ...(augmented ? { agent: { modelTools: selected("alpha", "beta", "gamma") } } : {}),
+        init: async (tx, id) => { await tx.appendEntry(id, { kind: ResetEntry.kind, head: "self" }); },
+      }, context);
+      const ledger = (await readToolLedger(storage, fork.id, context))!;
+      assert.equal(ledger.sequence, before.sequence + (augmented ? 1 : 0));
+      assert.equal(ledger.epoch, before.epoch + (augmented ? 2 : 1));
+      assert.deepEqual(ledger.loads.slice(0, 2), before.loads);
+      assert.deepEqual(await readResidentTools(storage, fork.id, context), ["mcp__s__echo"]);
+    }
+    assert.equal((await readToolLedger(storage, root.id, context))?.sequence, 3);
+    assert.deepEqual(await readResidentTools(storage, root.id, context), []);
   } finally {
     await harness.close(context);
   }
