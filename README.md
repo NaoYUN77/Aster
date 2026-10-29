@@ -58,6 +58,7 @@ npm start
 - `TELEGRAM_API_ROOT`：Telegram Bot API 的根地址覆盖。服务器无法直连 `api.telegram.org` 时，可指向自建反向代理（须为 https）；现网部署即经 Cloudflare Worker 反代使用此项。
 - `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭，行为与接入前一致（回滚开关）。其余 `MEMORY_*` 为预算与时区配置。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
+- `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
 
 私聊 bot 后直接发送文字即可。bot 若已配置 webhook，应用会拒绝启动，需先在原部署中停用 webhook。
 
@@ -107,7 +108,7 @@ npm start
 
 ## 工具与 MCP
 
-常驻工具：`bash`、`read`、`write`、`edit`（pi-durable 提供）、`current_time`，以及记忆开启时的 `memory_search`、`memory_read`、`working_read`、`working_update`。工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。在 `src/tools.ts` 用底座 `defineTool` 定义新工具并注册，名称冲突在注册时直接拒绝。工具契约、错误语义与重放规则见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
+常驻工具：`bash`、`read`、`write`、`edit`（pi-durable 提供）、`current_time`，配置 Web key 后的 `web_search`、`web_fetch`，以及记忆开启时的 `memory_search`、`memory_read`、`working_read`、`working_update`。工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。在 `src/tools.ts` 用底座 `defineTool` 定义新工具并注册，名称冲突在注册时直接拒绝。工具契约、错误语义与重放规则见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
 
 MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代码。文件不存在表示不启用；默认路径上的文件级错误只禁用 MCP 并记录原因，显式指定路径的错误使启动失败。
 
@@ -170,31 +171,14 @@ OAuth 首次授权或重新授权时先停 bot，再执行 `npm run build && DAT
 
 部署注意：容器内路径是卷内路径（`cwd` 等写 `/data/...`）；stdio server 依赖宜在派生镜像中预装，运行时从 npm registry 临时安装会把可用性绑到外部网络；每个 stdio server 都增加常驻进程与内存，4 GB 主机上优先少而稳。
 
-### 本地 web_search
+### 内置 Web 工具
 
-镜像内置一个窄的 DeepSeek Search stdio server，只暴露 `web_search`。它不会自动启用：先把独立搜索 API key 作为 `SEARCH_DEEPSEEK_API_KEY` 写入部署 `.env`，再在持久化卷的 `/data/mcp.json` 加入：
+Aster 内置 `web_search` 与 `web_fetch`，直接通过工具注册表执行，不需要 `mcp.json` 或额外 stdio 进程。默认不注册；在部署 `.env` 中设置独立的 `DEEPSEEK_WEB_API_KEY` 并重启 Aster 后，两项工具同时可用。此 key 与模型使用的 `DEEPSEEK_API_KEY` 分开，避免无意共享权限；key 只进入宿主执行上下文，不属于模型参数或工具结果。内置 `bash` 与 Aster 同属一个容器用户，因此环境变量不是针对 `bash` 的秘密隔离；需要更强隔离时应拆分服务或使用受控凭据代理。
 
-```json
-{
-  "servers": [{
-    "name": "web",
-    "transport": "stdio",
-    "command": "/usr/local/bin/node",
-    "args": ["/app/dist/src/web-search-mcp.js"],
-    "inheritEnv": false,
-    "env": { "SEARCH_DEEPSEEK_API_KEY": "${SEARCH_DEEPSEEK_API_KEY}" },
-    "timeoutMs": 30000,
-    "connectTimeoutMs": 10000
-  }],
-  "tools": {
-    "mcp__web__web_search": { "authz": "read" }
-  }
-}
-```
+- `web_search(query, maxResults?)`：query 为 1～128 个 Unicode 字符，maxResults 为 1～10、默认 5；返回来源 URL、摘要、站点与发布时间。
+- `web_fetch(url)`：抓取一个公开 HTTP(S) 页面，返回规范化标题和 Markdown 正文；拒绝凭据 URL、IP literal、localhost／常见内部域名与自定义端口。正文超过本地输出预算时按 Unicode 边界截取并明确返回 `truncated:true`。
 
-重启 Aster 后用 `npm run mcp:check` 或启动日志确认发现 `mcp__web__web_search`；运行中修改配置仍不会热加载。工具输入为 `query`（1～128 个 Unicode 字符）和可选 `maxResults`（1～10，默认 5），返回 DeepSeek 的来源 URL、摘要、站点与发布时间的规范化结果。一次调用最多 20 秒上游等待、256 KiB 响应和 24 KiB 结构化输出，同时最多 2 个搜索；不自动重试、不抓取结果网页、不把 key 放进模型参数或日志。
-
-此 key 与模型使用的 `DEEPSEEK_API_KEY` 分开，避免无意共享权限。stdio 子进程与 Aster 同属一个容器用户，因此环境注入是参数隔离，不是针对内置 `bash` 工具的秘密隔离。供应商选择和价格／限制依据见 [web_search 提供商调研](docs/web-search-provider-research.md)；目前未用真实 key 验证生产网络与检索质量，上线前须从实际镜像执行一次真实查询。
+两项工具均为只读授权，但远端调用可能计费，因此保持 `replay:"unsafe"`，恢复时不会自动重发。它们共享最多 2 个正在执行的请求，无内存等待队列；每次上游总等待最多 20 秒，不自动重试，取消信号会中止实际 HTTP I/O。Search 上游响应限 256 KiB，Fetch 限 512 KiB；模型可见结构化结果均限 24 KiB。供应商契约、价格与未公开边界见 [Web 提供商调研](docs/web-search-provider-research.md)。目前未用真实 key 验证生产网络、搜索质量或页面提取效果，上线前须从实际镜像分别执行一次真实 Search 与 Fetch。
 
 ## 投递核查与补发
 

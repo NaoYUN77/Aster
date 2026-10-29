@@ -1,6 +1,6 @@
-# web_search 提供商调研与接入建议
+# 内置 Web 工具提供商调研与接入依据
 
-状态：调研与实施依据。核对日期：2026-10-29。范围：Aster 的本地 stdio MCP server，只暴露 `web_search`。本文核对公开官方文档／规范，未使用 API key 发起真实搜索，也未验证生产服务器的网络与搜索质量；在线文档可能继续变化。实现与实际配置以代码、schema 和 README 为准。
+状态：调研与实施依据。核对日期：2026-10-29。范围：Aster 内置 `web_search` 与 `web_fetch`。本文核对公开官方文档／规范，未使用 API key 发起真实搜索或抓取，也未验证生产服务器的网络、检索质量与正文提取质量；在线文档可能继续变化。实现与实际配置以代码、schema 和 README 为准。
 
 ## 1. 建议
 
@@ -36,11 +36,11 @@ DeepSeek 的临时免费说明特指通过 DeepSeek Harness／Claude Code／Code
 
 ## 4. 本地工具契约
 
-以下是本次实现采用的项目契约，不是厂商承诺。只实现一个提供商、一个工具，不增加第二套 agent loop。[R1]
+以下是本次实现采用的项目契约，不是厂商承诺。只实现一个提供商和两个内置工具，不增加第二套 agent loop，也不通过 MCP 子进程接入。[R1]
 
 ### 输入与宿主配置
 
-MCP 原始名称 `web_search`，server 名为 `web`，Aster 注册名为 `mcp__web__web_search`。[R2]
+内置工具名为 `web_search` 与 `web_fetch`，通过 Aster 受治理注册表直接注册；两者均为 `authz:"read"`，远端调用可能计费，故保持 `replay:"unsafe"`。[R1][R2]
 
 ```json
 {
@@ -54,27 +54,9 @@ MCP 原始名称 `web_search`，server 名为 `web`，Aster 注册名为 `mcp__w
 }
 ```
 
-schema 的 default 只是声明；执行边界仍显式应用省略时的 5。双方都校验，server 不能依赖某个客户端已经校验。query 拒绝全空白、孤立 Unicode surrogate 及超限，按 Unicode code point 数计数；首尾空白在边界清理，其余原样转发，不静默裁剪，不自动改写搜索语法。模型参数不包含 key、endpoint、header、代理、IP 定位或身份。[R1][D1][D2]
+schema 的 default 只是声明；执行边界仍显式应用省略时的 5。底座 schema 校验与工具执行边界都校验，不依赖模型输入已经可信。query 拒绝全空白、孤立 Unicode surrogate 及超限，按 Unicode code point 数计数；首尾空白在边界清理，其余原样转发，不静默裁剪，不自动改写搜索语法。模型参数不包含 key、endpoint、header、代理、IP 定位或身份。[R1][D1][D2]
 
-server 仅从自己的环境读取 `SEARCH_DEEPSEEK_API_KEY`；标准宿主配置的环境引用缺失时，该 server 在 Aster 连接前即被禁用；执行边界也拒绝空 key，不把凭证问题伪装成空搜索。固定 HTTPS 端点，拒绝跟随重定向，避免把 Authorization 转发到别处。镜像内宿主配置示意：
-
-```json
-{
-  "servers": [{
-    "name": "web",
-    "transport": "stdio",
-    "command": "/usr/local/bin/node",
-    "args": ["/app/dist/src/web-search-mcp.js"],
-    "inheritEnv": false,
-    "env": { "SEARCH_DEEPSEEK_API_KEY": "${SEARCH_DEEPSEEK_API_KEY}" },
-    "timeoutMs": 30000,
-    "connectTimeoutMs": 10000
-  }],
-  "tools": { "mcp__web__web_search": { "authz": "read" } }
-}
-```
-
-这是凭证不进入模型参数的部署方式，**不是对 agent 的秘密隔离保证**：Aster 现行 `${ENV}` 由宿主解析，同 uid 的 bash 可读取进程环境和文件。需要防止模型经 bash 读取 key 时，改用独立用户／容器／受控凭证代理；仅另开 stdio 进程不构成隔离。[R2][R3]
+宿主从 `DEEPSEEK_WEB_API_KEY` 读取凭据；未设置时不注册两个 Web 工具，设置后在启动组合根一次性注册。执行边界仍拒绝空 key，不把凭证问题伪装成空结果。固定 HTTPS API 端点并拒绝跟随其重定向，避免把 Authorization 转发到别处。模型参数与持久化调用中没有 key、endpoint 或 header。环境变量注入**不是对 agent 的秘密隔离保证**：同 uid 的内置 bash 仍可能读取进程环境和文件；需要更强隔离时应拆分服务或使用受控凭证代理。[R1][R2]
 
 ### 上游请求与结果转换
 
@@ -90,7 +72,7 @@ Accept: application/json
 {"query":"用户 query 原文","count":5,"need_content":false}
 ```
 
-`count` 取已验证的 maxResults。省略 `ori_question`、`localization`；不额外发送完整聊天记录或用户 IP。不调用 Fetch，不生成 answer。[D1][D2]
+`count` 取已验证的 maxResults。省略 `ori_question`、`localization`；不额外发送完整聊天记录或用户 IP。一次 `web_search` 调用不会隐式调用 Fetch，也不生成 answer；需要正文时由模型显式调用独立 `web_fetch`。[D1][D2]
 
 上游每个 result 的正式字段：`rerank_score`（文档语义 0–3）、`title`、`url`、`snippet`、`summary`、`content`、`site_name`（string/null）、`site_icon`（string/null）、`date`（UTC RFC 3339/null）、`authority`（整数 -1–4，-1 为未知）。snippet 通常 100–200 字符，summary 通常 600–800；“通常”不是可安全分配内存的上限。[D1][D2]
 
@@ -115,7 +97,7 @@ Accept: application/json
 
 在适配边界校验上游正式字段类型、score／authority 范围、日期及绝对 HTTP(S) URL（拒绝含用户名／密码的 URL）；未知新增字段忽略。缺字段或非法字段返回 `UPSTREAM_PROTOCOL_ERROR`，不把 null 变成编造的站点／时间，不丢掉坏结果伪装完整成功。保留上游排序，结果数不得超过请求 count；score 与 authority 留在供应商边界内，不包装成跨提供商通用可信度。`results:[]` 是 `ok:true`，表示没有匹配。[R1][D1][D2]
 
-MCP 返回 `structuredContent` 为上述对象，同时在单个 `content:[{type:"text",text:JSON.stringify(对象)}]` 中给出同一对象，`isError:false`；发布的 outputSchema 涵盖成功与失败两种对象。MCP 2025-11-25 明确建议向后兼容的 JSON 文本副本；2026-07-28 允许任意 JSON structuredContent，本实现仍使用对象兼容两代。协议版本按 Aster 已装 pi-mcp 1.3.0 使用 2025-11-25，并由 stdio 集成测试验证初始化、列举和调用。Aster 当前适配器经 `toLlmContent` 输出，并未把 server 的 structuredContent 保存成应用自有结构化 details，因而不能只返回 structuredContent。[M1][M2][R1][R4]
+内置工具返回底座原生 `output` JSON 文本与同值 `structuredOutput`，并声明覆盖成功与失败对象的 `structuredOutputSchema`。预期业务失败设置 `isError:true`，供模型修正或向用户解释；不复制 MCP 协议对象。[R1]
 
 ### 失败、取消与资源上限
 
@@ -142,24 +124,86 @@ message 使用本地固定安全文案，可说明修改 query／检查 key／�
 | HTTP 200 但 JSON／字段／日期／URL 不合法 | `UPSTREAM_PROTOCOL_ERROR` | false |
 | 上游 body 或最终模型文本超过预算 | `RESULT_TOO_LARGE` | false |
 
-厂商状态含义依据 [D2]；错误码、总超时、并发和输出预算是本项目策略。一次请求的实际 I/O 使用取消信号，覆盖建连及 body 读取，20 秒后 abort；stdio 的取消通知也 abort 对应 HTTP。客户端已取消时遵守所协商版本的 MCP 取消语义，不发送迟到成功；本地超时但调用尚有效时才返回 TIMEOUT。[M3][R1] 中断连接不能证明远端未搜索／未计费；若远端已经返回成功但响应丢失，客户端无法断言其是否收费，不承诺“取消必不计费”。
+厂商状态含义依据 [D2]；错误码、总超时、并发和输出预算是本项目策略。一次请求的实际 I/O 使用工具上下文取消信号，覆盖建连及 body 读取，20 秒后 abort；调用方已取消时不伪造成功，本地 deadline 到期返回 TIMEOUT。[R1] 中断连接不能证明远端未搜索／未计费；若远端已经返回成功但响应丢失，客户端无法断言其是否收费，不承诺“取消必不计费”。
 
-资源边界：每 server 最多 2 个正在执行的搜索，无内存等待队列，超额立即 BUSY；上游响应按解压后的实际读取字节限 **256 KiB**，超过即取消读取；序列化后的模型文本限 **24 KiB**，超过显式失败，不静默截断／删结果。使用紧凑 JSON 保持低于 Aster 的 32 KiB／1,000 行文本上限；请求最多 10 项。没有自动重试、分页追取、结果缓存或 durable 重放，避免重复查询费用与恢复状态混淆；现有 Aster MCP 工具仍为 `replay:"unsafe"`，宿主 read 授权不改变重放策略。[R1][R2]
+资源边界：Search 与 Fetch 共享最多 2 个正在执行的请求，无内存等待队列，超额立即 BUSY；Search 上游响应按解压后的实际读取字节限 **256 KiB**，超过即取消读取；序列化后的模型文本限 **24 KiB**，超过显式失败，不静默删结果。使用紧凑 JSON 保持低于 Aster 的 32 KiB／1,000 行文本上限；搜索最多 10 项。没有自动重试、分页追取、结果缓存或 durable 重放，避免重复费用与恢复状态混淆；read 授权不改变 `replay:"unsafe"` 策略。[R1][R2]
 
-JSON-RPC 结构损坏／未知方法等协议错误由本地 stdio 协议边界处理；参数语义、上游 API 与业务失败用工具 `isError`，不能用成功空数组吞掉失败。Search 结果属于不可信外部内容，不把标题／摘要作为宿主指令或授权来源。[M1][R1][R2]
+参数语义、上游 API 与业务失败用工具 `isError`，不能用成功空数组吞掉失败。Search 结果与 Fetch 正文都属于不可信外部内容，不把其中的指令、标题或链接作为宿主授权来源。[R1][R2]
 
 ## 5. 网络与部署验收
 
-三者的上述路径都是远端 HTTPS API，本地 stdio 只负责 MCP 传输；仍需出站 DNS／TLS／443。建议本期只允许固定 `api.deepseek.com` 出站，server 不主动访问结果 URL；该方案无需本地浏览器、GPU、入站端口或 OAuth 回调。stdio 使用与当前 pi-mcp 客户端一致的换行 JSON-RPC framing，stdout 仅协议消息，固定诊断写 stderr。[D1][F2][T1][M4]
+三者的上述路径都是远端 HTTPS API；内置工具仍需出站 DNS／TLS／443。建议只允许固定 `api.deepseek.com` 出站：Aster 不直接访问用户给出的目标 URL，而由 DeepSeek Fetch 从其网络抓取；无需本地浏览器、GPU、入站端口或 OAuth 回调。[D1][D3][F2][T1]
 
-Aster 子进程默认环境允许列表**不包含代理和 CA 变量**，不能认为宿主可联网即子进程可联网。需要代理／企业 CA 时，在经审计的 server 配置中显式传递所需变量，并确认选用的 HTTP 客户端实际采用它们；不默认承诺 Node fetch 自动读取 HTTP_PROXY。Docker 中 command／args 必须指向镜像内程序，stdio server 及依赖需预装到派生镜像，固定直接依赖版本，不在运行时通过未固定的 npx 下载。[R3][R5][R1]
+需要代理／企业 CA 时，确认 Node 内置 fetch 实际采用部署网络配置；不默认承诺它自动读取 `HTTP_PROXY`。内置工具随应用镜像构建，不在运行时通过未固定的 npx 下载依赖。[R1][R5]
 
 实施前验收：从实际生产镜像与网络测试 key 的权限、DNS／TLS／代理路径、中文／英文查询及操作符、空结果、128 字符边界、401／402／429／504 映射、取消及超时是否终止读取、并发与输出预算、stdout 协议纯净度、日志无秘密。用固定样本比较检索质量与延迟后再决定是否调整提供商；本调研没有给出中国大陆可达性、全球数据驻留或 SLA 的保证。
 
-## 6. 一手来源
+## 6. DeepSeek Fetch：内置 web_fetch 的契约调研
+
+本节截至 **2026-10-29**，仅依据 DeepSeek 官方中英文 API Reference／guide，未发起付费 API 调用。下列厂商契约与 Aster 项目策略分开描述；`web_fetch` 不自动继承 Search 的输入或错误语义。[D3][D4][D5]
+
+### 厂商已公开的契约
+
+| 项目 | 核对结论与来源 |
+| --- | --- |
+| 端点与用途 | `POST https://api.deepseek.com/v1/tools/fetch`，抓取**单个网页**并返回标题与 Markdown 正文；独立 JSON API，不要求先 Search 或调用聊天模型。[Fetch Reference](https://api-docs.deepseek.com/api/fetch/)、[指南概述](https://api-docs.deepseek.com/guides/search/) |
+| 认证与编码 | 必填 `Authorization: Bearer <DeepSeek API Key>`、`Content-Type: application/json`；参考示例还发送 `Accept: application/json`，指南未将其列为必填。[鉴权](https://api-docs.deepseek.com/guides/search/#authentication)、[参考示例](https://api-docs.deepseek.com/api/fetch/) |
+| 请求字段与 URL | JSON body 唯一列出的字段为必填 `url:string`，**非空、最多 8192 characters、HTTP/HTTPS、必须含 host、不得携带用户名或密码**。无可省略的默认 URL；未公开其他 Fetch 参数。此处长度未像 Search 的 query 一样明确写为 Unicode 字符，不能据此保证字节／code point／UTF-16 的计数方式。未知 body 字段忽略的说明位于 Search 请求小节，不能外推到 Fetch。[请求 schema](https://api-docs.deepseek.com/api/fetch/#request)、[Fetch 请求](https://api-docs.deepseek.com/guides/search/#request-1) |
+| 成功响应 schema | HTTP **200**、`application/json` 对象，必填 `title:string` 与 `content:string`；`title` 不可用时为 `""`，`content` 为提取的 Markdown 正文。两字段均未声明可为 null；没有公开返回最终 URL、源站状态／headers 或抓取时间的字段，也没有公开正文长度硬上限。不能套用 Search 的 `results`、摘要与日期字段。[响应 schema](https://api-docs.deepseek.com/api/fetch/#responses)、[Fetch 响应](https://api-docs.deepseek.com/guides/search/#response-1) |
+| URL／重定向限制 | 已公开的 URL 语法约束如上；Fetch 受目标站点可用性与访问策略影响。未公开是否跟随目标网页重定向、允许的跨域／协议转换、跳数或逐跳校验。参考示例中的 `curl -L` 作用于客户端到 API 端点的请求，不能据此推导 DeepSeek 抓取目标网页时的重定向契约。[参考示例](https://api-docs.deepseek.com/api/fetch/)、[Fetch 响应说明](https://api-docs.deepseek.com/guides/search/#response-1) |
+| 价格与收费条件 | 中文指南标 **5 元／1,000 次成功 Fetch**，英文标 **$0.75／1,000 次**；按请求次数，非 token／正文长度。**仅 HTTP 200 且返回网页正文才计费**，失败与超时不计费；官方未解释币种适用或结算转换规则。DeepSeek Harness／Claude Code／Codex 经服务端工具的调用当前未计费，公告为 **2026-11-01 00:00 北京时间**开始按次收费；该特定说明不能外推为 Aster 直接 REST 调用的免费承诺。[中文计费](https://api-docs.deepseek.com/zh-cn/guides/search/#billing)、[英文计费](https://api-docs.deepseek.com/guides/search/#billing) |
+| Rate limits | Fetch **每账号 25 QPS**，与 API key 无关；与 Search 的 100 QPS 及模型并发限制独立。另有**目标域名级 QPS 限制**，但未公布数值、域名归并方式、共享范围、窗口／突发算法；任一限额超出均返回 429。不能通过多 key 推导更多额度，也不能把 25 QPS 当成本地推荐并发数。[限速](https://api-docs.deepseek.com/guides/search/#rate-limits) |
+| SSRF／网络语义 | 厂商称 Search／Fetch 为只读请求；Fetch 安全策略拒绝映射为 403，但未公开 SSRF 防护机制、私网／回环／链路本地／云元数据地址规则、IP literal／端口限制、DNS 重绑定与重定向逐跳校验。调用链为 Aster → DeepSeek HTTPS API → 目标站点；文档未保证抓取出口地域／IP、实时直连或缓存、DNS／TLS／代理行为、JS 渲染、cookie／登录态或 robots 策略细节。“只读”不是目标站点无访问日志／统计等副作用或无 SSRF 风险的证明。[概述](https://api-docs.deepseek.com/guides/search/)、[错误与只读说明](https://api-docs.deepseek.com/guides/search/#errors)、[目标站点限制](https://api-docs.deepseek.com/guides/search/#response-1) |
+
+最小线缆示意（不是项目工具 schema）：[D3][D4]
+
+```http
+POST /v1/tools/fetch HTTP/1.1
+Host: api.deepseek.com
+Authorization: Bearer <宿主持有的 DeepSeek API Key>
+Content-Type: application/json
+
+{"url":"https://example.com/article"}
+```
+
+```json
+{"title":"Example article","content":"# Example article\n\nArticle content."}
+```
+
+### 错误、超时与重试
+
+错误为 OpenAI 兼容对象 `{error:{message,type,param,code}}`，`param` 恒为 `null`；指南只给出示例，没有逐状态的 `type`／`code` 枚举或稳定 message 契约。不得按示例错误文本识别 Fetch 失败。[官方错误格式与状态表](https://api-docs.deepseek.com/guides/search/#errors)
+
+| HTTP 状态 | 官方含义 |
+| --- | --- |
+| 400 | 请求头／body 不合法，含 JSON 损坏或字段值无效。 |
+| 401 | API key 缺失或无效。 |
+| 402 | 账号余额不足。 |
+| 403 | Fetch 请求被安全策略拒绝；文档没有细分触发条件。 |
+| 404 | Fetch 未能取得可用正文：例如 URL 不可用、站点策略拦截、源站错误、不支持的内容类型、无法提取 Markdown。**不是源站一定返回 404，也不是成功空正文。** |
+| 408 | 读取调用方请求 body 超时，不能解释为目标网页抓取超时。 |
+| 413 | 请求 body 过大；具体字节阈值未公开。 |
+| 429 | 账户级或 Fetch 目标域名级 QPS 超限；未说明如何区分二者或保证 `Retry-After`。 |
+| 500 | 服务内部错误。 |
+| 504 | 下游请求超时；未公开时长及连接／读取／总时限拆分。 |
+
+以上逐状态均来自 [官方错误表](https://api-docs.deepseek.com/guides/search/#errors)。官方建议 408／429／5xx 等待后重试，402 充值后重试，其他 4xx 未改变请求不要重试；没有给出退避秒数、尝试次数或幂等键协议。若 Aster 取消连接或发生本地超时，不能仅据此证明 DeepSeek 同样超时或没有完成收费条件；重试可能形成另一笔成功请求。[错误与重试](https://api-docs.deepseek.com/guides/search/#errors)、[计费](https://api-docs.deepseek.com/guides/search/#billing)
+
+### 项目策略与待确认项
+
+模型参数只表达目标 URL；key、固定 API endpoint、超时、并发、输出字节预算与重试由宿主持有。输入在边界解析为绝对 HTTP(S) URL，拒绝凭据、IP literal、localhost／常见内部域名与自定义端口；这减少明显误用，但无法证明 DeepSeek 远端抓取及每次重定向都满足同一网络策略。目标页面正文作为不可信外部内容处理。[D3][D4]
+
+Fetch 使用 20 秒本地总 deadline、512 KiB 解压后上游响应预算和 24 KiB 模型输出预算，与 Search 共享 2 路执行并发且不排队、不自动重试。正文超出模型预算时在 Unicode 边界截取，并以 `truncated:true` 明示；空正文或畸形响应失败，不伪装成功。403 映射安全策略拒绝，404 映射无法取得可用正文，408／5xx 可重试。以上数字和策略均属项目约束，不是厂商限制。[R1][本节官方请求字段](https://api-docs.deepseek.com/api/fetch/#request)、[限速](https://api-docs.deepseek.com/guides/search/#rate-limits)、[错误](https://api-docs.deepseek.com/guides/search/#errors)
+
+官方资料**尚不能确认**：8192 的精确长度计数及未知字段处理；请求 body／正文大小上限和正文是否可能截断；具体超时秒数；单域名 QPS 数值与归并／共享规则及重试 headers；目标重定向、完整 SSRF／DNS／IP／端口规则；源站请求方法／headers、JS 与受保护页面能力、支持的 MIME 类型清单、缓存／新鲜度／出口位置；币种适用规则；取消后的远端执行与收费状态。应保留为待确认项，不能根据 SDK 惯例、Search 参数或错误示例补齐。[Fetch Reference](https://api-docs.deepseek.com/api/fetch/)、[Fetch 指南](https://api-docs.deepseek.com/guides/search/#fetch-api)、[错误](https://api-docs.deepseek.com/guides/search/#errors)、[计费](https://api-docs.deepseek.com/guides/search/#billing)、[限速](https://api-docs.deepseek.com/guides/search/#rate-limits)
+
+## 7. 一手来源
 
 - [D1] DeepSeek [Search API Reference](https://api-docs.deepseek.com/api/search/)：端点、认证示例、完整输入／结果 schema。
 - [D2] DeepSeek [Search & Fetch guide](https://api-docs.deepseek.com/guides/search/)：搜索能力、操作符、空结果、错误、收费条件、限流与 2026-11-01 计费说明。
+- [D3] DeepSeek [Fetch API Reference](https://api-docs.deepseek.com/api/fetch/)，[中文参考](https://api-docs.deepseek.com/zh-cn/api/fetch/)：Fetch 端点、认证示例、唯一请求字段及 200 响应 schema。
+- [D4] DeepSeek [Search & Fetch guide：Fetch](https://api-docs.deepseek.com/guides/search/#fetch-api)、[Errors](https://api-docs.deepseek.com/guides/search/#errors)、[Billing](https://api-docs.deepseek.com/guides/search/#billing)、[Rate Limits](https://api-docs.deepseek.com/guides/search/#rate-limits)：目标站点限制、错误语义、美元价格与成功收费条件、账号及域名限速。
+- [D5] DeepSeek [网页搜索与抓取指南](https://api-docs.deepseek.com/zh-cn/guides/search/)：交叉核对中文契约、人民币价格与北京时间计费切换说明。
 - [F1] TinyFish [Search overview](https://docs.tinyfish.ai/search-api)：搜索用途及与 Fetch／Agent／Browser 的区分。
 - [F2] TinyFish [Search API Reference](https://docs.tinyfish.ai/search-api/reference)：参数、结果、状态码、每日额度和 RPM。
 - [F3] TinyFish [Pricing](https://www.tinyfish.ai/pricing)：Search 免费、30/min／500/hour，与参考文档的差异。
@@ -167,12 +211,6 @@ Aster 子进程默认环境允许列表**不包含代理和 CA 变量**，不能
 - [T1] Tavily [Search API Reference](https://docs.tavily.com/documentation/api-reference/endpoint/search)，[同页原始 OpenAPI](https://docs.tavily.com/documentation/api-reference/endpoint/search.md)：端点、认证、参数、结果、状态码与 schema 差异。
 - [T2] Tavily [Credits & Pricing](https://docs.tavily.com/documentation/api-credits)：免费 credits、套餐和 PAYGO 单价。
 - [T3] Tavily [Rate Limits](https://docs.tavily.com/documentation/rate-limits)：开发／生产 key、429／Retry-After、434。
-- [M1] MCP [2025-11-25 Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)：输入、structuredContent 文本副本、outputSchema、协议与执行错误。
-- [M2] MCP [2026-07-28 Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)：当前结构化结果规范。
-- [M3] MCP [2026-07-28 Cancellation](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation)：stdio 通知、超时与迟到响应处理。
-- [M4] MCP [2025-11-25 Transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)：stdio framing、stdout／stderr 边界。
 - [R1] 仓库 [CLAUDE.md](../CLAUDE.md)：技术基线、数据／凭据／副作用与资源边界。
-- [R2] 仓库 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)：工具注册、宿主授权、静态凭证、MCP 输出与重放契约。
-- [R3] 仓库 [src/mcp-config.ts](../src/mcp-config.ts)、[src/mcp.ts](../src/mcp.ts)：环境引用、inheritEnv、子进程允许列表。
-- [R4] 仓库 [src/mcp.ts](../src/mcp.ts)：工具执行经 toLlmContent 转换，应用 details 只含 server／tool。
-- [R5] 仓库 [deployment-test-guide.md](deployment-test-guide.md)：Docker 内绝对路径、stdio 依赖安装与部署要求。
+- [R2] 仓库 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)：工具注册、宿主授权、输出与重放契约。
+- [R5] 仓库 [deployment-test-guide.md](deployment-test-guide.md)：Docker 镜像、网络与部署验收要求。

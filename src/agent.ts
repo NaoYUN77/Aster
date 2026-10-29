@@ -14,6 +14,7 @@ import type { TextRequest } from "./messages.js";
 import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry, type ToolAuthority } from "./tools.js";
+import { createWebExtension } from "./web-tools.js";
 import { readResidentTools, withToolLedger } from "./tool-ledger.js";
 import { installMcpTools, orderedMcpExtensions } from "./tool-pins.js";
 
@@ -80,6 +81,7 @@ The working directory is ${workspace}. Keep task files here unless the user expl
 Your final response will be delivered to Telegram as plain text: do not use Markdown markup (no bold, headings, or code fences); use short plain lines for lists. Do not claim an action succeeded unless the tool result confirms it.`;
 
   const registry = createToolRegistry(undefined, { authority: options.toolAuthority, log: options.toolReviewLog });
+  if (config.webApiKey !== undefined) registry.install(createWebExtension({ apiKey: config.webApiKey }));
   // Memory wiring (MEM-07) goes through the one composition entry; with MEMORY_ENABLED=0 the
   // application keeps exactly its previous registry, settings and request path. The memory
   // section is read from the same environment the rest of the config came from, unless the

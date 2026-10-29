@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import test from "node:test";
-import { openMcpConnection } from "../src/mcp.js";
-import type { McpServerConfig } from "../src/mcp-config.js";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { ToolExecutionApi } from "@earendil-works/pi-durable";
+import { createToolRegistry } from "../src/tools.js";
 import { parseWebSearchInput, searchWeb, WebSearchError } from "../src/web-search.js";
+import { createWebExtension } from "../src/web-tools.js";
 
 function errorCode(error: unknown): string | undefined {
   return error instanceof WebSearchError ? error.code : undefined;
@@ -201,68 +197,28 @@ test("oversized upstream responses and normalized outputs fail explicitly", asyn
   }), (error) => errorCode(error) === "RESULT_TOO_LARGE");
 });
 
-test("stdio framing rejects malformed and oversized messages without unbounded line buffering", { timeout: 20_000 }, async () => {
-  const child = spawn(process.execPath, ["--import", "tsx", resolve("src/web-search-mcp.ts")], {
-    stdio: ["pipe", "pipe", "ignore"],
-    env: { PATH: process.env.PATH },
-  });
-  const responses = createInterface({ input: child.stdout });
-  const iterator = responses[Symbol.asyncIterator]();
-  try {
-    child.stdin.write("not-json\n");
-    assert.deepEqual(JSON.parse((await iterator.next()).value as string), {
-      jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" },
-    });
-    child.stdin.write(Buffer.alloc(64 * 1024 + 1, 0x78));
-    assert.deepEqual(JSON.parse((await iterator.next()).value as string), {
-      jsonrpc: "2.0", id: null, error: { code: -32600, message: "Message exceeds the size limit" },
-    });
-    child.stdin.write("\n");
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 7 })}\n`);
-    assert.deepEqual(JSON.parse((await iterator.next()).value as string), {
-      jsonrpc: "2.0", id: 7, error: { code: -32600, message: "Invalid request" },
-    });
-  } finally {
-    child.stdin.end();
-    await once(child, "exit");
-    responses.close();
-  }
-});
-
-test("local stdio MCP server lists one tool and reports missing host credentials safely", { timeout: 20_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "web-search-mcp-"));
-  const server: McpServerConfig = {
-    name: "web",
-    transport: "stdio",
-    command: process.execPath,
-    args: ["--import", "tsx", resolve("src/web-search-mcp.ts")],
-    env: {},
-    inheritEnv: false,
-    timeoutMs: 5_000,
-    connectTimeoutMs: 5_000,
-  };
-  const connection = await openMcpConnection(server, { dataDir: directory, env: process.env });
-  try {
-    const tools = await connection.listTools();
-    assert.deepEqual(tools.map(({ name }) => name), ["web_search"]);
-    assert.deepEqual(tools[0]?.inputSchema, {
-      type: "object",
-      properties: {
-        query: { type: "string", minLength: 1, maxLength: 128, description: "The search query." },
-        maxResults: { type: "integer", minimum: 1, maximum: 10, default: 5, description: "Maximum result count." },
-      },
-      required: ["query"],
-      additionalProperties: false,
-    });
-    const result = await connection.callTool("web_search", { query: "test" }, { timeoutMs: 5_000 });
-    assert.equal(result.isError, true);
-    assert.deepEqual(result.structuredContent, {
-      ok: false,
-      error: { code: "PROVIDER_AUTH_FAILED", message: "Web search credentials are not configured.", retryable: false },
-    });
-    assert.deepEqual(result.content, [{ type: "text", text: JSON.stringify(result.structuredContent) }]);
-  } finally {
-    await connection.close();
-    await rm(directory, { recursive: true, force: true });
-  }
+test("built-in web search registers with read governance and host-only credentials", async () => {
+  let authorization: string | null = null;
+  const registry = createToolRegistry([createWebExtension({
+    apiKey: "host-secret",
+    fetch: async (_input, init) => {
+      authorization = new Headers(init?.headers).get("authorization");
+      return jsonResponse({ results: [] });
+    },
+  })], { authority: "restricted", log: () => {} });
+  const record = registry.lookup("web_search");
+  assert.ok(record);
+  assert.deepEqual(record.source, { kind: "builtin", extension: "web-tools" });
+  assert.equal(record.authz, "read");
+  assert.equal(record.trust, "trusted");
+  assert.equal(record.replay, "unsafe");
+  const tool = registry.snapshot().tools().find(({ tool }) => tool.name === "web_search")!.tool;
+  assert.equal(JSON.stringify(tool.parameters).includes("apiKey"), false);
+  const result = await tool.execute({ query: "test" }, {
+    conversationId: 1, taskId: 2, callId: "search",
+  } as ToolExecutionApi, BACKGROUND_CONTEXT);
+  assert.equal(result.isError, undefined);
+  assert.equal(authorization, "Bearer host-secret");
+  assert.deepEqual(result.structuredOutput, { ok: true, provider: "deepseek", query: "test", results: [] });
+  assert.deepEqual(result.output, [{ type: "text", text: JSON.stringify(result.structuredOutput) }]);
 });

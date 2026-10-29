@@ -41,12 +41,14 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   }
   required(PROVIDERS[provider].apiKeyEnv);
   const token = required("TELEGRAM_BOT_TOKEN");
+  const webApiKey = env.DEEPSEEK_WEB_API_KEY?.trim();
   return {
     token,
     ownerId,
     provider,
     model: required("MODEL_ID"),
     telegramApiRoot,
+    ...(webApiKey ? { webApiKey } : {}),
     ...resolveMcpConfigPaths(env),
   };
 }
