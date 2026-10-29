@@ -1,5 +1,7 @@
 # Aster 镜像迁移验证
 
+> 阅读边界（2026-10-29）：本文是 2026-10-26 当天的本地验证记录，写明未连接生产数据、未部署目标服务器。文中的 Go、router、Vault、四个镜像，以及文末「托管 CI 已通过」描述的是当时的仓库，不是当前 `.github/workflows/ci.yml`。当前流水线和「是否已上线」以 [CI/CD 实施计划的当前事实](ci-cd-implementation-plan.md#当前事实) 与 [部署指南第 9 节](deployment-test-guide.md#9-上线判定与验证边界) 为准。本文不追加生产部署结论。
+
 日期：2026-10-26。环境：Windows 11、Node.js 24.19.0、Go 1.25.6、Docker Desktop Linux engine、Compose 5.3.1。仅使用本地镜像、临时容器和临时卷，未连接生产数据或发布镜像，未部署目标服务器。
 
 注：2026-10-28 起 Agent Vault 子系统与 egress router 已整体移除。本文是当日的验证记录，涉及 router、Vault 组合与 broker 的条目保留为历史事实，不再代表当前单服务拓扑。
