@@ -5,7 +5,7 @@
 
 ## 上下文
 
-`docs/contracts-and-lifecycle.md` 记录 pi-durable 1.3.0 的行为：默认 `replay` 是 `unsafe`。只有持久化策略和当前工具策略都是 `safe` 时，已保存的执行意图才会重跑。MCP 工具在 `docs/mcp.md` 和契约里一律标成 `replay: "unsafe"`。工具体系范围见尚未合并的 [PR #28](https://github.com/NaoYUN77/Aster/pull/28) 中的 ADR-0003；本篇只记录重放策略本身。
+`docs/contracts-and-lifecycle.md` 记录 pi-durable 1.3.0 的行为：默认 `replay` 是 `unsafe`。只有持久化策略和当前工具策略都是 `safe` 时，已保存的执行意图才会重跑。MCP 工具在 `docs/mcp.md` 和契约里一律标成 `replay: "unsafe"`。工具体系范围见 [ADR-0003](0003-tool-governance-v01-scope.md)；本篇只记录重放策略本身。
 
 ## 决策
 

@@ -20,4 +20,4 @@
 
 - 新能力要么改代码，要么改 MCP 配置后重启。模型不能在对话里安装工具。
 - 工具描述仍会进入模型上下文。调研记录把投毒风险留在集成侧，本篇不把它收成已实现的过滤。
-- 写操作的二次确认不在本期。ADR-0003（[PR #28](https://github.com/NaoYUN77/Aster/pull/28)）把 authz 复核收进 v0.1，默认 write、不采信远端 annotations。那是授权，不是模型自注册。
+- 写操作的二次确认不在本期。[ADR-0003](0003-tool-governance-v01-scope.md) 把 authz 复核收进 v0.1，默认 write、不采信远端 annotations。那是授权，不是模型自注册。
