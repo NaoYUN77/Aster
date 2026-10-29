@@ -73,8 +73,10 @@ flowchart LR
 
 ## 对话示例
 
-> **TODO（维护者填写）**  
-> 放一段脱敏后的真实 Telegram 往返。不要编造对话。建议包含一条普通请求、一次工具调用、一次「记住这件事」，以及进程重启后的追问。删掉 token、用户 ID、文件路径和任何密钥。  
+> **TODO（维护者填写）**
+>
+> 放一段脱敏后的真实 Telegram 往返。不要编造对话。建议包含一条普通请求、一次工具调用、一次「记住这件事」，以及进程重启后的追问。删掉 token、用户 ID、文件路径和任何密钥。
+>
 > 在补上之前，本节不是能力证据。
 
 ## 快速开始
@@ -122,6 +124,7 @@ npm start
 - `TELEGRAM_API_ROOT`：Telegram Bot API 的根地址覆盖。服务器无法直连 `api.telegram.org` 时，可指向自建 https 反向代理。仓库没有记录这项是否在某台机器上使用。
 - `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭。其余 `MEMORY_*` 为预算、时区与归档超时。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
+- `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
 
 私聊 bot 后直接发送文字即可。bot 若已配置 webhook，应用会拒绝启动，需先在原部署中停用 webhook。
 
@@ -141,13 +144,19 @@ npm start
 
 ## 工具
 
-常驻工具包括底座的 `bash`、`read`、`write`、`edit`，以及 `current_time` 和上表中的记忆工具。新工具在 `src/tools.ts` 用底座 `defineTool` 注册。MCP 的配置字段、pin、授权、OAuth 和检查命令见 [工具与 MCP](docs/mcp.md)。
+常驻工具包括底座的 `bash`、`read`、`write`、`edit`，以及 `current_time`、上表中的记忆工具和配置 Web key 后启用的 `web_search`、`web_fetch`。内置工具使用底座 `defineTool` 注册；名称冲突在注册时直接拒绝。工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。MCP 的配置字段、pin、授权、OAuth 和检查命令见 [工具与 MCP](docs/mcp.md)，通用工具契约见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
 
 ## 部署与运维
 
 生产形态是单个 Docker 服务。镜像构建、Compose、卷备份和上线清单见 [部署指南](docs/deployment-test-guide.md)。同机 test／production 的环境描述见 [部署环境](docs/deployment-environments.md)。结果未知的 Telegram 发送如何核查和补发见 [投递核查与补发](docs/deliveries.md)。
 
 凭据只经部署环境提供。应用只做存在性与形状校验，不把秘密写入工具参数或 durable 状态。
+
+### 内置 Web 工具
+
+`web_search` 与 `web_fetch` 直接通过 Aster 的工具注册表执行，不需要 `mcp.json` 或额外进程。设置独立的 `DEEPSEEK_WEB_API_KEY` 并重启后，两项工具同时注册；未设置时均不向模型声明。Search 返回来源与摘要，Fetch 返回规范化标题和 Markdown 正文。
+
+两项工具按只读权限治理，但远端调用可能计费，因此不可自动重放。它们共享最多 2 个正在执行的请求，单次等待上限 20 秒；Search／Fetch 上游响应分别限 256／512 KiB，模型可见结果限 24 KiB。Fetch 会拒绝凭据 URL、IP literal、localhost／常见内部域名和自定义端口；这些本地检查不构成对供应商远端 DNS、重定向或 SSRF 行为的保证。供应商契约、价格、详细边界及待完成的真实 key 验证见 [Web 提供商调研](docs/web-search-provider-research.md)。
 
 ## 开发
 
