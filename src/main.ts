@@ -5,6 +5,7 @@ import { ConfigurationError, readConfig } from "./config.js";
 import { StateError } from "./errors.js";
 import { Inbox } from "./inbox.js";
 import { failureCode, serveTelegram, TelegramClient } from "./telegram.js";
+import { openBrowser, readBrowserConfig } from "./browser.js";
 
 const shutdown = new AbortController();
 process.once("SIGINT", () => shutdown.abort());
@@ -12,6 +13,7 @@ process.once("SIGTERM", () => shutdown.abort());
 
 try {
   const config = readConfig();
+  const browserConfig = readBrowserConfig();
   const client = new TelegramClient(config.token, config.telegramApiRoot);
   const botId = await client.identity(shutdown.signal);
   await mkdir(config.dataDir, { recursive: true });
@@ -19,12 +21,28 @@ try {
   try {
     inbox.bindIdentity(botId, config.ownerId);
     inbox.recover();
-    const agent = await openAgent(config, undefined, undefined, { signal: shutdown.signal });
+    const browser = browserConfig ? await openBrowser(browserConfig, config.dataDir, shutdown.signal) : undefined;
     try {
-      console.info("Personal agent starting; single-owner private Telegram messages enabled.");
-      await serveTelegram(config, botId, inbox, agent.reply, shutdown.signal, client);
+      const agent = await openAgent(config, undefined, undefined, { signal: shutdown.signal, browser });
+      try {
+        console.info("Personal agent starting; single-owner private Telegram messages enabled.");
+        await serveTelegram(config, botId, inbox, async (request, signal) => {
+          if (!browser) return request.text.trim() === "/browser_health" ? "浏览器未启用：请配置 BROWSER_CDP_URL。" : agent.reply(request, signal);
+          const taskSignal = AbortSignal.any([signal, AbortSignal.timeout(300_000)]);
+          await browser.begin(request.requestId, taskSignal);
+          try {
+            const text = request.text.trim() === "/browser_health"
+              ? await browser.health(taskSignal) : await agent.reply(request, signal);
+            return { text, photos: await browser.photos(request.requestId) };
+          } finally {
+            await browser.end();
+          }
+        }, shutdown.signal, client);
+      } finally {
+        await agent.close();
+      }
     } finally {
-      await agent.close();
+      await browser?.close();
     }
   } finally {
     inbox.close();

@@ -1,0 +1,50 @@
+# Optional overlay: docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d --build
+services:
+  personal-agent:
+    environment:
+      BROWSER_CDP_URL: http://aster-browser:9222
+      # Override the base env_file values so browser proxy settings reach only the sidecar.
+      BROWSER_PROXY: ""
+      BROWSER_DATA_DIR: ""
+    volumes:
+      - type: bind
+        source: ${BROWSER_DATA_DIR:-${HOME}/Aster/data/browser}
+        target: /data/browser
+        bind:
+          create_host_path: false
+
+  aster-browser:
+    build:
+      context: ./deploy/browser
+    image: aster-browser:playwright-1.64.1
+    restart: unless-stopped
+    init: true
+    environment:
+      BROWSER_PROXY: ${BROWSER_PROXY:-}
+    volumes:
+      - type: bind
+        source: ${BROWSER_DATA_DIR:-${HOME}/Aster/data/browser}
+        target: /data/browser
+        bind:
+          create_host_path: false
+    # The default bridge network has egress. No CDP/metrics ports are published to the host.
+    expose:
+      - "9222"
+    shm_size: 1g
+    mem_limit: 2g
+    pids_limit: 512
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9222/json/version', {signal: AbortSignal.timeout(3000)}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

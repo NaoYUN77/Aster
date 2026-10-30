@@ -956,6 +956,6 @@ test("08-H: dependency review — pure Context, Harness-free Daily, state-only W
 
   const pkg = JSON.parse(await read("package.json")) as { dependencies: Record<string, string> };
   const dependencyNames = Object.keys(pkg.dependencies).sort();
-  assert.deepEqual(dependencyNames, ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable", "@earendil-works/pi-mcp", "abort-controller", "grammy", "typebox"],
-    "the runtime dependency set is exactly the pre-MEM-08 one (no event bus, database service or plugin framework)");
+  assert.deepEqual(dependencyNames, ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable", "@earendil-works/pi-mcp", "@playwright/mcp", "abort-controller", "grammy", "playwright-core", "typebox"],
+    "the reviewed runtime dependencies include browser control without introducing another memory framework");
 });

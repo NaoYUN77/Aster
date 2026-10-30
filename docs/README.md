@@ -33,6 +33,7 @@ ADR 持续记录该功能所有部分的取舍与缺陷，跨越各份 spec 的�
 ## 运行与交付
 
 - [部署指南](deployment-test-guide.md)：当前部署、备份、更新与上线验证。
+- [浏览器操控](browser-control.md)：可选 Chromium 容器、MCP 生命周期、截图投递与验收。
 - [部署环境](deployment-environments.md)、[主机备份](host-backup.md)、[投递核查与补发](deliveries.md)：对应操作边界。
 - [CI 运行入口](ci-entrypoint.md)：现行检查入口与发布材料契约。
 - [CI/CD 设计与实施计划](ci-cd-implementation-plan.md)：当前工作流事实、后续交付设计和按日期保留的历史验收；任务待办不代表生产部署状态。

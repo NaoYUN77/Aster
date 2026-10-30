@@ -1,5 +1,7 @@
+import { open, realpath, stat } from "node:fs/promises";
+import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { Api, GrammyError } from "grammy";
+import { Api, GrammyError, InputFile } from "grammy";
 import { AbortController as TelegramAbortController, type AbortSignal as TelegramSignal } from "abort-controller";
 import type { Update } from "grammy/types";
 import type { readConfig } from "./config.js";
@@ -46,6 +48,79 @@ export class TelegramClient {
       (cancel) => this.api.sendMessage(chatId, text, {}, cancel));
     return String(message.message_id);
   }
+
+  async sendPhoto(chatId: string, path: string, signal: AbortSignal): Promise<string> {
+    const message = await telegramCall(AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+      (cancel) => this.api.sendPhoto(chatId, new InputFile(path), {}, cancel));
+    return String(message.message_id);
+  }
+}
+
+export type TelegramReply = string | { text: string; photos?: readonly string[] };
+
+function replyError(message: string, code = "REPLY_ATTACHMENT_INVALID"): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+function inside(root: string, path: string): boolean {
+  const child = relative(root, path);
+  return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+}
+
+/** Host reply boundary: persist canonical paths only after checking every attachment. */
+export async function validateTelegramReply(
+  reply: unknown,
+  dataDir: string,
+  signal: AbortSignal,
+): Promise<{ text: string; photos: readonly string[] }> {
+  signal.throwIfAborted();
+  const result = typeof reply === "string" ? { text: reply } : reply;
+  if (!result || typeof result !== "object" || !("text" in result)
+    || typeof result.text !== "string" || !result.text.trim()) {
+    throw replyError("Reply must contain non-empty text", "REPLY_INVALID");
+  }
+  const photos = "photos" in result ? result.photos : undefined;
+  if (photos !== undefined && (!Array.isArray(photos) || photos.length > 3)) {
+    throw replyError("Reply may contain at most three PNG photos");
+  }
+  const paths: string[] = [];
+  if (photos?.length) {
+    try {
+      const configuredRoot = resolve(dataDir, "browser", "shots");
+      const root = join(await realpath(dataDir), "browser", "shots");
+      // A symlink in the root itself must not turn the authorized directory into another tree.
+      if (relative(root, await realpath(root)) !== "") throw replyError("Screenshot root escapes its data directory");
+      for (const path of photos) {
+        signal.throwIfAborted();
+        if (typeof path !== "string" || !isAbsolute(path) || (!inside(configuredRoot, path) && !inside(root, path))
+          || extname(path).toLowerCase() !== ".png") throw replyError("Photo must be an absolute PNG path inside browser/shots");
+        const canonical = await realpath(path);
+        if (!inside(root, canonical) || extname(canonical).toLowerCase() !== ".png") {
+          throw replyError("Photo resolves outside browser/shots or is not PNG");
+        }
+        const info = await stat(canonical);
+        if (!info.isFile() || info.size > 8 * 1024 * 1024) throw replyError("Photo must be a regular file of at most 8 MiB");
+        const file = await open(canonical, "r");
+        try {
+          const opened = await file.stat();
+          if (!opened.isFile() || opened.size > 8 * 1024 * 1024) throw replyError("Photo must be a regular file of at most 8 MiB");
+          const signature = Buffer.alloc(8);
+          const { bytesRead } = await file.read(signature, 0, signature.length, 0);
+          if (bytesRead !== 8 || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+            throw replyError("Photo does not contain a PNG signature");
+          }
+        } finally {
+          await file.close();
+        }
+        paths.push(canonical);
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      throw replyError(error instanceof Error ? error.message : "Photo could not be validated");
+    }
+  }
+  signal.throwIfAborted();
+  return { text: result.text, photos: paths };
 }
 
 function updateIdOf(update: Update): number | undefined {
@@ -90,9 +165,9 @@ export async function serveTelegram(
   config: ReturnType<typeof readConfig>,
   botId: string,
   inbox: Inbox,
-  reply: (request: TextRequest, signal: AbortSignal) => Promise<string>,
+  reply: (request: TextRequest, signal: AbortSignal) => Promise<TelegramReply>,
   signal: AbortSignal,
-  client: Pick<TelegramClient, "updates" | "send">,
+  client: Pick<TelegramClient, "updates" | "send"> & Partial<Pick<TelegramClient, "sendPhoto">>,
 ): Promise<void> {
   if (inbox.blocked().length) console.error("Some replies need delivery reconciliation; run npm run deliveries -- list.");
   let pollFailures = 0;
@@ -101,11 +176,14 @@ export async function serveTelegram(
     if (job) {
       if (job.status === "pending") {
         let text: string;
+        let photos: readonly string[] = [];
         let errorCode: string | undefined;
         try {
-          text = job.text.length > 16_000
+          const result = await validateTelegramReply(job.text.length > 16_000
             ? "消息过长，请拆分后再发送。"
-            : await reply(job, signal);
+            : await reply(job, signal), config.dataDir, signal);
+          text = result.text;
+          photos = result.photos;
         } catch (error) {
           if (signal.aborted) return;
           // The Session will reject every later request; a failure notice would only hide that.
@@ -118,17 +196,39 @@ export async function serveTelegram(
             ? `${partial}\n\n（回复因长度限制被截断，内容不完整。请拆分请求后重试。）`
             : errorCode === "AGENT_TIMEOUT"
               ? "本次处理超时，已请求停止执行。已执行的操作可能仍然生效，请先核对结果。"
-              : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
+              : errorCode === "REPLY_ATTACHMENT_INVALID"
+                ? "本次处理未能完成：截图附件校验失败。已执行的操作可能仍然生效，请先核对结果。"
+                : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
         }
-        inbox.saveReply(job.requestId, text, errorCode);
+        inbox.saveReply(job.requestId, text, errorCode, photos);
       }
       if (signal.aborted) return;
       let part = inbox.nextPart(job.requestId);
       while (part && !signal.aborted) {
+        if (part.type === "photo") {
+          let validationError: unknown;
+          try {
+            if (!client.sendPhoto) throw replyError("Telegram client cannot send photos", "TELEGRAM_PHOTO_UNSUPPORTED");
+            // Saved files may have disappeared or changed since the reply was committed.
+            await validateTelegramReply({ text: "photo", photos: [part.path] }, config.dataDir, signal);
+          } catch (error) {
+            validationError = error;
+          }
+          // Shutdown before an upload starts leaves its saved part pending for recovery.
+          if (signal.aborted) return;
+          if (validationError) {
+            inbox.beginPart(job.requestId, part.part);
+            inbox.failPart(job.requestId, part.part, "failed", failureCode(validationError));
+            console.error(`Telegram delivery failed: ${job.requestId}, part ${part.part}`);
+            break;
+          }
+        }
         inbox.beginPart(job.requestId, part.part);
         let messageId: string;
         try {
-          messageId = await client.send(job.conversationId, part.text, signal);
+          messageId = part.type === "photo"
+            ? await client.sendPhoto!(job.conversationId, part.path, signal)
+            : await client.send(job.conversationId, part.text, signal);
         } catch (error) {
           // Explicit Telegram 4xx rejection means not sent. Transport failures remain ambiguous.
           const status = error instanceof GrammyError && error.error_code >= 400 && error.error_code < 500 ? "failed" : "uncertain";
