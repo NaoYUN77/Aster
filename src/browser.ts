@@ -163,7 +163,7 @@ export async function openBrowser(
       if (Array.isArray(schema.required)) schema.required = schema.required.filter((key) => key !== name);
     }
     schema.additionalProperties = false;
-    const tool = buildMcpTool(server, adapter, { ...info, inputSchema: schema }, `pw.${info.name}`);
+    const tool = buildMcpTool(server, adapter, { ...info, inputSchema: schema }, `pw_${info.name}`);
     if (!tool) throw failure("BROWSER_SCHEMA_INVALID");
     const { deferred: _deferred, ...resident } = tool;
     return resident;

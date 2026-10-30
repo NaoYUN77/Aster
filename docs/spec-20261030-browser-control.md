@@ -9,7 +9,7 @@ Telegram owner 可以用当前配置的模型操控独立 Chromium，并收到�
 - 可选 Compose overlay，CDP 不映射宿主机端口；浏览器可访问公网。
 - 浏览器 headless，shm 1 GiB、内存 2 GiB、pids 512、自动重启；BROWSER_PROXY 只影响浏览器。
 - BROWSER_CDP_URL 由宿主配置，工具参数不能修改端点、凭据、工作目录或输出路径。
-- pi-durable 原生注册 `pw.` 工具；工具参数经过底座校验与宿主执行边界复核，外部调用均不可自动重放。
+- pi-durable 原生注册 `pw_` 工具，例如 `pw_browser_navigate`；所有送往模型的工具名符合 `^[A-Za-z0-9_-]{1,64}$`，避免 DeepSeek 因非法工具声明拒绝普通聊天。工具参数经过底座校验与宿主执行边界复核，外部调用均不可自动重放。
 - 一条持久化请求对应独立 context；正常结束、取消、失败时清理。连接丢失后本轮不继续依赖旧页面；后续请求自动建立新连接。应用重启恢复未完成浏览器任务时明确状态丢失，不能假装原 context 仍在。
 - `/browser_health` 不调用模型：打开 about:blank、截图并通过 Telegram 返回，展示容器内存和进程计数；探测超时有界。
 - 文件位于宿主 `~/Aster/data/browser/{shots,pages,traces}`，先保存再投递。照片沿用 inbox 的逐段确认、未知结果隔离与人工重投；投递失败不重跑浏览器。

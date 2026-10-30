@@ -16,7 +16,7 @@ const contextCount = async () => (await cdp.send("Target.getBrowserContexts")).b
 const baseline = await contextCount();
 const report = { date: new Date().toISOString(), modelTest: false, telegramTest: false, scenarios: [] };
 const execute = async (name, args) => {
-  const tool = browser.extension.tools.find((entry) => entry.name === `pw.${name}`);
+  const tool = browser.extension.tools.find((entry) => entry.name === `pw_${name}`);
   const result = await tool.execute(args, undefined, { abortSignal: AbortSignal.timeout(35_000) });
   return { error: result.isError === true, text: result.output.filter((part) => part.type === "text").map((part) => part.text).join("\n").slice(0, 32_000) };
 };

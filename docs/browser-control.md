@@ -59,7 +59,7 @@ docker compose -f docker-compose.yml -f docker-compose.browser.yml exec personal
 
 设置 `BROWSER_CDP_URL=http://aster-browser:9222` 启用浏览器；仅接受无凭据、查询或路径的 HTTP(S) origin。工具发现只启动本地 MCP，不要求 CDP 已可用。每条 Telegram 请求使用一个 MCP stdio 会话和独立的 `--isolated` context，任务结束后调用 `browser_close` 并关闭连接；常驻 Chromium 继续运行。
 
-原生工具名为 `pw.browser_navigate`、`pw.browser_navigate_back`、`pw.browser_snapshot`、`pw.browser_click`、`pw.browser_type`、`pw.browser_press_key`、`pw.browser_select_option`、`pw.browser_take_screenshot`。均通过 pi-durable schema 验证与宿主权限审查，外部操作不可自动重放；本版本不暴露执行任意 JavaScript、安装浏览器、上传文件或设置存储状态的 MCP 工具。截图路径、格式和视口截图范围由宿主生成，模型不能覆盖目录。导航仅接受 HTTP(S) 与 about:blank，单次 URL 最多 4096 字符，字符串参数最多 16000 字符，每请求最多 40 次浏览器调用。
+原生工具名为 `pw_browser_navigate`、`pw_browser_navigate_back`、`pw_browser_snapshot`、`pw_browser_click`、`pw_browser_type`、`pw_browser_press_key`、`pw_browser_select_option`、`pw_browser_take_screenshot`。均通过 pi-durable schema 验证与宿主权限审查，外部操作不可自动重放；本版本不暴露执行任意 JavaScript、安装浏览器、上传文件或设置存储状态的 MCP 工具。截图路径、格式和视口截图范围由宿主生成，模型不能覆盖目录。导航仅接受 HTTP(S) 与 about:blank，单次 URL 最多 4096 字符，字符串参数最多 16000 字符，每请求最多 40 次浏览器调用。
 
 动作超时 5 秒、导航 20 秒、MCP 调用 30 秒。首个操作前最多等待 CDP 就绪 15 秒；只读就绪探测可以重试，网页操作不自动重试。断连、超时或 MCP 操作错误后本轮停止，后续请求建立新连接。检测到安全验证页或 Google 429 时只允许截图，阻止继续交互。该检测是保守的文本启发式，仍要求模型遇验证截图停止，不承诺识别所有验证形式。
 
@@ -69,7 +69,7 @@ docker compose -f docker-compose.yml -f docker-compose.browser.yml exec personal
 
 ## 模型与费用验收
 
-沿用 `MODEL_PROVIDER=deepseek` 和 `MODEL_ID=deepseek-v4-pro` / `deepseek-flash`；它们是安装的 pi-ai 1.3.0 目录中的实际 id。Playwright MCP 0.0.83 自带 alpha 版 Playwright，与 stable 1.64.1 sidecar 的 CDP 连接、截图、context 清理及重启重连已在下述容器验证。`pw.` 点号名称已通过底座原生 faux 模型执行验证，尚未用真实 DeepSeek API 验证其工具名接受情况。
+沿用 `MODEL_PROVIDER=deepseek` 和 `MODEL_ID=deepseek-v4-pro` / `deepseek-flash`；它们是安装的 pi-ai 1.3.0 目录中的实际 id。Playwright MCP 0.0.83 自带 alpha 版 Playwright，与 stable 1.64.1 sidecar 的 CDP 连接、截图、context 清理及重启重连已在下述容器验证。浏览器工具统一使用 `pw_` 前缀，所有工具名须符合 `^[A-Za-z0-9_-]{1,64}$`。原点号前缀会违反 DeepSeek 函数名约束，即使普通聊天未调用浏览器也可能导致请求被拒绝，现已修复并补跨工具类别契约测试；真实 DeepSeek API 往返仍待凭据验收。
 
 具备模型 key、CDP 与可写数据目录时，在仓库执行：
 
@@ -112,6 +112,6 @@ node scripts/browser-restart-check.mjs
 - 容器重启时原操作返回错误，同一 Aster 浏览器运行时进程继续存活；下一请求等待就绪后成功重连并截图。`scripts/browser-restart-check.mjs` 与 worker 为该检查入口，针对专用 `aster-browser-v1-check` 网络、卷和容器，不能用于生产对象。最终追加清理错误日志后申请再次复测，自动审批因当前上下文缺少该容器创建记录而拒绝；该次复测未执行，以上结果来自此前通过的真实重启检查。随后将检查入口改为等待操作者手动重启，该交互入口仅完成语法检查，未重跑容器断言。
 - 最后一轮 `scripts/browser-smoke.mjs` 在 Aster 镜像内执行，无模型、无 Telegram：百度搜索遇安全验证，约 17.2 秒、2 次工具调用、截图停止；谷歌约 8.3 秒返回 `/sorry/`、HTTP 429，2 次调用、截图停止，没有可用搜索结果；超星公开首页约 19.0 秒、3 次调用，读取快照并截图。快照包含个人作者授权、出版社授权、院士题词、超星名师讲坛、超星期刊及学习通下载入口；未登录、未逐个打开入口。搜索 smoke 直接打开结果 URL，不等同于从首页搜索的模型验收。测试网络未设置 BROWSER_PROXY；宿主环境自身出口不代表部署服务器出口。
 - 最后一轮健康探测读取内存 404520960 / 2147483648 bytes、cgroup 任务 199 / 512；随后空闲 Docker stats 为 253.9 MiB / 2 GiB、CPU 0.00%、146 tasks。均为样本而非峰值或生产容量承诺；未计服务器费用。
-- 最终全量离线测试为 276 项、268 通过、0 失败、8 项环境条件跳过；浏览器专项 23/23 通过，包含验证页与清理失败回归。类型检查、构建、脚本语法及 `git diff --check` 通过。
+- `pw_` 工具名修复后全量离线测试为 277 项、269 通过、0 失败、8 项环境条件跳过；浏览器测试 8/8 通过，包含捕获普通聊天实际模型工具声明的跨类别契约测试。类型检查、构建、脚本语法及 `git diff --check` 通过。此前容器验证使用修复前的构建，本次未重跑容器或真实模型验收。
 - 首次容器检查发现 `/json/version/` 尾斜杠未被代理接受，修复并加入回归；首次重启检查发现就绪竞态，增加操作前有界只读探测后通过。
 - 开发环境无 `.env`、DeepSeek key、Telegram token；两模型摘要/成本、真实 Telegram 图片、代理流量/费用仍未验收。保留临时 spec 与 Proposed ADR；本记录不宣称 issue 全部完成。

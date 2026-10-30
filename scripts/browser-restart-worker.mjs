@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { openBrowser, readBrowserConfig } from "../dist/src/browser.js";
 const browser = await openBrowser(readBrowserConfig(), "/data");
-const execute = async () => browser.extension.tools.find((tool) => tool.name === "pw.browser_navigate").execute({ url: "about:blank" }, undefined, { abortSignal: AbortSignal.timeout(30_000) });
+const execute = async () => browser.extension.tools.find((tool) => tool.name === "pw_browser_navigate").execute({ url: "about:blank" }, undefined, { abortSignal: AbortSignal.timeout(30_000) });
 try {
   await browser.begin(`restart-before:${Date.now()}`, AbortSignal.timeout(90_000));
   assert.equal((await execute()).isError, false);

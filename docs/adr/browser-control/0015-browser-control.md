@@ -24,7 +24,7 @@ Issue #46 要求在 4 核、4 GB 部署基线上增加浏览器操控。现有 p
 
 可选 browser Compose overlay；仅 Docker 网络暴露 CDP，宿主不映射端口，代理只配置浏览器进程。内部 metrics 端点读取 cgroup 计数，不挂载 Docker socket。
 
-Playwright MCP 通过 Node stdio 启动，端点、目录和取消信号来自宿主；每请求 `--isolated`，结束关闭 MCP context/连接。注册经过筛选的 `pw.` 工具，保留 schema 验证、治理与 unsafe replay。文件名由宿主生成。失败后不在同一请求重建空 context 伪装为原状态。
+Playwright MCP 通过 Node stdio 启动，端点、目录和取消信号来自宿主；每请求 `--isolated`，结束关闭 MCP context/连接。注册经过筛选的 `pw_` 工具，保留 schema 验证、治理与 unsafe replay。文件名由宿主生成。失败后不在同一请求重建空 context 伪装为原状态。
 
 截图保存后进入 SQLite 投递记录；旧文本记录通过兼容迁移保留。文本与图片逐段确认，网络结果未知保留 uncertain，补发仅使用已有文件。
 
@@ -38,7 +38,7 @@ Playwright MCP 通过 Node stdio 启动，端点、目录和取消信号来自�
 
 - 相关 spec：`docs/spec-20261030-browser-control.md`。
 - 依赖：Playwright MCP 0.0.83 自带 Playwright 1.64 alpha，直接 CDP 库与 sidecar 采用稳定 1.64.1；已用真实容器验证连接、截图、context 清理和重启恢复，后续升级仍需重新检查协议兼容性。
-- 工具名称：issue 要求 `pw.` 前缀；不同模型提供商可能限制工具名字符，必须记录真实模型验收，不能假设所有提供商接受点号。
+- 工具名称修复：2026-10-30 按 Jay 确认将原点号前缀改为 `pw_`，例如 `pw_browser_navigate`。DeepSeek 函数名只接受字母、数字、下划线与连字符；原点号名称随浏览器工具常驻声明发送，会令普通聊天也可能收到 HTTP 400。增加内置、记忆、MCP 与浏览器工具名契约测试，统一断言 `^[A-Za-z0-9_-]{1,64}$`。底层 MCP 原始工具名保持不变。
 - 初始验证阻塞：开发机 Docker Linux daemon 未运行。随后启动 Docker Desktop 并完成镜像、真实 CDP、context 隔离与清理、同进程重启重连验证；详细证据见 [运行与验收记录](../../browser-control.md)。百度验证页与 Google 429 均截图停止，超星首页可达；尚无模型摘要质量证据。
 - 已修复缺陷：CDP 客户端请求 `/json/version/` 时代理返回 404，规范化尾斜杠并补测试；容器重启后首次请求早于就绪，增加操作发送前最多 15 秒的只读就绪探测，网页操作不重试。
-- 尚未解决/验收：真实 DeepSeek 与 Flash 的 `pw.` 工具名兼容性、摘要质量、usage 成本、Telegram 图片往返，以及代理流量费用。开发环境无相应凭据；ADR 保持 Proposed，spec 保留。强杀应用后的孤立 context 和历史产物需运维清理，不能当作已实现自动回收。
+- 尚未解决/验收：真实 DeepSeek 与 Flash 的 `pw_` 工具 API 往返、摘要质量、usage 成本、Telegram 图片往返，以及代理流量费用。开发环境无相应凭据；ADR 保持 Proposed，spec 保留。强杀应用后的孤立 context 和历史产物需运维清理，不能当作已实现自动回收。
