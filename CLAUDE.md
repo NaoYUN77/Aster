@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 单个 issue 的调查记录、feature 的设计与实施步骤、临时方案和任务进度不属于本文件。问题重复出现也不自动成为仓库规则；只有跨功能适用的工程约束才纳入这里。
 
-新功能通过 `docs/spec-00-<feature-name>.md` 临时规格推进，编写与收尾约定见 [文档索引](docs/README.md#按功能的临时规格)。运行说明放在 README.md，接口细节放在相应契约或代码 schema 中。
+功能开发通过 `docs/spec-YYYYMMDD-<feature-name>.md` 临时规格推进，日期取本次开发开始当天。一个功能可有多个 spec，均引用同一份长期保留的功能 ADR；编写与收尾约定见 [文档索引](docs/README.md#按功能的临时规格)。运行说明放在 README.md，接口细节放在相应契约或代码 schema 中。
 
 ## 技术基线与版本
 
@@ -74,8 +74,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - CLAUDE.md：仓库级工程约束及技术基线。
 - README.md：项目入口、实际可用的配置与运行方法。
 - docs/：部署、运行和架构设计。接口说明与验收记录也放在这里。
-- docs/adr/：只放决策记录。技术选型、取舍和代价写在 ADR，不写进本文件。
-- `docs/spec-00-<feature-name>.md`：单个功能的临时规格、实施与验收依据；完成后将长期契约归入对应文档，临时 spec 可归档或删除。
+- docs/adr/：按功能长期保留决策及缺陷历史。同一功能的多个 spec 归属同一份 ADR，按时间记录各部分的 spec 名称、技术选型、取舍、代价与相关缺陷；这些记录不随 spec 删除。
+- `docs/spec-YYYYMMDD-<feature-name>.md`：覆盖功能开发一部分的临时规范、实施与验收依据，引用所属功能 ADR；开发完成后按文档索引的收尾约定转存长期内容并删除 spec。
 - issue 或任务文档：调查过程和任务进度。
 
 每项定义有明确的权威来源，其他文档引用它，不复制维护。区分已实现、拟采用与待验证的内容。历史任务和验收文档须标明适用日期与阅读边界，其中的范围排除项、待办和执行指令只适用于原任务；功能范围由对应临时 spec 定义，工程取舍以有效 ADR 为准。仓库不维护总的 MVP 产品边界文档，不新增或恢复 `mvp.md`。修改契约或技术基线时更新对应文档；不把单次任务结果追加到本文件。

@@ -4,7 +4,7 @@
 
 个人 AI agent，当前从单 owner 的 Telegram 私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。
 
-新功能按 `docs/spec-00-<feature-name>.md` 临时规格推进，完成后可归档或删除；约定见 [按功能的临时规格](docs/README.md#按功能的临时规格)。下面描述当前可用能力。
+功能开发按 `docs/spec-YYYYMMDD-<feature-name>.md` 临时规格推进，日期取本次开发开始当天。一个功能可有多个 spec，均引用同一份长期保留的功能 ADR；ADR 按时间记录各部分的取舍、缺陷与 spec 名称。功能开发完成后删除临时 spec，见 [按功能的临时规格](docs/README.md#按功能的临时规格)。下面描述当前可用能力。
 
 基于 `@earendil-works/pi-durable`（1.3.0）构建。现已部署在腾讯云服务器上并持续运行：真实服务器上的 Telegram 往返、记忆落盘和容器重启恢复都在这次运行里。日期、镜像 digest 等脱敏细节还没写进仓库，可以补在 [部署指南](docs/deployment-test-guide.md#9-上线判定与验证边界)。
 
