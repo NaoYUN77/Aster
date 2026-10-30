@@ -10,7 +10,7 @@ export interface Job extends TextRequest {
   repliedAt: string | null;
 }
 
-export interface Delivery {
+interface DeliveryState {
   requestId: string;
   part: number;
   text: string;
@@ -20,6 +20,11 @@ export interface Delivery {
   createdAt: string | null;
   updatedAt: string | null;
 }
+
+export type Delivery = DeliveryState & (
+  | { type: "text"; path: null }
+  | { type: "photo"; path: string }
+);
 
 function timestamp(): string {
   return new Date().toISOString();
@@ -55,6 +60,8 @@ export class Inbox {
         error TEXT,
         createdAt TEXT,
         updatedAt TEXT,
+        type TEXT NOT NULL DEFAULT 'text' CHECK (type IN ('text', 'photo')),
+        path TEXT,
         PRIMARY KEY (requestId, part)
       );
       CREATE TABLE IF NOT EXISTS failures (
@@ -68,6 +75,8 @@ export class Inbox {
     addColumn(this.db, "inbox", "repliedAt", "TEXT");
     addColumn(this.db, "deliveries", "createdAt", "TEXT");
     addColumn(this.db, "deliveries", "updatedAt", "TEXT");
+    addColumn(this.db, "deliveries", "type", "TEXT NOT NULL DEFAULT 'text' CHECK (type IN ('text', 'photo'))");
+    addColumn(this.db, "deliveries", "path", "TEXT");
   }
 
   bindIdentity(botId: string, ownerId: string): void {
@@ -113,12 +122,12 @@ export class Inbox {
     return this.db.prepare("SELECT * FROM inbox WHERE status IN ('pending', 'ready') ORDER BY rowid LIMIT 1").get() as Job | undefined;
   }
 
-  saveReply(requestId: string, reply: string, errorCode?: string): void {
+  saveReply(requestId: string, reply: string, errorCode?: string, photos: readonly string[] = []): void {
     if (!reply.trim()) throw new Error("Cannot deliver an empty reply");
     this.transaction(() => {
       const changed = this.db.prepare("UPDATE inbox SET reply = ?, status = 'ready', repliedAt = ? WHERE requestId = ? AND status = 'pending'").run(reply, timestamp(), requestId);
       if (changed.changes !== 1) throw new Error("Reply already saved or request missing");
-      this.insertParts(requestId, reply);
+      this.insertParts(requestId, reply, photos);
       if (errorCode) this.db.prepare("INSERT INTO failures VALUES (?, ?)").run(requestId, errorCode);
     });
   }
@@ -178,10 +187,12 @@ export class Inbox {
     this.db.close();
   }
 
-  private insertParts(requestId: string, reply: string): void {
+  private insertParts(requestId: string, reply: string, photos: readonly string[] = []): void {
     const now = timestamp();
-    const insert = this.db.prepare("INSERT INTO deliveries (requestId, part, text, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)");
-    splitReply(reply).forEach((text, part) => insert.run(requestId, part, text, now, now));
+    const insert = this.db.prepare("INSERT INTO deliveries (requestId, part, text, type, path, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    const chunks = splitReply(reply);
+    chunks.forEach((text, part) => insert.run(requestId, part, text, "text", null, now, now));
+    photos.forEach((path, index) => insert.run(requestId, chunks.length + index, "", "photo", path, now, now));
   }
 
   private finishIfDelivered(requestId: string): void {
