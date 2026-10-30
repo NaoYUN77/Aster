@@ -1,6 +1,6 @@
 # 历史：MVP 验收记录
 
-历史记录：以下结果、测试数量、待办和阻塞对应各节所列日期与部署配置，不代表当前开发范围或生产状态，也不证明当前 Aster 镜像已通过相同验收。原七条标准见 [历史 MVP 执行规划](mvp-execution-plan.md#原-mvp-七条验收标准历史)。产品范围见 [当前目标与开放范围](mvp.md)，当前运行证据见 [README](../README.md#已验证与尚未验证)。systemd 安装入口现已退役，运行及迁移说明见 [部署指南](deployment-test-guide.md)。
+历史记录：以下结果、测试数量、待办和阻塞对应各节所列日期与部署配置，不代表当前开发范围或生产状态，也不证明当前 Aster 镜像已通过相同验收。原七条标准见 [历史 MVP 执行规划](mvp-execution-plan.md#原-mvp-七条验收标准历史)。新功能的规格约定见 [文档索引](README.md#按功能的临时规格)，当前运行证据见 [README](../README.md#已验证与尚未验证)。systemd 安装入口现已退役，运行及迁移说明见 [部署指南](deployment-test-guide.md)。
 
 当时状态：本地验证完成；Docker 镜像构建、命名卷备份／还原与 systemd 安装脚本已在容器中演练；真实 Telegram／模型联调与真实 Linux 主机部署待验收。
 

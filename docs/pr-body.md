@@ -1,6 +1,6 @@
 # 历史 PR 草稿：修复代码审查问题 F1–F7
 
-历史 PR 正文草稿：仅保留基线 `57ef390` 后该批修复的实现与验证描述。下文「待做」与阻塞只反映当时，不能据此判断当前功能范围或部署状态；systemd 部署已退役。当前目标见 [开放范围](mvp.md)，运行事实见 [README](../README.md)，镜像交付见 [部署指南](deployment-test-guide.md)。
+历史 PR 正文草稿：仅保留基线 `57ef390` 后该批修复的实现与验证描述。下文「待做」与阻塞只反映当时，不能据此判断当前功能范围或部署状态；systemd 部署已退役。后续功能采用 [临时 spec](README.md#按功能的临时规格) 推进，运行事实见 [README](../README.md)，镜像交付见 [部署指南](deployment-test-guide.md)。
 
 基线：`57ef390`。执行范围与要求见 [docs/review-fix-plan.md](review-fix-plan.md)，逐项记录见 [docs/mvp-verification.md](mvp-verification.md)。
 

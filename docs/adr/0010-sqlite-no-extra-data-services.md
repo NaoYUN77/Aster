@@ -3,11 +3,11 @@
 - **状态**：Accepted
 - **日期**：2026-10-21
 
-阅读说明（2026-10-30）：下文对旧 MVP 排除项的引用只描述决策背景；产品范围现见 [当前目标与开放范围](../mvp.md)。记忆检索增强可以立项；本篇不部署独立数据服务的取舍仍有效，如需改变则记录后继 ADR。
+阅读说明（2026-10-30）：下文的旧 MVP 排除项只描述决策背景；记忆检索增强按 [临时 spec 约定](../README.md#按功能的临时规格) 推进。本篇不部署独立数据服务的取舍仍有效，如需改变则记录后继 ADR。
 
 ## 上下文
 
-`CLAUDE.md` 的部署基线是单台 4 核 CPU、4 GB 内存，模型推理在远端。`docs/mvp.md` 写明：底座用 Node 内置 SQLite 保存会话和执行状态，接入与投递用另一个 SQLite 文件，不需要数据库服务。`docs/memory-and-context-design.md` 写明本轮不包含向量数据库、第二套 agent loop 和磁盘历史清理。`docs/mvp.md` 把 PREFERENCE 和向量检索放在本次范围之外。
+`CLAUDE.md` 的部署基线是单台 4 核 CPU、4 GB 内存，模型推理在远端。当时的交付设计采用 Node 内置 SQLite 保存底座会话和执行状态，接入与投递用另一个 SQLite 文件，不需要数据库服务。`docs/memory-and-context-design.md` 写明本轮不包含向量数据库、第二套 agent loop 和磁盘历史清理。当时的交付范围未纳入 PREFERENCE 和向量检索。
 
 ## 决策
 
