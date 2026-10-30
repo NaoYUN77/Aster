@@ -37,6 +37,8 @@ Playwright MCP 通过 Node stdio 启动，端点、目录和取消信号来自�
 ### 2026-10-30：浏览器操控 v1
 
 - 相关 spec：`docs/spec-20261030-browser-control.md`。
-- 依赖：Playwright MCP 0.0.83 自带 Playwright 1.64 alpha，直接 CDP 库与 sidecar 采用稳定 1.64.1；实际协议兼容性仍需容器验收，不能用版本号相近代替证据。
+- 依赖：Playwright MCP 0.0.83 自带 Playwright 1.64 alpha，直接 CDP 库与 sidecar 采用稳定 1.64.1；已用真实容器验证连接、截图、context 清理和重启恢复，后续升级仍需重新检查协议兼容性。
 - 工具名称：issue 要求 `pw.` 前缀；不同模型提供商可能限制工具名字符，必须记录真实模型验收，不能假设所有提供商接受点号。
-- 已知缺陷/验证阻塞：开发机 Docker Linux daemon 未运行；容器、重启、真实网站、Telegram 图片与两种模型验收尚未执行。实现与离线验证完成后追加实际结果。
+- 初始验证阻塞：开发机 Docker Linux daemon 未运行。随后启动 Docker Desktop 并完成镜像、真实 CDP、context 隔离与清理、同进程重启重连验证；详细证据见 [运行与验收记录](../../browser-control.md)。百度验证页与 Google 429 均截图停止，超星首页可达；尚无模型摘要质量证据。
+- 已修复缺陷：CDP 客户端请求 `/json/version/` 时代理返回 404，规范化尾斜杠并补测试；容器重启后首次请求早于就绪，增加操作发送前最多 15 秒的只读就绪探测，网页操作不重试。
+- 尚未解决/验收：真实 DeepSeek 与 Flash 的 `pw.` 工具名兼容性、摘要质量、usage 成本、Telegram 图片往返，以及代理流量费用。开发环境无相应凭据；ADR 保持 Proposed，spec 保留。强杀应用后的孤立 context 和历史产物需运维清理，不能当作已实现自动回收。

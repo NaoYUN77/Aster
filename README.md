@@ -150,7 +150,7 @@ npm start
 
 ## 部署与运维
 
-生产形态是单个 Docker 服务。镜像构建、Compose、卷备份和上线清单见 [部署指南](docs/deployment-test-guide.md)。同机 test／production 的环境描述见 [部署环境](docs/deployment-environments.md)。结果未知的 Telegram 发送如何核查和补发见 [投递核查与补发](docs/deliveries.md)。
+基础部署为单个 Docker 服务；浏览器操控通过可选的独立 Chromium sidecar 启用，配置、`/browser_health` 与截图投递见 [浏览器运行指南](docs/browser-control.md)。镜像构建、Compose、卷备份和上线清单见 [部署指南](docs/deployment-test-guide.md)。同机 test／production 的环境描述见 [部署环境](docs/deployment-environments.md)。结果未知的 Telegram 发送如何核查和补发见 [投递核查与补发](docs/deliveries.md)。
 
 凭据只经部署环境提供。应用只做存在性与形状校验，不把秘密写入工具参数或 durable 状态。
 
