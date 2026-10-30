@@ -3,6 +3,8 @@
 - **状态**：Accepted
 - **日期**：2026-10-21
 
+阅读说明（2026-10-30）：下文引用 `docs/mvp.md` 的范围是决策时的历史背景；该路径现为 [当前目标与开放范围](../mvp.md)。扩展会话或并发可以立项，改变本篇顺序执行决策时记录后继 ADR。
+
 ## 上下文
 
 `docs/contracts-and-lifecycle.md` 写明底座默认可以并行执行工具。MVP 在 `src/agent.ts` 把 `toolExecution` 设为 `sequential`。`docs/mvp.md` 的范围是同一会话依次处理请求，全局 agent 并发为 1，避免消息交错和共享文件并发写入。

@@ -1,6 +1,6 @@
 # 工具契约与请求生命周期
 
-状态：MVP 设计。仓库级规则见 CLAUDE.md；本文定义具体契约、状态归属、恢复窗口与实现限制。真实服务联调和云端验收独立于本地自动化验证。
+状态：现行契约与实现边界。仓库级规则见 CLAUDE.md；本文定义具体契约、状态归属、恢复窗口与当前实现限制，不将当前限制作为未来功能排除项。产品演进见 [当前目标与开放范围](mvp.md)。真实服务联调和云端验收独立于本地自动化验证。
 
 ## 工具契约
 
@@ -41,7 +41,7 @@
 
 启动时健康快照先进入 Register，`installMcpTools()` 按 extension 名及工具注册名固定排序，再按注册名依次验证 pin 的存在性、available 状态和剩余预算。预算按 `estimateTextTokens(JSON.stringify(declarations))` 计算，声明通过原生 `toToolDeclaration()` 转换，包含内置、记忆、搜索工具及接受的 pin 的 name／description／parameters 等模型字段；使用 pi-ai 1.3.0 的字符估算，与提供商精确 token 数有差异。基础集合已超预算时拒绝所有新增 pin，不移除内置工具。失败记录 `TOOL_NOT_FOUND`／`TOOL_UNAVAILABLE`／`TOOL_BUDGET_EXCEEDED`；已注册且可用的 MCP 工具仍可按需搜索。
 
-本期只在启动结算，不监听配置文件、自动晋升或自动降级。底座开启后尚未恢复调度时，先初始化记忆并补扫已发布压缩，持久化归档目标，避免 pin 切换覆盖尚待确认的上下文头；再检查未完成任务（包括补扫新建的归档任务）、提交，以及记忆投影已落盘但输入尚未接收的请求；投影收据通过原生提交记录分页读取，不复制另一套请求状态。有未完成工作则按账本恢复旧常驻集，延迟新配置到下一次空闲重启，记录 `TOOL_PIN_RECOVERY`；恢复旧集不重新套用新预算或因掉线撤销已发出的声明。没有未完成工作且集合改变时，在一次原生提交中追加 `pi.reset` 上下文头并结算账本 epoch／resident 字段，下一请求发布完整基线，旧记录保留。此边界不启动任务，也不取消未完成请求；初次 pin 从 epoch 0 到 1，无变化重启不增加。`resident` 是常驻决策元数据，缺省等同旧版本的空集合，由存储适配层管理，可通过 `readResidentTools()` 查询。
+当前实现只在启动结算，不监听配置文件、自动晋升或自动降级。底座开启后尚未恢复调度时，先初始化记忆并补扫已发布压缩，持久化归档目标，避免 pin 切换覆盖尚待确认的上下文头；再检查未完成任务（包括补扫新建的归档任务）、提交，以及记忆投影已落盘但输入尚未接收的请求；投影收据通过原生提交记录分页读取，不复制另一套请求状态。有未完成工作则按账本恢复旧常驻集，延迟新配置到下一次空闲重启，记录 `TOOL_PIN_RECOVERY`；恢复旧集不重新套用新预算或因掉线撤销已发出的声明。没有未完成工作且集合改变时，在一次原生提交中追加 `pi.reset` 上下文头并结算账本 epoch／resident 字段，下一请求发布完整基线，旧记录保留。此边界不启动任务，也不取消未完成请求；初次 pin 从 epoch 0 到 1，无变化重启不增加。`resident` 是常驻决策元数据，缺省等同旧版本的空集合，由存储适配层管理，可通过 `readResidentTools()` 查询。
 
 晋升仅去掉原生 `deferred` 属性，保留工具参数、执行函数、健康拦截、`replay`、trust 和 authz。默认会话选择因此自动包含常驻工具；底座显式 `tools`／`modelTools` 过滤仍有优先权。取消 pin 不删除原生已加载选择，过去由搜索加载的工具不会自动卸载。所有 pin 配置改动均需重启，健康状态仍实时变化且不增加声明 epoch。
 
@@ -49,7 +49,7 @@
 
 `createToolRegistry(extensions, { authority, log })` 在每个原生工具执行函数外统一复核 Register，顺序为精确名称存在、state 为 available、当前权限足够，然后才进入工具实现。取消信号先检查；参数修复和参数校验仍由底座执行，参数不合法时不会到达复核执行器。内置、MCP、后装工具和 `api.executeTool()` 嵌套调用共用此边界。安全重放进入执行函数时再次使用当前状态和权限；unsafe 工具仍按底座规则报告执行结果未知，不因权限变化重跑。
 
-权限由宿主固定为 `owner`（默认，可执行 read 和 write）或 `restricted`（仅 read）。生产 `openAgent()` 通过 `toolAuthority` 注入，作用于整个实例的所有会话、任务及恢复；模型参数、MCP 描述和 annotations 均不能提升权限。现有 Telegram 入口已认证为所有者，使用默认 owner。本期只预留受限实例入口，不提供请求间动态切换、多级身份系统或 destructive 二次确认。authz 配置在启动时应用，包括未完成任务的后续执行；它不改变工具声明字节、加载编号、epoch、trust 或 replay。
+权限由宿主固定为 `owner`（默认，可执行 read 和 write）或 `restricted`（仅 read）。生产 `openAgent()` 通过 `toolAuthority` 注入，作用于整个实例的所有会话、任务及恢复；模型参数、MCP 描述和 annotations 均不能提升权限。现有 Telegram 入口已认证为所有者，使用默认 owner。当前只预留受限实例入口，尚未实现请求间动态切换、多级身份系统或破坏性操作二次确认。authz 配置在启动时应用，包括未完成任务的后续执行；它不改变工具声明字节、加载编号、epoch、trust 或 replay。
 
 | 拒绝原因 | 结果与恢复提示 |
 | --- | --- |
@@ -165,7 +165,7 @@ OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、
 | 已发送、确认尚未保存 | 标记结果未知；不能保证自动重发不会重复 |
 | 部分分段已确认 | 保留每段状态，不重新发送已确认段落 |
 
-Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不承诺端到端恰好一次。对于结果未知的发送，MVP 保留记录并提供诊断，不自动重发整条回复。取舍见 [ADR-0007](adr/0007-delivery-not-exactly-once.md)。
+Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不承诺端到端恰好一次。对于结果未知的发送，当前实现保留记录并提供诊断，不自动重发整条回复。取舍见 [ADR-0007](adr/0007-delivery-not-exactly-once.md)。
 
 ### 超时与关闭
 
@@ -177,7 +177,7 @@ Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不�
 
 - 工具结果的 `output` 给模型读取，`structuredOutput` 给程序化调用方，`details` 给 UI 消费者；三者不能互相替代。业务失败可返回 `isError: true`，执行异常由底座转换成错误工具结果。
 - 默认 `replay` 为 `unsafe`。执行意图已保存的工具，仅在持久化策略与当前工具策略都为 `safe` 时重跑。恢复使用当前实现与已保存参数，跳过首次参数修复和验证，因此工具升级必须兼容尚未完成调用的旧参数；不兼容变更需保留旧工具或在升级前收敛未完成任务。
-- 工具默认可以并行执行。MVP 已显式配置 `toolExecution: "sequential"`，同一回合的工具调用不会重叠；测试 `sequential tool execution prevents overlapping calls in one round` 验证该行为。取舍见 [ADR-0009](adr/0009-sequential-tool-execution.md)。内置 write/edit 已有进程内同文件写入队列，但不能保护 bash 写入，也不能把分开的读取和写入变成事务。
+- 工具默认可以并行执行。应用已显式配置 `toolExecution: "sequential"`，同一回合的工具调用不会重叠；测试 `sequential tool execution prevents overlapping calls in one round` 验证该行为。取舍见 [ADR-0009](adr/0009-sequential-tool-execution.md)。内置 write/edit 已有进程内同文件写入队列，但不能保护 bash 写入，也不能把分开的读取和写入变成事务。
 - 请求去重键是 `(底座 conversationId, requestId)`。相同键与相同提交类型返回旧请求，即使文本已改变，也不会检查内容冲突；接入层必须保证请求标识稳定且不被复用。
 - 输入提交状态为 `queued → placed → done | unanswered`，其中排队请求也可能直接成为 unanswered。`done` 带最终答案引用；`unanswered` 带原因。应用必须显式区分。
 - 取消 `wait()` 只取消等待。取消已开始的执行需使用底座执行取消机制；会话级 abort 会影响该会话的普通任务范围，不能假定它只影响一条请求。
@@ -201,13 +201,13 @@ Telegram sendMessage 没有可供本应用使用的幂等键，因此系统不�
 - `deliveries` 按 `(requestId, part)` 保存文本，分段状态为 `pending → sending → sent`；失败分为 `failed` 与 `uncertain`。确认时记录 Telegram message ID。每段最多 4000 个 UTF-16 code units，不切开代理对，使用纯文本发送。
 - Telegram 明确 4xx 拒绝记录为 failed；网络失败和其他无法排除送达的情况记录为 uncertain。重启将遗留 sending 转为 uncertain。阻塞请求不自动重发，但允许处理后续独立请求。
 - 投递管理 CLI 支持列出、重试该段、人工确认该段已送达。操作前停止应用，核对实际 Telegram 消息；重试仅发送已有结果，不重新运行 agent。CLI 打开数据库后先执行恢复，因此进程发送中被强杀时遗留的 `sending` 段以 `uncertain` 出现在列表中，`sending` 本身不会直接暴露给操作者。先前版本没有逐段记录的 uncertain 请求保留原记录，需人工核对。
-- 轮询遇到网络故障或服务端错误采用有界退避，明确配置/认证错误退出交给进程管理器处理。每次最多接收 10 条，先处理本地待办再继续轮询；长期离线或积压不在本 MVP 的可靠收件保证内。
+- 轮询遇到网络故障或服务端错误采用有界退避，明确配置/认证错误退出交给进程管理器处理。每次最多接收 10 条，先处理本地待办再继续轮询；当前不保证长期离线或持续积压情况下的可靠收件。
 - 操作失败只记录安全错误码，不向日志输出 SDK 请求对象或凭据。工具的详细执行记录仍归底座管理。启动失败时，`ConfigurationError` 与 `StateError`（数据目录已绑定其他 bot／owner 等）打印应用自己写的 message；其余异常只打印错误码，避免 SDK 错误对象带出凭据或消息内容。
 
 具体启动、投递管理及部署命令见 README.md。
 
-## MVP 实现尺度
+## 当前运行尺度
 
-一个应用进程、一个用户会话、一个执行中的用户请求；SQLite 保存运行状态。无需额外消息队列服务，也无需为每个工具设计独立框架。
+当前为一个应用进程、一个用户会话、一个执行中的用户请求，SQLite 保存运行状态；现有负载不需要额外消息队列服务或逐工具独立框架。扩展会话、并发或后台任务时，按具体需求更新状态归属、资源限制及相关契约。
 
 验收重点是边界行为：非法参数不执行、相同请求不重复提交、完成结果可重取、中断工具按策略恢复、部分投递不整条重发，以及超时确实触发取消而非仅停止等待。

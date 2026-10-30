@@ -2,7 +2,9 @@
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![Telegram](https://img.shields.io/badge/Telegram-grammY_1.46.0-26A5E4?logo=telegram&logoColor=white)](https://grammy.dev/) [![SQLite](https://img.shields.io/badge/SQLite-node:sqlite-003B57?logo=sqlite&logoColor=white)](https://nodejs.org/api/sqlite.html) [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/) [![MCP](https://img.shields.io/badge/MCP-pi--mcp_1.3.0-111111)](docs/mcp.md) [![pi-durable](https://img.shields.io/badge/pi--durable-1.3.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
 
-单 owner 的个人 AI agent：从 Telegram 私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。
+个人 AI agent，当前从单 owner 的 Telegram 私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。
+
+项目已进入持续功能开发阶段。计划任务、主动推送、多模态、记忆增强和更多个人集成都可以继续扩展；方向与实施边界见 [当前目标与开放范围](docs/mvp.md)。这些方向不表示已经实现，下面描述当前可用能力。
 
 基于 `@earendil-works/pi-durable`（1.3.0）构建。现已部署在腾讯云服务器上并持续运行：真实服务器上的 Telegram 往返、记忆落盘和容器重启恢复都在这次运行里。日期、镜像 digest 等脱敏细节还没写进仓库，可以补在 [部署指南](docs/deployment-test-guide.md#9-上线判定与验证边界)。
 
@@ -168,6 +170,8 @@ npm test        # 全量离线测试
 
 ## 文档索引
 
+- [当前目标与开放范围](docs/mvp.md)：产品方向、已开放的功能范围和工程边界
+- [文档分类索引](docs/README.md)：区分当前契约、运行手册、任务记录和历史材料
 - [部署指南](docs/deployment-test-guide.md)：镜像交付、备份恢复、维护命令、上线清单
 - [投递核查与补发](docs/deliveries.md)
 - [工具与 MCP](docs/mcp.md)
@@ -177,5 +181,5 @@ npm test        # 全量离线测试
 - [Memory 与 Context 实施方案](docs/memory-and-context-design.md) / [记忆系统验收](docs/memory-verification.md)
 - [CI 运行入口](docs/ci-entrypoint.md) / [主机备份与演练](docs/host-backup.md)
 - [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)
-- [MVP 范围](docs/mvp.md) / [Docker 验证记录](docs/docker-verification.md)
+- [历史 Docker 验证记录](docs/docker-verification.md)：对应当日拓扑，不代表当前部署状态
 - 仓库级约束见 [CLAUDE.md](CLAUDE.md)

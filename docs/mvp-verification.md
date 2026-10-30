@@ -1,8 +1,8 @@
-# MVP 验收记录
+# 历史：MVP 验收记录
 
-历史记录：以下结果对应各节所列日期与部署配置，不证明当前 Aster 镜像已通过相同验收。systemd 安装入口现已退役，当前运行及迁移说明见 [部署指南](deployment-test-guide.md)。
+历史记录：以下结果、测试数量、待办和阻塞对应各节所列日期与部署配置，不代表当前开发范围或生产状态，也不证明当前 Aster 镜像已通过相同验收。原七条标准见 [历史 MVP 执行规划](mvp-execution-plan.md#原-mvp-七条验收标准历史)。产品范围见 [当前目标与开放范围](mvp.md)，当前运行证据见 [README](../README.md#已验证与尚未验证)。systemd 安装入口现已退役，运行及迁移说明见 [部署指南](deployment-test-guide.md)。
 
-状态：本地验证完成；Docker 镜像构建、命名卷备份／还原与 systemd 安装脚本已在容器中演练；真实 Telegram／模型联调与真实 Linux 主机部署待验收。
+当时状态：本地验证完成；Docker 镜像构建、命名卷备份／还原与 systemd 安装脚本已在容器中演练；真实 Telegram／模型联调与真实 Linux 主机部署待验收。
 
 ## 环境与基线
 
@@ -163,7 +163,7 @@
 
 缺少：可用测试 bot 的 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`、受支持提供商的 `MODEL_PROVIDER`／`MODEL_ID`／API key，以及用户对测试环境的联调授权。
 
-影响：`docs/mvp.md` 七条验收中与真实 Telegram、真实模型、真实记忆文件相关的结果尚未取得。离线测试已覆盖同一边界逻辑。
+当时影响：原 MVP 七条验收中与真实 Telegram、真实模型、真实记忆文件相关的结果尚未取得。离线测试已覆盖同一边界逻辑。
 
 下一步：配置隔离的 `DATA_DIR` 与测试凭据后，按阶段 E 六项逐条记录时间、请求标识与脱敏观察。
 
