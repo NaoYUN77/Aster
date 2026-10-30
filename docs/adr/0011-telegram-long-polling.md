@@ -3,9 +3,11 @@
 - **状态**：Accepted
 - **日期**：2026-10-21
 
+阅读说明（2026-10-30）：下文的早期 MVP 范围属于决策背景；入口与用户模型的扩展按 [临时 spec 约定](../README.md#按功能的临时规格) 推进。本篇仍定义现行 Telegram 长轮询方式，改变该方式时记录后继 ADR。
+
 ## 上下文
 
-`docs/mvp.md` 把接入写成 Telegram 长轮询，不要求对公网开放 webhook。实现在 `src/telegram.ts`：`getUpdates` 长轮询，启动时如果 bot 已有 webhook URL，直接拒绝启动。每次最多取 10 条 update。
+当时的交付设计采用 Telegram 长轮询，不要求对公网开放 webhook。实现在 `src/telegram.ts`：`getUpdates` 长轮询，启动时如果 bot 已有 webhook URL，直接拒绝启动。每次最多取 10 条 update。
 
 ## 决策
 

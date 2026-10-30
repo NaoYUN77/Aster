@@ -2,7 +2,9 @@
 
 状态：MEM-01～MEM-06 的 module 已实现并通过各自本地验收；MEM-07 已完成组合接入并通过本地验收，记忆能力已注册到运行中的 agent；MEM-08 验收已执行（08-A／C／D／E／F／G／H 通过，08-B 窗口 6 缺陷 D-1 待决策；08-E 已用 DeepSeek 真实模型补测，遗留发现 F-1／F-2；08-F 已在目标服务器补测完成），记录见 `docs/memory-verification.md`。编制日期：2026-10-25。架构与 Interface 语义以 [实施方案](memory-and-context-design.md) 为唯一来源；本文负责拆分任务、依赖、交接产物和完成条件。
 
-## 接手方式
+阅读边界：本文是 MEM-01～08 的历史任务拆分与交接记录。下文的领取顺序、冻结节点和范围排除项只适用于该批实施，不作为新功能开发指令；后续任务以当前代码和记忆设计为起点，按 [临时 spec 约定](README.md#按功能的临时规格) 定义功能范围。
+
+## 原实施接手方式
 
 1. 先读根目录 `CLAUDE.md`、实施方案，以及领取 issue 指向的代码；涉及 SDK 时核对已安装的发布版。
 2. MEM-01 完成后冻结应用契约和文件归属，再开始并行。后续需要变更公共 Interface 时，先更新契约及调用方说明；不由两个 agent 各建一份近似类型。
@@ -25,7 +27,7 @@
 | MEM-07 | [#14](https://github.com/NaoYUN77/personal-agent-base-durable/issues/14) |
 | MEM-08 | [#15](https://github.com/NaoYUN77/personal-agent-base-durable/issues/15) |
 
-只先领取 MEM-01。依赖未满足时不要提前实现下游 module 的接入部分；本表与各 issue 的「依赖」一节一致，改动时两处同步。MEM-01 已于 2026-10-25 完成（交接记录见本节末），MEM-02、MEM-03、MEM-04 同批完成（交接记录分别见其小节末）。MEM-05 已于 2026-10-26 认领并完成本地验收（交接记录见对应小节）；MEM-06 已于 2026-10-27 认领并完成本地验收（交接记录见其小节末）。
+原实施顺序要求先领取 MEM-01，依赖未满足时不提前实现下游 module 的接入部分；本表与各 issue 的「依赖」一节一致，改动时两处同步。MEM-01 已于 2026-10-25 完成（交接记录见本节末），MEM-02、MEM-03、MEM-04 同批完成（交接记录分别见其小节末）。MEM-05 已于 2026-10-26 认领并完成本地验收（交接记录见对应小节）；MEM-06 已于 2026-10-27 认领并完成本地验收（交接记录见其小节末）。
 
 ## 依赖与并行安排
 
@@ -432,7 +434,7 @@ MEM-01 验证失败的接入点必须有具体替代方案和对应验收后才�
 - `src/config.ts`：新增 `readMemoryConfig(env)` 与 `MemoryConfig`：`MEMORY_ENABLED`（默认开）、预算六项覆盖、评估间隔、reserve、时区（经 `eventDate` 校验）、归档超时；每项有范围校验。`readConfig` 的返回结构未变，记忆配置由 `agent.ts` 结构化读取，避免破坏既有测试对返回字面量的标注。
 - `src/agent.ts`：只经组合入口接线——instructions 提取为常量并原样传入、记忆扩展在 MCP 之前注册、压缩设置由 `nativeCompactionPolicy` 派生（仅启用时）、`reply()` 在 resume 后 prepare、完成回执后 afterRequest、`MEMORY_*` 错误透传、新增 `reset()`、关闭先关组合入口。`MEMORY_ENABLED=0` 时与接入前逐项一致。每日 store 根按实施方案第 3 节取数据根目录（`DATA_DIR/memory/daily`）。
 - `test/memory-integration.test.ts`：07-A～07-G 与组合接缝共 15 个用例，全部用真实 `Harness` + Node SQLite + faux provider，分别经完整 `openAgent` 与 raw 组合装配两种方式，临时目录。
-- `docs/memory-and-context-design.md`：新增第 18 节（MEM-07 实现结论与接入语义），原第 18 节顺延为第 19 节；文首状态与第 2 节同步 MEM-07 状态。`README.md`、`docs/mvp.md`、`.env.example` 同步新能力与配置说明。
+- `docs/memory-and-context-design.md`：新增第 18 节（MEM-07 实现结论与接入语义），原第 18 节顺延为第 19 节；文首状态与第 2 节同步 MEM-07 状态。当时的项目说明与 `.env.example` 同步了新能力与配置说明；当前文档入口见 [文档索引](README.md)。
 
 执行命令与结果：
 

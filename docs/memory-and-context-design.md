@@ -1,10 +1,10 @@
 # Memory 与 Context 实施方案
 
-> 2026-10-28 变更（[ADR-0004](adr/0004-retire-workspace-memory-md.md)）：`workspace/MEMORY.md` 已退役——应用不再创建该文件，instructions 不再指示模型经文件工具读写它，「用户明确要求保存的长期事实」统一由本文的 working 状态与每日归档承担。下文涉及 MEMORY.md 的分工描述（第 1 节表格、相关段落）与 `memoryDigest: null` 的原始理由为历史设计，现状以 ADR-0004 为准；存量文件保留不删。
+> 当前记忆入口：working 状态与每日事件归档。`workspace/MEMORY.md` 已于 2026-10-28 退役，应用不再创建或指示模型读写它；存量文件保留，见 [ADR-0004](adr/0004-retire-workspace-memory-md.md)。下文的迁移验收仍保留对旧文件的历史说明。
 
-状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节），MEM-05 已实现可恢复的增量归档（结论见第 16 节），MEM-06 已实现原生压缩接入与周期快照切换（结论见第 17 节），MEM-07 已完成组合接入并注册到运行中的 agent（结论见第 18 节）；MEM-08 已完成本地验收（结论见第 19 节，真实模型质量与目标环境数据仍待验证）。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
+状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节），MEM-05 已实现可恢复的增量归档（结论见第 16 节），MEM-06 已实现原生压缩接入与周期快照切换（结论见第 17 节），MEM-07 已完成组合接入并注册到运行中的 agent（结论见第 18 节）；MEM-08 已执行验收与 DeepSeek 真实模型、目标服务器补测（结论与未解决项见第 19 节及 [验收记录](memory-verification.md)；其他提供商质量与真实窗口标定仍待验证）。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
 
-本轮是当前 MVP 之后的增量工作，不表示这些能力已经上线。现有运行范围见 [mvp.md](mvp.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.3.0 为准。
+本文保留记忆架构与各阶段实施结论。第 12～19 节中的测试数量、待办与验证结论按原阶段及后续补测解读，不构成其他功能的开发限制。新功能采用 [按功能的临时 spec](README.md#按功能的临时规格)，实际运行与生产证据见 [README](../README.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.3.0 为准。
 
 ## 1. 交付目标与范围
 
@@ -28,15 +28,15 @@
 
 本轮增加 working JSON、周期快照、每日 Markdown 归档和有界检索。移除独立的应用 history 记忆层；底座原始 Entries 继续保留为恢复记录和证据，通过来源定位读取。上下文压缩不删除持久化历史。
 
-本轮不包含向量数据库、第二套 agent loop、后台自动用户画像、每日定时推送、多用户记忆、任意插件平台、磁盘历史清理，以及独立于模型窗口的严格 64K 输入上限。
+MEM-01～08 的原实施包未包含向量检索、自动用户画像、定时推送、多用户记忆、插件平台、磁盘历史清理或独立于模型窗口的严格 64K 输入上限。这些任务排除项不限制后续功能开发；具体扩展按 [临时 spec 约定](README.md#按功能的临时规格) 设计。agent loop 继续复用 pi-durable，遵循 [ADR-0013](adr/0013-pi-durable-agent-loop.md)。
 
 ## 2. 当前实现与需要新增的能力
 
-当前应用通过 `root.configure({ instructions })` 设置系统提示，将原文提交给 root Conversation；底座派生消息、执行工具并自动压缩。`workspace/MEMORY.md` 仍由模型通过文件工具读取和按用户明确要求更新。
+当前应用通过 `root.configure({ instructions })` 设置系统提示，将原文提交给 root Conversation；底座派生消息、执行工具并自动压缩。长期目标、约束和明确偏好通过 working 工具管理，历史事实经每日归档与检索访问。
 
 宿主记忆投影、归档任务与原生检索工具已由 MEM-07 接入运行入口（第 18 节）。数据契约（schema、文档定义、范围与日期规则、错误分类）已由 MEM-01 冻结在 `src/memory/contracts.ts`；每日记忆的文件协议已由 MEM-04 实现（`src/memory/daily.ts`）。
 
-按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。MEM-05 实现了独立可恢复的增量归档 Task（`archive.ts`、`archive-task.ts`）。MEM-06 实现了 compaction Adapter、周期切换确认与轮数评估（`src/memory/compaction.ts`）。MEM-07 实现了组合入口（`src/memory/integration.ts`）与原生检索工具（`src/memory/memory-tools.ts`），并已在 `src/agent.ts` 注册：记忆能力已接入运行中的 agent，真实模型质量与缓存命中仍待 MEM-08 验证。
+按 issue 划分的状态：MEM-01 冻结了数据契约；MEM-02 实现了 Working Module 与两个原生工具（`src/memory/working.ts`、`working-tools.ts`）；MEM-03 实现了纯 Context 规划与快照渲染（`src/memory/context.ts`）；MEM-04 实现了每日 Markdown 的发布、按引用读取与有界检索（`src/memory/daily.ts`）。MEM-05 实现了独立可恢复的增量归档 Task（`archive.ts`、`archive-task.ts`）。MEM-06 实现了 compaction Adapter、周期切换确认与轮数评估（`src/memory/compaction.ts`）。MEM-07 实现了组合入口（`src/memory/integration.ts`）与原生检索工具（`src/memory/memory-tools.ts`），并已在 `src/agent.ts` 注册：记忆能力已接入运行中的 agent；MEM-08 的后续验收与 DeepSeek 补测结论见第 19 节和 [验收记录](memory-verification.md)。
 
 底座现有接入能力：
 
@@ -58,7 +58,6 @@
 | 周期快照 B | 初始应用 Entry 或已发布的 `pi.compaction` Entry | 不可变投影，带 schema 版本、来源边界和 working revision |
 | 原文、工具执行和恢复状态 | 底座原生 Entries、Tasks、Documents | 原样复用；应用不维护执行状态副本 |
 | 每日事件记忆 | `DATA_DIR/memory/daily/YYYY-MM-DD.md` | 可增量写入、可检索，保存有价值事件及来源 |
-| 用户明确要求保存的长期事实 | 既有 `workspace/MEMORY.md` | 兼容现有数据与写入语义，按需读取 |
 | 归档覆盖位置与待发布结果 | 应用归档 Document／底座归档 Task checkpoint | 只表示应用拥有的归档进度 |
 
 working、B 和每日记忆中可以出现同一事实，但各自回答不同问题：working 表示当前业务状态，B 表示某个上下文边界的投影，每日记忆表示过去发生的事件。历史中的旧值和摘要不能覆盖后续明确修订。
@@ -195,9 +194,9 @@ B 使用版本化的应用格式保存：连续性摘要、结构化基线、来
 
 拟议 `memory_search` 返回日期／主题／关键词的有界命中及稳定引用，`memory_read` 按引用读取有界片段和分页游标。两者由原生工具暴露，结果进入 C，不每轮重新注入全部 LTM。零命中与读失败分开；可按日期浏览，必要时回读来源 Entry。
 
-首版直接分页扫描 Markdown，给出明确的扫描范围、返回上限和继续游标。后续全文索引是可重建派生物，不能成为另一个可编辑事实库。分页扫描、游标与上限已在 MEM-04 实现，语义见第 15.4 节；原生工具包装仍待 MEM-07。
+首版直接分页扫描 Markdown，给出明确的扫描范围、返回上限和继续游标。后续全文索引是可重建派生物，不能成为另一个可编辑事实库。分页扫描、游标与上限已在 MEM-04 实现，语义见第 15.4 节；原生工具包装已由 MEM-07 接入，见第 18.4 节。
 
-既有 `MEMORY.md` 保留为用户明确保存的事实来源，不自动把日记合并进去，也不未经确认把旧文本转换成结构化偏好。加载时记录内容摘要；纠正或忘记后，未来快照与检索不能继续把旧值当作当前约定。
+存量 `MEMORY.md` 仅作为旧数据保留，不是现行记忆入口，不自动导入日记或转换为结构化偏好。纠正或撤销通过现行状态与记忆协议处理；未来快照与检索不能把已撤销的旧值当作当前约定。
 
 本轮“忘记”默认表示停止作为有效记忆使用，并在需要时保留最小撤销标记以防旧记录复活；清除所有原始历史、备份或提供商缓存属于另行定义的数据删除操作。此差别要通过实际工具结果说明，不宣称删除了所有历史副本。
 
@@ -611,7 +610,7 @@ hook 内顺序固定：派生稳定 key → 查已保存结果 → 读边界状�
 
 ### 18.3 facts 的接线取值
 
-本应用传入压缩 Adapter 的 facts 固定为：`instructionsDigest` 取配置 instructions 的 SHA-256 前 32 位十六进制；`memoryDigest` 取 `null`。理由：`MEMORY.md` 从不被载入 B——它由模型在每次请求中经文件工具读入 C——因此 B 没有可失效的 memory 版本；若把文件内容摘要放进 facts，任何一次「记住／忘记」编辑都会无谓地作废当前周期。宿主若把长期事实载入 B，必须提供真实摘要。facts 变化时优先走规划压缩（新 B 由原生压缩采用新 facts）；当没有可压缩内容（`compactableTokens == 0`、冻结规划器按设计拒绝）时，组合层执行一次显式周期重启：`root.reset()` 后在新链上投影边界 B，日志记为 `facts-restart`，而不是让后续请求永久失败。07-B/11 用例覆盖两条路径的分界与结果（新 B 的 `instructionsDigest` 为新版摘要、旧周期以 `pi.reset` 结束）。
+本应用传入压缩 Adapter 的 facts 固定为：`instructionsDigest` 取配置 instructions 的 SHA-256 前 32 位十六进制；`memoryDigest` 取 `null`。当前没有参与上下文组装的外部 `MEMORY.md` 文件；working 基线由 revision 管理，每日事件经检索进入 C，因此没有单独的文件记忆摘要。宿主以后若引入由外部资料版本决定的 B 内容，须提供对应的真实摘要。facts 变化时优先走规划压缩（新 B 由原生压缩采用新 facts）；当没有可压缩内容（`compactableTokens == 0`、冻结规划器按设计拒绝）时，组合层执行一次显式周期重启：`root.reset()` 后在新链上投影边界 B，日志记为 `facts-restart`，而不是让后续请求永久失败。07-B/11 用例覆盖两条路径的分界与结果（新 B 的 `instructionsDigest` 为新版摘要、旧周期以 `pi.reset` 结束）。
 
 ### 18.4 检索工具语义
 
