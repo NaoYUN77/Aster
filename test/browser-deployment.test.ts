@@ -62,6 +62,7 @@ test("CDP discovery rewrites loopback URLs and rejects unsupported methods and p
   assert.equal(response.status, 200);
   assert.equal((await response.json()).webSocketDebuggerUrl, `ws://127.0.0.1:${port}/devtools/browser/test-id`);
   assert.equal(observedHost, `127.0.0.1:${upstreamPort}`);
+  assert.equal((await fetch(`${base}/json/version/`)).status, 200, "Playwright CDP discovery includes a trailing slash");
   assert.deepEqual(await (await fetch(`${base}/aster/metrics`)).json(), sample);
   assert.equal((await fetch(`${base}/json/new?https://example.com`)).status, 404);
   assert.equal((await fetch(`${base}/aster/metrics`, { method: "POST" })).status, 405);

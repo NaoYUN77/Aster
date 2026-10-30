@@ -79,14 +79,16 @@ export function createCdpProxy({ upstreamPort = 9223, metrics = readMetrics, met
         return reply(response, 503, { error: "Browser metrics unavailable" });
       }
     }
-    if (!["/json/version", "/json/list", "/json", "/json/protocol"].includes(request.url)) {
+    // Playwright's HTTP CDP discovery appends a trailing slash.
+    const discoveryPath = request.url?.replace(/\/$/, "");
+    if (!["/json/version", "/json/list", "/json", "/json/protocol"].includes(discoveryPath)) {
       return reply(response, 404, { error: "Not found" });
     }
     const authority = request.headers.host;
     if (!authority || !/^(?:[a-zA-Z0-9.-]+|\[[a-fA-F0-9:]+\])(?::\d{1,5})?$/.test(authority)) {
       return reply(response, 400, { error: "Invalid host" });
     }
-    const upstream = http.get({ hostname: "127.0.0.1", port: upstreamPort, path: request.url, headers: { host: `127.0.0.1:${upstreamPort}` } }, (incoming) => {
+    const upstream = http.get({ hostname: "127.0.0.1", port: upstreamPort, path: discoveryPath, headers: { host: `127.0.0.1:${upstreamPort}` } }, (incoming) => {
       const chunks = [];
       let size = 0;
       incoming.on("data", (chunk) => {
