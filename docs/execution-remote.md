@@ -129,6 +129,7 @@ docker compose -f docker-compose.yml -f docker-compose.execution.yml \
 ## 边界与非目标
 
 - 不承诺跨主机恰好一次。恢复重放仍按 [ADR-0008](adr/0008-unsafe-tool-replay.md) 保守处理，声明可安全重放前必须确认重复执行没有副作用。
+- 切换 `EXECUTION_MODE` 前先让未完成任务收敛。durable 恢复会把未完成的工具调用重放到当前配置的执行环境；远程模式下文件工具调用会显式失败并记录为错误，不会被当作成功。
 - 执行 VPS 上的工作目录与缓存是本地状态，不参与控制面的会话／记忆／投递恢复。
 - 不实现远程文件系统、文件监听或文件工具；不把执行 VPS 加入 MITM 网络；不发布 broker 端口。
 - 模型调用仍经 MITM，密钥仍由代理按占位符替换。阶段 2／3 的凭据签发与模型直连不在本文范围，见 [ADR-0015](adr/0015-control-execution-split.md#阶段顺序)。
