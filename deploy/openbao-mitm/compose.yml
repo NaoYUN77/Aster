@@ -1,10 +1,14 @@
 # OpenBao + MITM proxy for Aster. Run from this directory; see README.md for the full procedure.
 #
-# The project name "aster" makes this stack's default network "aster_default". The app joins that
-# network through docker-compose.mitm.yml at the repository root. Do not name the app's own Compose
-# project "aster", or its default network would collide with this one.
+# Network layout (all user-defined, no published ports):
+#   aster_vault         internal; openbao + mitm only        -> OpenBao :8200 is reachable only by mitm
+#   aster_mitm_clients  internal; mitm + the Aster app only  -> proxy :14322 is reachable only by the app
+#   aster_egress        mitm only; the path to the internet
 #
-# No ports are published. Both services are reachable only on aster_default.
+# The app joins aster_mitm_clients through docker-compose.mitm.yml at the repository root, with a
+# fixed address that the addon accepts (ASTER_PROXY_CLIENT_ALLOW). mitm listens on its address on that
+# network only, so the proxy port is not bound on aster_vault or aster_egress. Do not attach unrelated
+# containers to these networks, and do not name the app's Compose project "aster".
 name: aster
 
 services:
@@ -19,7 +23,8 @@ services:
     security_opt:
       - no-new-privileges:true
     networks:
-      - default
+      vault:
+        ipv4_address: 10.89.82.2
 
   mitm:
     image: ${MITMPROXY_IMAGE:?set MITMPROXY_IMAGE to the pinned mitmproxy image used in production}
@@ -30,9 +35,13 @@ services:
     command:
       - "-q"
       - "--listen-host"
-      - "0.0.0.0"
+      # Bound to the aster_mitm_clients interface only; not 0.0.0.0.
+      - "10.89.143.2"
       - "--listen-port"
       - "14322"
+      - "--set"
+      # Drop idle client and upstream connections instead of holding them open indefinitely.
+      - "connection_timeout=30"
       - "--set"
       - "confdir=/home/mitmproxy/.mitmproxy"
       - "-s"
@@ -41,6 +50,8 @@ services:
       OPENBAO_ADDR: http://aster-openbao:8200
       OPENBAO_TOKEN_FILE: /run/secrets/openbao-mitm-token
       ASTER_VAULT_ALLOWLIST: /addon/allowlist.json
+      # Second gate on top of the dedicated network: only the Aster app container may use the proxy.
+      ASTER_PROXY_CLIENT_ALLOW: ${ASTER_PROXY_CLIENT_ALLOW:-10.89.143.3/32}
       # The addon reads OpenBao directly; it must not send that traffic through itself.
       NO_PROXY: aster-openbao,localhost,127.0.0.1
     volumes:
@@ -52,11 +63,31 @@ services:
     security_opt:
       - no-new-privileges:true
     networks:
-      - default
+      vault:
+        ipv4_address: 10.89.82.3
+      clients:
+        ipv4_address: 10.89.143.2
+      egress:
 
 volumes:
   openbao-data:
 
 networks:
-  default:
-    name: aster_default
+  # OpenBao <-> MITM only. internal: no route off the host, so even a mistake in OPENBAO_ADDR
+  # cannot send vault traffic to the internet.
+  vault:
+    name: aster_vault
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.89.82.0/24
+  # Aster app <-> MITM only. internal: the app has no direct route out and must use the proxy.
+  clients:
+    name: aster_mitm_clients
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.89.143.0/24
+  # MITM-only outbound path to model providers and Telegram.
+  egress:
+    name: aster_egress

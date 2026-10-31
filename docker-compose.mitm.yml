@@ -1,8 +1,12 @@
 # Routes the app's outbound HTTPS through the Aster MITM proxy (deploy/openbao-mitm), which replaces
 # __vault_<NAME>__ placeholders with OpenBao values (KV path secret/aster/<NAME>).
-# Apply on top of docker-compose.yml after the OpenBao/MITM stack is running and aster_default exists:
+# Apply on top of docker-compose.yml after the OpenBao/MITM stack is running:
 #   docker compose -f docker-compose.yml -f docker-compose.mitm.yml --env-file .env up -d
 # Rollback: remove `-f docker-compose.mitm.yml` and restore plaintext secret values in .env.
+#
+# Network isolation: the app attaches only to aster_mitm_clients, an internal network shared with the
+# MITM proxy. It has no default network and no direct route to the internet, so it cannot bypass the
+# proxy. The fixed address below must match ASTER_PROXY_CLIENT_ALLOW in deploy/openbao-mitm/compose.yml.
 #
 # CA trust: mounts the public MITM CA certificate (default ~/Aster/secrets/openbao/mitmproxy-ca.pem,
 # override with ASTER_MITM_CA_CERT) read-only and sets NODE_EXTRA_CA_CERTS. That file must contain
@@ -12,8 +16,8 @@ services:
     environment:
       HTTPS_PROXY: http://aster-mitm:14322
       HTTP_PROXY: http://aster-mitm:14322
-      # Direct paths: loopback, the proxy itself, and OpenBao. Everything else goes through the proxy.
-      NO_PROXY: localhost,127.0.0.1,::1,aster-mitm,aster-openbao
+      # Only loopback and the proxy itself are direct; everything else must go through the proxy.
+      NO_PROXY: localhost,127.0.0.1,::1,aster-mitm
       # Node 24 reads HTTP(S)_PROXY for fetch and https.request with this flag (and configureEnvProxy()).
       NODE_USE_ENV_PROXY: "1"
       # Trust the MITM CA certificate on top of Node's bundled root CAs.
@@ -24,10 +28,11 @@ services:
         target: /run/aster/mitmproxy-ca.pem
         read_only: true
     networks:
-      - default
-      - aster
+      mitm:
+        ipv4_address: 10.89.143.3
 networks:
-  aster:
-    # External network created by deploy/openbao-mitm (compose project "aster").
-    name: aster_default
+  mitm:
+    # Internal network created by deploy/openbao-mitm (compose project "aster"). No default
+    # network is attached, so this container cannot reach anything except the proxy.
+    name: aster_mitm_clients
     external: true

@@ -5,6 +5,9 @@ Scope of substitution, deliberately narrow:
   tool sends a model-supplied URL inside a body to DeepSeek, and a body substitution would hand a real
   key to a third party.
 - Only for the (name, host) pairs in allowlist.json. Any other placeholder use is answered with 403.
+- Only for source addresses in ASTER_PROXY_CLIENT_ALLOW (the Aster app container by default). The
+  listener is also bound to the dedicated aster_mitm_clients interface in compose.yml, so this check
+  is a second, independent gate rather than the only one.
 
 Run with `mitmdump -q` only. Verbose flow output prints request URLs, which would show a real
 Telegram bot token that this addon has just put into the path.
@@ -17,6 +20,7 @@ import urllib.request
 
 from mitmproxy import ctx, http
 
+from client_allowlist import DEFAULT_ALLOW, ClientAllowlist
 from vault_placeholders import PLACEHOLDER, PlaceholderError, substitute
 
 CACHE_SECONDS = 300
@@ -58,8 +62,22 @@ class AsterVault:
         with open(allowlist_path, encoding="utf-8") as handle:
             self.allowlist: dict[str, list[str]] = json.load(handle)
         self.resolve = OpenBaoKV(os.environ["OPENBAO_ADDR"], os.environ["OPENBAO_TOKEN_FILE"])
+        self.clients = ClientAllowlist(os.environ.get("ASTER_PROXY_CLIENT_ALLOW", DEFAULT_ALLOW))
+
+    def _refuse_unlisted_client(self, flow: http.HTTPFlow) -> bool:
+        if self.clients.allows(flow.client_conn.peername):
+            return False
+        # No address detail in the log: the rule itself is enough to diagnose a misconfiguration.
+        ctx.log.warn("aster-vault blocked client: source address not in ASTER_PROXY_CLIENT_ALLOW")
+        flow.response = http.Response.make(403, b"client not permitted\n", {"Content-Type": "text/plain"})
+        return True
+
+    def http_connect(self, flow: http.HTTPFlow) -> None:
+        self._refuse_unlisted_client(flow)
 
     def request(self, flow: http.HTTPFlow) -> None:
+        if self._refuse_unlisted_client(flow):
+            return
         host = flow.request.pretty_host
         path, separator, query = flow.request.path.partition("?")
         headers = flow.request.headers.fields
