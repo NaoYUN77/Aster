@@ -6,9 +6,10 @@
 //
 //   Working      read at a boundary (`workingAtBoundary`), apply `WorkingUpdate` with
 //                `expectedRevision`; returns a `WorkingReceipt` and appends a `WorkingAnchor` entry
-//                in the same commit. Errors: invalid-input, revision-conflict, missing-evidence,
-//                not-covered, corrupt-state. Side effects: one document write, one entry append,
-//                one receipt document per operation id.
+//                in the same commit. The state holds the active task, preferences, and the
+//                observation-period user profile. Errors: invalid-input, revision-conflict,
+//                missing-evidence, not-covered, corrupt-state. Side effects: one document write,
+//                one entry append, one receipt document per operation id.
 //   Context      pure: given a `CycleSnapshot` and budget it produces a `ContextPlan`; it performs
 //                no I/O, no model call, and no ordering of its own. Errors are reported in the plan
 //                (`action.kind === "error"`), never thrown for data conditions.
@@ -32,6 +33,7 @@ import {
   defineEntry,
   type ConversationId,
   type EntryId,
+  type JsonObject,
   type Session,
 } from "@earendil-works/pi-durable";
 import { Type, type Static, type TSchema } from "typebox";
@@ -39,6 +41,12 @@ import { Value } from "typebox/value";
 
 /** Bump with a `migrate` in the owning definition; every stored value carries its version. */
 export const MEMORY_SCHEMA_VERSION = 1;
+/**
+ * Structural version of `personal.working` only. Version 1 has no `profile` field;
+ * `migrateWorkingDocument` adds an empty list. The JSON `version` field stays
+ * `MEMORY_SCHEMA_VERSION`, because that literal is shared with snapshots, segments, and receipts.
+ */
+export const WORKING_DOC_VERSION = 2;
 export const WORKING_DOC_KIND = "personal.working";
 export const WORKING_ANCHOR_KIND = "personal.working.anchor";
 export const WORKING_COMPLETED_KIND = "personal.working.completed";
@@ -53,6 +61,8 @@ export const DAILY_DIRECTORY = "memory/daily";
 export const DAILY_MAX_PAGES = 9;
 export const UNKNOWN_DATE = "unknown";
 
+const DailyDateSchema = Type.String({ pattern: `^(\\d{4}-\\d{2}-\\d{2}|${UNKNOWN_DATE})$` });
+
 /** Bounds on every stored value; oversized input is rejected, never truncated silently. */
 export const MEMORY_LIMITS = {
   identifier: 64,
@@ -63,6 +73,10 @@ export const MEMORY_LIMITS = {
   constraints: 16,
   progress: 24,
   preferences: 32,
+  /** Profile items on the working state. Same cap as preferences. */
+  profile: 32,
+  /** Category label on a profile item. Same character cap as an identifier. */
+  category: 64,
   sources: 16,
   changes: 32,
   segments: 200,
@@ -184,9 +198,45 @@ const PreferenceDraftSchema = Type.Object(
 );
 
 /**
+ * One daily-log segment. Same fields as Daily Memory's `SegmentRef`, with `page` required so a
+ * missing page is not filled in. `date` is the event date, not the day the profile was written.
+ */
+export const DailySegmentRefSchema = Type.Object(
+  {
+    date: DailyDateSchema,
+    id: Identifier,
+    page: Type.Integer({ minimum: 1, maximum: DAILY_MAX_PAGES }),
+  },
+  { additionalProperties: false },
+);
+export type DailySegmentRef = Static<typeof DailySegmentRefSchema>;
+
+const profileFields = {
+  id: Identifier,
+  text: Text(MEMORY_LIMITS.text),
+  category: Text(MEMORY_LIMITS.category),
+  evidence: Type.Array(DailySegmentRefSchema, { minItems: 1, maxItems: MEMORY_LIMITS.sources }),
+};
+
+/** Model-visible profile item. The host sets `updatedAt`; the model cannot. */
+export const ProfileItemDraftSchema = Type.Object(profileFields, { additionalProperties: false });
+export type ProfileItemDraft = Static<typeof ProfileItemDraftSchema>;
+
+/** A stored profile fact. `updatedAt` is the host clock and must not enter a rendered snapshot. */
+export const ProfileItemSchema = Type.Object(
+  { ...profileFields, updatedAt: Timestamp },
+  { additionalProperties: false },
+);
+export type ProfileItem = Static<typeof ProfileItemSchema>;
+
+/** The profile fact as a snapshot renders it: the same item without its write time. */
+const ProfileBaselineItemSchema = ProfileItemDraftSchema;
+
+/**
  * Current business state. Every field is required and absence is `null` or an empty array, so a
  * stored value never contains `undefined`. `revision` starts at 1 and increments only on a business
- * change; `updatedAt` is wall-clock milliseconds and must never enter a rendered snapshot.
+ * change; `updatedAt` is wall-clock milliseconds and must never enter a rendered snapshot. Each
+ * profile item has its own `updatedAt`, and that clock is stripped the same way.
  */
 export const WorkingStateSchema = Type.Object(
   {
@@ -194,6 +244,7 @@ export const WorkingStateSchema = Type.Object(
     revision: Type.Integer({ minimum: 1 }),
     task: Type.Union([Type.Object({ status: Type.Literal("none") }, { additionalProperties: false }), ActiveTaskSchema]),
     preferences: Type.Array(PreferenceSchema, { maxItems: MEMORY_LIMITS.preferences }),
+    profile: Type.Array(ProfileItemSchema, { maxItems: MEMORY_LIMITS.profile }),
     updatedAt: Timestamp,
   },
   { additionalProperties: false },
@@ -211,26 +262,45 @@ export const WorkingBaselineSchema = Type.Object(
     revision: Type.Integer({ minimum: 1 }),
     task: WorkingStateSchema.properties.task,
     preferences: WorkingStateSchema.properties.preferences,
+    profile: Type.Array(ProfileBaselineItemSchema, { maxItems: MEMORY_LIMITS.profile }),
   },
   { additionalProperties: false },
 );
 export type WorkingBaseline = Static<typeof WorkingBaselineSchema>;
 
 export function baselineOf(state: WorkingState): WorkingBaseline {
-  return { version: state.version, revision: state.revision, task: state.task, preferences: state.preferences };
+  return {
+    version: state.version,
+    revision: state.revision,
+    task: state.task,
+    preferences: state.preferences,
+    profile: state.profile.map((item) => ({
+      id: item.id,
+      text: item.text,
+      category: item.category,
+      evidence: item.evidence.map((ref) => ({ date: ref.date, id: ref.id, page: ref.page })),
+    })),
+  };
 }
 
 /**
  * Render a baseline as the model reads it. This is the text a within-cycle revision carries into C, and
  * the same text a snapshot's baseline renders to, so a revision never restates a fact in another shape.
- * Deterministic: no clock, no `updatedAt`, keys in a fixed order.
+ * Deterministic: no clock, no state or profile-item `updatedAt`, keys in a fixed order.
  */
 export function renderBaseline(baseline: WorkingBaseline): string {
   return canonicalJson(baseline);
 }
 
 export function initialWorkingState(): WorkingState {
-  return { version: MEMORY_SCHEMA_VERSION, revision: 1, task: { status: "none" }, preferences: [], updatedAt: 0 };
+  return {
+    version: MEMORY_SCHEMA_VERSION,
+    revision: 1,
+    task: { status: "none" },
+    preferences: [],
+    profile: [],
+    updatedAt: 0,
+  };
 }
 
 /**
@@ -250,6 +320,8 @@ export const WorkingUpdateArgsSchema = Type.Object(
         Type.Object({ op: Type.Literal("task.clear") }, { additionalProperties: false }),
         Type.Object({ op: Type.Literal("preference.put"), preference: PreferenceDraftSchema }, { additionalProperties: false }),
         Type.Object({ op: Type.Literal("preference.remove"), id: Identifier }, { additionalProperties: false }),
+        Type.Object({ op: Type.Literal("profile.put"), item: ProfileItemDraftSchema }, { additionalProperties: false }),
+        Type.Object({ op: Type.Literal("profile.remove"), id: Identifier }, { additionalProperties: false }),
       ]),
       { minItems: 1, maxItems: MEMORY_LIMITS.changes },
     ),
@@ -346,14 +418,34 @@ export const WorkingAnchorEntry = defineEntry<WorkingAnchor>(WORKING_ANCHOR_KIND
 /** Typed completion entry: one per finished task, addressed by its entry id. */
 export const WorkingCompletedEntry = defineEntry<WorkingCompleted>(WORKING_COMPLETED_KIND);
 
+/**
+ * Load a `personal.working` value written before the profile field existed. Version 1 omits
+ * `profile`; the current document version must already match `WorkingStateSchema`. A missing field
+ * on the current version is corrupt, not an empty profile.
+ */
+export function migrateWorkingDocument(value: JsonObject, fromVersion: number): WorkingState {
+  if (fromVersion === WORKING_DOC_VERSION) {
+    return assertSchema<WorkingState>(WorkingStateSchema, value, "corrupt-state");
+  }
+  if (fromVersion !== 1) {
+    throw new MemoryError("unsupported-version", `Working document version ${fromVersion} is not supported`);
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new MemoryError("corrupt-state", "Working document is not an object");
+  }
+  if ("profile" in value) return assertSchema<WorkingState>(WorkingStateSchema, value, "corrupt-state");
+  return assertSchema<WorkingState>(WorkingStateSchema, { ...value, profile: [] }, "corrupt-state");
+}
+
 /** Rewindable current state. `fork: "asOf"` copies the value at the fork entry. */
 export const WorkingDoc = defineDoc({
   kind: WORKING_DOC_KIND,
-  version: MEMORY_SCHEMA_VERSION,
+  version: WORKING_DOC_VERSION,
   scope: "conversation",
   history: "rewindable",
   fork: "asOf",
   initial: initialWorkingState,
+  migrate: migrateWorkingDocument,
 });
 
 /** Operation receipts keyed by `operationId`. A fork starts empty: operations belong to their conversation. */
@@ -458,8 +550,23 @@ export function decodeCycleSnapshot(body: string): CycleSnapshot | undefined {
   if (version !== MEMORY_SCHEMA_VERSION) {
     throw new MemoryError("unsupported-version", `Cycle snapshot version ${version} is not supported`);
   }
-  const body_ = assertSchema<CycleSnapshotBody>(CycleSnapshotBodySchema, parsed, "corrupt-state");
+  const body_ = assertSchema<CycleSnapshotBody>(CycleSnapshotBodySchema, migrateStoredSnapshot(parsed), "corrupt-state");
   return { ...body_, narrative: body.slice(0, open).trim() };
+}
+
+/**
+ * A cycle snapshot written before the profile field existed has schema version 1 and no
+ * `baseline.profile`. That absence is the pre-profile shape, so decoding adds an empty list.
+ * The snapshot version is not bumped: `MEMORY_SCHEMA_VERSION` is shared with segments and receipts.
+ * A baseline that names `profile` and then fails the schema is corrupt and is not rewritten here.
+ */
+export function migrateStoredSnapshot(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const snapshot = value as { baseline?: unknown };
+  const baseline = snapshot.baseline;
+  if (typeof baseline !== "object" || baseline === null || Array.isArray(baseline)) return value;
+  if ("profile" in baseline) return value;
+  return { ...snapshot, baseline: { ...baseline, profile: [] } };
 }
 
 /**
@@ -477,8 +584,6 @@ export function canonicalJson(value: JsonValue): string {
   });
   return `{${fields.join(",")}}`;
 }
-
-const DailyDateSchema = Type.String({ pattern: `^(\\d{4}-\\d{2}-\\d{2}|${UNKNOWN_DATE})$` });
 
 /** One durable fact of a day. `date` is the event date in `timezone`, never the publish date. */
 export const MemorySegmentSchema = Type.Object(

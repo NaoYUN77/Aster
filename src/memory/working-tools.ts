@@ -24,8 +24,9 @@ import {
   applyWorkingUpdate,
   readWorking,
   type Committer,
+  type ProfileEvidenceResolver,
 } from "./working.js";
-import { MEMORY_LIMITS, MemoryError, WorkingUpdateArgsSchema, type WorkingState } from "./contracts.js";
+import { DAILY_MAX_PAGES, MEMORY_LIMITS, MemoryError, WorkingUpdateArgsSchema, type WorkingState } from "./contracts.js";
 
 /** The state a model may see: identifiers, revision, and text it wrote itself. */
 function renderState(state: WorkingState): string {
@@ -43,7 +44,18 @@ function renderState(state: WorkingState): string {
   }
   const preferences = state.preferences.filter((preference) => preference.expiresAt === null || preference.expiresAt > Date.now());
   lines.push(`preferences: ${preferences.length === 0 ? "none" : preferences.map((preference) => `${preference.id}: ${preference.text} (${preference.scope})`).join("; ")}`);
+  lines.push(renderProfile(state));
   return lines.join("\n");
+}
+
+/** Model-visible profile line. Evidence is included so a later put can cite the same daily segment. */
+function renderProfile(state: WorkingState): string {
+  if (state.profile.length === 0) return "profile: none";
+  const items = state.profile.map((item) => {
+    const evidence = item.evidence.map((ref) => `${ref.date}/${ref.id} p${ref.page}`).join(", ");
+    return `${item.id}: ${item.text} (${item.category}; ${evidence})`;
+  });
+  return `profile: ${items.join("; ")}`;
 }
 
 const structuredStateSchema = Type.Object(
@@ -57,6 +69,28 @@ const structuredStateSchema = Type.Object(
       ),
       { maxItems: MEMORY_LIMITS.preferences },
     ),
+    profile: Type.Array(
+      Type.Object(
+        {
+          id: Type.String({ maxLength: MEMORY_LIMITS.identifier }),
+          text: Type.String({ maxLength: MEMORY_LIMITS.text }),
+          category: Type.String({ maxLength: MEMORY_LIMITS.category }),
+          evidence: Type.Array(
+            Type.Object(
+              {
+                date: Type.String({ maxLength: 10 }),
+                id: Type.String({ maxLength: MEMORY_LIMITS.identifier }),
+                page: Type.Integer({ minimum: 1, maximum: DAILY_MAX_PAGES }),
+              },
+              { additionalProperties: false },
+            ),
+            { maxItems: MEMORY_LIMITS.sources },
+          ),
+        },
+        { additionalProperties: false },
+      ),
+      { maxItems: MEMORY_LIMITS.profile },
+    ),
   },
   { additionalProperties: false },
 );
@@ -67,6 +101,12 @@ function structuredState(state: WorkingState) {
     revision: state.revision,
     task: task === undefined ? ("none" as const) : task.goal,
     preferences: state.preferences.map((preference) => ({ id: preference.id, text: preference.text })),
+    profile: state.profile.map((item) => ({
+      id: item.id,
+      text: item.text,
+      category: item.category,
+      evidence: item.evidence.map((ref) => ({ date: ref.date, id: ref.id, page: ref.page })),
+    })),
   };
 }
 
@@ -104,11 +144,11 @@ function evidenceHint(ids: readonly EntryId[]): string {
 }
 
 /** Working tools bound to the calling conversation; no parameter can select another one. */
-export function workingTools(): ToolRegistration[] {
+export function workingTools(options: { readonly resolveProfileEvidence?: ProfileEvidenceResolver } = {}): ToolRegistration[] {
   const read = defineTool({
     name: "working_read",
     description:
-      "Read the current working state: the active task, its progress and blockers, and the preferences that outlive it. Call it before updating so the revision you pass is current. The result also lists the numeric entry ids of recent user messages: cite those ids as evidence in working_update, never guess an entry id.",
+      "Read the current working state: the active task, its progress and blockers, the preferences that outlive it, and the user profile. Call it before updating so the revision you pass is current. The result also lists the numeric entry ids of recent user messages: cite those ids as evidence in working_update, never guess an entry id. Profile lines cite daily-log segments as date/id page; pass those refs back on profile.put.",
     parameters: Type.Object({}, { additionalProperties: false }),
     structuredOutputSchema: structuredStateSchema,
     replay: "safe",
@@ -128,7 +168,7 @@ export function workingTools(): ToolRegistration[] {
   const update = defineTool({
     name: "working_update",
     description:
-      "Change the working state. Pass the revision you read and the entry ids that evidence the change, taken from the list working_read returns (numeric ids of user messages in this conversation; never guess an entry id). A task change needs at least one evidence entry; preferences need the entry where the user asked for them. The update is ignored when the revision is stale, and repeating the same call does not apply it twice.",
+      "Change the working state. Pass the revision you read and the entry ids that evidence a task or preference change, taken from the list working_read returns (numeric ids of user messages in this conversation; never guess an entry id). A task change needs at least one evidence entry; preferences need the entry where the user asked for them. A profile item needs its own evidence: one or more current daily-log segments (date, segment id, page), not those entry ids. A missing or superseded segment is rejected. The update is ignored when the revision is stale, and repeating the same call does not apply it twice.",
     parameters: WorkingUpdateArgsSchema,
     replay: "safe",
     execute: async (args, api, context) => {
@@ -143,6 +183,9 @@ export function workingTools(): ToolRegistration[] {
           evidence: args.evidence,
           changes: args.changes,
           now,
+          ...(options.resolveProfileEvidence === undefined
+            ? {}
+            : { resolveProfileEvidence: options.resolveProfileEvidence }),
         }, context);
         const state = await readWorking(api, api.conversationId, context);
         const heading = receipt.changed
@@ -178,5 +221,10 @@ export function workingTools(): ToolRegistration[] {
   return [read, update];
 }
 
-/** The extension registered by the application composition root. */
-export const workingExtension = defineExtension({ name: "working-memory", tools: workingTools() });
+/** The extension registered by the application composition root. Pass the daily-log resolver in production. */
+export function createWorkingExtension(options: { readonly resolveProfileEvidence?: ProfileEvidenceResolver } = {}) {
+  return defineExtension({ name: "working-memory", tools: workingTools(options) });
+}
+
+/** Tools with no daily-log resolver. Profile puts then fail `missing-evidence` until a resolver is supplied. */
+export const workingExtension = createWorkingExtension();

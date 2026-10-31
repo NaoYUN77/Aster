@@ -73,3 +73,4 @@ spec 在功能开发完成后删除，ADR 及其记录长期保留。ADR 中的 
 | 0013 | agent loop 只用 pi-durable | Accepted，2026-10-21 | [0013-pi-durable-agent-loop.md](0013-pi-durable-agent-loop.md) |
 | 0014 | 工具由人注册 | Accepted，2026-10-22 | [0014-humans-register-tools.md](0014-humans-register-tools.md) |
 | 0015 | 旧版画像字段导致 working memory 损坏态 | Accepted，2026-10-31 | [working-memory/0015-legacy-profile-memory-corrupt-state.md](working-memory/0015-legacy-profile-memory-corrupt-state.md) |
+| 0016 | 用户画像暂存 working memory | Accepted，2026-10-29 | [0016-user-profile-working-memory.md](0016-user-profile-working-memory.md) |
