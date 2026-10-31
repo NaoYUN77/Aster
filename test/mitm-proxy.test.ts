@@ -10,7 +10,7 @@ import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
-import { ConfigurationError, configureEnvProxy, isVaultPlaceholder, readConfig } from "../src/config.js";
+import { ConfigurationError, configureEnvProxy, isVaultPlaceholder, readConfig, withProxyToken } from "../src/config.js";
 import { PROVIDERS } from "../src/providers.js";
 
 const exec = promisify(execFile);
@@ -96,16 +96,59 @@ test("readConfig accepts __vault_<NAME>__ placeholders and rejects malformed pla
   );
 });
 
+test("withProxyToken injects proxy credentials from the token file and fails closed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-mitm-token-"));
+  try {
+    const tokenFile = join(directory, "mitm-proxy-token");
+    const token = "test-proxy-token-" + "x".repeat(32);
+    await writeFile(tokenFile, `${token}\n`);
+
+    const effective = withProxyToken({
+      HTTPS_PROXY: "http://aster-mitm:14322",
+      HTTP_PROXY: "http://aster-mitm:14322",
+      ASTER_MITM_TOKEN_FILE: tokenFile,
+    });
+    for (const key of ["HTTPS_PROXY", "HTTP_PROXY"] as const) {
+      const url = new URL(effective[key]!);
+      assert.equal(url.username, "aster");
+      assert.equal(url.password, token);
+      assert.equal(url.hostname, "aster-mitm");
+      assert.equal(url.port, "14322");
+    }
+
+    const plain: NodeJS.ProcessEnv = { HTTPS_PROXY: "http://aster-mitm:14322" };
+    assert.equal(withProxyToken(plain), plain, "no token file leaves the environment untouched");
+
+    await writeFile(tokenFile, "too-short\n");
+    assert.throws(
+      () => withProxyToken({ HTTPS_PROXY: "http://aster-mitm:14322", ASTER_MITM_TOKEN_FILE: tokenFile }),
+      /16-256 characters/,
+    );
+    assert.throws(
+      () => withProxyToken({ HTTPS_PROXY: "http://aster-mitm:14322", ASTER_MITM_TOKEN_FILE: join(directory, "absent") }),
+      /ASTER_MITM_TOKEN_FILE could not be read/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_PROXY and trust NODE_EXTRA_CA_CERTS", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-mitm-tls-"));
   const sockets = new Set<Duplex>();
   const tunnels: string[] = [];
+  const proxyAuth: string[] = [];
   const seenRequests: Array<{ method: string; url: string; auth?: string }> = [];
   const ca = join(directory, "mitmproxy-ca.pem");
   const key = join(directory, "mitmproxy-key.pem");
+  const tokenFile = join(directory, "mitm-proxy-token");
+  const proxyToken = "test-proxy-token-" + "y".repeat(32);
+  const expectedAuth = `Basic ${Buffer.from(`aster:${proxyToken}`).toString("base64")}`;
   let proxy: ReturnType<typeof createServer> | undefined;
   let upstream: ReturnType<typeof createHttpsServer> | undefined;
   try {
+    await writeFile(tokenFile, `${proxyToken}\n`);
+
     const opensslConfig = join(directory, "openssl.cnf");
     await writeFile(opensslConfig, "[req]\ndistinguished_name=dn\n[dn]\n");
     await exec(
@@ -169,6 +212,12 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
     });
     proxy.on("connect", (req, client, head) => {
       tunnels.push(req.url ?? "");
+      const provided = req.headers["proxy-authorization"];
+      proxyAuth.push(provided ?? "");
+      if (provided !== expectedAuth) {
+        client.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="aster-mitm"\r\n\r\n');
+        return;
+      }
       const remote = connect(upstreamPort, "127.0.0.1", () => {
         client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
         if (head.length) remote.write(head);
@@ -190,6 +239,7 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
       NO_PROXY: "localhost,127.0.0.1,::1,aster-mitm,aster-openbao",
       NODE_USE_ENV_PROXY: "1",
       NODE_EXTRA_CA_CERTS: ca,
+      ASTER_MITM_TOKEN_FILE: tokenFile,
     };
     for (const name of ["http_proxy", "https_proxy", "no_proxy", "ALL_PROXY", "all_proxy", "NODE_TLS_REJECT_UNAUTHORIZED"]) {
       delete env[name];
@@ -230,6 +280,8 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
 
     assert.ok(tunnels.includes("api.deepseek.com:443"), "DeepSeek requests must tunnel through HTTPS_PROXY");
     assert.ok(tunnels.includes("api.telegram.org:443"), "Telegram Bot API requests must tunnel through HTTPS_PROXY");
+    assert.ok(proxyAuth.length >= 2, "each tunnel must present proxy credentials");
+    assert.deepEqual([...new Set(proxyAuth)], [expectedAuth], "every CONNECT must carry the proxy token");
     assert.deepEqual(seenRequests, [
       { method: "POST", url: "/v1/chat/completions", auth: "Bearer __vault_DEEPSEEK_API_KEY__" },
       { method: "POST", url: "/v1/tools/search", auth: "Bearer __vault_DEEPSEEK_WEB_API_KEY__" },
@@ -305,10 +357,45 @@ test("deployment example, MITM overlay, and allowlist stay aligned without real 
   assert.match(overlay, /HTTPS_PROXY: http:\/\/aster-mitm:14322/);
   assert.match(overlay, /HTTP_PROXY: http:\/\/aster-mitm:14322/);
   assert.match(overlay, /NO_PROXY: localhost,127\.0\.0\.1,::1,aster-mitm/);
+  assert.match(overlay, /ASTER_MITM_TOKEN_FILE: \/run\/aster\/mitm-proxy-token/);
+  assert.match(
+    overlay,
+    /source: \$\{ASTER_MITM_PROXY_TOKEN:-\$\{HOME:-\/root\}\/Aster\/secrets\/openbao\/mitm-proxy-token\}/,
+  );
+  assert.match(overlay, /target: \/run\/aster\/mitm-proxy-token/);
   assert.match(overlay, /name: aster_mitm_clients/);
   assert.match(overlay, /ipv4_address: 10\.89\.143\.3/);
   assert.ok(!/aster_default/.test(overlay), "the app must not join a shared network");
   assert.ok(!/NODE_TLS_REJECT_UNAUTHORIZED|ssl_insecure|insecure/i.test(overlay));
+});
+
+test("OpenBao's network listener requires mTLS and the proxy requires a token", async () => {
+  const hcl = await readFile(join(root, "deploy", "openbao-mitm", "openbao", "config.hcl"), "utf8");
+  const networkListener = hcl.match(/listener "tcp" \{\s*\n\s*address\s*=\s*"0\.0\.0\.0:8200"[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.ok(networkListener, "the 0.0.0.0:8200 listener must exist");
+  assert.match(networkListener, /tls_require_and_verify_client_cert\s*=\s*true/);
+  assert.match(networkListener, /tls_client_ca_file\s*=\s*"\/openbao\/tls\/ca\.pem"/);
+  assert.ok(!/tls_disable\s*=\s*true/.test(networkListener), "the network listener must not be plaintext");
+
+  const loopbackListener = hcl.match(/listener "tcp" \{\s*\n\s*address\s*=\s*"127\.0\.0\.1:8201"[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.ok(loopbackListener, "the plaintext loopback listener must exist");
+  assert.match(loopbackListener, /tls_disable\s*=\s*true/);
+  assert.match(hcl, /api_addr\s*=\s*"https:\/\/aster-openbao:8200"/);
+
+  const raw = await readFile(join(root, "deploy", "openbao-mitm", "compose.yml"), "utf8");
+  const deploy = raw
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+  assert.match(deploy, /OPENBAO_ADDR: https:\/\/aster-openbao:8200/);
+  assert.match(deploy, /OPENBAO_CA_FILE: \/run\/secrets\/openbao-tls\/ca\.pem/);
+  assert.match(deploy, /OPENBAO_CLIENT_CERT_FILE: \/run\/secrets\/openbao-tls\/client\.pem/);
+  assert.match(deploy, /OPENBAO_CLIENT_KEY_FILE: \/run\/secrets\/openbao-tls\/client-key\.pem/);
+  assert.match(deploy, /ASTER_PROXY_TOKEN_FILE: \/run\/secrets\/mitm-proxy-token/);
+  assert.match(deploy, /BAO_ADDR: http:\/\/127\.0\.0\.1:8201/);
+  assert.match(deploy, /test: \["CMD", "bao", "status"\]/);
+  assert.ok(!/OPENBAO_ADDR: http:\/\/aster-openbao/.test(deploy), "the addon must not use plaintext to OpenBao");
+  assert.ok(!/tls_disable\s*=\s*true/.test(deploy), "TLS is configured in config.hcl, not disabled in compose");
 });
 
 test("MITM proxy and OpenBao listen only on dedicated internal networks with a client allowlist", async () => {
