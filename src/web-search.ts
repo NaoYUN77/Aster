@@ -6,11 +6,6 @@ const MAX_RESULTS = 10;
 const MAX_QUERY_CHARS = 128;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 24 * 1024;
-const MAX_TITLE_CHARS = 500;
-const MAX_URL_CHARS = 2_048;
-const MAX_SNIPPET_CHARS = 2_000;
-const MAX_SUMMARY_CHARS = 4_000;
-const MAX_SITE_NAME_CHARS = 300;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 export type WebSearchInput = {
@@ -196,19 +191,14 @@ async function readBoundedJson(response: Response, signal: AbortSignal): Promise
 }
 
 function normalizeResponse(value: unknown, query: string, maxResults: number): WebSearchOutput {
-  if (!isRecord(value) || !Array.isArray(value.results) || value.results.length > maxResults) throw protocolError();
-  const results = value.results.map((candidate, index): WebSearchResult => {
-    if (!isRecord(candidate)
-      || typeof candidate.rerank_score !== "number" || !Number.isFinite(candidate.rerank_score)
-      || candidate.rerank_score < 0 || candidate.rerank_score > 3
-      || !Number.isInteger(candidate.authority) || (candidate.authority as number) < -1 || (candidate.authority as number) > 4
-      || typeof candidate.content !== "string"
-      || (candidate.site_icon !== null && typeof candidate.site_icon !== "string")) throw protocolError();
-    const title = boundedProviderText(candidate.title, MAX_TITLE_CHARS);
+  if (!isRecord(value) || !Array.isArray(value.results)) throw protocolError();
+  const results = value.results.slice(0, maxResults).map((candidate, index): WebSearchResult => {
+    if (!isRecord(candidate)) throw protocolError();
+    const title = providerText(candidate.title);
     const url = safeUrl(candidate.url);
-    const snippet = boundedProviderText(candidate.snippet, MAX_SNIPPET_CHARS);
-    const summary = boundedProviderText(candidate.summary, MAX_SUMMARY_CHARS);
-    const siteName = nullableText(candidate.site_name, MAX_SITE_NAME_CHARS);
+    const snippet = providerText(candidate.snippet);
+    const summary = candidate.summary === undefined ? "" : providerText(candidate.summary);
+    const siteName = nullableText(candidate.site_name);
     const publishedAt = nullableDate(candidate.date);
     if (title === undefined || url === undefined || snippet === undefined || summary === undefined
       || siteName === undefined || publishedAt === undefined) throw protocolError();
@@ -217,19 +207,18 @@ function normalizeResponse(value: unknown, query: string, maxResults: number): W
   return { ok: true, provider: "deepseek", query, results };
 }
 
-function boundedProviderText(value: unknown, maxChars: number): string | undefined {
-  if (typeof value !== "string" || hasUnpairedSurrogate(value) || [...value].length > maxChars) return undefined;
-  const clean = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-  return clean ? clean : undefined;
+function providerText(value: unknown): string | undefined {
+  if (typeof value !== "string" || hasUnpairedSurrogate(value)) return undefined;
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function nullableText(value: unknown, maxChars: number): string | null | undefined {
+function nullableText(value: unknown): string | null | undefined {
   if (value === null) return null;
-  return boundedProviderText(value, maxChars);
+  return providerText(value);
 }
 
 function nullableDate(value: unknown): string | null | undefined {
-  if (value === null) return null;
+  if (value === null || value === "") return null;
   if (typeof value !== "string") return undefined;
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:Z|\+00:00)$/.exec(value);
   if (match === null) return undefined;
@@ -246,7 +235,7 @@ function nullableDate(value: unknown): string | null | undefined {
 }
 
 function safeUrl(value: unknown): string | undefined {
-  if (typeof value !== "string" || value.length > MAX_URL_CHARS) return undefined;
+  if (typeof value !== "string") return undefined;
   try {
     const url = new URL(value);
     if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) return undefined;
