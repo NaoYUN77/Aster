@@ -4,6 +4,17 @@ Aster 应用的模型、Web 工具与 Telegram 请求经 MITM 代理出站；代
 
 代理与 OpenBao 都不共享通用网络：应用只能经专用内网访问代理，OpenBao 只对代理可达，两个端口都不发布到宿主机。代理端口还要求客户端出示代理 token；OpenBao 的 `8200` 监听要求 TLS 客户端证书（mTLS），因此未认证的 `/v1/sys/health` 无法经代理或同网直连读取。详见下文“网络可达性”。
 
+## 行为速览
+
+MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的值，不做其它凭据注入。
+
+- **触发条件**：请求头或 URL 路径（`?` 之前）出现占位符，且目标 Host 与该 `<NAME>` 在 [`addon/allowlist.json`](addon/allowlist.json) 中的条目精确匹配（不做后缀或通配匹配）。
+- **不自动塞 `Authorization`**：代理不按目标主机推断凭据；客户端没发占位符，请求原样转发。
+- **body 不替换**：请求体一律不动，避免 `web_fetch` 把模型提供的 URL 当作外带通道。
+- **无映射即 403**：占位符名不在 allowlist、Host 不匹配或 OpenBao 读取失败，整条请求返回 `403`，不做部分替换；日志只记占位符名与主机。
+
+替换策略见 [`addon/vault_placeholders.py`](addon/vault_placeholders.py)，支持的主机映射以 `allowlist.json` 为唯一来源。
+
 > **历史背景**：[ADR-0005](../../docs/adr/0005-remove-agent-vault-single-service.md) 删除的是依赖 Infisical 云的旧 Agent Vault 子系统；本方案使用同机自建的 `aster-openbao` + `aster-mitm` 内网服务完成出站占位替换。
 
 ## 目录结构
