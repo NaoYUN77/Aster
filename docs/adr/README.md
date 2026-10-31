@@ -72,3 +72,4 @@ spec 在功能开发完成后删除，ADR 及其记录长期保留。ADR 中的 
 | 0012 | 安装方式改为 Docker，systemd 只留迁移 | Accepted，2026-10-27 | [0012-docker-replaces-systemd.md](0012-docker-replaces-systemd.md) |
 | 0013 | agent loop 只用 pi-durable | Accepted，2026-10-21 | [0013-pi-durable-agent-loop.md](0013-pi-durable-agent-loop.md) |
 | 0014 | 工具由人注册 | Accepted，2026-10-22 | [0014-humans-register-tools.md](0014-humans-register-tools.md) |
+| 0015 | 控制面与执行面分离，工具执行先下沉到执行 VPS | Proposed，2026-10-31 | [0015-control-execution-split.md](0015-control-execution-split.md) |
