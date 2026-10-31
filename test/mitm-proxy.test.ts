@@ -304,9 +304,34 @@ test("deployment example, MITM overlay, and allowlist stay aligned without real 
   assert.match(overlay, /NODE_USE_ENV_PROXY: "1"/);
   assert.match(overlay, /HTTPS_PROXY: http:\/\/aster-mitm:14322/);
   assert.match(overlay, /HTTP_PROXY: http:\/\/aster-mitm:14322/);
-  assert.match(overlay, /NO_PROXY: localhost,127\.0\.0\.1,::1,aster-mitm,aster-openbao/);
-  assert.match(overlay, /name: aster_default/);
+  assert.match(overlay, /NO_PROXY: localhost,127\.0\.0\.1,::1,aster-mitm/);
+  assert.match(overlay, /name: aster_mitm_clients/);
+  assert.match(overlay, /ipv4_address: 10\.89\.143\.3/);
+  assert.ok(!/aster_default/.test(overlay), "the app must not join a shared network");
   assert.ok(!/NODE_TLS_REJECT_UNAUTHORIZED|ssl_insecure|insecure/i.test(overlay));
+});
+
+test("MITM proxy and OpenBao listen only on dedicated internal networks with a client allowlist", async () => {
+  const raw = await readFile(join(root, "deploy", "openbao-mitm", "compose.yml"), "utf8");
+  const deploy = raw
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+
+  // MITM is bound to its aster_mitm_clients address only, never to 0.0.0.0 or the other networks.
+  assert.match(deploy, /--listen-host"\s*\n\s*-\s*"10\.89\.143\.2"\s*\n\s*-\s*"--listen-port"/);
+  assert.ok(!/--listen-host"\s*\n\s*-\s*"0\.0\.0\.0"/.test(deploy));
+  assert.match(deploy, /ASTER_PROXY_CLIENT_ALLOW: \$\{ASTER_PROXY_CLIENT_ALLOW:-10\.89\.143\.3\/32\}/);
+  assert.match(deploy, /connection_timeout=30/);
+
+  // OpenBao and MITM share only the internal vault network; the app gets only the internal client network.
+  assert.match(deploy, /name: aster_vault[\s\S]*?internal: true[\s\S]*?subnet: 10\.89\.82\.0\/24/);
+  assert.match(deploy, /name: aster_mitm_clients[\s\S]*?internal: true[\s\S]*?subnet: 10\.89\.143\.0\/24/);
+  assert.match(deploy, /name: aster_egress/);
+  assert.match(deploy, /ipv4_address: 10\.89\.82\.2/);
+  assert.match(deploy, /ipv4_address: 10\.89\.82\.3/);
+  assert.match(deploy, /ipv4_address: 10\.89\.143\.2/);
+  assert.ok(!/ports:/.test(deploy), "neither service may publish a host port");
 });
 
 test("MITM placeholder substitution addon unit tests pass", async () => {

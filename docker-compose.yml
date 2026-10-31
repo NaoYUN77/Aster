@@ -1,5 +1,5 @@
 # Base single-service deployment. To route outbound HTTPS through the OpenBao + MITM proxy
-# (http://aster-mitm:14322 on aster_default) with __vault_<NAME>__ placeholders in .env, layer
+# (http://aster-mitm:14322 on aster_mitm_clients) with __vault_<NAME>__ placeholders in .env, layer
 # docker-compose.mitm.yml:
 #   docker compose -f docker-compose.yml -f docker-compose.mitm.yml --env-file .env up -d
 # Rollback: drop `-f docker-compose.mitm.yml` and restore plaintext values in .env.
