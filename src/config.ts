@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
@@ -33,13 +34,48 @@ export function hasProxyEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   );
 }
 
+const PROXY_VARS = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] as const;
+const MITM_TOKEN_FILE = "ASTER_MITM_TOKEN_FILE";
+// Same shape the addon accepts: workable as URL userinfo without percent-encoding surprises.
+const MITM_TOKEN_SHAPE = /^[A-Za-z0-9._~-]{16,256}$/;
+
+/**
+ * Adds the MITM proxy credentials from ASTER_MITM_TOKEN_FILE to every configured proxy URL. Node
+ * sends URL userinfo as `Proxy-Authorization: Basic ...` on CONNECT, so the app satisfies the proxy's
+ * token gate without a token in .env, argv, or tool arguments. An unreadable or malformed token is a
+ * startup error: connecting without credentials would only earn a 407 later.
+ */
+export function withProxyToken(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const path = env[MITM_TOKEN_FILE]?.trim();
+  if (!path) return env;
+  let token: string;
+  try {
+    token = readFileSync(path, "utf8").trim();
+  } catch {
+    throw new ConfigurationError(`${MITM_TOKEN_FILE} could not be read`);
+  }
+  if (!MITM_TOKEN_SHAPE.test(token)) {
+    throw new ConfigurationError(`${MITM_TOKEN_FILE} must contain 16-256 characters of [A-Za-z0-9._~-]`);
+  }
+  const effective: NodeJS.ProcessEnv = { ...env };
+  for (const key of PROXY_VARS) {
+    const raw = env[key]?.trim();
+    if (!raw) continue;
+    const url = new URL(raw);
+    url.username = "aster";
+    url.password = token;
+    effective[key] = url.toString();
+  }
+  return effective;
+}
+
 function validateProxyEnv(env: NodeJS.ProcessEnv): void {
   if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
     throw new ConfigurationError(
       "NODE_TLS_REJECT_UNAUTHORIZED=0 is not allowed; trust the MITM CA via NODE_EXTRA_CA_CERTS",
     );
   }
-  for (const key of ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] as const) {
+  for (const key of PROXY_VARS) {
     const raw = env[key]?.trim();
     if (!raw) continue;
     let url: URL;
@@ -57,11 +93,18 @@ function validateProxyEnv(env: NodeJS.ProcessEnv): void {
 /**
  * Enable Node's global HTTP(S) proxy dispatcher from the environment when a proxy variable is set.
  * Needed when HTTPS_PROXY is loaded from --env-file=.env after Node startup; safe alongside NODE_USE_ENV_PROXY=1.
+ * With ASTER_MITM_TOKEN_FILE set, the effective URLs carry the proxy credentials and are written back
+ * so clients that build their own agent from process.env (TelegramClient, MCP children) use them too.
  */
 export function configureEnvProxy(env: NodeJS.ProcessEnv = process.env): boolean {
   validateProxyEnv(env);
   if (!hasProxyEnv(env)) return false;
-  setGlobalProxyFromEnv(env);
+  const effective = withProxyToken(env);
+  for (const key of PROXY_VARS) {
+    const value = effective[key];
+    if (value) env[key] = value;
+  }
+  setGlobalProxyFromEnv(effective);
   return true;
 }
 

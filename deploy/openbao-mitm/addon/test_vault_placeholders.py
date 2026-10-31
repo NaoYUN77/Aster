@@ -45,7 +45,7 @@ class SubstituteTests(unittest.TestCase):
 
     def test_resolver_failure_is_reported_by_name_only(self):
         def failing(name: str) -> str:
-            raise OSError("connection refused to http://aster-openbao:8200")
+            raise OSError("connection refused to https://aster-openbao:8200")
 
         with self.assertRaises(PlaceholderError) as raised:
             substitute("__vault_DEEPSEEK_API_KEY__", "api.deepseek.com", ALLOWLIST, failing)

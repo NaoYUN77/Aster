@@ -11,6 +11,11 @@
 # CA trust: mounts the public MITM CA certificate (default ~/Aster/secrets/openbao/mitmproxy-ca.pem,
 # override with ASTER_MITM_CA_CERT) read-only and sets NODE_EXTRA_CA_CERTS. That file must contain
 # only the public certificate (exported from mitmproxy-ca-cert.pem), never the CA private key.
+#
+# Proxy authentication: mounts the proxy token file (default
+# ~/Aster/secrets/openbao/mitm-proxy-token, override with ASTER_MITM_PROXY_TOKEN) and points
+# ASTER_MITM_TOKEN_FILE at it. The token is never in .env or in the environment; configureEnvProxy()
+# reads it and puts it into the proxy URL userinfo at startup.
 services:
   personal-agent:
     environment:
@@ -22,11 +27,21 @@ services:
       NODE_USE_ENV_PROXY: "1"
       # Trust the MITM CA certificate on top of Node's bundled root CAs.
       NODE_EXTRA_CA_CERTS: /run/aster/mitmproxy-ca.pem
+      # The proxy rejects unauthenticated clients; configureEnvProxy() injects this token at startup.
+      ASTER_MITM_TOKEN_FILE: /run/aster/mitm-proxy-token
     volumes:
       - type: bind
         source: ${ASTER_MITM_CA_CERT:-${HOME:-/root}/Aster/secrets/openbao/mitmproxy-ca.pem}
         target: /run/aster/mitmproxy-ca.pem
         read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ASTER_MITM_PROXY_TOKEN:-${HOME:-/root}/Aster/secrets/openbao/mitm-proxy-token}
+        target: /run/aster/mitm-proxy-token
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       mitm:
         ipv4_address: 10.89.143.3
