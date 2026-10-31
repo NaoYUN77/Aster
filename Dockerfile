@@ -10,6 +10,7 @@ FROM node:24.19.0-bookworm-slim
 LABEL org.opencontainers.image.title="Aster"
 WORKDIR /app
 ENV NODE_ENV=production \
+    NODE_USE_ENV_PROXY=1 \
     DATA_DIR=/data \
     HOME=/data \
     NPM_CONFIG_CACHE=/data/.npm

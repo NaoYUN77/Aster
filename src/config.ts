@@ -1,3 +1,4 @@
+import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
 import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
@@ -11,6 +12,58 @@ import {
 } from "./memory/contracts.js";
 
 export { ConfigurationError };
+
+const VAULT_PLACEHOLDER = /^__vault_[A-Z][A-Z0-9_]*__$/;
+
+/** True when value is a well-formed OpenBao/MITM placeholder (`__vault_<NAME>__`). */
+export function isVaultPlaceholder(value: string): boolean {
+  return VAULT_PLACEHOLDER.test(value);
+}
+
+function assertValidCredentialShape(key: string, value: string): void {
+  if (value.includes("__vault_") && !isVaultPlaceholder(value)) {
+    throw new ConfigurationError(`${key} has a malformed vault placeholder; expected __vault_${key}__`);
+  }
+}
+
+/** True when HTTP(S)_PROXY is present in the environment. */
+export function hasProxyEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(
+    env.HTTPS_PROXY?.trim() || env.https_proxy?.trim() || env.HTTP_PROXY?.trim() || env.http_proxy?.trim(),
+  );
+}
+
+function validateProxyEnv(env: NodeJS.ProcessEnv): void {
+  if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
+    throw new ConfigurationError(
+      "NODE_TLS_REJECT_UNAUTHORIZED=0 is not allowed; trust the MITM CA via NODE_EXTRA_CA_CERTS",
+    );
+  }
+  for (const key of ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] as const) {
+    const raw = env[key]?.trim();
+    if (!raw) continue;
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new ConfigurationError(`${key} must be a valid HTTP(S) URL`);
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new ConfigurationError(`${key} must use http: or https:`);
+    }
+  }
+}
+
+/**
+ * Enable Node's global HTTP(S) proxy dispatcher from the environment when a proxy variable is set.
+ * Needed when HTTPS_PROXY is loaded from --env-file=.env after Node startup; safe alongside NODE_USE_ENV_PROXY=1.
+ */
+export function configureEnvProxy(env: NodeJS.ProcessEnv = process.env): boolean {
+  validateProxyEnv(env);
+  if (!hasProxyEnv(env)) return false;
+  setGlobalProxyFromEnv(env);
+  return true;
+}
 
 /**
  * MCP paths without the bot's own requirements, so the authorization CLI resolves the same file as the
@@ -28,6 +81,7 @@ export function resolveMcpConfigPaths(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env) {
+  validateProxyEnv(env);
   const telegramApiRoot = readTelegramApiRoot(env);
   const required = (key: string) => {
     const value = env[key]?.trim();
@@ -39,9 +93,13 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!isProviderId(provider)) {
     throw new ConfigurationError(`MODEL_PROVIDER must be one of: ${PROVIDER_IDS.join(", ")}`);
   }
-  required(PROVIDERS[provider].apiKeyEnv);
+  const providerKeyEnv = PROVIDERS[provider].apiKeyEnv;
+  const providerKey = required(providerKeyEnv);
+  assertValidCredentialShape(providerKeyEnv, providerKey);
   const token = required("TELEGRAM_BOT_TOKEN");
+  assertValidCredentialShape("TELEGRAM_BOT_TOKEN", token);
   const webApiKey = env.DEEPSEEK_WEB_API_KEY?.trim();
+  if (webApiKey) assertValidCredentialShape("DEEPSEEK_WEB_API_KEY", webApiKey);
   return {
     token,
     ownerId,

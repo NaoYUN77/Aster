@@ -1,4 +1,4 @@
-import { resolveMcpConfigPaths } from "./config.js";
+import { configureEnvProxy, resolveMcpConfigPaths } from "./config.js";
 import { mcpErrorCode, openMcpConnection } from "./mcp.js";
 import { readMcpConfig } from "./mcp-config.js";
 
@@ -8,6 +8,7 @@ import { readMcpConfig } from "./mcp-config.js";
  * model. Run it as the service user so the sandbox and file ownership match the service.
  */
 async function main(): Promise<void> {
+  configureEnvProxy();
   // Same resolution as the bot, so MCP_CONFIG and DATA_DIR are read from one place and cannot disagree.
   const { dataDir, mcpConfigPath: configPath, mcpConfigExplicit } = resolveMcpConfigPaths();
   const read = await readMcpConfig(configPath, mcpConfigExplicit);
