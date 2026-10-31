@@ -566,6 +566,8 @@ function childEnvironment(server: Extract<McpServerConfig, { transport: "stdio" 
   if (server.inheritEnv) return { ...env, ...server.env } as Record<string, string>;
   const names = [
     "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "NPM_CONFIG_CACHE", "npm_config_cache",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "NODE_USE_ENV_PROXY", "NODE_EXTRA_CA_CERTS",
     "SystemRoot", "ComSpec", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
   ];
   const inherited: Record<string, string> = {};

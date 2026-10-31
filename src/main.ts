@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { openAgent } from "./agent.js";
-import { ConfigurationError, readConfig } from "./config.js";
+import { ConfigurationError, configureEnvProxy, readConfig } from "./config.js";
 import { StateError } from "./errors.js";
 import { Inbox } from "./inbox.js";
 import { failureCode, serveTelegram, TelegramClient } from "./telegram.js";
@@ -11,6 +11,7 @@ process.once("SIGINT", () => shutdown.abort());
 process.once("SIGTERM", () => shutdown.abort());
 
 try {
+  configureEnvProxy();
   const config = readConfig();
   const client = new TelegramClient(config.token, config.telegramApiRoot);
   const botId = await client.identity(shutdown.signal);

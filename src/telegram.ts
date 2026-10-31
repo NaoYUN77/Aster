@@ -1,8 +1,9 @@
+import { Agent as HttpsAgent } from "node:https";
 import { setTimeout as delay } from "node:timers/promises";
 import { Api, GrammyError } from "grammy";
 import { AbortController as TelegramAbortController, type AbortSignal as TelegramSignal } from "abort-controller";
 import type { Update } from "grammy/types";
-import type { readConfig } from "./config.js";
+import { hasProxyEnv, type readConfig } from "./config.js";
 import type { Inbox } from "./inbox.js";
 import type { TextRequest } from "./messages.js";
 
@@ -22,9 +23,14 @@ async function telegramCall<T>(signal: AbortSignal, call: (signal: TelegramSigna
 export class TelegramClient {
   private readonly api: Api;
 
-  constructor(token: string, apiRoot?: string) {
+  constructor(token: string, apiRoot?: string, env: NodeJS.ProcessEnv = process.env) {
     this.api = new Api(token, {
       ...(apiRoot ? { apiRoot } : {}),
+      ...(hasProxyEnv(env) ? {
+        // grammY constructs its own https.Agent without proxyEnv, so NODE_USE_ENV_PROXY=1 on the
+        // global agent alone does not route Bot API calls through HTTPS_PROXY.
+        baseFetchConfig: { agent: new HttpsAgent({ keepAlive: true, proxyEnv: env }) },
+      } : {}),
     });
   }
 

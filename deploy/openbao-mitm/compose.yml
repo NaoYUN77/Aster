@@ -1,0 +1,62 @@
+# OpenBao + MITM proxy for Aster. Run from this directory; see README.md for the full procedure.
+#
+# The project name "aster" makes this stack's default network "aster_default". The app joins that
+# network through docker-compose.mitm.yml at the repository root. Do not name the app's own Compose
+# project "aster", or its default network would collide with this one.
+#
+# No ports are published. Both services are reachable only on aster_default.
+name: aster
+
+services:
+  openbao:
+    image: ${OPENBAO_IMAGE:?set OPENBAO_IMAGE to the pinned OpenBao image used in production}
+    container_name: aster-openbao
+    restart: unless-stopped
+    command: ["server", "-config=/openbao/config/config.hcl"]
+    volumes:
+      - ./openbao/config.hcl:/openbao/config/config.hcl:ro
+      - openbao-data:/openbao/file
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - default
+
+  mitm:
+    image: ${MITMPROXY_IMAGE:?set MITMPROXY_IMAGE to the pinned mitmproxy image used in production}
+    container_name: aster-mitm
+    restart: unless-stopped
+    # -q keeps request URLs out of the log: the Telegram token is in the URL path after substitution.
+    entrypoint: ["mitmdump"]
+    command:
+      - "-q"
+      - "--listen-host"
+      - "0.0.0.0"
+      - "--listen-port"
+      - "14322"
+      - "--set"
+      - "confdir=/home/mitmproxy/.mitmproxy"
+      - "-s"
+      - "/addon/aster_vault_addon.py"
+    environment:
+      OPENBAO_ADDR: http://aster-openbao:8200
+      OPENBAO_TOKEN_FILE: /run/secrets/openbao-mitm-token
+      ASTER_VAULT_ALLOWLIST: /addon/allowlist.json
+      # The addon reads OpenBao directly; it must not send that traffic through itself.
+      NO_PROXY: aster-openbao,localhost,127.0.0.1
+    volumes:
+      - ./addon:/addon:ro
+      # Host-only directory: holds the CA private key (mitmproxy-ca.pem) and the CA certificate.
+      - ${ASTER_OPENBAO_SECRETS:?set ASTER_OPENBAO_SECRETS to the absolute path of the secrets directory}/mitmproxy:/home/mitmproxy/.mitmproxy
+      # Read-only OpenBao token with the aster-mitm-read policy only (see bootstrap.sh).
+      - ${ASTER_OPENBAO_SECRETS:?set ASTER_OPENBAO_SECRETS to the absolute path of the secrets directory}/openbao-mitm-token:/run/secrets/openbao-mitm-token:ro
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - default
+
+volumes:
+  openbao-data:
+
+networks:
+  default:
+    name: aster_default

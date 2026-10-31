@@ -3,7 +3,7 @@ import {
   OAuthCallbackServer,
   OAuthError,
 } from "@earendil-works/pi-mcp/oauth";
-import { resolveMcpConfigPaths } from "./config.js";
+import { configureEnvProxy, resolveMcpConfigPaths } from "./config.js";
 import { createOAuthProvider, mcpAuthFlowOptions, openMcpConnection } from "./mcp.js";
 import { readMcpConfig, type McpAuthConfig, type McpServerConfig } from "./mcp-config.js";
 
@@ -16,6 +16,7 @@ const CALLBACK_TIMEOUT_MS = 10 * 60_000;
  * the token file.
  */
 async function main(): Promise<void> {
+  configureEnvProxy();
   const target = process.argv[2];
   if (!target) {
     console.error("Usage: npm run mcp:auth -- <server>");

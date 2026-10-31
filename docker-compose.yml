@@ -1,7 +1,16 @@
+# Base single-service deployment. To route outbound HTTPS through the OpenBao + MITM proxy
+# (http://aster-mitm:14322 on aster_default) with __vault_<NAME>__ placeholders in .env, layer
+# docker-compose.mitm.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.mitm.yml --env-file .env up -d
+# Rollback: drop `-f docker-compose.mitm.yml` and restore plaintext values in .env.
 services:
   personal-agent:
     image: ${ASTER_IMAGE:-aster:local}
     restart: unless-stopped
+    # In MITM mode, secret variables in .env use __vault_<NAME>__ placeholders (for example
+    # TELEGRAM_BOT_TOKEN=__vault_TELEGRAM_BOT_TOKEN__, DEEPSEEK_API_KEY=__vault_DEEPSEEK_API_KEY__,
+    # DEEPSEEK_WEB_API_KEY=__vault_DEEPSEEK_WEB_API_KEY__); non-secret settings (TELEGRAM_OWNER_ID,
+    # MODEL_PROVIDER, MODEL_ID, DATA_DIR, MEMORY_*) keep their normal values.
     env_file:
       - .env
     environment:

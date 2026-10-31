@@ -1,0 +1,33 @@
+# Routes the app's outbound HTTPS through the Aster MITM proxy (deploy/openbao-mitm), which replaces
+# __vault_<NAME>__ placeholders with OpenBao values (KV path secret/aster/<NAME>).
+# Apply on top of docker-compose.yml after the OpenBao/MITM stack is running and aster_default exists:
+#   docker compose -f docker-compose.yml -f docker-compose.mitm.yml --env-file .env up -d
+# Rollback: remove `-f docker-compose.mitm.yml` and restore plaintext secret values in .env.
+#
+# CA trust: mounts the public MITM CA certificate (default ~/Aster/secrets/openbao/mitmproxy-ca.pem,
+# override with ASTER_MITM_CA_CERT) read-only and sets NODE_EXTRA_CA_CERTS. That file must contain
+# only the public certificate (exported from mitmproxy-ca-cert.pem), never the CA private key.
+services:
+  personal-agent:
+    environment:
+      HTTPS_PROXY: http://aster-mitm:14322
+      HTTP_PROXY: http://aster-mitm:14322
+      # Direct paths: loopback, the proxy itself, and OpenBao. Everything else goes through the proxy.
+      NO_PROXY: localhost,127.0.0.1,::1,aster-mitm,aster-openbao
+      # Node 24 reads HTTP(S)_PROXY for fetch and https.request with this flag (and configureEnvProxy()).
+      NODE_USE_ENV_PROXY: "1"
+      # Trust the MITM CA certificate on top of Node's bundled root CAs.
+      NODE_EXTRA_CA_CERTS: /run/aster/mitmproxy-ca.pem
+    volumes:
+      - type: bind
+        source: ${ASTER_MITM_CA_CERT:-${HOME:-/root}/Aster/secrets/openbao/mitmproxy-ca.pem}
+        target: /run/aster/mitmproxy-ca.pem
+        read_only: true
+    networks:
+      - default
+      - aster
+networks:
+  aster:
+    # External network created by deploy/openbao-mitm (compose project "aster").
+    name: aster_default
+    external: true
