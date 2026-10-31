@@ -156,6 +156,12 @@ npm start
 
 可选的 MITM 占位符模式（密钥留在 OpenBao，应用只见 `__vault_<NAME>__`）见 [OpenBao + MITM 部署](deploy/openbao-mitm/README.md)，应用侧 overlay 为 `docker-compose.mitm.yml`。代理只在客户端显式发送占位符、且目标 Host 精确命中 [`allowlist.json`](deploy/openbao-mitm/addon/allowlist.json) 时才填充；不按目标自动补 `Authorization`，不替换请求体，无映射返回 `403`。
 
+### 远程工具执行（阶段 1，可选）
+
+可选的 `docker-compose.execution.yml` overlay 把命令工具（`bash`）放到第二台 VPS 执行：应用容器经宿主共享 Unix socket 调用宿主网络里的 `execution-broker`，由 broker 从 Aster 主机 SSH 到执行 VPS。控制面仍保留会话、记忆与投递状态；应用容器不新增网络、不发布端口，MITM／OpenBao／allowlist 的隔离语义不变。
+
+阶段 1 只支持 shell；`read`／`write`／`edit` 等文件工具在远程模式下返回 `not_supported`，文件工作请用 `bash`。broker 不可达时应用启动失败，不回退本地执行。socket 目录权限、SSH 密钥与 known-hosts 路径（示例均为占位）、检查命令与失败语义见 [远程工具执行](docs/execution-remote.md)，设计取舍见 [ADR-0015](docs/adr/0015-control-execution-split.md)。
+
 ### 内置 Web 工具
 
 `web_search` 与 `web_fetch` 直接通过 Aster 的工具注册表执行，不需要 `mcp.json` 或额外进程。设置独立的 `DEEPSEEK_WEB_API_KEY` 并重启后，两项工具同时注册；未设置时均不向模型声明。Search 返回来源与摘要，Fetch 返回规范化标题和 Markdown 正文。
@@ -177,6 +183,7 @@ npm test        # 全量离线测试
 - [投递核查与补发](docs/deliveries.md)
 - [工具与 MCP](docs/mcp.md)
 - [部署环境描述](docs/deployment-environments.md)
+- [远程工具执行](docs/execution-remote.md)：阶段 1 的宿主 broker、SSH 基线、配置与失败语义
 - [契约与生命周期](docs/contracts-and-lifecycle.md)
 - [ADR](docs/adr/)：决策记录
 - [Memory 与 Context 实施方案](docs/memory-and-context-design.md) / [记忆系统验收](docs/memory-verification.md)

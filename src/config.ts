@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
+import { isAbsoluteRemotePath } from "./execution/protocol.js";
 import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
 import {
   assertSchema,
@@ -143,6 +144,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   assertValidCredentialShape("TELEGRAM_BOT_TOKEN", token);
   const webApiKey = env.DEEPSEEK_WEB_API_KEY?.trim();
   if (webApiKey) assertValidCredentialShape("DEEPSEEK_WEB_API_KEY", webApiKey);
+  const execution = readExecutionConfig(env);
   return {
     token,
     ownerId,
@@ -150,7 +152,69 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     model: required("MODEL_ID"),
     telegramApiRoot,
     ...(webApiKey ? { webApiKey } : {}),
+    ...(execution === undefined ? {} : { execution }),
     ...resolveMcpConfigPaths(env),
+  };
+}
+
+/** Tool execution placement. Local is the default and the only mode that exposes file tools. */
+export type ExecutionConfig = {
+  /** Private host socket shared with the broker container; never a network address. */
+  readonly brokerSocket: string;
+  /** Working directory on the execution host. The control plane's DATA_DIR never applies there. */
+  readonly remoteCwd: string;
+  readonly connectTimeoutMs: number;
+  readonly defaultTimeoutSeconds: number;
+  readonly maxTimeoutSeconds: number;
+};
+
+function executionInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
+  const raw = env[key]?.trim();
+  if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) throw new ConfigurationError(`${key} must be an integer in ${min}..${max}`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new ConfigurationError(`${key} must be an integer in ${min}..${max}`);
+  }
+  return value;
+}
+
+/**
+ * EXECUTION_MODE=remote selects the host-side broker. Every remote setting is validated before the
+ * process can reach the broker, and values unrelated to the selected mode are ignored rather than
+ * leaking into a local deployment.
+ */
+export function readExecutionConfig(env: NodeJS.ProcessEnv = process.env): ExecutionConfig | undefined {
+  const mode = env.EXECUTION_MODE?.trim() || "local";
+  if (mode === "local") return undefined;
+  if (mode !== "remote") throw new ConfigurationError("EXECUTION_MODE must be local or remote");
+  const required = (key: string) => {
+    const value = env[key]?.trim();
+    if (!value) throw new ConfigurationError(`Missing configuration: ${key}`);
+    return value;
+  };
+  const brokerSocket = required("EXECUTION_BROKER_SOCKET");
+  if (!isAbsoluteRemotePath(brokerSocket)) {
+    throw new ConfigurationError("EXECUTION_BROKER_SOCKET must be an absolute POSIX socket path without control characters");
+  }
+  const remoteCwd = required("EXECUTION_REMOTE_CWD");
+  if (!isAbsoluteRemotePath(remoteCwd)) {
+    throw new ConfigurationError("EXECUTION_REMOTE_CWD must be an absolute POSIX path without control characters");
+  }
+  if (Buffer.byteLength(remoteCwd, "utf8") > 4096) {
+    throw new ConfigurationError("EXECUTION_REMOTE_CWD must be at most 4096 bytes");
+  }
+  const defaultTimeoutSeconds = executionInteger(env, "EXECUTION_DEFAULT_TIMEOUT_SECONDS", 300, 1, 86_400);
+  const maxTimeoutSeconds = executionInteger(env, "EXECUTION_MAX_TIMEOUT_SECONDS", 3600, 1, 86_400);
+  if (defaultTimeoutSeconds > maxTimeoutSeconds) {
+    throw new ConfigurationError("EXECUTION_DEFAULT_TIMEOUT_SECONDS must not exceed EXECUTION_MAX_TIMEOUT_SECONDS");
+  }
+  return {
+    brokerSocket,
+    remoteCwd,
+    connectTimeoutMs: executionInteger(env, "EXECUTION_BROKER_CONNECT_TIMEOUT_MS", 5_000, 100, 60_000),
+    defaultTimeoutSeconds,
+    maxTimeoutSeconds,
   };
 }
 
