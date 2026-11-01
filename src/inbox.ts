@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { StateError } from "./errors.js";
-import { splitReply, type TextRequest } from "./messages.js";
+import { splitReply, type IncomingRequest, type TextRequest } from "./messages.js";
+import type { AudioReference } from "./stt.js";
 
 export interface Job extends TextRequest {
   status: "pending" | "ready" | "sent" | "failed" | "uncertain";
@@ -8,6 +9,9 @@ export interface Job extends TextRequest {
   /** ISO 8601 UTC; null only for rows written before timestamps existed. */
   receivedAt: string | null;
   repliedAt: string | null;
+  audio: AudioReference | null;
+  transcriptionStatus: "pending" | "running" | "done" | "failed" | "uncertain" | null;
+  transcriptionError: string | null;
 }
 
 export interface Delivery {
@@ -64,6 +68,9 @@ export class Inbox {
     `);
     // Existing databases predate the timestamps. Adding a nullable column leaves those rows unknown
     // instead of backfilling them with a time the process never observed.
+    addColumn(this.db, "inbox", "audio", "TEXT");
+    addColumn(this.db, "inbox", "transcriptionStatus", "TEXT");
+    addColumn(this.db, "inbox", "transcriptionError", "TEXT");
     addColumn(this.db, "inbox", "receivedAt", "TEXT");
     addColumn(this.db, "inbox", "repliedAt", "TEXT");
     addColumn(this.db, "deliveries", "createdAt", "TEXT");
@@ -80,6 +87,7 @@ export class Inbox {
 
   recover(): void {
     this.transaction(() => {
+      this.db.prepare("UPDATE inbox SET transcriptionStatus = 'uncertain', transcriptionError = 'STT_UNCERTAIN' WHERE transcriptionStatus = 'running'").run();
       this.db.prepare("UPDATE deliveries SET status = 'uncertain', error = 'PROCESS_INTERRUPTED' WHERE status = 'sending'").run();
       this.db.prepare(`UPDATE inbox SET status = 'uncertain' WHERE status = 'sending'
         OR requestId IN (SELECT requestId FROM deliveries WHERE status = 'uncertain')`).run();
@@ -94,15 +102,18 @@ export class Inbox {
     return (this.db.prepare("SELECT offset FROM checkpoint WHERE id = 1").get() as { offset: number }).offset;
   }
 
-  accept(nextOffset: number, request?: TextRequest): void {
+  accept(nextOffset: number, request?: IncomingRequest): void {
     this.transaction(() => {
       if (request) {
+        const audio = request.audio ? JSON.stringify(request.audio) : null;
         const existing = this.db.prepare("SELECT * FROM inbox WHERE requestId = ?").get(request.requestId);
-        if (existing && (existing.text !== request.text || existing.conversationId !== request.conversationId || existing.senderId !== request.senderId)) {
+        if (existing && (existing.audio !== audio || (!audio && existing.text !== request.text)
+          || existing.conversationId !== request.conversationId || existing.senderId !== request.senderId)) {
           throw new Error("Request ID reused with different content");
         }
-        this.db.prepare(`INSERT OR IGNORE INTO inbox (requestId, conversationId, senderId, text, receivedAt)
-          VALUES (?, ?, ?, ?, ?)`).run(request.requestId, request.conversationId, request.senderId, request.text, timestamp());
+        this.db.prepare(`INSERT OR IGNORE INTO inbox (requestId, conversationId, senderId, text, receivedAt, audio, transcriptionStatus)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(request.requestId, request.conversationId, request.senderId,
+            request.text, timestamp(), audio, audio ? "pending" : null);
       }
       // Telegram can randomize update IDs after an idle week; do not use MAX(offset).
       this.db.prepare("UPDATE checkpoint SET offset = ? WHERE id = 1").run(nextOffset);
@@ -110,7 +121,28 @@ export class Inbox {
   }
 
   next(): Job | undefined {
-    return this.db.prepare("SELECT * FROM inbox WHERE status IN ('pending', 'ready') ORDER BY rowid LIMIT 1").get() as Job | undefined;
+    const row = this.db.prepare("SELECT * FROM inbox WHERE status IN ('pending', 'ready') ORDER BY rowid LIMIT 1").get();
+    if (!row) return;
+    return { ...row, audio: row.audio === null ? null : JSON.parse(String(row.audio)) } as Job;
+  }
+
+  beginTranscription(requestId: string): void {
+    const result = this.db.prepare(`UPDATE inbox SET transcriptionStatus = 'running'
+      WHERE requestId = ? AND status = 'pending' AND transcriptionStatus = 'pending'`).run(requestId);
+    if (result.changes !== 1) throw new StateError("Audio request is not pending transcription");
+  }
+
+  saveTranscript(requestId: string, text: string): void {
+    if (!text.trim()) throw new StateError("Cannot save an empty transcript");
+    const result = this.db.prepare(`UPDATE inbox SET text = ?, transcriptionStatus = 'done'
+      WHERE requestId = ? AND status = 'pending' AND transcriptionStatus = 'running'`).run(text, requestId);
+    if (result.changes !== 1) throw new StateError("Audio request is not running transcription");
+  }
+
+  failTranscription(requestId: string, code: string): void {
+    const result = this.db.prepare(`UPDATE inbox SET transcriptionStatus = 'failed', transcriptionError = ?
+      WHERE requestId = ? AND status = 'pending' AND transcriptionStatus IN ('pending', 'running')`).run(code, requestId);
+    if (result.changes !== 1) throw new StateError("Audio request cannot fail transcription");
   }
 
   saveReply(requestId: string, reply: string, errorCode?: string): void {

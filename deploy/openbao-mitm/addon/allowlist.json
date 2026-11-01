@@ -1,6 +1,7 @@
 {
   "ANTHROPIC_API_KEY": ["api.anthropic.com"],
   "OPENAI_API_KEY": ["api.openai.com"],
+  "STT_API_KEY": ["api.openai.com"],
   "DEEPSEEK_API_KEY": ["api.deepseek.com"],
   "DEEPSEEK_WEB_API_KEY": ["api.deepseek.com"],
   "GEMINI_API_KEY": ["generativelanguage.googleapis.com"],
