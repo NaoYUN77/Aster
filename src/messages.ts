@@ -1,8 +1,15 @@
+import type { AudioReference } from "./stt.js";
+
 export interface TextRequest {
   requestId: string;
   conversationId: string;
   senderId: string;
   text: string;
+}
+
+/** Audio inputs carry an empty text until a transcript is durably saved. */
+export interface IncomingRequest extends TextRequest {
+  audio?: AudioReference;
 }
 
 export function splitReply(text: string, limit = 4000): string[] {

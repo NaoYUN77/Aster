@@ -5,7 +5,11 @@ import { AbortController as TelegramAbortController, type AbortSignal as Telegra
 import type { Update } from "grammy/types";
 import { hasProxyEnv, type readConfig } from "./config.js";
 import type { Inbox } from "./inbox.js";
-import type { TextRequest } from "./messages.js";
+import type { IncomingRequest, TextRequest } from "./messages.js";
+import {
+  audioFilename, MAX_AUDIO_BYTES, readBoundedBody, SttError, sttFailureReply,
+  transcribeAudio, validateAudio, type AudioFile, type AudioReference,
+} from "./stt.js";
 
 async function telegramCall<T>(signal: AbortSignal, call: (signal: TelegramSignal) => Promise<T>): Promise<T> {
   signal.throwIfAborted();
@@ -23,7 +27,7 @@ async function telegramCall<T>(signal: AbortSignal, call: (signal: TelegramSigna
 export class TelegramClient {
   private readonly api: Api;
 
-  constructor(token: string, apiRoot?: string, env: NodeJS.ProcessEnv = process.env) {
+  constructor(private readonly token: string, private readonly apiRoot?: string, env: NodeJS.ProcessEnv = process.env) {
     this.api = new Api(token, {
       ...(apiRoot ? { apiRoot } : {}),
       ...(hasProxyEnv(env) ? {
@@ -47,6 +51,31 @@ export class TelegramClient {
       (cancel) => this.api.getUpdates({ offset, timeout: 25, limit: 10, allowed_updates: ["message"] }, cancel));
   }
 
+  async download(audio: AudioReference, signal: AbortSignal): Promise<AudioFile> {
+    validateAudio(audio);
+    const bounded = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+    try {
+      const file = await telegramCall(bounded, (cancel) => this.api.getFile(audio.fileId, cancel));
+      if (file.file_size !== undefined && (!Number.isSafeInteger(file.file_size) || file.file_size <= 0 || file.file_size > MAX_AUDIO_BYTES)) {
+        throw new SttError("STT_AUDIO_TOO_LARGE");
+      }
+      const filename = audioFilename(file.file_path);
+      const root = this.apiRoot ?? "https://api.telegram.org";
+      const response = await fetch(`${root}/file/bot${this.token}/${file.file_path}`, { signal: bounded, redirect: "manual" });
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new SttError("STT_DOWNLOAD_FAILED");
+      }
+      const bytes = await readBoundedBody(response, MAX_AUDIO_BYTES, bounded);
+      if (!bytes.length) throw new SttError("STT_INVALID_AUDIO");
+      return { bytes, filename };
+    } catch (error) {
+      if (signal.aborted) throw signal.reason;
+      if (error instanceof SttError) throw error;
+      throw new SttError("STT_DOWNLOAD_FAILED");
+    }
+  }
+
   async send(chatId: string, text: string, signal: AbortSignal): Promise<string> {
     const message = await telegramCall(AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
       (cancel) => this.api.sendMessage(chatId, text, {}, cancel));
@@ -65,19 +94,27 @@ function numericId(value: unknown): string | undefined {
   return undefined;
 }
 
-export function toRequest(update: Update, ownerId: string, botId: string): TextRequest | undefined {
+export function toRequest(update: Update, ownerId: string, botId: string): IncomingRequest | undefined {
   const updateId = updateIdOf(update);
   const message = update.message;
-  if (updateId === undefined || !message || message.chat?.type !== "private"
-    || typeof message.text !== "string" || !message.text) return;
+  if (updateId === undefined || !message || message.chat?.type !== "private") return;
   const conversationId = numericId(message.chat.id);
   const senderId = numericId(message.from?.id);
   if (!conversationId || !senderId || senderId !== ownerId) return;
+  const identity = { requestId: `telegram:${botId}:${updateId}`, conversationId, senderId };
+  if (typeof message.text === "string" && message.text) return { ...identity, text: message.text };
+  const media = message.voice !== undefined ? message.voice : message.audio;
+  if (media === undefined) return;
+  const valid = media !== null && typeof media === "object" && typeof media.file_id === "string"
+    && media.file_id.length > 0 && media.file_id.length <= 1024
+    && Number.isSafeInteger(media.duration) && media.duration >= 0
+    && (media.file_size === undefined || (Number.isSafeInteger(media.file_size) && media.file_size > 0));
   return {
-    requestId: `telegram:${botId}:${updateId}`,
-    conversationId,
-    senderId,
-    text: message.text,
+    ...identity, text: "",
+    audio: valid ? {
+      kind: message.voice !== undefined ? "voice" : "audio", fileId: media.file_id,
+      durationSeconds: media.duration, fileSize: media.file_size ?? null,
+    } : { kind: message.voice !== undefined ? "voice" : "audio", fileId: "", durationSeconds: 0, fileSize: null, invalid: true },
   };
 }
 
@@ -98,13 +135,42 @@ export async function serveTelegram(
   inbox: Inbox,
   reply: (request: TextRequest, signal: AbortSignal) => Promise<string>,
   signal: AbortSignal,
-  client: Pick<TelegramClient, "updates" | "send">,
+  client: Pick<TelegramClient, "updates" | "send"> & Partial<Pick<TelegramClient, "download">>,
+  transcribe: typeof transcribeAudio = transcribeAudio,
 ): Promise<void> {
   if (inbox.blocked().length) console.error("Some replies need delivery reconciliation; run npm run deliveries -- list.");
   let pollFailures = 0;
   while (!signal.aborted) {
     const job = inbox.next();
     if (job) {
+      if (job.status === "pending" && job.audio && job.transcriptionStatus !== "done") {
+        if (job.transcriptionStatus === "pending") {
+          let transcript: string;
+          try {
+            validateAudio(job.audio);
+            if (!config.stt || !client.download) throw new SttError("STT_NOT_CONFIGURED");
+            const audio = await client.download(job.audio, signal);
+            signal.throwIfAborted();
+            // Persist before the billable POST; storage failures must stop the process.
+            inbox.beginTranscription(job.requestId);
+            transcript = await transcribe(audio, config.stt, signal);
+          } catch (error) {
+            if (signal.aborted) return;
+            if (!(error instanceof SttError)) throw error;
+            const code = error.code;
+            inbox.failTranscription(job.requestId, code);
+            console.error(`Telegram transcription failed: ${job.requestId} (${code})`);
+            inbox.saveReply(job.requestId, sttFailureReply(code), code);
+            continue;
+          }
+          inbox.saveTranscript(job.requestId, transcript);
+          // Reload the saved transcript before entering the existing agent path.
+          continue;
+        }
+        const code = job.transcriptionError ?? "STT_UNCERTAIN";
+        inbox.saveReply(job.requestId, sttFailureReply(code), code);
+        continue;
+      }
       if (job.status === "pending") {
         let text: string;
         let errorCode: string | undefined;
@@ -126,7 +192,7 @@ export async function serveTelegram(
               ? "本次处理超时，已请求停止执行。已执行的操作可能仍然生效，请先核对结果。"
               : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
         }
-        inbox.saveReply(job.requestId, text, errorCode);
+        inbox.saveReply(job.requestId, job.audio ? `识别文本：\n${job.text}\n\n${text}` : text, errorCode);
       }
       if (signal.aborted) return;
       let part = inbox.nextPart(job.requestId);

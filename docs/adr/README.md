@@ -74,3 +74,4 @@ spec 在功能开发完成后删除，ADR 及其记录长期保留。ADR 中的 
 | 0014 | 工具由人注册 | Accepted，2026-10-22 | [0014-humans-register-tools.md](0014-humans-register-tools.md) |
 | 0015 | 旧版画像字段导致 working memory 损坏态 | Accepted，2026-10-31 | [working-memory/0015-legacy-profile-memory-corrupt-state.md](working-memory/0015-legacy-profile-memory-corrupt-state.md) |
 | 0016 | 用户画像暂存 working memory | Accepted，2026-10-29 | [0016-user-profile-working-memory.md](0016-user-profile-working-memory.md) |
+| 0017 | Telegram 音频先持久化转写，再进入原 agent | Proposed，2026-11-01 | [telegram-stt/0017-whisper-transcription-before-agent.md](telegram-stt/0017-whisper-transcription-before-agent.md) |

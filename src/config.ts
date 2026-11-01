@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
+import type { SttConfig } from "./stt.js";
 import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
 import {
   assertSchema,
@@ -150,8 +151,29 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     model: required("MODEL_ID"),
     telegramApiRoot,
     ...(webApiKey ? { webApiKey } : {}),
+    ...readSttConfig(env),
     ...resolveMcpConfigPaths(env),
   };
+}
+
+function readSttConfig(env: NodeJS.ProcessEnv): { stt?: SttConfig } {
+  const keys = ["STT_API_URL", "STT_API_KEY", "STT_MODEL"] as const;
+  if (!keys.some((key) => env[key]?.trim())) return {};
+  const values = keys.map((key) => {
+    const value = env[key]?.trim();
+    if (!value) throw new ConfigurationError(`Missing configuration: ${key}`);
+    return value;
+  });
+  const [apiUrl, apiKey, model] = values as [string, string, string];
+  let url: URL;
+  try { url = new URL(apiUrl); } catch { throw new ConfigurationError("STT_API_URL must be a valid HTTPS URL"); }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new ConfigurationError("STT_API_URL must use HTTPS without credentials, query or fragment");
+  }
+  assertValidCredentialShape("STT_API_KEY", apiKey);
+  if (/[\s\u0000-\u001f\u007f]/.test(apiKey)) throw new ConfigurationError("STT_API_KEY must be a single header token");
+  if (model.length > 256 || /[\u0000-\u001f\u007f]/.test(model)) throw new ConfigurationError("STT_MODEL is invalid");
+  return { stt: { apiUrl: url.href, apiKey, model } };
 }
 
 /**

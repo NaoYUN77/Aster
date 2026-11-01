@@ -6,6 +6,7 @@ ALLOWLIST = {
     "DEEPSEEK_API_KEY": ["api.deepseek.com"],
     "DEEPSEEK_WEB_API_KEY": ["api.deepseek.com"],
     "TELEGRAM_BOT_TOKEN": ["api.telegram.org"],
+    "STT_API_KEY": ["api.openai.com"],
 }
 
 
@@ -25,6 +26,14 @@ class SubstituteTests(unittest.TestCase):
         self.assertEqual(web, "Bearer resolved-openbao-deepseek_web_api_key")
         tg = substitute("/bot__vault_TELEGRAM_BOT_TOKEN__/getMe", "api.telegram.org", ALLOWLIST, resolve)
         self.assertEqual(tg, "/botresolved-openbao-telegram_bot_token/getMe")
+
+    def test_stt_header_and_telegram_file_path(self):
+        stt = substitute("Bearer __vault_STT_API_KEY__", "api.openai.com", ALLOWLIST, resolve)
+        self.assertEqual(stt, "Bearer resolved-openbao-stt_api_key")
+        with self.assertRaises(PlaceholderError):
+            substitute("Bearer __vault_STT_API_KEY__", "api.openai.com.evil.example", ALLOWLIST, resolve)
+        path = substitute("/file/bot__vault_TELEGRAM_BOT_TOKEN__/voice/file.oga", "api.telegram.org", ALLOWLIST, resolve)
+        self.assertEqual(path, "/file/botresolved-openbao-telegram_bot_token/voice/file.oga")
 
     def test_host_match_is_case_insensitive_and_exact(self):
         out = substitute("__vault_DEEPSEEK_API_KEY__", "API.DeepSeek.com", ALLOWLIST, resolve)

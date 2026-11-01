@@ -120,7 +120,7 @@ npm start
 
 注册表定义在 `src/providers.ts`，是支持范围的唯一来源。本应用只支持显式 API key 的提供商：不含 OAuth／订阅登录、云厂商环境凭据（Bedrock、Vertex），暂不支持自定义 base URL 的 OpenAI 兼容端点。
 
-常用可选项（均有默认值，注释里的数字与 `src/memory/contracts.ts`、`src/config.ts` 一致，完整清单见 `.env.example`）：
+常用可选项（注释里的默认值与 `src/memory/contracts.ts`、`src/config.ts` 一致，完整清单见 `.env.example`）：
 
 - `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。
 - `TELEGRAM_API_ROOT`：Telegram Bot API 的根地址覆盖。服务器无法直连 `api.telegram.org` 时，可指向自建 https 反向代理。仓库没有记录这项是否在某台机器上使用。
@@ -128,7 +128,11 @@ npm start
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
 - `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
 
-私聊 bot 后直接发送文字即可。bot 若已配置 webhook，应用会拒绝启动，需先在原部署中停用 webhook。
+私聊 bot 后直接发送文字即可。配置 `STT_API_URL`、`STT_API_KEY`、`STT_MODEL` 后，也可发送 Telegram voice/audio；三项全空表示禁用，部分配置启动失败。URL 是完整 HTTPS 转写 endpoint，例如 `https://api.openai.com/v1/audio/transcriptions`，模型可设 `whisper-1`；STT 与聊天模型独立，聊天仍可使用 DeepSeek。MITM 模式使用 `__vault_STT_API_KEY__`，自定义 STT 主机须同步配置代理 allowlist。
+
+语音先持久化文件引用，再下载并转写；transcript 保存后以普通用户文本进入同一 agent 路径，最终回复附识别文本。音频上限 20 MiB / 10 分钟，转写文本上限 16,000 字符；失败会明确通知。音频仅在内存中暂存；供应商会收到音频。未保存结果的已启动转写在重启后不自动重复上传或计费，会提示结果未知。使用 `TELEGRAM_API_ROOT` 时，反向代理还须支持 `/file/bot<token>/<file_path>`，占位符模式须允许该代理主机。详细配置与验收见 [Telegram STT 规格](docs/spec-20261101-telegram-stt.md)。
+
+bot 若已配置 webhook，应用会拒绝启动，需先在原部署中停用 webhook。
 
 ## 记忆系统
 

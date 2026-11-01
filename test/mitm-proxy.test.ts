@@ -133,7 +133,7 @@ test("withProxyToken injects proxy credentials from the token file and fails clo
   }
 });
 
-test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_PROXY and trust NODE_EXTRA_CA_CERTS", { timeout: 30_000 }, async () => {
+test("LLM, web tools, Telegram file download and STT tunnel through HTTPS_PROXY and trust NODE_EXTRA_CA_CERTS", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-mitm-tls-"));
   const sockets = new Set<Duplex>();
   const tunnels: string[] = [];
@@ -156,7 +156,7 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
       [
         "req", "-config", opensslConfig, "-x509", "-newkey", "rsa:2048", "-nodes",
         "-keyout", key, "-out", ca, "-days", "1", "-subj", "/CN=aster-mitm-test",
-        "-addext", "subjectAltName=DNS:api.deepseek.com,DNS:api.telegram.org",
+        "-addext", "subjectAltName=DNS:api.deepseek.com,DNS:api.telegram.org,DNS:api.openai.com",
       ],
       { timeout: 10_000 },
     );
@@ -191,6 +191,12 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
         );
       } else if (req.url === "/v1/tools/fetch") {
         res.end(JSON.stringify({ url: "https://example.org/a", title: "Aster Doc", content: "# Hello" }));
+      } else if (req.url === "/v1/audio/transcriptions") {
+        res.end(JSON.stringify({ text: "proxy transcript" }));
+      } else if (req.url?.endsWith("/getFile")) {
+        res.end(JSON.stringify({ ok: true, result: { file_id: "file-id", file_unique_id: "unique", file_path: "voice/file_1.oga", file_size: 3 } }));
+      } else if (req.url?.startsWith("/file/bot")) {
+        res.end(Buffer.from([1, 2, 3]));
       } else if (req.url?.endsWith("/getMe")) {
         res.end(JSON.stringify({ ok: true, result: { id: 777000, is_bot: true, first_name: "Aster" } }));
       } else if (req.url?.endsWith("/getWebhookInfo")) {
@@ -251,6 +257,7 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
       import { TelegramClient } from "./src/telegram.ts";
       import { searchWeb } from "./src/web-search.ts";
       import { fetchWeb } from "./src/web-fetch.ts";
+      import { transcribeAudio } from "./src/stt.ts";
 
       configureEnvProxy();
 
@@ -270,6 +277,12 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
       const tg = new TelegramClient("__vault_TELEGRAM_BOT_TOKEN__");
       const botId = await tg.identity(AbortSignal.timeout(10_000));
       assert.equal(botId, "777000");
+      const audio = await tg.download({ kind: "voice", fileId: "file-id", durationSeconds: 1, fileSize: 3 }, AbortSignal.timeout(10_000));
+      assert.equal(audio.filename, "audio.ogg");
+      const transcript = await transcribeAudio(audio, {
+        apiUrl: "https://api.openai.com/v1/audio/transcriptions", apiKey: "__vault_STT_API_KEY__", model: "whisper-1",
+      }, AbortSignal.timeout(10_000));
+      assert.equal(transcript, "proxy transcript");
     `;
 
     await exec(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probeScript], {
@@ -280,6 +293,7 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
 
     assert.ok(tunnels.includes("api.deepseek.com:443"), "DeepSeek requests must tunnel through HTTPS_PROXY");
     assert.ok(tunnels.includes("api.telegram.org:443"), "Telegram Bot API requests must tunnel through HTTPS_PROXY");
+    assert.ok(tunnels.includes("api.openai.com:443"), "STT requests must tunnel through HTTPS_PROXY");
     assert.ok(proxyAuth.length >= 2, "each tunnel must present proxy credentials");
     assert.deepEqual([...new Set(proxyAuth)], [expectedAuth], "every CONNECT must carry the proxy token");
     assert.deepEqual(seenRequests, [
@@ -288,6 +302,9 @@ test("LLM fetch, web_search/web_fetch, and TelegramClient tunnel through HTTPS_P
       { method: "POST", url: "/v1/tools/fetch", auth: "Bearer __vault_DEEPSEEK_WEB_API_KEY__" },
       { method: "POST", url: "/bot__vault_TELEGRAM_BOT_TOKEN__/getMe" },
       { method: "POST", url: "/bot__vault_TELEGRAM_BOT_TOKEN__/getWebhookInfo" },
+      { method: "POST", url: "/bot__vault_TELEGRAM_BOT_TOKEN__/getFile" },
+      { method: "GET", url: "/file/bot__vault_TELEGRAM_BOT_TOKEN__/voice/file_1.oga" },
+      { method: "POST", url: "/v1/audio/transcriptions", auth: "Bearer __vault_STT_API_KEY__" },
     ]);
   } finally {
     for (const socket of sockets) socket.destroy();
@@ -346,6 +363,8 @@ test("deployment example, MITM overlay, and allowlist stay aligned without real 
   assert.deepEqual(allowlist.DEEPSEEK_API_KEY, ["api.deepseek.com"]);
   assert.deepEqual(allowlist.DEEPSEEK_WEB_API_KEY, ["api.deepseek.com"]);
   assert.deepEqual(allowlist.TELEGRAM_BOT_TOKEN, ["api.telegram.org"]);
+  assert.equal(seenSecrets.get("STT_API_KEY"), "__vault_STT_API_KEY__");
+  assert.deepEqual(allowlist.STT_API_KEY, ["api.openai.com"]);
 
   const raw = await readFile(join(root, "docker-compose.mitm.yml"), "utf8");
   const overlay = raw

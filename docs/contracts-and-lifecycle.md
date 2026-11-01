@@ -153,6 +153,12 @@ OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、
 6. 按 Telegram 限制拆分消息并发送，记录每段确认结果。
 7. 全部段落确认后标记投递完成。
 
+### Telegram 音频转写
+
+owner 私聊的 voice/audio 与文本共用 requestId 命名空间。接收事务先保存有界音频引用与 offset；音频字节仅在内存暂存，不写 durable 工具参数。下载为可重复的只读操作。收费 STT POST 前持久化 `running`，成功后保存 transcript 为普通文本再进入既有底座请求路径。STT 不跟随聊天 `MODEL_PROVIDER`，不添加另一套 agent loop。
+
+转写失败保存独立诊断码与明确通知，agent 不执行；成功回复附识别文本并沿用分段确认。未保存结果的 `running` 在恢复时转为 `uncertain`，不自动重放，提示可能已处理/计费。下载阶段关闭则保留待转写状态；transcript 已保存后关闭则按原请求恢复。投递失败只重投保存的结果，不重新下载、转写或执行业务。旧文本行新增列为 null，不改变其恢复语义。
+
 ### 恢复窗口
 
 | 中断位置 | 恢复方式 |

@@ -48,6 +48,8 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 | `TELEGRAM_BOT_TOKEN` | 是 | `__vault_TELEGRAM_BOT_TOKEN__` | `secret/aster/TELEGRAM_BOT_TOKEN` | `api.telegram.org` |
 | `DEEPSEEK_API_KEY` | 是 | `__vault_DEEPSEEK_API_KEY__` | `secret/aster/DEEPSEEK_API_KEY` | `api.deepseek.com` |
 | `DEEPSEEK_WEB_API_KEY` | 是（可选） | `__vault_DEEPSEEK_WEB_API_KEY__` | `secret/aster/DEEPSEEK_WEB_API_KEY` | `api.deepseek.com` |
+| `STT_API_KEY` | 是（可选） | `__vault_STT_API_KEY__` | `secret/aster/STT_API_KEY` | 默认 `api.openai.com`；自定义 endpoint 须改 allowlist |
+| `STT_API_URL` / `STT_MODEL` | 否 | 完整 HTTPS 转写 endpoint / STT 模型名 | — | — |
 | 其他提供商 `*_API_KEY` | 是（按需） | `__vault_<NAME>__` | `secret/aster/<NAME>` | 见 `addon/allowlist.json` |
 | `TELEGRAM_OWNER_ID` | 否 | 数值用户 ID（进程内比对，不出站） | — | — |
 | `MODEL_PROVIDER` / `MODEL_ID` / `DATA_DIR` / `MEMORY_*` | 否 | 普通配置值 | — | — |
@@ -132,6 +134,20 @@ ASTER_OPENBAO_SECRETS=$HOME/Aster/secrets/openbao ./bootstrap.sh
 `bootstrap.sh` 可重复执行：已有 TLS 文件、token 文件、KV 条目保持不变。服务端证书 SAN 覆盖 `aster-openbao`、`localhost`、`10.89.82.2`、`127.0.0.1`；客户端证书仅含 `clientAuth`。更换 IP 或网络名后需删除 `tls/` 重新生成，并同步 `compose.yml`。
 
 从明文 `8200` 的旧栈升级时，先 `docker compose down`（`openbao-data` 卷保留；重启后需要重新 unseal），再按上面顺序执行。不要在旧容器仍运行时只重跑 `bootstrap.sh`：旧容器没有新的 loopback `8201` 环境，也不会加载 TLS 配置。
+
+### 可选 STT 凭据
+
+在同一运维目录运行 `./bootstrap.sh STT_API_KEY` 隐藏录入语音供应商 key（不要重复传入无需轮换的其他 key 名）。应用 `.env` 增加：
+
+```dotenv
+STT_API_URL=https://api.openai.com/v1/audio/transcriptions
+STT_API_KEY=__vault_STT_API_KEY__
+STT_MODEL=whisper-1
+```
+
+URL 为完整 HTTPS 转写 endpoint，三项全空禁用，部分配置启动失败。示例 allowlist 仅允许 `STT_API_KEY` 发往 `api.openai.com`；自定义供应商时将 `addon/allowlist.json` 中该条目改为所选 endpoint 的精确主机（无 scheme/path），重启 `mitm` 服务后生效。模型名按供应商选择，不跟随聊天模型。STT key 经 Bearer header 替换，multipart 音频正文不作替换；下载与 STT fetch 使用应用已有的全局代理和 CA 配置。
+
+如使用 `TELEGRAM_API_ROOT`，反向代理必须同时支持 `/bot<token>/getFile` 与 `/file/bot<token>/<file_path>`；占位符模式还需在 `TELEGRAM_BOT_TOKEN` 的 allowlist 条目明确加入该代理主机。未列入白名单时失败关闭，不自动退回直连。
 
 ## 2. 应用加入 `aster_mitm_clients` 并切换为占位符（迁移步骤）
 

@@ -50,6 +50,12 @@ chmod 600 .env
 - 当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`）；其他提供商的 key 留空。
 - `TELEGRAM_API_ROOT`（可选）：https 前缀，无 query 或 fragment。供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理。未设置时使用官方根地址。仓库没有记录这项是否在某台机器上使用。
 
+可选 Telegram 语音转写：设置 `STT_API_URL`（完整 HTTPS endpoint，如 `https://api.openai.com/v1/audio/transcriptions`）、`STT_API_KEY` 与 `STT_MODEL`（如 `whisper-1`）。三项全空禁用，部分配置会使离线检查失败；STT 模型无需出现在聊天 provider 目录。Compose 已通过 `.env` 透传，无需修改环境资源描述。
+
+MITM 模式的 key 写 `__vault_STT_API_KEY__`，真实值录入 OpenBao `secret/aster/STT_API_KEY`；当前 allowlist 的示例主机为 `api.openai.com`，换供应商须把 `STT_API_KEY` 条目改为 endpoint 的精确主机并重启 MITM。明文开发模式通过私有环境提供 key，勿提交。若配置 `TELEGRAM_API_ROOT`，反向代理必须同时支持 Bot API 与 `/file/bot<token>/<file_path>`；MITM 占位符模式也须允许该 Telegram 代理主机。
+
+联调验收应检查：owner 私聊 voice/audio 的识别文本与 agent 回复、禁用时的明确提示、无效凭据/超限时不执行 agent、重启后复用已保存 transcript、投递重试不重复转写。音频仅在内存中暂存（20 MiB / 10 分钟上限），会上传到所配置的 STT 供应商；需由部署者确认其音频格式与数据处理政策。升级增量迁移 inbox 列；回滚旧版本前先排空音频待办，旧版本不识别新音频请求。未保存结果的在途 STT 不自动重放，重新发送可能再次计费。
+
 只检查键是否存在，不要在终端或日志中回显值：
 
 ```sh
