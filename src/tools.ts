@@ -29,6 +29,8 @@ export type ToolGovernance = {
   readonly source: ToolSource;
   readonly trust: "trusted" | "untrusted";
   readonly authz: "read" | "write";
+  /** Canonical approved GitHub baseline fingerprint, including its approval version. */
+  readonly githubApproval?: string;
 };
 
 export type GovernedTool = ToolRegistration & { readonly governance?: ToolGovernance };
@@ -80,6 +82,7 @@ function registration(extension: Extension, tool: GovernedTool): ToolRecord {
     trust: governance.trust,
     replay: tool.replay ?? "unsafe",
     authz: governance.authz,
+    ...(governance.githubApproval === undefined ? {} : { githubApproval: governance.githubApproval }),
     schemaHash: createHash("sha256").update(schema).digest("hex"),
     state: "available",
   });

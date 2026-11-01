@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { GITHUB_ENDPOINT, GITHUB_TOOL_NAMES, parseGithubPolicy, type GithubPolicyConfig } from "./github-policy.js";
 
 const MAX_SERVERS = 8;
 const MAX_STDIO_SERVERS = 4;
@@ -51,6 +52,7 @@ export type McpHttpServerConfig = {
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly auth?: McpAuthConfig;
+  readonly githubPolicy?: GithubPolicyConfig;
   readonly timeoutMs: number;
   readonly connectTimeoutMs: number;
 };
@@ -145,6 +147,12 @@ function collectServers(raw: unknown, env: NodeJS.ProcessEnv): McpConfigReadResu
         stdioCount++;
       }
       names.add(server.name);
+      if (server.name === "github" && (server.transport !== "http" || server.githubPolicy === undefined)) {
+        throw new McpConfigError("github requires the official HTTP readonly policy");
+      }
+      if (server.name === "github" && Object.entries(tools).some(([name, entry]) => name.startsWith("mcp__github__") && (entry.pin === true || entry.authz === "write"))) {
+        throw new McpConfigError("GitHub tools must be deferred and readonly");
+      }
       servers.push(server);
     } catch (error) {
       const message = error instanceof McpConfigError ? error.message : "invalid server entry";
@@ -187,7 +195,7 @@ function parseServer(value: unknown, env: NodeJS.ProcessEnv): McpServerConfig {
 
   const allowed = transport === "stdio"
     ? new Set(["name", "transport", "command", "args", "cwd", "env", "inheritEnv", "timeoutMs", "connectTimeoutMs"])
-    : new Set(["name", "transport", "url", "headers", "auth", "timeoutMs", "connectTimeoutMs"]);
+    : new Set(["name", "transport", "url", "headers", "auth", "githubPolicy", "timeoutMs", "connectTimeoutMs"]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown !== undefined) throw new McpConfigError(`${name}: unknown key ${unknown}`);
 
@@ -244,12 +252,28 @@ function parseServer(value: unknown, env: NodeJS.ProcessEnv): McpServerConfig {
     resolvedHeaders[key] = resolved;
   }
   const auth = value.auth === undefined ? undefined : parseAuth(value.auth, name, env);
+  let githubPolicy: GithubPolicyConfig | undefined;
+  if (name === "github" || value.githubPolicy !== undefined || new URL(value.url).hostname === "api.githubcopilot.com") {
+    try { githubPolicy = parseGithubPolicy(value.githubPolicy); }
+    catch { throw new McpConfigError(`${name}: invalid or missing githubPolicy`); }
+    const entries = Object.entries(resolvedHeaders).map(([key, entry]) => [key.toLowerCase(), entry] as const);
+    const header = Object.fromEntries(entries);
+    if (name !== "github" || value.url !== GITHUB_ENDPOINT || auth !== undefined
+      || entries.length !== 3 || new Set(entries.map(([key]) => key)).size !== 3
+      || header.authorization !== "Bearer __vault_GITHUB_MCP_TOKEN__"
+      || header["x-mcp-readonly"] !== "true"
+      || header["x-mcp-tools"] !== GITHUB_TOOL_NAMES.join(",")
+      || timeoutMs > 60_000 || connectTimeoutMs > 10_000) {
+      throw new McpConfigError(`${name}: GitHub requires the official endpoint, placeholder-only static headers, exact tools and readonly policy, and bounded timeouts`);
+    }
+  }
   return {
     name,
     transport,
     url: value.url,
     headers: resolvedHeaders,
     ...(auth ? { auth } : {}),
+    ...(githubPolicy ? { githubPolicy } : {}),
     timeoutMs,
     connectTimeoutMs,
   };

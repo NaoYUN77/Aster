@@ -35,6 +35,10 @@ export function installMcpTools(
       log(`MCP pin ${name} rejected (TOOL_NOT_FOUND)`);
       continue;
     }
+    if (record.source.server === "github") {
+      log(`MCP pin ${name} rejected (GITHUB_PIN_FORBIDDEN)`);
+      continue;
+    }
     if (recovering === undefined && record.state !== "available") {
       log(`MCP pin ${name} rejected (TOOL_UNAVAILABLE)`);
       continue;
