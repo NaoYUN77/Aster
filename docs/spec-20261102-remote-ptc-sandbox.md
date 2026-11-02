@@ -773,6 +773,8 @@ npm run execution:rpc-e2e
 
 `rpc-e2e` 输出 `executionId`、`streamChunks`、`streamBytes`、`cancelCode` 和 `cancelOutcome`；同时用 `ss -ltn` 确认执行 VPS 只监听私网地址。
 
+证书签发、systemd、防火墙、负向 mTLS 用例、断线检查和证据模板见 [Phase 0 部署与验收 Runbook](runbook-execution-rpc-phase0.md)。
+
 ## 15. 实施步骤
 
 ### 15.1 Phase 0
@@ -837,7 +839,7 @@ npm run execution:rpc-e2e
 - 权限边界：`execute` 的 `executor: "bash"`、任意 `command`、`tool.call` 均返回 `not_implemented` 或 `invalid_request`；不存在任意命令执行路径。
 - 现有测试：`npm run check`、`npm test` 不回归。
 
-**真实跨 VPS**（状态：未执行；本环境没有两台带私网的主机）
+**真实跨 VPS**（状态：未执行；本环境没有两台带私网的主机；按 [Phase 0 部署与验收 Runbook](runbook-execution-rpc-phase0.md) 执行并保存证据）
 
 - Agent 部署在执行 VPS，只绑定私网地址；`ss -ltn` 不显示公网监听，Docker 不发布端口。
 - Gateway 部署在控制面宿主，使用 mTLS 连接；`health.check` 返回执行 VPS 的 `executionId`。
