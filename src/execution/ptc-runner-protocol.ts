@@ -8,9 +8,10 @@ import type {
   PtcToolCallArgs,
   PtcToolCallResult,
   RpcErrorCode,
+  RpcFileMethod,
   RpcSkippedOutput,
 } from "./rpc-protocol.js";
-import { parsePtcToolCallPayload } from "./rpc-protocol.js";
+import { isRpcFileMethod, parseFileRequestPayload, parsePtcToolCallPayload } from "./rpc-protocol.js";
 
 export const PTC_RUNNER_MAX_FRAME_BYTES = 4 * 1024 * 1024;
 export const PTC_RUNNER_HEADER_BYTES = 4;
@@ -37,9 +38,21 @@ export type PtcRunnerToolCall = {
   readonly args: PtcToolCallArgs;
 };
 
+/**
+ * One bounded file primitive executed inside the sandbox. `requestId` is the agent's RPC request
+ * id space; it is independent of the VM's nested `callId`, because a file operation is not a tool
+ * call and must never be answered as one.
+ */
+export type PtcRunnerFile = {
+  readonly t: "file";
+  readonly requestId: number;
+  readonly method: RpcFileMethod;
+  readonly payload: Record<string, unknown>;
+};
+
 export type PtcRunnerCancel = { readonly t: "cancel" };
 
-export type HostToRunner = PtcRunnerStart | PtcRunnerReply | PtcRunnerToolCall | PtcRunnerCancel;
+export type HostToRunner = PtcRunnerStart | PtcRunnerReply | PtcRunnerToolCall | PtcRunnerFile | PtcRunnerCancel;
 
 export type PtcRunnerVm = {
   readonly t: "vm";
@@ -69,6 +82,19 @@ export type PtcRunnerToolError = {
   readonly message: string;
 };
 
+export type PtcRunnerFileDone = {
+  readonly t: "file.done";
+  readonly requestId: number;
+  readonly result: unknown;
+};
+
+export type PtcRunnerFileError = {
+  readonly t: "file.error";
+  readonly requestId: number;
+  readonly code: RpcErrorCode;
+  readonly message: string;
+};
+
 export type PtcRunnerDone = { readonly t: "done" };
 
 export type PtcRunnerError = {
@@ -82,6 +108,8 @@ export type RunnerToHost =
   | PtcRunnerToolOutput
   | PtcRunnerToolDone
   | PtcRunnerToolError
+  | PtcRunnerFileDone
+  | PtcRunnerFileError
   | PtcRunnerDone
   | PtcRunnerError;
 
@@ -219,6 +247,34 @@ export function parseRunnerFrame(payload: Buffer | string): RunnerParseResult<Ru
       },
     };
   }
+  if (t === "file.done") {
+    const unknown = Object.keys(value).find((key) => !["t", "requestId", "result"].includes(key));
+    if (unknown !== undefined) return fail(`unknown file.done field: ${unknown}`);
+    if (!Number.isSafeInteger(value.requestId) || (value.requestId as number) < 1) {
+      return fail("file.done.requestId is invalid");
+    }
+    return { ok: true, value: { t: "file.done", requestId: value.requestId as number, result: value.result } };
+  }
+  if (t === "file.error") {
+    const unknown = Object.keys(value).find((key) => !["t", "requestId", "code", "message"].includes(key));
+    if (unknown !== undefined) return fail(`unknown file.error field: ${unknown}`);
+    if (!Number.isSafeInteger(value.requestId) || (value.requestId as number) < 1) {
+      return fail("file.error.requestId is invalid");
+    }
+    if (typeof value.code !== "string" || typeof value.message !== "string"
+      || Buffer.byteLength(value.message) > 2_048) {
+      return fail("file.error is invalid");
+    }
+    return {
+      ok: true,
+      value: {
+        t: "file.error",
+        requestId: value.requestId as number,
+        code: value.code as RpcErrorCode,
+        message: value.message,
+      },
+    };
+  }
   if (t === "done") return { ok: true, value: { t: "done" } };
   if (t === "error") {
     if (typeof value.code !== "string" || typeof value.message !== "string" || Buffer.byteLength(value.message) > 2_048) {
@@ -288,6 +344,23 @@ export function parseHostFrame(payload: Buffer | string): RunnerParseResult<Host
     const parsed = parsePtcToolCallPayload({ tool: "bash", callId: value.callId, args: value.args });
     if (!parsed.ok) return fail(`tool.call args are invalid: ${parsed.message}`);
     return { ok: true, value: { t: "tool.call", callId: value.callId as number, args: parsed.value.args } };
+  }
+  if (value.t === "file") {
+    const unknown = unknownKey(["t", "requestId", "method", "payload"]);
+    if (unknown !== undefined) return fail(`unknown file field: ${unknown}`);
+    if (!Number.isSafeInteger(value.requestId) || (value.requestId as number) < 1) return fail("file.requestId is invalid");
+    if (!isRpcFileMethod(value.method)) return fail("file.method is invalid");
+    const parsed = parseFileRequestPayload(value.method, value.payload);
+    if (!parsed.ok) return fail(`file payload is invalid: ${parsed.message}`);
+    return {
+      ok: true,
+      value: {
+        t: "file",
+        requestId: value.requestId as number,
+        method: value.method,
+        payload: parsed.value,
+      },
+    };
   }
   if (value.t === "cancel") {
     const unknown = unknownKey(["t"]);

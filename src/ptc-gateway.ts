@@ -3,15 +3,16 @@
 // Interface
 //   derivePtcJobId(conversationId, taskId)     stable identity for one code mode task
 //   SessionBoundCodemodeSandbox                remote VM sandbox whose session is the one bound around start()
-//   PtcGateway.start()                         prove the agent speaks PTC before accepting work
+//   PtcGateway.start()                         prove the agent speaks PTC and file tools before accepting work
 //   PtcGateway.wrapCodemodeTool(tool)          open one PTC session per code mode call, close it in finally
-//   PtcGateway.wrapScriptTools(extension)      run nested bash calls through the session's VM
-//   PtcGateway.close()                         close sessions, then the shared RPC connection
+//   PtcGateway.wrapScriptTools(extension)      run nested bash/read/write/edit calls through the session
+//   PtcGateway.close()                         close sessions, then the RPC connection it owns
 //
-// Inputs: the validated RPC client configuration, the code mode bounds, the execution timeout bounds,
-// and pi-durable's per-call API. Identity is host-derived: jobId from the conversation and the code
-// mode task, sessionId from the host's random source, callId from the durable nested key. The model
-// supplies only script text and tool arguments.
+// Inputs: the validated RPC client configuration (or an already connected client shared with the
+// direct environment), the code mode bounds, the execution timeout bounds, and pi-durable's per-call
+// API. Identity is host-derived: jobId from the conversation and the code mode task, sessionId from the
+// host's random source, callId from the durable nested key. The model supplies only script text and
+// tool arguments.
 //
 // Errors: a missing session, an unexpected nested key and a failed RPC call are errors; the bash
 // wrapper never falls back to the direct broker path. Closing a session is best-effort and logged,
@@ -62,6 +63,9 @@ import { parseNestedCallKey, type PtcRpcClient, type PtcSession } from "./ptc-se
 
 /** Slack over the script deadline for the runner to report its own stop. */
 const VM_DEADLINE_SLACK_MS = 60_000;
+
+/** Built-in tools whose nested form must run in the sandbox rather than on the control plane. */
+const NESTED_FILE_TOOLS: ReadonlySet<string> = new Set(["read", "write", "edit"]);
 
 /** `jobId` names one code mode task's workspace; a rerun of the same task derives the same id. */
 export function derivePtcJobId(conversationId: ConversationId, taskId: TaskId): string {
@@ -228,6 +232,11 @@ export type PtcGatewayOptions = {
   readonly sandbox: SessionBoundCodemodeSandbox;
   readonly defaultTimeoutSeconds: number;
   readonly maxTimeoutSeconds: number;
+  /**
+   * A connected client shared with the agent's direct environment, when the transport already built
+   * one. The owner closes it; the gateway must not close a connection it does not own.
+   */
+  readonly client?: RpcExecutionClient;
   /** Test seam; production connects with mutual TLS or the host socket. */
   readonly connect?: (config: RpcClientConfig) => Promise<RpcExecutionClient>;
   readonly now?: () => number;
@@ -245,18 +254,21 @@ export class PtcGateway {
   readonly #sessions = new Map<TaskId, TrackedSession>();
   #client: RpcExecutionClient | undefined;
   #connecting: Promise<RpcExecutionClient> | undefined;
+  /** Injected clients belong to their owner; only a client this gateway connected is closed here. */
+  #ownsClient = false;
 
   constructor(options: PtcGatewayOptions) {
     this.#options = options;
     this.#sandbox = options.sandbox;
+    this.#client = options.client;
   }
 
-  /** Fail closed at startup when the agent is unreachable or does not advertise PTC. */
+  /** Fail closed at startup when the agent is unreachable or does not advertise PTC and file tools. */
   async start(): Promise<void> {
     const client = await this.#clientHandle();
     const health = await client.health();
-    if (health.protocol !== 1 || health.ptc !== true) {
-      throw new Error("The execution agent does not support the PTC sandbox");
+    if (health.protocol !== 1 || health.ptc !== true || health.fileTools !== true) {
+      throw new Error("The execution agent does not support the PTC sandbox with file tools");
     }
   }
 
@@ -266,6 +278,7 @@ export class PtcGateway {
       const connect = this.#options.connect ?? connectRpcClient;
       const client = await connect(this.#options.rpc);
       this.#client = client;
+      this.#ownsClient = true;
       return client;
     })();
     try {
@@ -391,15 +404,62 @@ export class PtcGateway {
   }
 
   /**
-   * Route nested `bash` calls through the session's VM. A model-issued call keeps the environment
-   * the host built for it; a nested call always gets the PTC environment or fails closed.
+   * Route nested `bash`/`read`/`write`/`edit` calls through the session's VM. A model-issued call
+   * keeps the environment the host built for it; a nested call always gets the PTC environment or
+   * fails closed. File tools run inside the runner, so their paths never resolve on the control plane.
    */
   wrapScriptTools(extension: Extension): Extension {
     if (extension.tools === undefined) return extension;
     return {
       ...extension,
-      tools: extension.tools.map((tool) => tool.name === "bash" ? this.#wrapBash(tool) : tool),
+      tools: extension.tools.map((tool) => {
+        if (tool.name === "bash") return this.#wrapBash(tool);
+        if (NESTED_FILE_TOOLS.has(tool.name)) return this.#wrapNestedFileTool(tool);
+        return tool;
+      }),
     };
+  }
+
+  /** A nested call names its parent task; a model call has no `nested` input and keeps its env. */
+  async #resolveNested(
+    api: ToolExecutionApi,
+    context: Context,
+  ): Promise<{ readonly session: PtcSession; readonly callId: number } | undefined> {
+    const task = await api.getTask(api.taskId, context);
+    const input = task === undefined ? undefined : taskInputRecord(task.input);
+    if (input?.kind !== "nested") return undefined;
+    const parent = taskIdOrUndefined(input.parent);
+    const session = parent === undefined ? undefined : this.#sessionForParent(parent);
+    if (session === undefined) {
+      throw new Error("No active PTC session for this nested call");
+    }
+    const callId = parseNestedCallKey(typeof input.key === "string" ? input.key : undefined);
+    if (callId === undefined) {
+      throw new Error("The nested call key is not a PTC VM call id");
+    }
+    return { session, callId };
+  }
+
+  #executionEnv(api: ToolExecutionApi, session: PtcSession, callId: number): PtcExecutionEnv {
+    return new PtcExecutionEnv({
+      session,
+      callId,
+      cwd: PTC_WORKSPACE_PATH,
+      defaultTimeoutSeconds: this.#options.defaultTimeoutSeconds,
+      maxTimeoutSeconds: this.#options.maxTimeoutSeconds,
+      onOutputRef: async (ref, commitContext) => {
+        await api.commit(
+          async (tx) => await appendPtcOutputInTx(
+            tx,
+            api.conversationId,
+            session.jobId,
+            ref as PtcOutputRef,
+            this.#now(),
+          ),
+          commitContext,
+        );
+      },
+    });
   }
 
   #wrapBash(tool: ToolRegistration): ToolRegistration {
@@ -408,54 +468,38 @@ export class PtcGateway {
       ...tool,
       structuredOutputSchema: PTC_BASH_STRUCTURED_OUTPUT_SCHEMA,
       execute: async (args, api, context) => {
-        const task = await api.getTask(api.taskId, context);
-        const input = task === undefined ? undefined : taskInputRecord(task.input);
-        if (input?.kind !== "nested") {
-          return execute(args, api, context);
-        }
-        const parent = taskIdOrUndefined(input.parent);
-        const session = parent === undefined ? undefined : this.#sessionForParent(parent);
-        if (session === undefined) {
-          throw new Error("No active PTC session for this nested call");
-        }
-        const callId = parseNestedCallKey(typeof input.key === "string" ? input.key : undefined);
-        if (callId === undefined) {
-          throw new Error("The nested call key is not a PTC VM call id");
-        }
-        const env = new PtcExecutionEnv({
-          session,
-          callId,
-          cwd: PTC_WORKSPACE_PATH,
-          defaultTimeoutSeconds: this.#options.defaultTimeoutSeconds,
-          maxTimeoutSeconds: this.#options.maxTimeoutSeconds,
-          onOutputRef: async (ref, commitContext) => {
-            await api.commit(
-              async (tx) => await appendPtcOutputInTx(
-                tx,
-                api.conversationId,
-                session.jobId,
-                ref as PtcOutputRef,
-                this.#now(),
-              ),
-              commitContext,
-            );
-          },
-        });
+        const nested = await this.#resolveNested(api, context);
+        if (nested === undefined) return execute(args, api, context);
+        const env = this.#executionEnv(api, nested.session, nested.callId);
         const result = await execute(args, { ...api, env }, context);
         return withPtcBashOutput(result, env.outputRef, env.spillTruncated);
       },
     };
   }
 
-  /** Close every open session, then the shared connection. */
+  #wrapNestedFileTool(tool: ToolRegistration): ToolRegistration {
+    const execute = tool.execute;
+    return {
+      ...tool,
+      execute: async (args, api, context) => {
+        const nested = await this.#resolveNested(api, context);
+        if (nested === undefined) return execute(args, api, context);
+        return execute(args, { ...api, env: this.#executionEnv(api, nested.session, nested.callId) }, context);
+      },
+    };
+  }
+
+  /** Close every open session, then the connection this gateway connected (never an injected one). */
   async close(): Promise<void> {
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
     await Promise.all(sessions.map((tracked) => tracked.close()));
     const client = this.#client;
+    const owns = this.#ownsClient;
     this.#client = undefined;
     this.#connecting = undefined;
-    await client?.close();
+    this.#ownsClient = false;
+    if (owns) await client?.close();
   }
 }
 

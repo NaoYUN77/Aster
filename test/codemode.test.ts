@@ -92,10 +92,27 @@ test("code mode is opt-in and its sandbox bounds are validated before startup", 
 test("script tools are limited without hiding them from the model", () => {
   const restricted = restrictScriptTools(CodingTools, REMOTE_SCRIPT_TOOLS);
   const tools = new Map((restricted.tools ?? []).map((tool) => [tool.name, tool]));
-  assert.equal(tools.get("bash")?.callers, undefined, "the allowed tool is unchanged");
-  assert.deepEqual(tools.get("read")?.callers, ["model"]);
-  assert.deepEqual(tools.get("write")?.callers, ["model"]);
-  assert.deepEqual(tools.get("edit")?.callers, ["model"]);
+  // Remote scripts may now call the file tools too: they run inside the execution sandbox.
+  for (const name of ["bash", "read", "write", "edit"]) {
+    assert.equal(tools.get(name)?.callers, undefined, `${name} stays available to scripts`);
+  }
+
+  const modelOnly = defineTool({
+    name: "model_only",
+    description: "Only the model may call this.",
+    parameters: Type.Object({}),
+    callers: ["model"],
+    execute: async () => ({ output: [] }),
+  });
+  const ordinary = defineTool({
+    name: "ordinary",
+    description: "Callable by both by default.",
+    parameters: Type.Object({}),
+    execute: async () => ({ output: [] }),
+  });
+  const narrowed = restrictScriptTools(defineExtension({ name: "extra", tools: [modelOnly, ordinary] }), new Set());
+  assert.deepEqual(narrowed.tools?.[0]?.callers, ["model"], "a model-only tool keeps its model caller");
+  assert.deepEqual(narrowed.tools?.[1]?.callers, ["model"], "a default tool loses its script caller");
 
   const toolsOnly = defineTool({
     name: "tools_only",
@@ -203,7 +220,7 @@ test("code mode runs one script whose nested calls stay out of the transcript", 
 
 // The PTC transport is TLS, but the direct execution path still opens the broker's state directory
 // and the broker socket is a Unix domain socket, which Windows does not provide.
-test("code mode in remote execution exposes only bash to scripts", {
+test("code mode in remote execution exposes the sandbox tools to scripts", {
   skip: process.platform === "win32" ? "the execution broker requires a Unix domain socket" : false,
   timeout: 30_000,
 }, async () => {
@@ -262,7 +279,9 @@ test("code mode in remote execution exposes only bash to scripts", {
         const section = systemSection(transcript.messages, "codemode");
         assert.ok(section);
         assert.match(section, /bash/);
-        assert.doesNotMatch(section, /`read`/);
+        assert.match(section, /`read`/);
+        assert.match(section, /`write`/);
+        assert.match(section, /`edit`/);
         return fauxAssistantMessage(fauxToolCall("codemode", {
           code: `
             const first = await tools.bash({ command: "printf remote-first" });

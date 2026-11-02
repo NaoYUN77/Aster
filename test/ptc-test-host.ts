@@ -2,17 +2,20 @@
 // in-process, with `executeBash` standing in for the sandboxed command. Everything between the
 // gateway and the agent still crosses real RPC framing, payload validation, session state and the
 // vm.reply cycle, so control-plane tests cover their half of Phase 1 without bwrap or cgroups.
+import { PtcFileService } from "../src/execution/ptc-fs.js";
 import { PtcHostError, type PtcEventSink, type PtcHost } from "../src/execution/ptc-host.js";
 import { PtcRunnerCore } from "../src/execution/ptc-runner-core.js";
 import type { HostToRunner, RunnerToHost } from "../src/execution/ptc-runner-protocol.js";
-import type {
-  PtcIsolationState,
-  PtcToolCallArgs,
-  PtcToolCallPayload,
-  PtcToolCallResult,
-  PtcVmReplyPayload,
-  PtcVmStartPayload,
-  PtcWorkspaceState,
+import {
+  parseFileResult,
+  type PtcIsolationState,
+  type PtcToolCallArgs,
+  type PtcToolCallPayload,
+  type PtcToolCallResult,
+  type PtcVmReplyPayload,
+  type PtcVmStartPayload,
+  type PtcWorkspaceState,
+  type RpcFileMethod,
 } from "../src/execution/rpc-protocol.js";
 
 export type TestPtcCall = {
@@ -25,12 +28,24 @@ type PendingTool = {
   reject(error: unknown): void;
 };
 
+type PendingFile = {
+  readonly method: RpcFileMethod;
+  resolve(result: unknown): void;
+  reject(error: unknown): void;
+};
+
 type TestSession = {
   readonly jobId: string;
   core?: PtcRunnerCore;
   pending?: Map<number, PendingTool>;
+  pendingFiles?: Map<number, PendingFile>;
   /** The running tool.call's sink; its events belong to that request, not to vm.start. */
   toolSink?: PtcEventSink;
+};
+
+export type TestPtcHostOptions = {
+  /** Host directory exposed as `/workspace` for file primitives; omit to keep them unavailable. */
+  readonly workspacePath?: string;
 };
 
 export class TestPtcHost implements PtcHost {
@@ -45,6 +60,12 @@ export class TestPtcHost implements PtcHost {
   /** Every nested call the agent's sandbox actually ran, in order. */
   readonly calls: TestPtcCall[] = [];
   readonly #sessions = new Map<string, TestSession>();
+  readonly #options: TestPtcHostOptions;
+  #nextFileRequestId = 1;
+
+  constructor(options: TestPtcHostOptions = {}) {
+    this.#options = options;
+  }
 
   async preflight(): Promise<Record<string, boolean | null>> {
     return { usable: true };
@@ -77,8 +98,28 @@ export class TestPtcHost implements PtcHost {
       settle = (error) => error === undefined ? resolve() : reject(error);
     });
     const pending = new Map<number, PendingTool>();
+    const pendingFiles = new Map<number, PendingFile>();
     const send = (frame: RunnerToHost): void => {
       switch (frame.t) {
+        case "file.done": {
+          const file = pendingFiles.get(frame.requestId);
+          if (file === undefined) return;
+          pendingFiles.delete(frame.requestId);
+          const parsed = parseFileResult(file.method, frame.result);
+          if (!parsed.ok) {
+            file.reject(new PtcHostError("protocol_error", `invalid file result: ${parsed.message}`, "failed"));
+            return;
+          }
+          file.resolve(parsed.value);
+          return;
+        }
+        case "file.error": {
+          const file = pendingFiles.get(frame.requestId);
+          if (file === undefined) return;
+          pendingFiles.delete(frame.requestId);
+          file.reject(new PtcHostError(frame.code, frame.message, frame.code === "aborted" ? "unknown" : "failed"));
+          return;
+        }
         case "vm":
           input.sink.vmMessage(frame.callId, frame.messages);
           return;
@@ -112,6 +153,11 @@ export class TestPtcHost implements PtcHost {
         spillMaxBytes: 1024 * 1024,
         jobRetentionMs: 60_000,
       },
+      ...(this.#options.workspacePath === undefined ? {} : {
+        files: new PtcFileService({
+          roots: [{ virtual: "/workspace", host: this.#options.workspacePath, writable: true }],
+        }),
+      }),
       executeBash: async (args, callId, _identity, events) => {
         this.calls.push({ callId, args });
         events.output(`out-${callId}`, "stdout");
@@ -120,6 +166,7 @@ export class TestPtcHost implements PtcHost {
     }, send);
     session.core = core;
     session.pending = pending;
+    session.pendingFiles = pendingFiles;
     try {
       const start: HostToRunner = {
         t: "start",
@@ -130,8 +177,13 @@ export class TestPtcHost implements PtcHost {
       await core.handle(start);
       await done;
     } finally {
+      for (const file of pendingFiles.values()) {
+        file.reject(new PtcHostError("unavailable", "the sandbox ended while the file operation was running", "unknown"));
+      }
+      pendingFiles.clear();
       session.core = undefined;
       session.pending = undefined;
+      session.pendingFiles = undefined;
     }
     return {};
   }
@@ -162,6 +214,46 @@ export class TestPtcHost implements PtcHost {
     } finally {
       session.pending.delete(input.payload.callId);
       if (session.toolSink === input.sink) session.toolSink = undefined;
+    }
+  }
+
+  async fileRequest(input: {
+    sessionId: string;
+    method: RpcFileMethod;
+    payload: Record<string, unknown>;
+    signal: AbortSignal;
+  }): Promise<unknown> {
+    const session = this.#sessions.get(input.sessionId);
+    const core = session?.core;
+    const pendingFiles = session?.pendingFiles;
+    if (core === undefined || pendingFiles === undefined) {
+      throw new PtcHostError("not_found", "no VM is running", "not_started");
+    }
+    if (input.signal.aborted) {
+      throw new PtcHostError("aborted", "the file request was aborted before it started", "not_started");
+    }
+    const requestId = this.#nextFileRequestId++;
+    let rejectPending!: (error: unknown) => void;
+    const result = new Promise<unknown>((resolve, reject) => {
+      rejectPending = reject;
+      pendingFiles.set(requestId, { method: input.method, resolve, reject });
+    });
+    const onAbort = () => {
+      if (!pendingFiles.delete(requestId)) return;
+      rejectPending(new PtcHostError(
+        "aborted",
+        "the file request was aborted",
+        input.method === "file.write" ? "unknown" : "failed",
+      ));
+    };
+    input.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      void core.handle({ t: "file", requestId, method: input.method, payload: input.payload })
+        .catch(() => undefined);
+      return await result;
+    } finally {
+      input.signal.removeEventListener("abort", onAbort);
+      pendingFiles.delete(requestId);
     }
   }
 

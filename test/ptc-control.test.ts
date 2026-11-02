@@ -137,11 +137,12 @@ type Recorded = {
 function ptcEnv(options: {
   result?: (payload: PtcToolCallPayload) => Promise<PtcToolCallResult>;
   onOutputRef?: (ref: PtcOutputRef) => Promise<void>;
+  file?: (method: string, payload: Record<string, unknown>) => Promise<unknown>;
 } = {}) {
   const calls: Recorded[] = [];
   const committed: PtcOutputRef[] = [];
   const session: PtcSession = {
-    // Only `startToolCall` is reachable from `exec`.
+    // Only `startToolCall` and `fileRequest` are reachable from the environment.
     client: {
       startToolCall: (_sessionId: string, payload: PtcToolCallPayload, invoke: { deadlineMs?: number }) => {
         calls.push({ payload, deadlineMs: invoke.deadlineMs });
@@ -150,6 +151,10 @@ function ptcEnv(options: {
           : options.result(payload);
         return { id: "call-1", result, cancel: () => undefined };
       },
+      fileRequest: (_sessionId: string, method: string, payload: Record<string, unknown>) =>
+        options.file === undefined
+          ? Promise.reject(new RpcClientError("not_implemented", "no file transport", { outcome: "failed" }))
+          : options.file(method, payload),
     } as unknown as RpcExecutionClient,
     sessionId,
     jobId,
@@ -228,7 +233,7 @@ test("the PTC environment fails the call when its output ref cannot be recorded"
   }
 });
 
-test("the PTC environment maps agent failures and closes file tools", async () => {
+test("the PTC environment maps agent failures and delegates file tools to the session", async () => {
   const timeouts = ptcEnv({ result: async () => Promise.reject(new RpcClientError("timeout", "late")) });
   const timeout = await timeouts.env.exec("sleep 9", undefined, BACKGROUND_CONTEXT);
   assert.equal(timeout.ok, false);
@@ -239,8 +244,25 @@ test("the PTC environment maps agent failures and closes file tools", async () =
   assert.equal(unknown.ok, false);
   if (!unknown.ok) assert.match(unknown.error.message, /outcome is unknown/);
 
-  const { env } = ptcEnv();
+  const requests: Array<{ method: string; payload: Record<string, unknown> }> = [];
+  const { env } = ptcEnv({
+    file: async (method, payload) => {
+      requests.push({ method, payload });
+      if (method === "file.readText") return { data: Buffer.from("hola").toString("base64") };
+      if (method === "file.write") return { info: { name: "b.txt", path: "/workspace/b.txt", kind: "file", size: 4, mtimeMs: 1 } };
+      return Promise.reject(new RpcClientError("not_found", "missing", { outcome: "failed" }));
+    },
+  });
   const read = await env.readTextFile("/workspace/a.txt", BACKGROUND_CONTEXT);
-  assert.equal(read.ok, false);
-  if (!read.ok) assert.equal(read.error.code, "not_supported");
+  assert.equal(read.ok, true);
+  if (read.ok) assert.equal(read.value, "hola");
+  const written = await env.writeFile("/workspace/b.txt", "data", BACKGROUND_CONTEXT);
+  assert.equal(written.ok, true);
+  assert.deepEqual(requests.map(({ method }) => method), ["file.readText", "file.write"]);
+  assert.equal(requests[1]?.payload.path, "/workspace/b.txt", "the virtual path crosses, never a host path");
+
+  // Namespace operations the sandbox cannot honor stay closed rather than half-implemented.
+  const list = await env.listDir("/workspace", BACKGROUND_CONTEXT);
+  assert.equal(list.ok, false);
+  if (!list.ok) assert.equal(list.error.code, "not_supported");
 });

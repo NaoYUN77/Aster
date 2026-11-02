@@ -59,6 +59,9 @@ test("PTC RPC runs a VM, routes its nested call to the sandbox, and answers the 
     assert.equal(health.phase, 1);
     assert.equal(health.ptc, true);
     assert.equal(health.testExecutor, false);
+    assert.equal(health.directBash, false);
+    assert.equal(health.fileTools, true);
+    assert.ok(health.methods.includes("file.write"));
 
     const preflight = await client.preflight();
     assert.equal(preflight.ok, true);

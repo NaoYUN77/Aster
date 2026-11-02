@@ -5,7 +5,9 @@ import type {
   PtcVmReplyPayload,
   PtcVmStartPayload,
   PtcWorkspaceState,
+  RpcBashExecutePayload,
   RpcErrorCode,
+  RpcFileMethod,
   RpcOutcome,
   RpcSkippedOutput,
 } from "./rpc-protocol.js";
@@ -55,6 +57,34 @@ export type PtcHost = {
     readonly signal: AbortSignal;
     readonly sink: PtcEventSink;
   }): Promise<PtcToolCallResult>;
+  /** One bounded file primitive, executed inside this session's sandbox. */
+  fileRequest(input: {
+    readonly sessionId: string;
+    readonly method: RpcFileMethod;
+    readonly payload: Record<string, unknown>;
+    readonly signal: AbortSignal;
+  }): Promise<unknown>;
   /** Requests immediate process termination; the signal is the cooperative path. */
   cancel(sessionId: string, requestId: string): void;
+};
+
+/** A direct session's host, which owns `/shared` and one private `/tmp` directory per session. */
+export type DirectHost = {
+  readonly enabled: boolean;
+  readonly sharedMode: "none" | "ro" | "rw";
+  preflight(): Promise<Record<string, boolean | null>>;
+  openSession(sessionId: string): Promise<{ readonly sharedMode: "ro" | "rw"; readonly tmpPath: string }>;
+  closeSession(sessionId: string): Promise<void>;
+  execute(input: {
+    readonly sessionId: string;
+    readonly payload: RpcBashExecutePayload;
+    readonly signal: AbortSignal;
+    readonly emit: (seq: number, stream: "stdout" | "stderr", text: string, skipped?: RpcSkippedOutput) => void;
+  }): Promise<{ readonly exitCode: number; readonly durationMs: number }>;
+  fileRequest(input: {
+    readonly sessionId: string;
+    readonly method: RpcFileMethod;
+    readonly payload: Record<string, unknown>;
+    readonly signal: AbortSignal;
+  }): Promise<unknown>;
 };

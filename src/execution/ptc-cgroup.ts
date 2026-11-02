@@ -98,9 +98,9 @@ async function probeCgroup(config: PtcConfig): Promise<boolean> {
   }
 }
 
-async function probeDirectory(path: string): Promise<boolean> {
+async function probeDirectory(path: string, mode: "read" | "write" = "write"): Promise<boolean> {
   try {
-    await access(path, constants.W_OK);
+    await access(path, mode === "write" ? constants.W_OK : constants.R_OK | constants.X_OK);
     return true;
   } catch {
     return false;
@@ -137,14 +137,21 @@ export async function probePtcRuntime(config: PtcConfig): Promise<PtcRuntimeProb
         cgroup,
         workspaceRoot,
         sharedWorkspace: null,
+        directTmpRoot: null,
       },
       cgroupAvailable: cgroup,
     };
   }
   let sharedWorkspace: boolean | null = null;
-  if (config.sharedWorkspaceMode === "ro" && config.sharedWorkspace !== undefined) {
-    sharedWorkspace = await probeDirectory(config.sharedWorkspace);
+  if (config.sharedWorkspaceMode !== "none" && config.sharedWorkspace !== undefined) {
+    sharedWorkspace = await probeDirectory(
+      config.sharedWorkspace,
+      config.sharedWorkspaceMode === "rw" ? "write" : "read",
+    );
   }
+  const directTmpRoot = config.directEnabled
+    ? await probeDirectory(config.directTmpRoot)
+    : null;
   return {
     isolation: useBwrap
       ? {
@@ -162,6 +169,7 @@ export async function probePtcRuntime(config: PtcConfig): Promise<PtcRuntimeProb
       cgroup: useBwrap ? cgroup : null,
       workspaceRoot,
       sharedWorkspace,
+      directTmpRoot,
       degraded: useBwrap ? null : true,
     },
     cgroupAvailable: useBwrap && cgroup,

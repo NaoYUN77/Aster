@@ -14,6 +14,7 @@ import {
   type RunnerToHost,
 } from "./ptc-runner-protocol.js";
 import {
+  parseFileResult,
   parsePtcToolCallResult,
   type PtcIsolationState,
   type PtcToolCallPayload,
@@ -22,6 +23,7 @@ import {
   type PtcVmStartPayload,
   type PtcWorkspaceState,
   type RpcErrorCode,
+  type RpcFileMethod,
   type RpcOutcome,
 } from "./rpc-protocol.js";
 
@@ -51,6 +53,12 @@ type PendingTool = {
   readonly reject: (error: unknown) => void;
 };
 
+type PendingFile = {
+  readonly method: RpcFileMethod;
+  readonly resolve: (result: unknown) => void;
+  readonly reject: (error: unknown) => void;
+};
+
 type Runner = {
   readonly sessionId: string;
   readonly jobId: string;
@@ -62,6 +70,7 @@ type Runner = {
   exit: Promise<void>;
   vm?: PendingVm;
   tool?: PendingTool;
+  readonly files: Map<number, PendingFile>;
   finished: boolean;
   exited: boolean;
   stderr: string;
@@ -92,6 +101,7 @@ export class PtcExecutor implements PtcHost {
   readonly enabled: boolean;
   private readonly sessions = new Map<string, SessionState>();
   private readonly usable: boolean;
+  private nextFileRequestId = 1;
 
   constructor(private readonly options: PtcExecutorOptions) {
     this.isolation = options.probe.isolation;
@@ -207,6 +217,52 @@ export class PtcExecutor implements PtcHost {
     }
   }
 
+  /**
+   * Forward one file primitive into the running sandbox. File requests never share the VM's call
+   * cycle, so a slow read cannot deadlock a nested tool call; an aborted file request is dropped
+   * from the pending map and its late answer is ignored.
+   */
+  async fileRequest(input: {
+    sessionId: string;
+    method: RpcFileMethod;
+    payload: Record<string, unknown>;
+    signal: AbortSignal;
+  }): Promise<unknown> {
+    const session = this.requireSession(input.sessionId);
+    const runner = session.runner;
+    if (runner === undefined) {
+      throw new PtcHostError("not_found", "no VM is running in this session", "not_started");
+    }
+    if (input.signal.aborted) {
+      throw new PtcHostError("aborted", "the file request was aborted before it started", "not_started");
+    }
+    const requestId = this.nextFileRequestId++;
+    if (!Number.isSafeInteger(requestId)) {
+      throw new PtcHostError("busy", "the sandbox ran out of file request ids", "not_started");
+    }
+    let rejectPending!: (error: unknown) => void;
+    const result = new Promise<unknown>((resolve, reject) => {
+      rejectPending = reject;
+      runner.files.set(requestId, { method: input.method, resolve, reject });
+    });
+    const onAbort = () => {
+      if (!runner.files.delete(requestId)) return;
+      rejectPending(new PtcHostError(
+        "aborted",
+        "the file request was aborted",
+        input.method === "file.write" ? "unknown" : "failed",
+      ));
+    };
+    input.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      this.send(runner, { t: "file", requestId, method: input.method, payload: input.payload });
+      return await result;
+    } finally {
+      input.signal.removeEventListener("abort", onAbort);
+      runner.files.delete(requestId);
+    }
+  }
+
   cancel(sessionId: string, _requestId: string): void {
     const session = this.sessions.get(sessionId);
     if (session === undefined) return;
@@ -280,6 +336,7 @@ export class PtcExecutor implements PtcHost {
       child,
       decoder: new PtcRunnerFrameDecoder(),
       ...(cgroup === undefined ? {} : { cgroup }),
+      files: new Map(),
       writes: Promise.resolve(),
       exit: Promise.resolve(),
       finished: false,
@@ -391,6 +448,30 @@ export class PtcExecutor implements PtcHost {
         tool.reject(new PtcHostError(code, frame.message, outcomeFor(code)));
         return;
       }
+      case "file.done": {
+        const pending = runner.files.get(frame.requestId);
+        if (pending === undefined) return;
+        runner.files.delete(frame.requestId);
+        const parsed = parseFileResult(pending.method, frame.result);
+        if (!parsed.ok) {
+          pending.reject(new PtcHostError(
+            "protocol_error",
+            `the sandbox sent an invalid file result: ${parsed.message}`,
+            "failed",
+          ));
+          return;
+        }
+        pending.resolve(parsed.value);
+        return;
+      }
+      case "file.error": {
+        const pending = runner.files.get(frame.requestId);
+        if (pending === undefined) return;
+        runner.files.delete(frame.requestId);
+        const code: RpcErrorCode = ERROR_CODES.has(frame.code) ? frame.code : "internal";
+        pending.reject(new PtcHostError(code, frame.message, outcomeFor(code)));
+        return;
+      }
       case "done":
         this.finishRunner(session, runner, undefined);
         return;
@@ -415,6 +496,14 @@ export class PtcExecutor implements PtcHost {
     if (tool !== undefined) {
       tool.reject(error ?? new PtcHostError("internal", "the VM ended while a nested call was running", "unknown"));
     }
+    for (const pending of runner.files.values()) {
+      pending.reject(error ?? new PtcHostError(
+        "unavailable",
+        "the sandbox ended while the file operation was running",
+        "unknown",
+      ));
+    }
+    runner.files.clear();
     if (vm !== undefined) {
       if (error === undefined) vm.resolve();
       else vm.reject(error);

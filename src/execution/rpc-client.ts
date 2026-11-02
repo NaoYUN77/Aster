@@ -2,8 +2,13 @@ import { randomUUID } from "node:crypto";
 import {
   RPC_MAX_DEADLINE_MS,
   RPC_MIN_DEADLINE_MS,
+  parseBashExecuteResult,
+  parseFileResult,
   parsePtcToolCallResult,
   type PtcIsolationState,
+  type RpcBashExecutePayload,
+  type RpcBashExecuteResult,
+  type RpcFileMethod,
   type PtcToolCallPayload,
   type PtcToolCallResult,
   type PtcVmReplyPayload,
@@ -70,6 +75,7 @@ export type RpcHandle<TResult> = {
 };
 
 export type RpcExecuteHandle = RpcHandle<TestExecutionResult>;
+export type RpcBashExecuteHandle = RpcHandle<RpcBashExecuteResult>;
 export type RpcVmHandle = RpcHandle<unknown>;
 export type RpcToolCallHandle = RpcHandle<PtcToolCallResult>;
 
@@ -98,6 +104,9 @@ export type RpcHealthResult = {
   readonly testExecutor: boolean;
   readonly ptc?: boolean;
   readonly isolation?: PtcIsolationState;
+  readonly directBash?: boolean;
+  readonly fileTools?: boolean;
+  readonly sharedMode?: "none" | "ro" | "rw";
 };
 
 export type RpcPreflightResult = {
@@ -112,6 +121,12 @@ export type RpcSessionResult = {
   readonly executionId: string;
   readonly jobId?: string;
   readonly workspaceReady?: PtcWorkspaceState;
+  /** Present when the session is a direct session over `/shared` and its private `/tmp`. */
+  readonly direct?: {
+    readonly sharedMode: "ro" | "rw";
+    readonly workspace: string;
+    readonly tmp: string;
+  };
   readonly limits: {
     readonly maxSessions: number;
     readonly maxConcurrent: number;
@@ -121,7 +136,9 @@ export type RpcSessionResult = {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 /** A dropped connection or a cancelled request leaves these in an unknown state, not "not started". */
-const SIDE_EFFECTING_METHODS: ReadonlySet<RpcRequestFrame["method"]> = new Set(["execute", "tool.call", "vm.start"]);
+const SIDE_EFFECTING_METHODS: ReadonlySet<RpcRequestFrame["method"]> = new Set([
+  "execute", "tool.call", "vm.start", "file.write",
+]);
 
 function clampDeadline(value: number | undefined, fallback: number): number {
   const candidate = value ?? fallback;
@@ -225,6 +242,60 @@ export class RpcExecutionClient {
       result: request.promise as Promise<TestExecutionResult>,
       cancel: (reason?: string) => this.cancel(sessionId, request.id, reason),
     };
+  }
+
+  /**
+   * Run one command directly in the sandbox of a direct session. The result carries only the exit
+   * code and duration; output arrives through `onOutput` and is bounded by the payload's window.
+   */
+  startBashExecute(
+    sessionId: string,
+    payload: RpcBashExecutePayload,
+    options: {
+      readonly deadlineMs?: number;
+      readonly signal?: AbortSignal;
+      readonly onOutput?: (event: RpcOutputEvent) => void;
+    } = {},
+  ): RpcBashExecuteHandle {
+    const request = this.beginRequest("execute", payload as unknown as Record<string, unknown>, {
+      sessionId,
+      deadlineMs: options.deadlineMs ?? Math.min(RPC_MAX_DEADLINE_MS, payload.timeoutMs + 60_000),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.onOutput === undefined ? {} : { onOutput: options.onOutput }),
+    });
+    return {
+      id: request.id,
+      result: request.promise.then((value) => {
+        const parsed = parseBashExecuteResult(value);
+        if (!parsed.ok) {
+          // The command ran; an unreadable result is an unknown outcome, never a success.
+          throw new RpcClientError("protocol_error", `execute result is invalid: ${parsed.message}`, { outcome: "unknown" });
+        }
+        return parsed.value;
+      }),
+      cancel: (reason?: string) => this.cancel(sessionId, request.id, reason),
+    };
+  }
+
+  /** One bounded file primitive; the response is validated against the method that produced it. */
+  async fileRequest(
+    sessionId: string,
+    method: RpcFileMethod,
+    payload: Record<string, unknown>,
+    options: { readonly deadlineMs?: number; readonly signal?: AbortSignal } = {},
+  ): Promise<unknown> {
+    const value = await this.request(method, payload, {
+      sessionId,
+      ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    const parsed = parseFileResult(method, value);
+    if (!parsed.ok) {
+      throw new RpcClientError("protocol_error", `${method} result is invalid: ${parsed.message}`, {
+        outcome: method === "file.write" ? "unknown" : "failed",
+      });
+    }
+    return parsed.value;
   }
 
   /** Start the remote VM for one code mode script. Resolves when the script settles. */

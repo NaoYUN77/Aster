@@ -3,6 +3,7 @@ import { ConfigurationError } from "../errors.js";
 import { describeRpcAgentConfig, readRpcAgentConfig, readTlsMaterial } from "./rpc-config.js";
 import { probePtcRuntime } from "./ptc-cgroup.js";
 import { readPtcConfig } from "./ptc-config.js";
+import { DirectExecutor } from "./direct-executor.js";
 import { PtcExecutor } from "./ptc-executor.js";
 import { startRpcAgent } from "./rpc-server.js";
 import { listenTlsRpc, listenUnixRpc, type RpcServer } from "./rpc-transport.js";
@@ -22,15 +23,22 @@ async function main(): Promise<void> {
   const config = readRpcAgentConfig();
   const ptcConfig = readPtcConfig();
   let ptc: PtcExecutor | undefined;
+  let direct: DirectExecutor | undefined;
   let ptcChecks: Record<string, boolean | null> | undefined;
+  let directChecks: Record<string, boolean | null> | undefined;
   if (ptcConfig !== undefined) {
     const probe = await probePtcRuntime(ptcConfig);
     ptc = new PtcExecutor({ config: ptcConfig, probe });
     ptcChecks = await ptc.preflight();
+    // Direct sessions share the PTC runtime probe; they are only advertised when isolation,
+    // `/shared` and the per-session tmp root are all usable.
+    direct = new DirectExecutor({ config: ptcConfig, probe });
+    directChecks = await direct.preflight();
   }
   const checkReport = (): string => `${JSON.stringify({
     ...describeRpcAgentConfig(config),
     ...(ptcChecks === undefined ? {} : { ptc: ptcChecks }),
+    ...(directChecks === undefined ? {} : { direct: directChecks }),
   }, null, 2)}\n`;
   let server: RpcServer;
   let transport: "unix" | "tls" = config.transport;
@@ -81,6 +89,12 @@ async function main(): Promise<void> {
       "PTC is enabled but this host cannot provide bwrap, user namespaces and cgroup v2 (or an explicitly allowed degraded fallback)",
     );
   }
+  if (direct !== undefined && ptcConfig?.directEnabled === true && !direct.enabled) {
+    // A gateway would otherwise open direct sessions that fail per request; refuse to advertise it.
+    throw new ConfigurationError(
+      "PTC_DIRECT_ENABLED is set but this host cannot provide bwrap, user namespaces, cgroup v2, a readable shared workspace and a writable tmp root",
+    );
+  }
   const agent = startRpcAgent({
     server,
     executionId: config.executionId,
@@ -91,6 +105,7 @@ async function main(): Promise<void> {
     heartbeatMs: config.heartbeatMs,
     testExecutorEnabled: config.testExecutorEnabled,
     ...(ptc === undefined ? {} : { ptc }),
+    ...(direct === undefined ? {} : { direct }),
   });
   const address = server.address();
   const target = "path" in address ? address.path : `${address.host}:${address.port}`;
@@ -99,7 +114,9 @@ async function main(): Promise<void> {
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    agent.close().then(() => process.exit(0), () => process.exit(1));
+    agent.close()
+      .then(() => direct?.closeAll())
+      .then(() => process.exit(0), () => process.exit(1));
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);

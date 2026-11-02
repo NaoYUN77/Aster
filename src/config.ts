@@ -174,16 +174,37 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   };
 }
 
-/** Tool execution placement. Local is the default and the only mode that exposes file tools. */
+/**
+ * Tool execution placement. Local is the default. Remote execution picks exactly one transport:
+ * `ssh` keeps the legacy broker socket path; `rpc` uses the execution agent's direct sessions, which
+ * also carry the file primitives. The control plane never falls back from one to the other.
+ */
 export type ExecutionConfig = {
-  /** Private host socket shared with the broker container; never a network address. */
-  readonly brokerSocket: string;
   /** Working directory on the execution host. The control plane's DATA_DIR never applies there. */
   readonly remoteCwd: string;
-  readonly connectTimeoutMs: number;
   readonly defaultTimeoutSeconds: number;
   readonly maxTimeoutSeconds: number;
-};
+} & (
+  | {
+      readonly transport: "ssh";
+      /** Private host socket shared with the broker container; never a network address. */
+      readonly brokerSocket: string;
+      readonly connectTimeoutMs: number;
+    }
+  | {
+      readonly transport: "rpc";
+      /** Validated execution agent connection; the agent also runs the direct sandbox. */
+      readonly rpc: RpcClientConfig;
+    }
+);
+
+/** `/shared` itself or a path below it; the direct sandbox exposes nothing else to commands. */
+function isSharedRemotePath(value: string): boolean {
+  return value === "/shared"
+    || (value.startsWith("/shared/")
+      && !value.includes("\\")
+      && !value.split("/").includes(".."));
+}
 
 function boundedInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
   const raw = env[key]?.trim();
@@ -197,23 +218,25 @@ function boundedInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, m
 }
 
 /**
- * EXECUTION_MODE=remote selects the host-side broker. Every remote setting is validated before the
- * process can reach the broker, and values unrelated to the selected mode are ignored rather than
- * leaking into a local deployment.
+ * EXECUTION_MODE=remote selects a remote transport; EXECUTION_REMOTE_TRANSPORT chooses which one
+ * (default `ssh`, the legacy broker). Every setting of the selected transport is validated before the
+ * process can reach the agent, and settings of the other transport are ignored rather than silently
+ * taking effect after a later switch. Ownership of `EXECUTION_REMOTE_CWD` follows the transport: the
+ * direct sandbox only exposes `/shared`, so the RPC path confines it there.
  */
 export function readExecutionConfig(env: NodeJS.ProcessEnv = process.env): ExecutionConfig | undefined {
   const mode = env.EXECUTION_MODE?.trim() || "local";
   if (mode === "local") return undefined;
   if (mode !== "remote") throw new ConfigurationError("EXECUTION_MODE must be local or remote");
+  const transport = env.EXECUTION_REMOTE_TRANSPORT?.trim() || "ssh";
+  if (transport !== "ssh" && transport !== "rpc") {
+    throw new ConfigurationError("EXECUTION_REMOTE_TRANSPORT must be ssh or rpc");
+  }
   const required = (key: string) => {
     const value = env[key]?.trim();
     if (!value) throw new ConfigurationError(`Missing configuration: ${key}`);
     return value;
   };
-  const brokerSocket = required("EXECUTION_BROKER_SOCKET");
-  if (!isAbsoluteRemotePath(brokerSocket)) {
-    throw new ConfigurationError("EXECUTION_BROKER_SOCKET must be an absolute POSIX socket path without control characters");
-  }
   const remoteCwd = required("EXECUTION_REMOTE_CWD");
   if (!isAbsoluteRemotePath(remoteCwd)) {
     throw new ConfigurationError("EXECUTION_REMOTE_CWD must be an absolute POSIX path without control characters");
@@ -221,12 +244,29 @@ export function readExecutionConfig(env: NodeJS.ProcessEnv = process.env): Execu
   if (Buffer.byteLength(remoteCwd, "utf8") > 4096) {
     throw new ConfigurationError("EXECUTION_REMOTE_CWD must be at most 4096 bytes");
   }
+  if (transport === "rpc" && !isSharedRemotePath(remoteCwd)) {
+    throw new ConfigurationError("EXECUTION_REMOTE_CWD must be /shared or a path below it for the rpc transport");
+  }
   const defaultTimeoutSeconds = boundedInteger(env, "EXECUTION_DEFAULT_TIMEOUT_SECONDS", 300, 1, 86_400);
   const maxTimeoutSeconds = boundedInteger(env, "EXECUTION_MAX_TIMEOUT_SECONDS", 3600, 1, 86_400);
   if (defaultTimeoutSeconds > maxTimeoutSeconds) {
     throw new ConfigurationError("EXECUTION_DEFAULT_TIMEOUT_SECONDS must not exceed EXECUTION_MAX_TIMEOUT_SECONDS");
   }
+  if (transport === "rpc") {
+    return {
+      transport,
+      rpc: readRpcClientConfig(env),
+      remoteCwd,
+      defaultTimeoutSeconds,
+      maxTimeoutSeconds,
+    };
+  }
+  const brokerSocket = required("EXECUTION_BROKER_SOCKET");
+  if (!isAbsoluteRemotePath(brokerSocket)) {
+    throw new ConfigurationError("EXECUTION_BROKER_SOCKET must be an absolute POSIX socket path without control characters");
+  }
   return {
+    transport,
     brokerSocket,
     remoteCwd,
     connectTimeoutMs: boundedInteger(env, "EXECUTION_BROKER_CONNECT_TIMEOUT_MS", 5_000, 100, 60_000),

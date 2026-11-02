@@ -436,14 +436,22 @@ test("Phase 0 only exposes the test executor and deduplicates request ids per co
     const opened = responseFrame(await frames.waitFor((frame) => frame.kind === "response" && frame.id === "open-1"));
     assert.equal(opened.status, "ok");
 
-    connection.send(request("bash-1", "execute", { executor: "bash", command: "id" }, "sess-raw"));
+    // Well-formed for the protocol boundary even though this agent runs Phase 0: the frame is
+    // parsed (and so must be valid) before the dispatcher can answer `not_implemented`.
+    connection.send(request("bash-1", "execute", {
+      executor: "bash",
+      command: "id",
+      cwd: "/shared",
+      env: {},
+      inheritEnv: false,
+      timeoutMs: 1_000,
+      window: { maxBytes: 1_024, maxLines: 10, minIntervalMs: 0, bytesPerSecond: 0 },
+    }, "sess-raw"));
     assertErrorResponse(
       await frames.waitFor((frame) => frame.kind === "response" && frame.id === "bash-1"),
       "not_implemented",
     );
 
-    // Well-formed for the protocol boundary even though this agent runs Phase 0: the frame is
-    // parsed (and so must be valid) before the dispatcher can answer `not_implemented`.
     connection.send(request("tool-1", "tool.call", {
       tool: "bash",
       callId: 1,

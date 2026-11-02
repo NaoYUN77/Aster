@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ConfigurationError } from "../errors.js";
@@ -9,7 +10,11 @@ export const PTC_JOB_ID_PATTERN = /^ptc-[a-f0-9]{32}$/;
 export type PtcConfig = {
   readonly workspaceRoot: string;
   readonly sharedWorkspace: string | undefined;
-  readonly sharedWorkspaceMode: "none" | "ro";
+  readonly sharedWorkspaceMode: "none" | "ro" | "rw";
+  /** Direct RPC bash/file sessions; opt-in because they expose `/shared` to the control plane. */
+  readonly directEnabled: boolean;
+  /** Root for per-session host `/tmp` directories; never shared between sessions. */
+  readonly directTmpRoot: string;
   readonly cgroupRoot: string;
   readonly cgroupMemoryMaxBytes: number;
   readonly cgroupPidsMax: number;
@@ -63,8 +68,8 @@ export function readPtcConfig(env: NodeJS.ProcessEnv = process.env): PtcConfig |
   if (enabled !== "1") throw new ConfigurationError("PTC_ENABLED must be 0 or 1");
 
   const mode = env.PTC_SHARED_WORKSPACE_MODE ?? "none";
-  if (mode !== "none" && mode !== "ro") {
-    throw new ConfigurationError("PTC_SHARED_WORKSPACE_MODE must be none or ro in Phase 1");
+  if (mode !== "none" && mode !== "ro" && mode !== "rw") {
+    throw new ConfigurationError("PTC_SHARED_WORKSPACE_MODE must be none, ro or rw");
   }
   const sharedWorkspace = env.PTC_SHARED_WORKSPACE === undefined || env.PTC_SHARED_WORKSPACE === ""
     ? undefined
@@ -72,6 +77,16 @@ export function readPtcConfig(env: NodeJS.ProcessEnv = process.env): PtcConfig |
   if (mode !== "none" && sharedWorkspace === undefined) {
     throw new ConfigurationError("PTC_SHARED_WORKSPACE is required when PTC_SHARED_WORKSPACE_MODE is not none");
   }
+  const directEnabled = env.PTC_DIRECT_ENABLED === "1";
+  if (env.PTC_DIRECT_ENABLED !== undefined && env.PTC_DIRECT_ENABLED !== "0" && !directEnabled) {
+    throw new ConfigurationError("PTC_DIRECT_ENABLED must be 0 or 1");
+  }
+  if (directEnabled && sharedWorkspace === undefined) {
+    throw new ConfigurationError("PTC_DIRECT_ENABLED requires PTC_SHARED_WORKSPACE");
+  }
+  const directTmpRoot = env.PTC_DIRECT_TMP_ROOT === undefined || env.PTC_DIRECT_TMP_ROOT === ""
+    ? tmpdir()
+    : absolutePath(env, "PTC_DIRECT_TMP_ROOT", "");
   const allowDegraded = env.PTC_ALLOW_DEGRADED === "1";
   if (env.PTC_ALLOW_DEGRADED !== undefined && env.PTC_ALLOW_DEGRADED !== "0" && !allowDegraded) {
     throw new ConfigurationError("PTC_ALLOW_DEGRADED must be 0 or 1");
@@ -92,6 +107,8 @@ export function readPtcConfig(env: NodeJS.ProcessEnv = process.env): PtcConfig |
     workspaceRoot: absolutePath(env, "PTC_WORKSPACE_ROOT", "/home/aster/jobs"),
     sharedWorkspace,
     sharedWorkspaceMode: mode,
+    directEnabled,
+    directTmpRoot,
     cgroupRoot: absolutePath(env, "PTC_CGROUP_ROOT", "/sys/fs/cgroup/aster-ptc"),
     cgroupMemoryMaxBytes: integer(env, "PTC_CGROUP_MEMORY_MAX_BYTES", 512 * 1024 * 1024, 16 * 1024 * 1024, 8 * 1024 * 1024 * 1024),
     cgroupPidsMax: integer(env, "PTC_CGROUP_PIDS_MAX", 128, 8, 4_096),

@@ -1,0 +1,51 @@
+# Remote PTC Phase 1／2 自动化验收记录（2026-11-03）
+
+- 状态：**自动化通过，真实双 VPS 验收待执行**
+- 分支：`feat/remote-ptc-sandbox-phase1`
+- Phase 1 commit：`b82aaeb`
+- PR：[#59](https://github.com/NaoYUN77/Aster/pull/59)
+- 验收环境：Windows 11 + Node 24.19.0；POSIX-only 用例跳过
+- 标准：[远程 PTC 与统一 RPC 执行通道 spec](../spec-20261102-remote-ptc-sandbox.md) 16.2／16.3
+
+## 自动化基线
+
+| 检查 | 结果 |
+| --- | --- |
+| `npx tsc --noEmit -p tsconfig.json` | 0 |
+| `npx tsx --test test/*.test.ts` | 362 tests，351 pass，0 fail，11 skipped |
+
+11 个 skipped：7 个记忆库／部署文件权限类、Unix socket RPC、Unix socket 上的远程 codemode、Windows 无法创建的符号链接用例。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。
+
+## Phase 1：远程 PTC
+
+| 验收点 | 覆盖 |
+| --- | --- |
+| `vm.start` / `vm.message` / `vm.reply` 与嵌套 `tool.call` | `test/ptc-rpc.test.ts`：TLS loopback 上启动 VM、脚本内 bash 回调、输出事件与终态响应 |
+| 控制面工具授权与 `NestedCallDoc` 绑定 | `test/ptc-control.test.ts`：嵌套任务输入解析、`callId` 来源、`OutputRef` 提交先于结果交付、失败映射 |
+| Job／workspace／`OutputRef` 持久化 | `test/ptc-control.test.ts`：job 记录只创建一次、`OutputRef` 去重与淘汰、引用与字节自校验 |
+| 文件工具在 PTC session 内执行 | `test/ptc-control.test.ts`、`test/ptc-files.test.ts`：`file.readText`／`file.write` 走 session，目录等不支持操作保持 `not_supported` |
+| 大小／超时／重放边界 | `test/ptc-control.test.ts`：超限 timeout 在本地拒绝、输出 ref 提交失败按“可能已执行”失败 |
+
+未在本机执行：bwrap／cgroup 实际隔离、`/proc/net/dev` 无网络、强杀后无遗留进程、`/shared` 挂载模式、真实跨 VPS 重放。这些需要 POSIX 执行主机与双 VPS 环境。
+
+## Phase 2：direct bash 与文件原语
+
+| 验收点 | 覆盖 |
+| --- | --- |
+| 直接 `bash` 走 RPC `execute` | `test/direct-rpc.test.ts`：TLS loopback 上 health 显示 phase 2、direct bash、文件工具与 `sharedMode: rw`；`execute` 流式输出与退出码 |
+| 传输显式选择，无静默回退 | `test/execution-remote-env.test.ts`：`EXECUTION_REMOTE_TRANSPORT` 只接受 `ssh`／`rpc`；rpc 要求 `/shared` cwd；两种传输的配置形状互斥。`test/ptc-files.test.ts`：执行面未开放 direct session 时返回 `unknown`，不退回本地或 broker |
+| session 生命周期 | `test/ptc-files.test.ts`：首次使用时打开一次、关闭后不再执行；被 TTL 清理后仅在 `not_found`＋`not_started` 时重建一次并重试 |
+| 路径边界 | `test/ptc-files.test.ts`：`/workspace`、`/shared`、`/tmp` 之外的绝对路径、`..`、NUL、反斜杠、相对路径被拒绝；POSIX 上符号链接逃逸、悬空链接和 root 内链接均按预期处理 |
+| `/shared` 只读／可写 | `test/ptc-files.test.ts`：只读根拒绝写；Phase 2 direct 环境要求可写并在 health 中声明 |
+| 分块读取 | `test/ptc-files.test.ts`、`test/direct-rpc.test.ts`：`file.read` 返回 `bytesRead`／`nextOffset`／`eof`，客户端校验范围；`RemoteFileSystem` 把大读取拆成 ≤256 KiB 的帧 |
+| 原子写入与上限 | `test/ptc-files.test.ts`：写入后目录只保留目标文件，失败不留临时文件；写 >2 MiB、读文本 >2 MiB 显式拒绝，超限在发送前拦截 |
+| 句柄隔离 | `test/ptc-files.test.ts`：句柄只属于打开它的 session，关闭或跨 session 访问返回 `not_found` |
+| 嵌套文件工具 | `test/ptc-control.test.ts`：PTC 环境把 `readText`／`write` 交给 session，虚拟路径跨线，主机路径不出现 |
+| 协议边界 | `test/execution-rpc.test.ts`：Phase 0 agent 对 bash `execute` 与 `tool.call` 仍返回 `not_implemented`；格式非法的 bash 载荷在帧解析阶段被拒绝 |
+
+## 未覆盖与下一步
+
+1. 在 POSIX 执行主机运行 `npm test`，使符号链接与 Unix socket 用例实际执行。
+2. 按 16.2 执行 bwrap／cgroup／无网络／强杀验收，并记录 `cgroup="none"` 等降级实况。
+3. 按 16.3 在真实双 VPS 上验证 direct `bash`、`/shared` 读写一致性、断线后的未知结果记录与重放不重复执行。
+4. 迁移验收通过前，生产可继续使用 `EXECUTION_REMOTE_TRANSPORT=ssh`；该模式不提供远程文件工具。

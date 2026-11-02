@@ -39,6 +39,7 @@ import {
   type WatchTarget,
 } from "@earendil-works/pi-durable/env";
 import { RpcClientError } from "./execution/rpc-client.js";
+import { RemoteFileSystem } from "./execution/remote-files.js";
 import {
   PTC_MAX_TOOL_TIMEOUT_MS,
   PTC_MAX_WINDOW_BYTES,
@@ -67,7 +68,7 @@ export const PTC_DEFAULT_WINDOW: PtcOutputWindow = {
 };
 
 const FILE_TOOLS_UNAVAILABLE =
-  "Remote PTC phase 1 runs commands only; file tools are unavailable until remote file operations land. Use bash on the execution host.";
+  "The PTC sandbox supports reading, writing and editing files under /workspace, /shared and /tmp only";
 
 export type PtcExecutionEnvOptions = {
   readonly session: PtcSession;
@@ -103,6 +104,7 @@ export class PtcExecutionEnv implements ExecutionEnv {
   private readonly defaultTimeoutSeconds: number;
   private readonly maxTimeoutMs: number;
   private readonly onOutputRef: (ref: PtcOutputRef, context: Context) => Promise<void>;
+  readonly #files: RemoteFileSystem;
   #lastOutputRef: PtcOutputRef | undefined;
   #lastSpillTruncated = false;
 
@@ -121,6 +123,16 @@ export class PtcExecutionEnv implements ExecutionEnv {
       PTC_MAX_CALL_TIMEOUT_MS,
     );
     this.onOutputRef = options.onOutputRef;
+    this.#files = new RemoteFileSystem({
+      namespace: `ptc:${options.session.sessionId}`,
+      cwd: this.cwd,
+      request: (method, payload, requestOptions) => options.session.client.fileRequest(
+        options.session.sessionId,
+        method,
+        payload,
+        requestOptions,
+      ),
+    });
   }
 
   /** The ref produced by the last successful command, for the tool wrapper's structured output. */
@@ -229,8 +241,8 @@ export class PtcExecutionEnv implements ExecutionEnv {
     return err(new FileError("not_supported", FILE_TOOLS_UNAVAILABLE, path));
   }
 
-  async readTextFile(path: string, _context: Context): Promise<Result<string, FileError>> {
-    return this.unsupported(path);
+  async readTextFile(path: string, context: Context): Promise<Result<string, FileError>> {
+    return this.#files.readTextFile(path, context);
   }
 
   async openTextLineReader(path: string, _context: Context): Promise<Result<TextLineReader, FileError>> {
@@ -245,12 +257,12 @@ export class PtcExecutionEnv implements ExecutionEnv {
     return this.unsupported(path);
   }
 
-  async openBinaryReader(path: string, _options: { noFollow?: boolean } | undefined, _context: Context): Promise<Result<BinaryReader, FileError>> {
-    return this.unsupported(path);
+  async openBinaryReader(path: string, options: { noFollow?: boolean } | undefined, context: Context): Promise<Result<BinaryReader, FileError>> {
+    return this.#files.openBinaryReader(path, options, context);
   }
 
-  async writeFile(path: string, _content: string | Uint8Array, _context: Context): Promise<Result<void, FileError>> {
-    return this.unsupported(path);
+  async writeFile(path: string, content: string | Uint8Array, context: Context): Promise<Result<void, FileError>> {
+    return this.#files.writeFile(path, content, context);
   }
 
   async appendFile(path: string, _content: string | Uint8Array, _context: Context): Promise<Result<void, FileError>> {
@@ -269,8 +281,8 @@ export class PtcExecutionEnv implements ExecutionEnv {
     return this.unsupported(sourcePath);
   }
 
-  async fileInfo(path: string, _context: Context): Promise<Result<FileInfo, FileError>> {
-    return this.unsupported(path);
+  async fileInfo(path: string, context: Context): Promise<Result<FileInfo, FileError>> {
+    return this.#files.fileInfo(path, context);
   }
 
   async listDir(path: string, _context: Context): Promise<Result<FileInfo[], FileError>> {
@@ -289,12 +301,12 @@ export class PtcExecutionEnv implements ExecutionEnv {
     return this.unsupported();
   }
 
-  async canonicalPath(path: string, _context: Context): Promise<Result<string, FileError>> {
-    return this.unsupported(path);
+  async canonicalPath(path: string, context: Context): Promise<Result<string, FileError>> {
+    return this.#files.canonicalPath(path, context);
   }
 
-  async exists(path: string, _context: Context): Promise<Result<boolean, FileError>> {
-    return this.unsupported(path);
+  async exists(path: string, context: Context): Promise<Result<boolean, FileError>> {
+    return this.#files.exists(path, context);
   }
 
   async createDir(path: string, _options: { recursive?: boolean } | undefined, _context: Context): Promise<Result<void, FileError>> {

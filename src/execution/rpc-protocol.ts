@@ -3,7 +3,9 @@
  * 4-byte big-endian payload length followed by UTF-8 JSON. The protocol is deliberately small and
  * strict; the transport may be a Unix socket for local tests or TCP/TLS with mutual certificates
  * across VPS hosts. Phase 0 exposes the restricted test executor; Phase 1 adds the remote PTC
- * sandbox (`vm.start`/`vm.reply` requests and `vm.message`/`tool.output` events).
+ * sandbox (`vm.start`/`vm.reply` requests and `vm.message`/`tool.output` events). Phase 2 adds
+ * direct `bash` execution (`execute` with `executor: "bash"`) and the bounded `file.*` primitives
+ * both direct sessions and PTC nested calls use.
  */
 
 import { validateCommand, validateEnv } from "./protocol.js";
@@ -31,8 +33,19 @@ export const PTC_MAX_WINDOW_LINES = 1_000_000;
 /** A single VM reply's payload must leave room for frame envelope fields inside one frame. */
 export const PTC_MAX_REPLY_PAYLOAD_BYTES = RPC_MAX_FRAME_BYTES - 64 * 1024;
 
+/** Direct execution bounds. They are wire bounds; the agent clamps them to its own configuration. */
+export const RPC_MAX_EXECUTE_TIMEOUT_MS = RPC_MAX_DEADLINE_MS - 60_000;
+export const FILE_MAX_PATH_BYTES = 4_096;
+export const FILE_MAX_WRITE_BYTES = 2 * 1024 * 1024;
+export const FILE_MAX_READ_TEXT_BYTES = 2 * 1024 * 1024;
+export const FILE_MAX_READ_CHUNK_BYTES = 256 * 1024;
+export const FILE_MAX_SCAN_LINES = 10_000_000;
+export const FILE_MAX_HANDLES = 64;
+
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const FILE_HANDLE_PATTERN = /^f[a-f0-9]{16}$/;
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 export type RpcMethod =
   | "health.check"
@@ -44,7 +57,28 @@ export type RpcMethod =
   | "cancel"
   | "vm.start"
   | "vm.message"
-  | "vm.reply";
+  | "vm.reply"
+  | "file.stat"
+  | "file.exists"
+  | "file.canonical"
+  | "file.open"
+  | "file.read"
+  | "file.scanLines"
+  | "file.close"
+  | "file.readText"
+  | "file.write";
+
+/** The bounded file primitives. Read-only methods and `file.write` share one wire shape. */
+export type RpcFileMethod =
+  | "file.stat"
+  | "file.exists"
+  | "file.canonical"
+  | "file.open"
+  | "file.read"
+  | "file.scanLines"
+  | "file.close"
+  | "file.readText"
+  | "file.write";
 
 export type RpcErrorCode =
   | "invalid_request"
@@ -61,6 +95,9 @@ export type RpcErrorCode =
   | "test_error"
   | "workspace_missing"
   | "output_unavailable"
+  | "permission_denied"
+  | "is_directory"
+  | "not_directory"
   | "internal";
 
 export type RpcOutcome = "not_started" | "failed" | "unknown";
@@ -213,6 +250,28 @@ export type RpcTestExecutePayload =
     };
 
 /**
+ * A direct `bash` call. The `command`, `cwd`, environment and timeout are host-supplied through
+ * pi-durable's shell contract; the model only supplies command text. The agent re-validates the
+ * cwd against the session's exposed roots before spawning anything.
+ */
+export type RpcBashExecutePayload = {
+  readonly executor: "bash";
+  readonly command: string | readonly string[];
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly inheritEnv: boolean;
+  readonly timeoutMs: number;
+  readonly window: PtcOutputWindow;
+};
+
+export type RpcExecutePayload = RpcTestExecutePayload | RpcBashExecutePayload;
+
+export type RpcBashExecuteResult = {
+  readonly exitCode: number;
+  readonly durationMs: number;
+};
+
+/**
  * The tail of one nested command's combined output the caller keeps. Same shape as pi-durable's
  * `ShellOutputWindow`; the agent clamps every field to its own configured maximum.
  */
@@ -304,6 +363,40 @@ export type PtcIsolationState = {
   readonly network: "none" | "host";
 };
 
+/** File metadata as the execution host reports it; `path` is the virtual path, never a host path. */
+export type RpcFileInfo = {
+  readonly name: string;
+  readonly path: string;
+  readonly kind: "file" | "directory" | "symlink";
+  readonly size: number;
+  readonly mtimeMs: number;
+};
+
+export type RpcFileStatResult = { readonly info: RpcFileInfo };
+export type RpcFileExistsResult = { readonly exists: boolean };
+export type RpcFileCanonicalResult = { readonly path: string };
+export type RpcFileOpenResult = { readonly handle: string; readonly info: RpcFileInfo };
+export type RpcFileReadResult = {
+  readonly data: string;
+  readonly bytesRead: number;
+  /** Offset the next read starts at; `eof` marks the end of the file. */
+  readonly nextOffset: number;
+  readonly eof: boolean;
+};
+export type RpcFileScanResult = {
+  readonly scan: {
+    readonly newlines: number;
+    readonly start: number;
+    readonly end: number;
+    readonly firstLineEnd: number;
+    readonly lastLineStart: number;
+    readonly selectedBytes: number;
+    readonly firstLineBytes: number;
+  };
+};
+export type RpcFileReadTextResult = { readonly data: string };
+export type RpcFileWriteResult = { readonly info: RpcFileInfo };
+
 const METHODS = new Set<RpcMethod>([
   "health.check",
   "preflight",
@@ -315,6 +408,15 @@ const METHODS = new Set<RpcMethod>([
   "vm.start",
   "vm.message",
   "vm.reply",
+  "file.stat",
+  "file.exists",
+  "file.canonical",
+  "file.open",
+  "file.read",
+  "file.scanLines",
+  "file.close",
+  "file.readText",
+  "file.write",
 ]);
 
 const ERROR_CODES = new Set<RpcErrorCode>([
@@ -332,6 +434,9 @@ const ERROR_CODES = new Set<RpcErrorCode>([
   "test_error",
   "workspace_missing",
   "output_unavailable",
+  "permission_denied",
+  "is_directory",
+  "not_directory",
   "internal",
 ]);
 
@@ -457,6 +562,315 @@ export function parseTestExecutePayload(value: unknown): ParseResult<RpcTestExec
 
 function isPositiveInteger(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= max;
+}
+
+function isNonNegativeInteger(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= max;
+}
+
+/**
+ * A virtual path is absolute, POSIX-shaped and already free of `..` segments, so a host mapping
+ * built from it can never climb out of its root. The service still resolves symlinks and checks
+ * containment; this is the first gate, not the only one.
+ */
+function isVirtualPath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  if (byteLength(value) > FILE_MAX_PATH_BYTES) return false;
+  if (!value.startsWith("/") || value.includes("\0") || value.includes("\\")) return false;
+  return !value.split("/").some((segment) => segment === "..");
+}
+
+function isFileHandle(value: unknown): value is string {
+  return typeof value === "string" && FILE_HANDLE_PATTERN.test(value);
+}
+
+function isBase64(value: unknown, maxBytes: number): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length > Math.ceil(maxBytes / 3) * 4) return false;
+  return BASE64_PATTERN.test(value);
+}
+
+/** Parse and bound a direct `bash` request; the agent still authorizes the cwd and environment. */
+export function parseBashExecutePayload(value: unknown): ParseResult<RpcBashExecutePayload> {
+  if (!isPlainObject(value)) return fail("execute payload must be an object");
+  const unknown = unexpectedKey(value, ["executor", "command", "cwd", "env", "inheritEnv", "timeoutMs", "window"]);
+  if (unknown !== undefined) return fail(`unknown bash execute field: ${unknown}`);
+  const commandError = validateCommand(value.command);
+  if (commandError !== undefined) return fail(commandError);
+  if (!isVirtualPath(value.cwd)) return fail("cwd is invalid");
+  const envError = validateEnv(value.env);
+  if (envError !== undefined) return fail(envError);
+  if (typeof value.inheritEnv !== "boolean") return fail("inheritEnv must be a boolean");
+  if (!Number.isSafeInteger(value.timeoutMs) || (value.timeoutMs as number) < 1
+    || (value.timeoutMs as number) > RPC_MAX_EXECUTE_TIMEOUT_MS) {
+    return fail(`timeoutMs must be an integer in 1..${RPC_MAX_EXECUTE_TIMEOUT_MS}`);
+  }
+  const window = parsePtcOutputWindow(value.window);
+  if (!window.ok) return fail(window.message);
+  return {
+    ok: true,
+    value: {
+      executor: "bash",
+      command: value.command as string | readonly string[],
+      cwd: value.cwd,
+      env: value.env as Record<string, string>,
+      inheritEnv: value.inheritEnv,
+      timeoutMs: value.timeoutMs as number,
+      window: window.value,
+    },
+  };
+}
+
+function validateFilePayload(method: RpcFileMethod, value: unknown): ParseResult<Record<string, unknown>> {
+  if (!isPlainObject(value)) return fail(`${method} payload must be an object`);
+  switch (method) {
+    case "file.stat":
+    case "file.open": {
+      const unknown = unexpectedKey(value, ["path", "noFollow"]);
+      if (unknown !== undefined) return fail(`unknown ${method} field: ${unknown}`);
+      if (!isVirtualPath(value.path)) return fail("path is invalid");
+      if (Object.hasOwn(value, "noFollow") && typeof value.noFollow !== "boolean") {
+        return fail("noFollow must be a boolean");
+      }
+      return { ok: true, value };
+    }
+    case "file.exists":
+    case "file.canonical":
+    case "file.readText": {
+      const unknown = unexpectedKey(value, ["path"]);
+      if (unknown !== undefined) return fail(`unknown ${method} field: ${unknown}`);
+      if (!isVirtualPath(value.path)) return fail("path is invalid");
+      return { ok: true, value };
+    }
+    case "file.read": {
+      const unknown = unexpectedKey(value, ["handle", "offset", "length"]);
+      if (unknown !== undefined) return fail(`unknown file.read field: ${unknown}`);
+      if (!isFileHandle(value.handle)) return fail("handle is invalid");
+      if (!isNonNegativeInteger(value.offset)) return fail("offset is invalid");
+      if (!isPositiveInteger(value.length, FILE_MAX_READ_CHUNK_BYTES)) {
+        return fail(`length must be an integer in 1..${FILE_MAX_READ_CHUNK_BYTES}`);
+      }
+      return { ok: true, value };
+    }
+    case "file.scanLines": {
+      const unknown = unexpectedKey(value, ["handle", "startLine", "endLine"]);
+      if (unknown !== undefined) return fail(`unknown file.scanLines field: ${unknown}`);
+      if (!isFileHandle(value.handle)) return fail("handle is invalid");
+      if (!isNonNegativeInteger(value.startLine, FILE_MAX_SCAN_LINES)) return fail("startLine is invalid");
+      if (Object.hasOwn(value, "endLine")) {
+        if (!isNonNegativeInteger(value.endLine, FILE_MAX_SCAN_LINES)
+          || (value.endLine as number) <= (value.startLine as number)) {
+          return fail("endLine must be an integer greater than startLine");
+        }
+      }
+      return { ok: true, value };
+    }
+    case "file.close": {
+      const unknown = unexpectedKey(value, ["handle"]);
+      if (unknown !== undefined) return fail(`unknown file.close field: ${unknown}`);
+      if (!isFileHandle(value.handle)) return fail("handle is invalid");
+      return { ok: true, value };
+    }
+    case "file.write": {
+      const unknown = unexpectedKey(value, ["path", "content"]);
+      if (unknown !== undefined) return fail(`unknown file.write field: ${unknown}`);
+      if (!isVirtualPath(value.path)) return fail("path is invalid");
+      if (!isBase64(value.content, FILE_MAX_WRITE_BYTES)) {
+        return fail(`content must be base64 of at most ${FILE_MAX_WRITE_BYTES} bytes`);
+      }
+      return { ok: true, value };
+    }
+    default:
+      return fail("unknown file method");
+  }
+}
+
+export const FILE_METHODS = new Set<RpcFileMethod>([
+  "file.stat",
+  "file.exists",
+  "file.canonical",
+  "file.open",
+  "file.read",
+  "file.scanLines",
+  "file.close",
+  "file.readText",
+  "file.write",
+]);
+
+export function isRpcFileMethod(value: unknown): value is RpcFileMethod {
+  return typeof value === "string" && FILE_METHODS.has(value as RpcFileMethod);
+}
+
+/** Validate a file request exactly once at each boundary: the RPC server and the runner both call it. */
+export function parseFileRequestPayload(method: RpcFileMethod, value: unknown): ParseResult<Record<string, unknown>> {
+  return validateFilePayload(method, value);
+}
+
+/** Validate a file result according to the method that produced it. */
+export function parseFileResult(method: RpcFileMethod, value: unknown): ParseResult<unknown> {
+  switch (method) {
+    case "file.stat":
+    case "file.write":
+      return parseFileStatResult(value);
+    case "file.exists":
+      return parseFileExistsResult(value);
+    case "file.canonical":
+      return parseFileCanonicalResult(value);
+    case "file.open":
+      return parseFileOpenResult(value);
+    case "file.read":
+      return parseFileReadResult(value);
+    case "file.scanLines":
+      return parseFileScanResult(value);
+    case "file.readText":
+      return parseFileReadTextResult(value);
+    case "file.close": {
+      if (!isPlainObject(value)) return fail("file result must be an object");
+      const unknown = unexpectedKey(value, []);
+      return unknown === undefined ? { ok: true, value: {} } : fail(`unknown file result field: ${unknown}`);
+    }
+  }
+}
+
+export function parseRpcFileInfo(value: unknown): ParseResult<RpcFileInfo> {
+  if (!isPlainObject(value)) return fail("file info must be an object");
+  const unknown = unexpectedKey(value, ["name", "path", "kind", "size", "mtimeMs"]);
+  if (unknown !== undefined) return fail(`unknown file info field: ${unknown}`);
+  if (typeof value.name !== "string" || value.name.length === 0 || byteLength(value.name) > 255) {
+    return fail("file info.name is invalid");
+  }
+  if (!isVirtualPath(value.path)) return fail("file info.path is invalid");
+  if (value.kind !== "file" && value.kind !== "directory" && value.kind !== "symlink") {
+    return fail("file info.kind is invalid");
+  }
+  if (!isNonNegativeInteger(value.size)) return fail("file info.size is invalid");
+  if (typeof value.mtimeMs !== "number" || !Number.isFinite(value.mtimeMs) || value.mtimeMs < 0) {
+    return fail("file info.mtimeMs is invalid");
+  }
+  return {
+    ok: true,
+    value: {
+      name: value.name,
+      path: value.path,
+      kind: value.kind,
+      size: value.size as number,
+      mtimeMs: value.mtimeMs,
+    },
+  };
+}
+
+function parseFileInfoResult(value: unknown): ParseResult<RpcFileStatResult> {
+  if (!isPlainObject(value)) return fail("file result must be an object");
+  const unknown = unexpectedKey(value, ["info"]);
+  if (unknown !== undefined) return fail(`unknown file result field: ${unknown}`);
+  const info = parseRpcFileInfo(value.info);
+  if (!info.ok) return fail(info.message);
+  return { ok: true, value: { info: info.value } };
+}
+
+export function parseFileStatResult(value: unknown): ParseResult<RpcFileStatResult> {
+  return parseFileInfoResult(value);
+}
+
+export function parseFileExistsResult(value: unknown): ParseResult<RpcFileExistsResult> {
+  if (!isPlainObject(value)) return fail("file result must be an object");
+  const unknown = unexpectedKey(value, ["exists"]);
+  if (unknown !== undefined) return fail(`unknown file result field: ${unknown}`);
+  if (typeof value.exists !== "boolean") return fail("exists must be a boolean");
+  return { ok: true, value: { exists: value.exists } };
+}
+
+export function parseFileCanonicalResult(value: unknown): ParseResult<RpcFileCanonicalResult> {
+  if (!isPlainObject(value)) return fail("file result must be an object");
+  const unknown = unexpectedKey(value, ["path"]);
+  if (unknown !== undefined) return fail(`unknown file result field: ${unknown}`);
+  if (!isVirtualPath(value.path)) return fail("path is invalid");
+  return { ok: true, value: { path: value.path } };
+}
+
+export function parseFileOpenResult(value: unknown): ParseResult<RpcFileOpenResult> {
+  if (!isPlainObject(value)) return fail("file result must be an object");
+  const unknown = unexpectedKey(value, ["handle", "info"]);
+  if (unknown !== undefined) return fail(`unknown file result field: ${unknown}`);
+  if (!isFileHandle(value.handle)) return fail("handle is invalid");
+  const info = parseRpcFileInfo(value.info);
+  if (!info.ok) return fail(info.message);
+  return { ok: true, value: { handle: value.handle, info: info.value } };
+}
+
+export function parseFileReadResult(value: unknown): ParseResult<RpcFileReadResult> {
+  if (!isPlainObject(value)) return fail("file result must be an object");
+  const unknown = unexpectedKey(value, ["data", "bytesRead", "nextOffset", "eof"]);
+  if (unknown !== undefined) return fail(`unknown file result field: ${unknown}`);
+  if (!isBase64(value.data, FILE_MAX_READ_CHUNK_BYTES)) return fail("data is invalid");
+  if (!isNonNegativeInteger(value.bytesRead, FILE_MAX_READ_CHUNK_BYTES)) return fail("bytesRead is invalid");
+  if (!isNonNegativeInteger(value.nextOffset)) return fail("nextOffset is invalid");
+  if ((value.nextOffset as number) < (value.bytesRead as number)) return fail("nextOffset is inconsistent");
+  if (typeof value.eof !== "boolean") return fail("eof must be a boolean");
+  const decoded = Buffer.from(value.data, "base64");
+  if (decoded.length !== value.bytesRead) {
+    return fail("data does not match bytesRead");
+  }
+  return {
+    ok: true,
+    value: {
+      data: value.data,
+      bytesRead: value.bytesRead as number,
+      nextOffset: value.nextOffset as number,
+      eof: value.eof,
+    },
+  };
+}
+
+export function parseFileScanResult(value: unknown): ParseResult<RpcFileScanResult> {
+  if (!isPlainObject(value)) return fail("file result must be an object");
+  const unknown = unexpectedKey(value, ["scan"]);
+  if (unknown !== undefined) return fail(`unknown file result field: ${unknown}`);
+  if (!isPlainObject(value.scan)) return fail("scan must be an object");
+  const scan = value.scan;
+  const unknownScan = unexpectedKey(scan, [
+    "newlines", "start", "end", "firstLineEnd", "lastLineStart", "selectedBytes", "firstLineBytes",
+  ]);
+  if (unknownScan !== undefined) return fail(`unknown scan field: ${unknownScan}`);
+  for (const field of ["newlines", "start", "end", "firstLineEnd", "lastLineStart", "selectedBytes", "firstLineBytes"]) {
+    if (!isNonNegativeInteger(scan[field])) return fail(`scan.${field} is invalid`);
+  }
+  if ((scan.start as number) > (scan.end as number)) return fail("scan range is invalid");
+  return {
+    ok: true,
+    value: {
+      scan: {
+        newlines: scan.newlines as number,
+        start: scan.start as number,
+        end: scan.end as number,
+        firstLineEnd: scan.firstLineEnd as number,
+        lastLineStart: scan.lastLineStart as number,
+        selectedBytes: scan.selectedBytes as number,
+        firstLineBytes: scan.firstLineBytes as number,
+      },
+    },
+  };
+}
+
+export function parseFileReadTextResult(value: unknown): ParseResult<RpcFileReadTextResult> {
+  if (!isPlainObject(value)) return fail("file result must be an object");
+  const unknown = unexpectedKey(value, ["data"]);
+  if (unknown !== undefined) return fail(`unknown file result field: ${unknown}`);
+  if (!isBase64(value.data, FILE_MAX_READ_TEXT_BYTES)) return fail("data is invalid");
+  return { ok: true, value: { data: value.data } };
+}
+
+export function parseFileWriteResult(value: unknown): ParseResult<RpcFileWriteResult> {
+  return parseFileInfoResult(value);
+}
+
+export function parseBashExecuteResult(value: unknown): ParseResult<RpcBashExecuteResult> {
+  if (!isPlainObject(value)) return fail("execute result must be an object");
+  const unknown = unexpectedKey(value, ["exitCode", "durationMs"]);
+  if (unknown !== undefined) return fail(`unknown execute result field: ${unknown}`);
+  if (!isNonNegativeInteger(value.exitCode, 255)) return fail("exitCode must be an integer in 0..255");
+  if (!isNonNegativeInteger(value.durationMs)) return fail("durationMs is invalid");
+  return { ok: true, value: { exitCode: value.exitCode as number, durationMs: value.durationMs as number } };
 }
 
 function parsePtcOutputWindow(value: unknown): ParseResult<PtcOutputWindow> {
@@ -776,9 +1190,23 @@ function validateRequestPayload(method: RpcMethod, payload: unknown): ParseResul
         const parsed = parseTestExecutePayload(payload);
         if (!parsed.ok) return fail(parsed.message);
       }
-      // Non-test executors are parsed but rejected by the dispatcher; they are never executed.
+      if (payload.executor === "bash") {
+        const parsed = parseBashExecutePayload(payload);
+        if (!parsed.ok) return fail(parsed.message);
+      }
+      // Other executors are parsed but rejected by the dispatcher; they are never executed.
       return { ok: true, value: payload };
     }
+    case "file.stat":
+    case "file.exists":
+    case "file.canonical":
+    case "file.open":
+    case "file.read":
+    case "file.scanLines":
+    case "file.close":
+    case "file.readText":
+    case "file.write":
+      return validateFilePayload(method, payload);
     case "tool.call": {
       const parsed = parsePtcToolCallPayload(payload);
       if (!parsed.ok) return fail(parsed.message);

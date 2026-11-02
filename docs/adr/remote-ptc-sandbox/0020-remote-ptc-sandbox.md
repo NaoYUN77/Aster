@@ -133,3 +133,11 @@
 - 权限：`test/execution-rpc.test.ts` 9/9 通过；未执行任何 `bash`／`tool.call`；Phase 0 仍只有受限 `test.*` 执行器。
 - 网络变更：部署方未修改主机、Docker／容器、`ufw` 或云安全组；用户在执行面实例的云安全组中单独加入 TCP 9443 ← 控制面私网 `/32` 的入站规则。该规则是环境准备，不是部署 agent 的防火墙变更。
 - 证据：[2026-11-02 验收记录](../../acceptance/20261102-execution-rpc-phase0.md)。Phase 1／2 未实现。
+
+### 2026-11-03：Phase 1／2 代码与自动化验收
+
+- 相关 spec：`docs/spec-20261102-remote-ptc-sandbox.md`（历史文件名）
+- 结果：Phase 1 代码随 PR #59 合入前完成：`vm.start`／`vm.message`／`vm.reply`／`tool.call`、`RemoteCodemodeSandbox` 网关绑定、bwrap／cgroup／workspace／`OutputRef` runner、预算、强杀与 preflight；自动化测试通过。
+- Phase 2：直接 `bash` 通过统一 RPC `execute`（direct session）执行，文件原语以 `file.stat`／`exists`／`canonical`／`open`／`read`／`scanLines`／`close`／`readText`／`write` 提供；PTC 嵌套调用在 runner 内、直接工具在 agent 内共用 `PtcFileService` 的路径与原子写实现。控制面用 `EXECUTION_REMOTE_TRANSPORT=ssh|rpc` 显式选择传输（默认 `ssh`）；rpc 模式要求执行面同时支持 direct bash、文件工具和可写 `/shared`，否则启动失败，不静默回退。
+- 会话修复：direct session 被 Agent TTL 清理后，只有请求被明确拒绝为 `not_found`＋`not_started` 时才重建一次并重试；文件级 `not_found` 与结果未知的情况都不重试，保持“未知不当作未执行”。
+- 证据：[2026-11-03 自动化验收记录](../../acceptance/20261103-remote-ptc-phase2.md)。真实双 VPS 的 bwrap／cgroup、`/shared` 一致性和断线重放仍按 spec 16.2／16.3 待执行。

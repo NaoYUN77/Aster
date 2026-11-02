@@ -7,6 +7,7 @@ import {
 import { CODEMODE_TOOL_NAME, createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox, type CodemodeSandboxBase } from "@earendil-works/pi-codemode";
 import type { CodemodeConfig } from "./config.js";
+import type { RpcExecutionClient } from "./execution/rpc-client.js";
 import { PtcGateway, SessionBoundCodemodeSandbox } from "./ptc-gateway.js";
 
 /**
@@ -17,8 +18,8 @@ export const CODEMODE_OUTPUT_LIMITS = { maxBytes: 32 * 1024, maxLines: 1_000, re
 
 /** File tools are usable inside scripts only when the execution environment is local. */
 export const LOCAL_SCRIPT_TOOLS: ReadonlySet<string> = new Set(["read", "write", "edit", "bash"]);
-/** Remote execution phase 1 has no remote file API, so scripts may run commands only. */
-export const REMOTE_SCRIPT_TOOLS: ReadonlySet<string> = new Set(["bash"]);
+/** Remote execution exposes the same tools; file primitives run inside the PTC sandbox. */
+export const REMOTE_SCRIPT_TOOLS: ReadonlySet<string> = new Set(["read", "write", "edit", "bash"]);
 
 export type CodemodeHost = {
   readonly extension: Extension;
@@ -90,9 +91,10 @@ export function serializeNestedCalls(tool: ToolRegistration): ToolRegistration {
  * filesystem, network, timers, or modules are exposed to the VM.
  *
  * Remote execution uses `SessionBoundCodemodeSandbox`: the VM runs on the execution agent and every
- * nested tool call is bridged back to the host through one PTC session per code mode call.
+ * nested tool call is bridged back to the host through one PTC session per code mode call. `client`
+ * lets the agent share its already connected RPC client; the gateway then never closes it.
  */
-export function createCodemodeHost(config: CodemodeConfig): CodemodeHost {
+export function createCodemodeHost(config: CodemodeConfig, client?: RpcExecutionClient): CodemodeHost {
   let sandbox: CodemodeSandboxBase;
   let gateway: PtcGateway | undefined;
   if (config.ptc === undefined) {
@@ -111,6 +113,7 @@ export function createCodemodeHost(config: CodemodeConfig): CodemodeHost {
       sandbox: bound,
       defaultTimeoutSeconds: config.ptc.defaultTimeoutSeconds,
       maxTimeoutSeconds: config.ptc.maxTimeoutSeconds,
+      ...(client === undefined ? {} : { client }),
     });
   }
   const base = createCodemodeExtension({ sandbox, models: false });

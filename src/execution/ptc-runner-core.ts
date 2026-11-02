@@ -5,10 +5,19 @@ import { rename, unlink } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { loadQuickJSWasm, serveCodemodeRemote, type CodemodeRemoteExchange, type CodemodeRemoteReply, type CodemodeRemoteRequest, type CodemodeWasmModule } from "@earendil-works/pi-codemode";
 import { OutputWindow } from "./broker.js";
+import { chunkText, signalNumber } from "./output-chunks.js";
+import { FileServiceError, type PtcFileService } from "./ptc-fs.js";
 import { PtcHostError } from "./ptc-host.js";
 import { PTC_OUTPUT_DIRECTORY } from "./ptc-workspace.js";
-import type { HostToRunner, PtcRunnerStart, PtcRunnerToolCall, RunnerToHost } from "./ptc-runner-protocol.js";
-import { RPC_MAX_OUTPUT_CHUNK_BYTES, type PtcOutputRef, type PtcToolCallArgs, type PtcToolCallResult, type RpcSkippedOutput } from "./rpc-protocol.js";
+import type { HostToRunner, PtcRunnerFile, PtcRunnerStart, PtcRunnerToolCall, RunnerToHost } from "./ptc-runner-protocol.js";
+import {
+  RPC_MAX_OUTPUT_CHUNK_BYTES,
+  type PtcOutputRef,
+  type PtcToolCallArgs,
+  type PtcToolCallResult,
+  type RpcErrorCode,
+  type RpcSkippedOutput,
+} from "./rpc-protocol.js";
 
 export type BashOutcome = {
   readonly exitCode: number;
@@ -47,9 +56,20 @@ export type PtcRunnerCoreOptions = {
   readonly maxInterruptBudget?: number;
   readonly maxMemoryLimitBytes?: number;
   readonly bash: BashOptions;
+  /** Bounded file primitive service; absent keeps file methods unavailable in this sandbox. */
+  readonly files?: PtcFileService;
   /** Test seam; production always uses the local bash executor. */
   readonly executeBash?: BashExecutor;
 };
+
+const FILE_ERROR_CODES = new Set<RpcErrorCode>([
+  "invalid_request", "not_found", "permission_denied", "not_directory", "is_directory",
+  "too_large", "aborted", "busy", "not_implemented", "internal",
+]);
+
+function fileErrorCode(error: FileServiceError): RpcErrorCode {
+  return FILE_ERROR_CODES.has(error.code as RpcErrorCode) ? error.code as RpcErrorCode : "internal";
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -95,9 +115,93 @@ export class PtcRunnerCore {
       case "tool.call":
         await this.runToolCall(frame);
         return;
+      case "file":
+        await this.runFile(frame);
+        return;
       case "cancel":
         this.cancel();
         return;
+    }
+  }
+
+  /** File primitives never cross the VM's call cycle; the agent gets a result or an error frame. */
+  private async runFile(frame: PtcRunnerFile): Promise<void> {
+    const files = this.options.files;
+    const identity = this.identity;
+    if (files === undefined) {
+      this.emit({
+        t: "file.error",
+        requestId: frame.requestId,
+        code: "not_implemented",
+        message: "file tools are unavailable in this sandbox",
+      });
+      return;
+    }
+    if (identity === undefined || this.stopped) {
+      this.emit({
+        t: "file.error",
+        requestId: frame.requestId,
+        code: "not_implemented",
+        message: "the sandbox has not started",
+      });
+      return;
+    }
+    try {
+      const result = await this.dispatchFile(files, identity.sessionId, frame);
+      this.emit({ t: "file.done", requestId: frame.requestId, result });
+    } catch (error) {
+      if (error instanceof FileServiceError) {
+        this.emit({
+          t: "file.error",
+          requestId: frame.requestId,
+          code: fileErrorCode(error),
+          message: error.message,
+        });
+        return;
+      }
+      this.emit({
+        t: "file.error",
+        requestId: frame.requestId,
+        code: "internal",
+        message: "the sandbox could not complete the file operation",
+      });
+    }
+  }
+
+  private async dispatchFile(files: PtcFileService, session: string, frame: PtcRunnerFile): Promise<unknown> {
+    const payload = frame.payload;
+    switch (frame.method) {
+      case "file.stat":
+        return await files.info(payload.path as string);
+      case "file.exists":
+        return { exists: await files.exists(payload.path as string) };
+      case "file.canonical":
+        return { path: await files.canonical(payload.path as string) };
+      case "file.open":
+        return await files.open(session, payload.path as string, {
+          ...(payload.noFollow === true ? { noFollow: true } : {}),
+        });
+      case "file.read":
+        return await files.read(
+          session,
+          payload.handle as string,
+          payload.offset as number,
+          payload.length as number,
+        );
+      case "file.scanLines":
+        return await files.scanLines(
+          session,
+          payload.handle as string,
+          payload.startLine as number,
+          payload.endLine as number | undefined,
+        );
+      case "file.close":
+        await files.close(session, payload.handle as string);
+        return {};
+      case "file.readText":
+        return await files.readText(payload.path as string);
+      case "file.write":
+        return await files.write(payload.path as string, payload.content as string);
     }
   }
 
@@ -211,12 +315,6 @@ export class PtcRunnerCore {
   }
 }
 
-function signalNumber(signal: NodeJS.Signals | null): number {
-  if (signal === null) return 0;
-  const numbers: Partial<Record<NodeJS.Signals, number>> = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 };
-  return numbers[signal] ?? 1;
-}
-
 function clampWindow(args: PtcToolCallArgs, options: BashOptions): PtcToolCallArgs["window"] {
   return {
     // One `tool.output` event cannot exceed the RPC event text limit; the tail is what matters.
@@ -225,26 +323,6 @@ function clampWindow(args: PtcToolCallArgs, options: BashOptions): PtcToolCallAr
     minIntervalMs: Math.min(Math.max(0, args.window.minIntervalMs), 1_000),
     bytesPerSecond: Math.max(0, Math.min(args.window.bytesPerSecond, Math.max(0, options.outputBytesPerSecond))),
   };
-}
-
-/** Splits a window tail into frames the wire format accepts, preserving order. */
-function chunkText(text: string, maxBytes: number): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  while (start < text.length) {
-    let end = start;
-    let bytes = 0;
-    while (end < text.length) {
-      const code = text.codePointAt(end);
-      const width = code === undefined ? 1 : code > 0xffff ? 4 : Buffer.byteLength(String.fromCodePoint(code), "utf8");
-      if (bytes + width > maxBytes && end > start) break;
-      end += code !== undefined && code > 0xffff ? 2 : 1;
-      bytes += width;
-    }
-    parts.push(text.slice(start, end));
-    start = end;
-  }
-  return parts;
 }
 
 /**

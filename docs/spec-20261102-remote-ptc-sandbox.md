@@ -1,12 +1,12 @@
 # 远程 PTC 与统一 RPC 执行通道（Phase 0：跨 VPS RPC；Phase 1：远程 PTC sandbox；Phase 2：文件原语）
 
-- **状态**：Phase 0 已通过真实双 VPS 验收（2026-11-02，`executionId 3a0d7374b09e9b05`）；Phase 1／2 暂不实现
+- **状态**：Phase 0 已通过真实双 VPS 验收（2026-11-02，`executionId 3a0d7374b09e9b05`）；Phase 1／2 代码已实现，自动化验收通过（2026-11-03），真实双 VPS 验收待执行
 - **日期**：2026-11-02
 - **功能**：remote-ptc-sandbox
 - **所属 ADR**：[ADR-0020](adr/remote-ptc-sandbox/0020-remote-ptc-sandbox.md)
 - **前置决策**：[ADR-0019](adr/codemode-ptc/0019-codemode-ptc.md)、[ADR-0021](adr/0021-control-execution-split.md)
 
-> 本文区分“仓库当前已实现”“Phase 0 已通过真实双 VPS 验收”“Phase 1／2 暂不实现”。除明确标注为已实现的内容外，均不是现有代码能力。Phase 0 的验收证据见 [2026-11-02 验收记录](acceptance/20261102-execution-rpc-phase0.md)。
+> 本文区分“仓库当前已实现”“Phase 0 已通过真实双 VPS 验收”“Phase 1／2 已实现但真实双 VPS 验收待执行”。除明确标注为已实现的内容外，均不是现有代码能力。Phase 0 的验收证据见 [2026-11-02 验收记录](acceptance/20261102-execution-rpc-phase0.md)；Phase 1／2 的自动化证据见 [2026-11-03 验收记录](acceptance/20261103-remote-ptc-phase2.md)。
 
 ## 1. 实现状态
 
@@ -15,17 +15,17 @@
 | 本地 codemode（`CodemodeSandbox`） | 已实现 | `src/codemode.ts`、`src/agent.ts`、`test/codemode.test.ts` |
 | 远程 `bash`（一次调用一条 Unix socket 请求 + 一条 SSH） | 已实现 | `src/execution/broker.ts`、`broker-client.ts`、`ssh.ts`、`remote-env.ts` |
 | `RemoteExecutionEnv` shell 半边 | 已实现 | 文件 API 仍返回 `not_supported` |
-| 远程 PTC（`RemoteCodemodeSandbox`） | 暂不实现 | 只有设计，没有生产代码 |
+| 远程 PTC（`RemoteCodemodeSandbox`） | Phase 1 已实现 | `src/ptc-gateway.ts`、`src/ptc-session.ts`、`src/execution/ptc-host.ts`；`test/ptc-control.test.ts`、`test/ptc-rpc.test.ts` |
 | 统一 RPC 协议、Transport、Gateway Client、Execution Agent | Phase 0 已实现 | `src/execution/rpc-protocol.ts`、`rpc-transport.ts`、`rpc-client.ts`、`rpc-server.ts`、`rpc-config.ts`、`rpc-main.ts`、`rpc-test-executor.ts` |
 | TCP/TLS + mTLS 私网通信 | Phase 0 代码已实现 | `listenTlsRpc`／`tlsRpcTransport`；TLS loopback 双向认证、客户端 CN allowlist 与拒绝测试通过 |
 | 端到端 CLI 闭环 | TLS loopback 与真实双 VPS 均已通过 | `execution:rpc-agent --check`、`execution:rpc-e2e` 完成 health／stream／cancel；真实跨 VPS 证据见验收记录 |
 | Session、心跳、流式响应、取消、deadline、断线处理 | Phase 0 已实现 | `rpc-server.ts`、`rpc-client.ts`；见 `test/execution-rpc.test.ts` |
 | 真实双 VPS RPC 闭环 | 已通过 | 2026-11-02，执行面 `executionId 3a0d7374b09e9b05`；正向／负向／断线证据见验收记录 |
-| PTC bwrap／cgroup／workspace／`OutputRef` | Phase 1 暂不实现 | 本文第 10～12 节 |
-| 直接 `bash` 迁移到统一 RPC、远程文件工具 | Phase 2 暂不实现 | 本文第 13 节 |
+| PTC bwrap／cgroup／workspace／`OutputRef` | Phase 1 已实现 | `ptc-bwrap.ts`、`ptc-cgroup.ts`、`ptc-executor.ts`、`ptc-host.ts`、`ptc-runner-*.ts`、`ptc-workspace.ts`；POSIX 自动化验收通过，真实双 VPS 验收待执行 |
+| 直接 `bash` 迁移到统一 RPC、远程文件工具 | Phase 2 已实现 | `remote-rpc-env.ts`、`direct-executor.ts`、`ptc-fs.ts`、`remote-files.ts`；`test/direct-rpc.test.ts`、`test/ptc-files.test.ts`；真实双 VPS 验收待执行 |
 | gRPC、消息队列、额外数据库 | 暂不实现 | 不引入 |
 
-Phase 0 已通过真实双 VPS 验收；Unix socket 用例在 POSIX 验收中 9/9 通过。Phase 1 仍未开始。Phase 0 不改变现有 Tool Registry、pi-durable Journal、`NestedCallDoc` 或 QuickJS 执行核心。
+Phase 0 已通过真实双 VPS 验收；Unix socket 用例在 POSIX 验收中 9/9 通过。Phase 1／2 的代码路径与自动化验收已完成（2026-11-03），真实双 VPS 场景（bwrap／cgroup、`/shared` 一致性、断线重放）仍需按 16.2／16.3 执行。Phase 0 不改变现有 Tool Registry、pi-durable Journal、`NestedCallDoc` 或 QuickJS 执行核心。
 
 ## 2. 用户目标
 
@@ -54,7 +54,7 @@ Phase 0 只建立通道和执行代理，不接入 PTC，不迁移普通工具�
 - 受限测试执行器（只开放 `test.*` 能力，不接受任意命令）。
 - 本地 Unix socket 测试、TLS loopback 测试和真实跨 VPS 验收。
 
-实现状态：上述代码路径均已落地；TLS loopback 自动化测试通过，Unix socket 在 POSIX 验收中 9/9 通过。2026-11-02 已完成真实双 VPS 验收（PASS），证据见 [验收记录](acceptance/20261102-execution-rpc-phase0.md)。Phase 0 验收已完成，Phase 1 尚未开始。
+实现状态：上述代码路径均已落地；TLS loopback 自动化测试通过，Unix socket 在 POSIX 验收中 9/9 通过。2026-11-02 已完成真实双 VPS 验收（PASS），证据见 [验收记录](acceptance/20261102-execution-rpc-phase0.md)。Phase 0 验收已完成；Phase 1 代码随后完成（PR #59），真实双 VPS 验收待执行。
 
 Phase 0 明确不实现：
 
@@ -75,11 +75,15 @@ Phase 0 验收通过后实施：
 - 稳定 `jobId`、workspace 复用、`OutputRef`、大输出过滤和 Token 消耗对比验收。
 - 只开放 `bash`；文件原语留到 Phase 2。
 
+实现状态：Phase 1 代码已于 2026-11-03 完成并提交（PR #59）；Loopback／自动化测试通过，真实双 VPS 验收按 16.2 待执行。
+
 ### Phase 2：直接工具迁移与文件原语
 
 - 直接 `bash` 从现有 one-shot SSH 迁移到统一 RPC。
 - 增加远程 `read`／`write`／`edit`，以及必要的 `file.stat` 等只读操作。
 - 保留旧 SSH 路径作为兼容，直到迁移验收通过；不得静默降级。
+
+实现状态：Phase 2 代码已于 2026-11-03 完成。`EXECUTION_REMOTE_TRANSPORT=ssh|rpc` 显式选择传输，默认 `ssh`；rpc 模式下直接 `bash` 与文件工具都走统一 RPC，ssh 模式保持原 broker 路径并且文件工具仍不可用，两种模式之间没有回退。自动化证据见 [验收记录](acceptance/20261103-remote-ptc-phase2.md)，真实双 VPS 验收按 16.3 待执行。
 
 ### 非目标
 
@@ -262,7 +266,7 @@ type RpcEventFrame =
 
 取消不是独立帧，而是 `method: "cancel"` 的请求，`payload` 为 `{ targetId, reason? }`；Agent 用普通响应确认取消请求本身，目标请求以 `aborted` 错误响应终止。
 
-实现边界：Phase 0 的 Agent 只接受 `request` 帧；收到其他帧类型会关闭连接。Gateway 只接受 `response`／`event` 帧。`tool.output`、`vm.message` 等事件只在 Phase 1 设计中，当前协议类型没有实现。
+实现边界：Phase 0 的 Agent 只接受 `request` 帧；收到其他帧类型会关闭连接。Gateway 只接受 `response`／`event` 帧。`tool.output`、`vm.message`、`session.closed` 事件在 Phase 1 实现；`file.*` 方法在 Phase 1（PTC session）与 Phase 2（direct session）实现。
 
 ### 6.4 方法
 
@@ -272,12 +276,12 @@ type RpcEventFrame =
 | `preflight` | 实现基础版 | 扩展 | 扩展 | Phase 0 检查 TLS／测试执行器；Phase 1 加 bwrap/cgroup |
 | `session.open` | 实现 | 实现 | 实现 | 携带 `sessionId`、`jobId`、limits |
 | `session.close` | 实现 | 实现 | 实现 | 关闭会话并中止活动请求 |
-| `execute` | 仅 `executor: "test"` | 不开放 bash | 实现 bash | Phase 0 不接受任意命令 |
-| `tool.call` | `not_implemented` | 实现 `bash` | 扩展 | 嵌套 PTC 工具调用；先过控制面授权 |
+| `execute` | 仅 `executor: "test"` | 不开放 bash（`not_implemented`） | 实现 bash | 需要 direct session；语义见第 13 节 |
+| `tool.call` | `not_implemented` | 实现 `bash` | 扩展 `read`／`write`／`edit` | 嵌套 PTC 工具调用；先过控制面授权 |
 | `cancel` | 实现 | 实现 | 实现 | 按 target request id 中止 |
 | `vm.start` | 仅协议 | 实现 | 实现 | `RemoteCodemodeSandbox` 启动 |
 | `vm.message` / `vm.reply` | 仅协议 | 实现 | 实现 | VM 消息交换 |
-| `file.read/write/edit` | 仅设计 | 仅设计 | 实现 | 远程文件原语 |
+| `file.stat`／`exists`／`canonical`／`open`／`read`／`scanLines`／`close`／`readText`／`write` | 仅设计 | 实现（PTC session） | 实现（direct session） | 有界文件原语；路径限制见第 13 节 |
 
 Phase 0 的 `execute` 只接受受限测试能力：
 
@@ -466,8 +470,8 @@ type PtcToolCallPayload = {
 - 包装层每次 codemode 调用先打开或拒绝 session，然后用 `AsyncLocalStorage` 把该 session 绑定在整次 `execute()` 上；并发脚本各自拿到自己的 session，不会串用。
 - 嵌套调用不通过 context 传递身份：调度器的 `HarnessOptions.env` 只看到后台 context，看不到单次调用 context。绑定层改为包裹 `bash` 工具，从持久化嵌套任务输入读取 `parent`（codemode 任务 id）和 `key`（`c<callId>`），据此找到 session 并派生 `callId`；`callId` 不从模型参数读取，找不到 session 或 key 形状不符则失败关闭。
 - 每个嵌套 `bash` 调用构造一个 `PtcExecutionEnv`（`cwd=/workspace`），把 `env.exec` 转成同一 session 上的 `tool.call`；返回值带 `outputRef`／`spillTruncated`。`OutputRef` 在结果交付给 VM 之前提交到 `PtcOutputDoc`，提交失败则调用失败（命令可能已执行）。
-- 模型直接调用 `bash` 仍走原有 broker 路径；只有嵌套调用走 PTC，且不会静默回退到直连 broker。
-- `restrictScriptTools` Phase 1 远程白名单为 `{ "bash" }`；Phase 2 加 `{ "read", "write", "edit" }`；模型仍能看到全部工具。
+- 模型直接调用 `bash` 在 `EXECUTION_REMOTE_TRANSPORT=rpc` 时走同一 RPC 的 `execute`（direct session），在默认 `ssh` 时仍走原有 broker 路径；两种模式都不静默回退到另一种，文件工具在 ssh 模式保持不可用。
+- `restrictScriptTools` 在 Phase 2 的远程白名单为 `{ "bash", "read", "write", "edit" }`（与本地一致）；模型仍能看到全部工具。
 - 包装层继续串行化嵌套调用，并在 codemode 调用结束、失败、超时或取消时中止仍在运行的嵌套 context；随后关闭 RPC session。
 
 ## 11. Workspace、重放与输出引用
@@ -537,9 +541,9 @@ QuickJS VM 仍然没有文件系统、网络、计时器或模块能力。它不
   - 需要过滤时，用同一 sandbox 内的 `bash` 处理 `ref.path`，例如 `grep`、`awk`、`sed`、`head`、`tail`；
   - 只把过滤后的有界结果返回给脚本；完整输出不经 RPC 传输。
 - Phase 2（增加 `read`）：
-  - 脚本调用 `tools.read({ path: ref.path, offset, maxBytes, maxLines })`；
-  - 返回 `{ content, nextOffset, eof, truncated }`；
-  - 脚本循环读取并聚合，单次结果受窗口和 journal 预算限制。
+  - 脚本或模型直接调用 `read`，`RemoteFileSystem` 通过 `file.open`／`file.read`／`file.scanLines` 读取；
+  - `file.read` 每次最多 256 KiB，返回 `{ data, bytesRead, nextOffset, eof }`；客户端校验 `nextOffset` 与请求范围一致；
+  - 内置 `read` 的 offset／limit 与行扫描在宿主侧组合，返回文本及其截断状态；单次远程读取不超过 2 MiB。
 - 分块默认 32 KiB／1000 行；按字节 offset，UTF-8 边界不拆分；每个脚本有累计读取预算。
 - 不用“把完整输出塞进一次 tool result”的方式；也不让控制面读取执行 VPS 文件。
 
@@ -686,6 +690,9 @@ bwrap \
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
+| `EXECUTION_MODE` | `local` | `local`／`remote`；只有 `remote` 才读取下列变量 |
+| `EXECUTION_REMOTE_TRANSPORT` | `ssh` | `ssh`（旧 broker）或 `rpc`（统一 RPC direct session）；不做隐式回退 |
+| `EXECUTION_REMOTE_CWD` | 无 | 两种传输都必填；rpc 模式必须在 `/shared` 下 |
 | `EXECUTION_RPC_TRANSPORT` | `tls` | `tls` 或 `unix`；生产用 `tls` |
 | `EXECUTION_RPC_ADDRESS` | 无 | Agent 私网地址，例如 `10.1.0.15:9443` |
 | `EXECUTION_RPC_SERVER_NAME` | 无 | 证书 SAN 校验名 |
@@ -717,13 +724,16 @@ bwrap \
 | `EXECUTION_AGENT_TEST_EXECUTOR` | `1` | Phase 0 测试执行器开关；生产 Phase 1 关闭 |
 | `EXECUTION_AGENT_UNIX_SOCKET` | 无 | 仅本地测试／同机部署 |
 
-Phase 1 PTC 配置（暂不实现）：
+Phase 1／2 执行面配置（已实现）：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
+| `PTC_ENABLED` | 无 | 必须显式 `1` 才启用 PTC sandbox |
 | `PTC_WORKSPACE_ROOT` | `/home/aster/jobs` | job 根目录 |
-| `PTC_SHARED_WORKSPACE` | `/home/aster/workspace` | 直接 `bash` 工作目录 |
-| `PTC_SHARED_WORKSPACE_MODE` | `none` | `none`／`ro`／`rw` |
+| `PTC_SHARED_WORKSPACE` | `/home/aster/workspace` | 直接 `bash` 工作目录；`PTC_SHARED_WORKSPACE_MODE` 非 `none` 时必填 |
+| `PTC_SHARED_WORKSPACE_MODE` | `none` | `none`／`ro`／`rw`；Phase 2 直接模式要求 `rw` |
+| `PTC_DIRECT_ENABLED` | `0` | `1` 时开放 direct session（`execute` bash＋文件工具）；需要 `PTC_SHARED_WORKSPACE` |
+| `PTC_DIRECT_TMP_ROOT` | `/tmp/aster-direct` | 每个 direct session 的私有 `/tmp` 根 |
 | `PTC_CGROUP_ROOT` | `/sys/fs/cgroup/aster-ptc` | cgroup v2 子树 |
 | `PTC_CGROUP_MEMORY_MAX_BYTES` | `536870912` | 512 MiB |
 | `PTC_CGROUP_PIDS_MAX` | `128` | 进程／线程上限 |
@@ -809,6 +819,8 @@ npm run execution:rpc-e2e
 
 ### 15.2 Phase 1
 
+状态：步骤 1～5 的代码与自动化测试已实现（2026-11-03，PR #59）；真实双 VPS 验收按 16.2 待执行。
+
 1. 增加 `vm.start`、`vm.message`、`vm.reply`、`tool.call`（bash）载荷和测试。
 2. `RemoteCodemodeSandbox` / `PTC_SESSION` 接入 Gateway Client。
 3. `aster-ptc-host`、`aster-ptc-runner`、bwrap、cgroup、workspace、`PtcJobDoc`。
@@ -818,7 +830,9 @@ npm run execution:rpc-e2e
 
 ### 15.3 Phase 2
 
-1. 直接 `bash` 从 one-shot SSH 迁到 RPC `execute`。
+状态：步骤 1～4 的代码与自动化测试已实现（2026-11-03）；真实双 VPS 验收按 16.3 待执行。
+
+1. 直接 `bash` 从 one-shot SSH 迁到 RPC `execute`（`EXECUTION_REMOTE_TRANSPORT=rpc`；默认仍为 `ssh`）。
 2. 远程 `read`／`write`／`edit` 和 `/shared`。
 3. 路径、符号链接、原子写入、幂等和重放验收。
 4. 旧 SSH 路径保留到迁移验收通过。
@@ -850,6 +864,8 @@ npm run execution:rpc-e2e
 
 ### 16.2 Phase 1
 
+状态：自动化部分（loopback RPC、网关、嵌套调用、输出窗口）于 2026-11-03 通过；bwrap／cgroup／无网络／进程清理／真实跨 VPS 部分待 POSIX 与双 VPS 执行。
+
 - 脚本 `tools.bash({ command: "hostname" })` 返回执行 VPS 主机名；控制面主机名不同。
 - 一个脚本内连续 10 次 bash 只使用一条 RPC 连接；嵌套调用经过 registry、`NestedCallDoc`；transcript 中只有一个 codemode `toolResult`。
 - VM 与 bash 在同一 bwrap 进程树／cgroup；`/proc/net/dev` 只有 `lo`；无外网和 DNS。
@@ -861,6 +877,8 @@ npm run execution:rpc-e2e
 - 协议：未知帧、超大帧、错误 sessionId／callId、错误版本均关闭连接且不执行。
 
 ### 16.3 Phase 2
+
+状态：自动化部分于 2026-11-03 通过（`test/direct-rpc.test.ts`、`test/ptc-files.test.ts`、`test/execution-rpc.test.ts`、`test/execution-remote-env.test.ts`）；`/shared` 只读绑定、bwrap 下的真实路径与符号链接行为、跨主机重放需按部署环境复验。Windows 上依赖 POSIX 符号链接与 Unix socket 的用例被跳过，需在 POSIX 执行。
 
 - 直接 `bash` 可通过 RPC 执行，旧 SSH 路径仍可显式启用；切换模式不静默降级。
 - 远程 `read`／`write`／`edit` 在 `/workspace`、`/shared`、`/tmp` 边界内工作；越界、符号链接逃逸、NUL 被拒绝。

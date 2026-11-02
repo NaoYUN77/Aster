@@ -4,7 +4,7 @@ import type { RpcExecutionClient } from "./execution/rpc-client.js";
 /** The RPC operations one PTC session needs. Structural, so tests can drive the gateway in-process. */
 export type PtcRpcClient = Pick<
   RpcExecutionClient,
-  "health" | "openSession" | "closeSession" | "startVm" | "replyVm" | "startToolCall" | "close"
+  "health" | "openSession" | "closeSession" | "startVm" | "replyVm" | "startToolCall" | "fileRequest" | "close"
 >;
 
 /**

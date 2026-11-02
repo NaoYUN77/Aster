@@ -3,6 +3,7 @@
  * workspace and the sandbox; stdin/stdout carry length-prefixed frames only, never diagnostics.
  */
 import { ConfigurationError } from "../errors.js";
+import { PtcFileService, type PtcFileRoot } from "./ptc-fs.js";
 import { PtcRunnerCore, executeLocalBash, type BashOptions } from "./ptc-runner-core.js";
 import {
   PtcRunnerFrameDecoder,
@@ -29,6 +30,40 @@ function integer(env: NodeJS.ProcessEnv, name: string, fallback: number, min: nu
     throw new ConfigurationError(`${name} must be an integer in ${min}..${max}`);
   }
   return value;
+}
+
+function optionalAbsolute(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const value = env[name];
+  if (value === undefined || value === "") return undefined;
+  return absolute(env, name);
+}
+
+/**
+ * The roots the runner may expose to file tools. They are the paths as seen *inside* the sandbox:
+ * `/workspace` and `/shared` are mounts, and `/tmp` exists only when bwrap gave it a private tmpfs.
+ * No root is ever the host root, and a read-only shared mount makes `file.write` fail closed.
+ */
+function fileRoots(env: NodeJS.ProcessEnv): PtcFileRoot[] {
+  const roots: PtcFileRoot[] = [
+    { virtual: "/workspace", host: absolute(env, "PTC_RUNNER_WORKSPACE"), writable: true },
+  ];
+  const shared = optionalAbsolute(env, "PTC_RUNNER_SHARED");
+  const sharedMode = env.PTC_RUNNER_SHARED_MODE ?? "none";
+  if (sharedMode !== "none" && sharedMode !== "ro" && sharedMode !== "rw") {
+    throw new ConfigurationError("PTC_RUNNER_SHARED_MODE must be none, ro or rw");
+  }
+  if (sharedMode === "none" && shared !== undefined) {
+    throw new ConfigurationError("PTC_RUNNER_SHARED is set but PTC_RUNNER_SHARED_MODE is none");
+  }
+  if (sharedMode !== "none" && shared === undefined) {
+    throw new ConfigurationError("PTC_RUNNER_SHARED_MODE requires PTC_RUNNER_SHARED");
+  }
+  if (shared !== undefined) {
+    roots.push({ virtual: "/shared", host: shared, writable: sharedMode === "rw" });
+  }
+  const tmp = optionalAbsolute(env, "PTC_RUNNER_TMP");
+  if (tmp !== undefined) roots.push({ virtual: "/tmp", host: tmp, writable: true });
+  return roots;
 }
 
 function bashOptions(env: NodeJS.ProcessEnv): BashOptions {
@@ -73,7 +108,10 @@ function write(frame: RunnerToHost): void {
 function main(): void {
   let core: PtcRunnerCore;
   try {
-    core = new PtcRunnerCore({ bash: bashOptions(process.env) }, write);
+    core = new PtcRunnerCore({
+      bash: bashOptions(process.env),
+      files: new PtcFileService({ roots: fileRoots(process.env) }),
+    }, write);
   } catch (error) {
     // Nothing is listening for frames yet; exiting non-zero is the only honest signal.
     process.stderr.write(`ptc runner: ${error instanceof Error ? error.message : String(error)}\n`);
