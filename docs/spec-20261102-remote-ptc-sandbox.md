@@ -183,7 +183,7 @@ gRPC 双向流是候选，但 Phase 0 不引入：
 
 - Execution Agent 只绑定私网地址或 WireGuard 地址，例如 `10.x.x.x:9443` 或 `fd00::1:9443`。
 - 禁止绑定 `0.0.0.0`、`::` 或公网地址；不发布 Docker 端口。
-- 防火墙只允许控制面 gateway 的私网地址访问该端口。
+- 本阶段不修改现有防火墙、Docker/容器网络或云安全组规则；部署方只读核验现有网络策略。若现有策略不满足私网访问或允许非预期来源，记录并停止，不自行变更。
 - 服务端证书 SAN 必须包含实际连接地址；客户端校验证书链和主机名。
 - Gateway 使用客户端证书；Agent 要求并校验客户端证书。
 - CA 固定，证书由部署阶段签发；证书和私钥不进入仓库、不写入 `.env`、不暴露给模型。
@@ -738,7 +738,7 @@ Phase 1 PTC 配置（暂不实现）：
 ### 14.3 部署
 
 1. 控制面生成／分发 CA，签发 Gateway 客户端证书和 Agent 服务端证书；证书不进仓库。
-2. Agent 绑定执行 VPS 私网地址，配置防火墙只允许控制面 gateway 地址。
+2. Agent 绑定执行 VPS 私网地址；本阶段不修改现有防火墙、Docker/容器网络或云安全组，只做只读核验。
 3. Gateway 配置 CA、客户端证书、服务端 SAN；`rejectUnauthorized` 必须为真。Agent 的 `EXECUTION_AGENT_CLIENT_CERT_CN` 必须等于该客户端证书 CN，其他 CA 签发或 CN 不符的证书在进入 RPC 前被拒绝。
 4. 不发布 Docker 端口；Agent 进程直接绑定私网地址，或在 host 网络容器中运行。
 5. 先运行 `execution-agent --check` 和 Gateway `health.check`；失败则不进入 Phase 0 验收。
@@ -773,7 +773,7 @@ npm run execution:rpc-e2e
 
 `rpc-e2e` 输出 `executionId`、`streamChunks`、`streamBytes`、`cancelCode` 和 `cancelOutcome`；同时用 `ss -ltn` 确认执行 VPS 只监听私网地址。
 
-证书签发、systemd、防火墙、负向 mTLS 用例、断线检查和证据模板见 [Phase 0 部署与验收 Runbook](runbook-execution-rpc-phase0.md)。
+证书签发、systemd、网络策略只读核验、负向 mTLS 用例、断线检查和证据模板见 [Phase 0 部署与验收 Runbook](runbook-execution-rpc-phase0.md)。
 
 ## 15. 实施步骤
 
@@ -871,7 +871,7 @@ npm run execution:rpc-e2e
 ## 17. 风险与待验证
 
 - **TCP/TLS 与证书运维**：mTLS 需要证书签发、轮换、SAN 和私网绑定；Phase 0 必须用真实证书验收，不能只用本地自签。
-- **私网监听**：虽然不暴露公网，仍需防火墙、绑定地址和客户端证书三层限制；Agent 不是任意命令服务。
+- **私网监听**：虽然不暴露公网，仍需绑定地址、客户端证书和现有网络策略三层限制；本阶段不改防火墙，Agent 不是任意命令服务。
 - **跨 VPS 验收环境**：需要两台真实主机和私网路由；CI 只能覆盖 loopback TLS，真实验收按 runbook 记录。
 - **userns 环境差异**：Debian／Ubuntu 的 sysctl、AppArmor 和 bwrap 版本可能使 `bwrap --unshare-user` 失败；必须实际 probe。
 - **cgroup 委派**：容器或 systemd 环境可能没有可写子树；降级到 `prlimit` 后聚合限制更弱。
