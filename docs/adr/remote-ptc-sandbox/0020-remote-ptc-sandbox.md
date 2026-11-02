@@ -3,6 +3,7 @@
 - **状态**：Accepted
 - **日期**：2026-11-02
 - **功能**：remote-ptc-sandbox
+- **当前决策口径**：2026-11-02 修订为统一 RPC Execution Agent，见文末「2026-11-02：统一 RPC 修订」。下文「决策」保留初次设计原文；两者冲突时以修订附记为准。
 
 ## 上下文
 
@@ -105,3 +106,20 @@
 - 相关 spec：`docs/spec-20261102-remote-ptc-sandbox.md`（本功能完成后删除，文件名保留为历史标识）
 - 决策与取舍：确认采用远程 VM + 远程 sandbox，控制面保留 journal 和 authz；拒绝方案 A（脚本留控制面）和方案 B 阶段 1 形态（runner 完全自执行、不逐次回调）。通道采用单条 SSH session 流和 `callId`；阶段 1 只开放 `bash`，阶段 2 加文件原语。隔离以 bwrap + user namespace 为必需层，cgroup 优先、`prlimit` 仅作资源降级，且 userns 缺失时默认失败关闭。输出采用远端窗口截断＋workspace spill，控制面 journal 只存有界结果。workspace 通过稳定 `jobId` 和 `workspaceReady` 保证重放衔接，缺失时显式失败。
 - 相关缺陷：尚未实现；已识别的风险包括 userns 在 Debian／Ubuntu／AppArmor 环境下的可用性差异、cgroup 委派失败后的弱降级、`serveCodemodeRemote` 在客户端超时后可能继续计算到下一个工具调用或中断预算、以及直接 `bash` 与 PTC 的安全不对称。实现阶段须用实际 probe、超时强杀和无遗留进程验收逐项确认，不能只以配置存在作为证据。
+
+### 2026-11-02：统一 RPC 修订
+
+- 相关 spec：`docs/spec-20261102-remote-ptc-sandbox.md`（历史文件名）
+- 触发原因：初次设计把“每个 PTC job 一条长生命周期 SSH 流”当作通道，Phase 0 只实现 Unix socket 抽象会把 TCP/TLS、双向证书和真实跨 VPS 闭环推到后续；同时 RPC 不能演变成无约束远程命令服务，request id 去重也不能替代 durable replay。
+- 决策与取舍：通道改为统一 RPC Execution Agent，保留自定义长度前缀 JSON（4 字节大端长度，协议版本 1），暂不引入 gRPC；Transport 抽象同时支持 Unix socket（本地测试）和 TCP/TLS + mTLS（跨 VPS）；Agent 只绑定私网地址，不新增公网监听，不发布端口。Phase 0 只实现健康检查、预检、session、心跳、流式输出、取消、断线和受限 `test.*` 执行器，不接受任意命令；真实 `bash`／`tool.call` 必须经过控制面 registry、schema、authz 和必要审批，执行面仍执行 allowlist、bwrap 和资源限制。Phase 0 验收必须包含真实双 VPS 的 mTLS 闭环，而不是只看 loopback 或 Unix socket。RPC request id 去重仅限同一连接；连接断开后执行类请求结果未知，不自动重跑；`NestedCallDoc`、unsafe 工具策略和 durable journal 不修改、不替代。PTC 仍以减少 LLM 上下文为目标：完整输出留在执行 VPS，控制面只保存有界尾部和 `OutputRef` 元数据；QuickJS 不能直接读文件，Phase 1 用同 sandbox `bash` 过滤，Phase 2 用分块 `read`；重放时校验 `OutputRef` 引用，缺失或 hash 不符返回 `output_unavailable`。Phase 0 完成后再做远程 PTC 集成；不得提前迁移全部普通工具。
+- 备选方案与不采用原因：
+  - gRPC 双向流：需要引入 protobuf、HTTP/2 调优和额外依赖；Phase 0 的请求／响应、流式事件、取消和心跳用长度前缀 JSON 已足够。保留 Transport 抽象，后续可替换。
+  - 只实现 Unix socket，TCP/mTLS 后置：不满足真实跨 VPS 验收目标，不采用。
+  - 由 app 容器直接连执行 VPS：违反 ADR-0015 的路由隔离；继续由控制面 gateway 连接。
+  - 反向连接（Agent 主动连控制面）：仍需一个私网监听端点，且证书方向、NAT 和故障恢复更复杂；作为部署受限时的备选，不是 Phase 0 主路径。
+  - 持久 SSH stdio 承载同一套 RPC 帧：可作为私网不可达时的兼容适配器，但仍需双向认证和帧协议，不把“SSH”当作 RPC 的安全边界。
+  - Phase 0 开放进程执行器：会把 Agent 变成无约束远程命令服务；Phase 0 只开放受限测试能力，真实命令留到 Phase 1／2 并经过控制面授权。
+  - 用 RPC request id 去重替代 durable replay：跨连接、重启和外部副作用都不成立；只保留同连接去重。
+- 后果：新增一个常驻 Execution Agent 和一套私网 mTLS 证书运维；Phase 0 的跨 VPS 验收需要两台真实主机和私网路由，CI 只覆盖 loopback TLS。Phase 0 不改变现有 broker／SSH 路径、Tool Registry、Journal 或 QuickJS 核心。Phase 1 才引入 bwrap、cgroup、workspace、`OutputRef` 和 `RemoteCodemodeSandbox`；Phase 2 才迁移直接 `bash` 和远程文件工具。
+- 实现状态：Phase 0 的协议、Transport 抽象、Gateway Client、常驻 Execution Agent、TCP/TLS + mTLS、客户端 CN allowlist、session／心跳／流式／取消／断线处理和受限测试执行器代码已落地；本地类型检查、TLS loopback 测试和 TLS loopback 的 `rpc-agent --check`＋`rpc-e2e` 闭环通过，Unix socket 用例已提供并在 Windows 上跳过（由 POSIX CI 执行）。真实双 VPS 跨私网验收尚未执行，因此 Phase 0 不视为验收完成；Phase 1／2 未实现。
+- 相关缺陷：Phase 0 代码已实现但跨 VPS 验收待执行。验收阶段需重点验证：Agent 不得绑定 `0.0.0.0`；无客户端证书／错误 CA／错误 SAN／错误客户端 CN 必须拒绝；流式事件和取消必须真实跨 VPS；断线后不得自动重跑；Phase 0 不存在任意命令路径；真实跨 VPS 验收记录必须包含执行 VPS 的 `executionId` 和监听地址证据。
