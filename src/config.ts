@@ -3,6 +3,7 @@ import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
 import { isAbsoluteRemotePath } from "./execution/protocol.js";
+import { readRpcClientConfig, type RpcClientConfig } from "./execution/rpc-config.js";
 import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
 import {
   assertSchema,
@@ -146,6 +147,20 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   if (webApiKey) assertValidCredentialShape("DEEPSEEK_WEB_API_KEY", webApiKey);
   const execution = readExecutionConfig(env);
   const codemode = readCodemodeConfig(env);
+  // Remote code mode runs its VM on the execution agent, so the gateway must be configured and
+  // reachable. A local deployment keeps the previous codemode shape unchanged.
+  const codemodeConfig: CodemodeConfig | undefined = codemode.enabled
+    ? {
+        ...codemode,
+        ...(execution === undefined ? {} : {
+          ptc: {
+            rpc: readRpcClientConfig(env),
+            defaultTimeoutSeconds: execution.defaultTimeoutSeconds,
+            maxTimeoutSeconds: execution.maxTimeoutSeconds,
+          },
+        }),
+      }
+    : undefined;
   return {
     token,
     ownerId,
@@ -154,7 +169,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     telegramApiRoot,
     ...(webApiKey ? { webApiKey } : {}),
     ...(execution === undefined ? {} : { execution }),
-    ...(codemode.enabled ? { codemode } : {}),
+    ...(codemodeConfig === undefined ? {} : { codemode: codemodeConfig }),
     ...resolveMcpConfigPaths(env),
   };
 }
@@ -227,6 +242,15 @@ export type CodemodeConfig = {
   readonly timeoutMs: number;
   /** Maximum heap the QuickJS instance may allocate. */
   readonly memoryLimitBytes: number;
+  /** Present only when execution is remote: the agent that runs the script's VM. */
+  readonly ptc?: CodemodePtcConfig;
+};
+
+/** The execution agent connection and timeout bounds a remote code mode run needs. */
+export type CodemodePtcConfig = {
+  readonly rpc: RpcClientConfig;
+  readonly defaultTimeoutSeconds: number;
+  readonly maxTimeoutSeconds: number;
 };
 
 /**

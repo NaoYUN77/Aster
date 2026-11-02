@@ -1,6 +1,9 @@
 import { createSecureContext } from "node:tls";
 import { ConfigurationError } from "../errors.js";
 import { describeRpcAgentConfig, readRpcAgentConfig, readTlsMaterial } from "./rpc-config.js";
+import { probePtcRuntime } from "./ptc-cgroup.js";
+import { readPtcConfig } from "./ptc-config.js";
+import { PtcExecutor } from "./ptc-executor.js";
 import { startRpcAgent } from "./rpc-server.js";
 import { listenTlsRpc, listenUnixRpc, type RpcServer } from "./rpc-transport.js";
 
@@ -17,12 +20,24 @@ async function main(): Promise<void> {
     return;
   }
   const config = readRpcAgentConfig();
+  const ptcConfig = readPtcConfig();
+  let ptc: PtcExecutor | undefined;
+  let ptcChecks: Record<string, boolean | null> | undefined;
+  if (ptcConfig !== undefined) {
+    const probe = await probePtcRuntime(ptcConfig);
+    ptc = new PtcExecutor({ config: ptcConfig, probe });
+    ptcChecks = await ptc.preflight();
+  }
+  const checkReport = (): string => `${JSON.stringify({
+    ...describeRpcAgentConfig(config),
+    ...(ptcChecks === undefined ? {} : { ptc: ptcChecks }),
+  }, null, 2)}\n`;
   let server: RpcServer;
   let transport: "unix" | "tls" = config.transport;
   if (config.transport === "unix") {
     if (config.socketPath === undefined) throw new ConfigurationError("EXECUTION_AGENT_UNIX_SOCKET is required");
     if (process.argv.includes("--check")) {
-      process.stdout.write(`${JSON.stringify(describeRpcAgentConfig(config), null, 2)}\n`);
+      process.stdout.write(checkReport());
       return;
     }
     server = await listenUnixRpc(config.socketPath, {
@@ -43,7 +58,7 @@ async function main(): Promise<void> {
     // Fail before listening if a PEM file is unreadable or does not form a usable context.
     createSecureContext({ cert: material.cert, key: material.key, ca: material.ca });
     if (process.argv.includes("--check")) {
-      process.stdout.write(`${JSON.stringify(describeRpcAgentConfig(config), null, 2)}\n`);
+      process.stdout.write(checkReport());
       return;
     }
     server = await listenTlsRpc({
@@ -59,6 +74,13 @@ async function main(): Promise<void> {
     });
     transport = "tls";
   }
+  if (ptc !== undefined && !ptc.enabled) {
+    // Refusing to listen is the only fail-closed answer: a host that cannot isolate must not
+    // advertise the Phase 1 surface at all.
+    throw new ConfigurationError(
+      "PTC is enabled but this host cannot provide bwrap, user namespaces and cgroup v2 (or an explicitly allowed degraded fallback)",
+    );
+  }
   const agent = startRpcAgent({
     server,
     executionId: config.executionId,
@@ -68,6 +90,7 @@ async function main(): Promise<void> {
     sessionTtlMs: config.sessionTtlMs,
     heartbeatMs: config.heartbeatMs,
     testExecutorEnabled: config.testExecutorEnabled,
+    ...(ptc === undefined ? {} : { ptc }),
   });
   const address = server.address();
   const target = "path" in address ? address.path : `${address.host}:${address.port}`;

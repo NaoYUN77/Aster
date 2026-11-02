@@ -1,9 +1,12 @@
 /**
- * Phase 0 wire contract for the resident execution agent. Frames are length-prefixed JSON: a
+ * Unified wire contract for the resident execution agent. Frames are length-prefixed JSON: a
  * 4-byte big-endian payload length followed by UTF-8 JSON. The protocol is deliberately small and
  * strict; the transport may be a Unix socket for local tests or TCP/TLS with mutual certificates
- * across VPS hosts. Phase 0 only exposes the restricted test executor through this protocol.
+ * across VPS hosts. Phase 0 exposes the restricted test executor; Phase 1 adds the remote PTC
+ * sandbox (`vm.start`/`vm.reply` requests and `vm.message`/`tool.output` events).
  */
+
+import { validateCommand, validateEnv } from "./protocol.js";
 
 export const RPC_PROTOCOL_VERSION = 1;
 export const RPC_HEADER_BYTES = 4;
@@ -14,6 +17,19 @@ export const RPC_MAX_DEADLINE_MS = 3_600_000;
 export const RPC_MAX_ID_BYTES = 64;
 export const RPC_MAX_JOB_ID_BYTES = 128;
 export const RPC_MAX_REASON_BYTES = 512;
+/** The only cwd the Phase 1 sandbox exposes. A model-supplied path never reaches the agent. */
+export const PTC_WORKSPACE_PATH = "/workspace";
+export const PTC_MAX_TOOL_TIMEOUT_MS = 86_400_000;
+export const PTC_MAX_VM_MESSAGES = 4_096;
+export const PTC_MAX_VM_CODE_BYTES = 1024 * 1024;
+export const PTC_MAX_VM_TOOLS = 512;
+export const PTC_MAX_VM_GLOBALS = 256;
+export const PTC_MAX_VM_STORE_ENTRIES = 1_024;
+export const PTC_MAX_INTERRUPT_BUDGET = 1_000_000_000;
+export const PTC_MAX_WINDOW_BYTES = 16 * 1024 * 1024;
+export const PTC_MAX_WINDOW_LINES = 1_000_000;
+/** A single VM reply's payload must leave room for frame envelope fields inside one frame. */
+export const PTC_MAX_REPLY_PAYLOAD_BYTES = RPC_MAX_FRAME_BYTES - 64 * 1024;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -43,6 +59,8 @@ export type RpcErrorCode =
   | "unavailable"
   | "protocol_error"
   | "test_error"
+  | "workspace_missing"
+  | "output_unavailable"
   | "internal";
 
 export type RpcOutcome = "not_started" | "failed" | "unknown";
@@ -111,7 +129,47 @@ export type RpcSessionClosedEvent = {
   readonly reason: string;
 };
 
-export type RpcEventFrame = RpcOutputEvent | RpcHeartbeatEvent | RpcSessionClosedEvent;
+/**
+ * One batch of VM messages produced by the remote `serveCodemodeRemote`. `callId` is present only
+ * when the batch carries a `call`; the gateway answers that batch with a `vm.reply` request. A
+ * batch without a call carries output, `started`, `idle`, or the terminal `done`/`crash`/`failure`
+ * and needs no reply.
+ */
+export type RpcVmMessageEvent = {
+  readonly v: 1;
+  readonly kind: "event";
+  readonly event: "vm.message";
+  readonly id: string;
+  readonly sessionId: string;
+  readonly callId?: number;
+  readonly messages: readonly Record<string, unknown>[];
+};
+
+/** One windowed chunk of a nested bash call; `id` is the `tool.call` request id. */
+export type RpcToolOutputEvent = {
+  readonly v: 1;
+  readonly kind: "event";
+  readonly event: "tool.output";
+  readonly id: string;
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly stream: "stdout" | "stderr";
+  readonly text: string;
+  readonly skipped?: RpcSkippedOutput;
+};
+
+export type RpcSkippedOutput = {
+  readonly bytes: number;
+  readonly newlines: number;
+  readonly endsWithNewline: boolean;
+};
+
+export type RpcEventFrame =
+  | RpcOutputEvent
+  | RpcHeartbeatEvent
+  | RpcSessionClosedEvent
+  | RpcVmMessageEvent
+  | RpcToolOutputEvent;
 
 export type RpcFrame = RpcRequestFrame | RpcResponseFrame | RpcEventFrame;
 
@@ -154,6 +212,98 @@ export type RpcTestExecutePayload =
       readonly code: "test_error";
     };
 
+/**
+ * The tail of one nested command's combined output the caller keeps. Same shape as pi-durable's
+ * `ShellOutputWindow`; the agent clamps every field to its own configured maximum.
+ */
+export type PtcOutputWindow = {
+  readonly maxBytes: number;
+  readonly maxLines: number;
+  readonly minIntervalMs: number;
+  readonly bytesPerSecond: number;
+};
+
+export type PtcToolCallArgs = {
+  readonly command: string | readonly string[];
+  readonly cwd: typeof PTC_WORKSPACE_PATH;
+  readonly env: Readonly<Record<string, string>>;
+  readonly inheritEnv: boolean;
+  readonly timeoutMs: number;
+  readonly window: PtcOutputWindow;
+};
+
+/** A nested tool call already authorized, validated and journaled by the control plane. */
+export type PtcToolCallPayload = {
+  readonly tool: "bash";
+  readonly callId: number;
+  readonly args: PtcToolCallArgs;
+};
+
+/**
+ * Content-addressed reference to the complete output of one nested call. The content lives in the
+ * job workspace on the execution host; the control plane stores only this metadata.
+ */
+export type PtcOutputRef = {
+  readonly blobId: string;
+  readonly jobId: string;
+  readonly sessionId: string;
+  readonly callId: number;
+  readonly path: string;
+  readonly size: number;
+  readonly sha256: string;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly state: "available" | "evicted" | "unknown";
+};
+
+export type PtcToolCallResult = {
+  readonly exitCode: number;
+  readonly outputRef?: PtcOutputRef;
+  /** The complete output was larger than the spill limit and was not written past it. */
+  readonly spillTruncated: boolean;
+  readonly durationMs: number;
+};
+
+export type PtcVmToolDefinition = {
+  readonly name: string;
+  readonly jsName: string;
+  readonly description: string;
+};
+
+export type PtcVmStartPayload = {
+  readonly request: {
+    readonly data: {
+      readonly code: string;
+      readonly tools: readonly PtcVmToolDefinition[];
+      readonly globals: readonly { readonly name: string; readonly spread: boolean }[];
+      readonly store: Readonly<Record<string, string>>;
+      readonly memoryLimitBytes?: number;
+      readonly deterministic?: { readonly startedAt: number; readonly seed: number };
+    };
+    readonly interruptBudget?: number;
+  };
+};
+
+export type PtcVmReplyPayload = {
+  readonly callId: number;
+  readonly reply: Record<string, unknown> | null;
+};
+
+/** Workspace state reported by `session.open` after the agent prepared (or found) the job directory. */
+export type PtcWorkspaceState = {
+  readonly path: string;
+  readonly created: boolean;
+  readonly reused: boolean;
+};
+
+export type PtcIsolationState = {
+  readonly mode: "bwrap" | "degraded-prlimit";
+  readonly bwrap: boolean;
+  readonly userNamespace: boolean;
+  readonly cgroup: "v2" | "none";
+  readonly network: "none" | "host";
+};
+
 const METHODS = new Set<RpcMethod>([
   "health.check",
   "preflight",
@@ -180,6 +330,8 @@ const ERROR_CODES = new Set<RpcErrorCode>([
   "unavailable",
   "protocol_error",
   "test_error",
+  "workspace_missing",
+  "output_unavailable",
   "internal",
 ]);
 
@@ -303,6 +455,288 @@ export function parseTestExecutePayload(value: unknown): ParseResult<RpcTestExec
   }
 }
 
+function isPositiveInteger(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= max;
+}
+
+function parsePtcOutputWindow(value: unknown): ParseResult<PtcOutputWindow> {
+  if (!isPlainObject(value)) return fail("args.window must be an object");
+  const unknown = unexpectedKey(value, ["maxBytes", "maxLines", "minIntervalMs", "bytesPerSecond"]);
+  if (unknown !== undefined) return fail(`unknown args.window field: ${unknown}`);
+  const { maxBytes, maxLines, minIntervalMs, bytesPerSecond } = value;
+  if (!Number.isSafeInteger(maxBytes) || (maxBytes as number) < 1 || (maxBytes as number) > PTC_MAX_WINDOW_BYTES) {
+    return fail(`args.window.maxBytes must be an integer in 1..${PTC_MAX_WINDOW_BYTES}`);
+  }
+  if (!Number.isSafeInteger(maxLines) || (maxLines as number) < 1 || (maxLines as number) > PTC_MAX_WINDOW_LINES) {
+    return fail(`args.window.maxLines must be an integer in 1..${PTC_MAX_WINDOW_LINES}`);
+  }
+  if (!Number.isSafeInteger(minIntervalMs) || (minIntervalMs as number) < 0 || (minIntervalMs as number) > 60_000) {
+    return fail("args.window.minIntervalMs must be an integer in 0..60000");
+  }
+  if (!Number.isSafeInteger(bytesPerSecond) || (bytesPerSecond as number) < 0
+    || (bytesPerSecond as number) > 1_000_000_000) {
+    return fail("args.window.bytesPerSecond must be an integer in 0..1000000000");
+  }
+  return {
+    ok: true,
+    value: {
+      maxBytes: maxBytes as number,
+      maxLines: maxLines as number,
+      minIntervalMs: minIntervalMs as number,
+      bytesPerSecond: bytesPerSecond as number,
+    },
+  };
+}
+
+/** Validate a nested `bash` call. The control plane has already authorized it; this is the agent's own gate. */
+export function parsePtcToolCallPayload(value: unknown): ParseResult<PtcToolCallPayload> {
+  if (!isPlainObject(value)) return fail("tool.call payload must be an object");
+  const unknown = unexpectedKey(value, ["tool", "callId", "args"]);
+  if (unknown !== undefined) return fail(`unknown tool.call field: ${unknown}`);
+  if (value.tool !== "bash") return fail("Phase 1 only implements the bash tool");
+  if (!isPositiveInteger(value.callId)) return fail("callId must be a positive integer");
+  if (!isPlainObject(value.args)) return fail("args must be an object");
+  const args = value.args;
+  const unknownArg = unexpectedKey(args, ["command", "cwd", "env", "inheritEnv", "timeoutMs", "window"]);
+  if (unknownArg !== undefined) return fail(`unknown args field: ${unknownArg}`);
+  const commandError = validateCommand(args.command);
+  if (commandError !== undefined) return fail(commandError);
+  if (args.cwd !== PTC_WORKSPACE_PATH) return fail(`args.cwd must be ${PTC_WORKSPACE_PATH}`);
+  const envError = validateEnv(args.env);
+  if (envError !== undefined) return fail(envError);
+  if (typeof args.inheritEnv !== "boolean") return fail("args.inheritEnv must be a boolean");
+  if (!Number.isSafeInteger(args.timeoutMs) || (args.timeoutMs as number) < 1
+    || (args.timeoutMs as number) > PTC_MAX_TOOL_TIMEOUT_MS) {
+    return fail(`args.timeoutMs must be an integer in 1..${PTC_MAX_TOOL_TIMEOUT_MS}`);
+  }
+  const window = parsePtcOutputWindow(args.window);
+  if (!window.ok) return fail(window.message);
+  return {
+    ok: true,
+    value: {
+      tool: "bash",
+      callId: value.callId,
+      args: {
+        command: args.command as string | readonly string[],
+        cwd: PTC_WORKSPACE_PATH,
+        env: args.env as Record<string, string>,
+        inheritEnv: args.inheritEnv,
+        timeoutMs: args.timeoutMs as number,
+        window: window.value,
+      },
+    },
+  };
+}
+
+function isShortString(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && byteLength(value) <= maxBytes;
+}
+
+/**
+ * The VM start request is built by the control plane's code mode extension, but it crosses an
+ * untrusted boundary like every other payload. Bounds here keep the agent from accepting an
+ * unbounded or malformed VM definition; the runner still treats it as data.
+ */
+export function parsePtcVmStartPayload(value: unknown): ParseResult<PtcVmStartPayload> {
+  if (!isPlainObject(value)) return fail("vm.start payload must be an object");
+  const unknown = unexpectedKey(value, ["request"]);
+  if (unknown !== undefined) return fail(`unknown vm.start field: ${unknown}`);
+  if (!isPlainObject(value.request)) return fail("request must be an object");
+  const request = value.request;
+  const unknownRequest = unexpectedKey(request, ["data", "interruptBudget"]);
+  if (unknownRequest !== undefined) return fail(`unknown request field: ${unknownRequest}`);
+  if (!isPlainObject(request.data)) return fail("request.data must be an object");
+  const data = request.data;
+  const unknownData = unexpectedKey(data, ["code", "tools", "globals", "memoryLimitBytes", "store", "deterministic"]);
+  if (unknownData !== undefined) return fail(`unknown request.data field: ${unknownData}`);
+  if (!isShortString(data.code, PTC_MAX_VM_CODE_BYTES)) {
+    return fail(`request.data.code must be a string of at most ${PTC_MAX_VM_CODE_BYTES} bytes`);
+  }
+  if (!Array.isArray(data.tools) || data.tools.length > PTC_MAX_VM_TOOLS) {
+    return fail(`request.data.tools must be an array of at most ${PTC_MAX_VM_TOOLS} entries`);
+  }
+  for (const tool of data.tools) {
+    if (!isPlainObject(tool)) return fail("request.data.tools entries must be objects");
+    if (unexpectedKey(tool, ["name", "jsName", "description"]) !== undefined) {
+      return fail("request.data.tools entries have unknown fields");
+    }
+    if (!isShortString(tool.name, 256) || !isShortString(tool.jsName, 256)
+      || !isShortString(tool.description, 4096)) {
+      return fail("request.data.tools entries are invalid");
+    }
+  }
+  if (!Array.isArray(data.globals) || data.globals.length > PTC_MAX_VM_GLOBALS) {
+    return fail(`request.data.globals must be an array of at most ${PTC_MAX_VM_GLOBALS} entries`);
+  }
+  for (const global of data.globals) {
+    if (!isPlainObject(global) || unexpectedKey(global, ["name", "spread"]) !== undefined) {
+      return fail("request.data.globals entries are invalid");
+    }
+    if (!isShortString(global.name, 256) || typeof global.spread !== "boolean") {
+      return fail("request.data.globals entries are invalid");
+    }
+  }
+  if (Object.hasOwn(data, "memoryLimitBytes")
+    && (!isPositiveInteger(data.memoryLimitBytes, 512 * 1024 * 1024))) {
+    return fail("request.data.memoryLimitBytes must be an integer in 1..536870912");
+  }
+  if (!isPlainObject(data.store)) return fail("request.data.store must be an object");
+  const storeEntries = Object.entries(data.store);
+  if (storeEntries.length > PTC_MAX_VM_STORE_ENTRIES) {
+    return fail(`request.data.store must have at most ${PTC_MAX_VM_STORE_ENTRIES} entries`);
+  }
+  for (const [key, entry] of storeEntries) {
+    if (byteLength(key) > 256 || !isShortString(entry, 256 * 1024)) {
+      return fail("request.data.store entries are invalid");
+    }
+  }
+  if (Object.hasOwn(data, "deterministic")) {
+    const deterministic = data.deterministic;
+    if (!isPlainObject(deterministic)
+      || unexpectedKey(deterministic, ["startedAt", "seed"]) !== undefined
+      || !Number.isSafeInteger(deterministic.startedAt) || (deterministic.startedAt as number) < 0
+      || !Number.isSafeInteger(deterministic.seed)) {
+      return fail("request.data.deterministic is invalid");
+    }
+  }
+  if (Object.hasOwn(request, "interruptBudget")
+    && !isPositiveInteger(request.interruptBudget, PTC_MAX_INTERRUPT_BUDGET)) {
+    return fail(`request.interruptBudget must be an integer in 1..${PTC_MAX_INTERRUPT_BUDGET}`);
+  }
+  return {
+    ok: true,
+    value: {
+      request: {
+        data: {
+          code: data.code as string,
+          tools: data.tools as PtcVmToolDefinition[],
+          globals: data.globals as { name: string; spread: boolean }[],
+          store: data.store as Record<string, string>,
+          ...(Object.hasOwn(data, "memoryLimitBytes") ? { memoryLimitBytes: data.memoryLimitBytes as number } : {}),
+          ...(Object.hasOwn(data, "deterministic")
+            ? { deterministic: data.deterministic as { startedAt: number; seed: number } }
+            : {}),
+        },
+        ...(Object.hasOwn(request, "interruptBudget") ? { interruptBudget: request.interruptBudget as number } : {}),
+      },
+    },
+  };
+}
+
+/** Validate the gateway's answer to one VM exchange. Only `stop` and `result` can come back. */
+export function parsePtcVmReplyPayload(value: unknown): ParseResult<PtcVmReplyPayload> {
+  if (!isPlainObject(value)) return fail("vm.reply payload must be an object");
+  const unknown = unexpectedKey(value, ["callId", "reply"]);
+  if (unknown !== undefined) return fail(`unknown vm.reply field: ${unknown}`);
+  if (!isPositiveInteger(value.callId)) return fail("callId must be a positive integer");
+  const reply = value.reply;
+  if (reply === null) return { ok: true, value: { callId: value.callId, reply: null } };
+  if (!isPlainObject(reply)) return fail("reply must be an object or null");
+  if (reply.type === "stop") {
+    const unknownStop = unexpectedKey(reply, ["type"]);
+    if (unknownStop !== undefined) return fail(`unknown stop field: ${unknownStop}`);
+    return { ok: true, value: { callId: value.callId, reply: { type: "stop" } } };
+  }
+  if (reply.type !== "result") return fail("reply.type is invalid");
+  const unknownResult = unexpectedKey(reply, ["type", "id", "ok", "payload", "seq", "now", "properties"]);
+  if (unknownResult !== undefined) return fail(`unknown result field: ${unknownResult}`);
+  if (!isPositiveInteger(reply.id)) return fail("reply.id must be a positive integer");
+  if (typeof reply.ok !== "boolean") return fail("reply.ok must be a boolean");
+  if (Object.hasOwn(reply, "payload") && !isShortString(reply.payload, PTC_MAX_REPLY_PAYLOAD_BYTES)) {
+    return fail("reply.payload is invalid");
+  }
+  if (Object.hasOwn(reply, "seq")
+    && (!Number.isSafeInteger(reply.seq) || (reply.seq as number) < 0)) {
+    return fail("reply.seq is invalid");
+  }
+  if (Object.hasOwn(reply, "now") && !Number.isSafeInteger(reply.now)) return fail("reply.now is invalid");
+  if (Object.hasOwn(reply, "properties") && !isShortString(reply.properties, 16 * 1024)) {
+    return fail("reply.properties is invalid");
+  }
+  return {
+    ok: true,
+    value: {
+      callId: value.callId,
+      reply: {
+        type: "result",
+        id: reply.id,
+        ok: reply.ok,
+        ...(Object.hasOwn(reply, "payload") ? { payload: reply.payload } : {}),
+        ...(Object.hasOwn(reply, "seq") ? { seq: reply.seq } : {}),
+        ...(Object.hasOwn(reply, "now") ? { now: reply.now } : {}),
+        ...(Object.hasOwn(reply, "properties") ? { properties: reply.properties } : {}),
+      },
+    },
+  };
+}
+
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const OUTPUT_PATH_PREFIX = `${PTC_WORKSPACE_PATH}/.ptc/outputs/`;
+
+export function parsePtcOutputRef(value: unknown): ParseResult<PtcOutputRef> {
+  if (!isPlainObject(value)) return fail("outputRef must be an object");
+  const unknown = unexpectedKey(value, [
+    "blobId", "jobId", "sessionId", "callId", "path", "size", "sha256", "createdAt", "expiresAt", "state",
+  ]);
+  if (unknown !== undefined) return fail(`unknown outputRef field: ${unknown}`);
+  if (!isShortString(value.blobId, 64) || !SHA256_PATTERN.test(value.blobId)) return fail("outputRef.blobId is invalid");
+  if (!isSafeJobId(value.jobId)) return fail("outputRef.jobId is invalid");
+  if (!isSafeId(value.sessionId)) return fail("outputRef.sessionId is invalid");
+  if (!isPositiveInteger(value.callId)) return fail("outputRef.callId is invalid");
+  if (!isShortString(value.path, 4096) || !value.path.startsWith(OUTPUT_PATH_PREFIX)
+    || value.path.includes("\0") || value.path.includes("\n") || value.path.includes("\r")) {
+    return fail("outputRef.path is invalid");
+  }
+  if (!Number.isSafeInteger(value.size) || (value.size as number) < 0) return fail("outputRef.size is invalid");
+  if (!isShortString(value.sha256, 64) || !SHA256_PATTERN.test(value.sha256)) return fail("outputRef.sha256 is invalid");
+  if (!Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0) return fail("outputRef.createdAt is invalid");
+  if (!Number.isSafeInteger(value.expiresAt) || (value.expiresAt as number) < 0) return fail("outputRef.expiresAt is invalid");
+  if (value.state !== "available" && value.state !== "evicted" && value.state !== "unknown") {
+    return fail("outputRef.state is invalid");
+  }
+  return {
+    ok: true,
+    value: {
+      blobId: value.blobId,
+      jobId: value.jobId,
+      sessionId: value.sessionId,
+      callId: value.callId,
+      path: value.path,
+      size: value.size as number,
+      sha256: value.sha256,
+      createdAt: value.createdAt as number,
+      expiresAt: value.expiresAt as number,
+      state: value.state,
+    },
+  };
+}
+
+export function parsePtcToolCallResult(value: unknown): ParseResult<PtcToolCallResult> {
+  if (!isPlainObject(value)) return fail("tool.call result must be an object");
+  const unknown = unexpectedKey(value, ["exitCode", "outputRef", "spillTruncated", "durationMs"]);
+  if (unknown !== undefined) return fail(`unknown tool.call result field: ${unknown}`);
+  if (!Number.isSafeInteger(value.exitCode) || (value.exitCode as number) < 0 || (value.exitCode as number) > 255) {
+    return fail("exitCode must be an integer in 0..255");
+  }
+  if (typeof value.spillTruncated !== "boolean") return fail("spillTruncated must be a boolean");
+  if (!Number.isSafeInteger(value.durationMs) || (value.durationMs as number) < 0) return fail("durationMs is invalid");
+  let outputRef: PtcOutputRef | undefined;
+  if (Object.hasOwn(value, "outputRef")) {
+    const parsed = parsePtcOutputRef(value.outputRef);
+    if (!parsed.ok) return fail(parsed.message);
+    outputRef = parsed.value;
+  }
+  return {
+    ok: true,
+    value: {
+      exitCode: value.exitCode as number,
+      spillTruncated: value.spillTruncated,
+      durationMs: value.durationMs as number,
+      ...(outputRef === undefined ? {} : { outputRef }),
+    },
+  };
+}
+
 function validateRequestPayload(method: RpcMethod, payload: unknown): ParseResult<Record<string, unknown>> {
   if (!isPlainObject(payload)) return fail("request payload must be an object");
   switch (method) {
@@ -312,10 +746,13 @@ function validateRequestPayload(method: RpcMethod, payload: unknown): ParseResul
       return unknown === undefined ? { ok: true, value: payload } : fail(`unknown payload field: ${unknown}`);
     }
     case "session.open": {
-      const unknown = unexpectedKey(payload, ["sessionId", "jobId"]);
+      const unknown = unexpectedKey(payload, ["sessionId", "jobId", "workspaceReady"]);
       if (unknown !== undefined) return fail(`unknown session.open field: ${unknown}`);
       if (!isSafeId(payload.sessionId)) return fail("sessionId is invalid");
       if (Object.hasOwn(payload, "jobId") && !isSafeJobId(payload.jobId)) return fail("jobId is invalid");
+      if (Object.hasOwn(payload, "workspaceReady") && typeof payload.workspaceReady !== "boolean") {
+        return fail("workspaceReady must be a boolean");
+      }
       return { ok: true, value: payload };
     }
     case "session.close": {
@@ -343,32 +780,27 @@ function validateRequestPayload(method: RpcMethod, payload: unknown): ParseResul
       return { ok: true, value: payload };
     }
     case "tool.call": {
-      const unknown = unexpectedKey(payload, ["tool", "callId", "args"]);
-      if (unknown !== undefined) return fail(`unknown tool.call field: ${unknown}`);
-      if (typeof payload.tool !== "string" || byteLength(payload.tool) > 64) return fail("tool is invalid");
-      if (Object.hasOwn(payload, "callId")
-        && (!Number.isSafeInteger(payload.callId) || (payload.callId as number) < 1)) {
-        return fail("callId must be a positive integer");
-      }
-      if (Object.hasOwn(payload, "args") && !isPlainObject(payload.args)) return fail("args must be an object");
+      const parsed = parsePtcToolCallPayload(payload);
+      if (!parsed.ok) return fail(parsed.message);
       return { ok: true, value: payload };
     }
     case "vm.start": {
-      const unknown = unexpectedKey(payload, ["request"]);
-      if (unknown !== undefined) return fail(`unknown vm.start field: ${unknown}`);
-      if (!isPlainObject(payload.request)) return fail("request must be an object");
+      const parsed = parsePtcVmStartPayload(payload);
+      if (!parsed.ok) return fail(parsed.message);
       return { ok: true, value: payload };
     }
     case "vm.message": {
       const unknown = unexpectedKey(payload, ["messages"]);
       if (unknown !== undefined) return fail(`unknown vm.message field: ${unknown}`);
-      if (!Array.isArray(payload.messages)) return fail("messages must be an array");
+      if (!Array.isArray(payload.messages) || payload.messages.length > PTC_MAX_VM_MESSAGES) {
+        return fail(`messages must be an array of at most ${PTC_MAX_VM_MESSAGES} entries`);
+      }
+      if (!payload.messages.every(isPlainObject)) return fail("messages entries must be objects");
       return { ok: true, value: payload };
     }
     case "vm.reply": {
-      const unknown = unexpectedKey(payload, ["reply"]);
-      if (unknown !== undefined) return fail(`unknown vm.reply field: ${unknown}`);
-      if (!isPlainObject(payload.reply)) return fail("reply must be an object");
+      const parsed = parsePtcVmReplyPayload(payload);
+      if (!parsed.ok) return fail(parsed.message);
       return { ok: true, value: payload };
     }
     default:
@@ -480,6 +912,69 @@ function parseEvent(value: Record<string, unknown>): ParseResult<RpcEventFrame> 
     return {
       ok: true,
       value: { v: 1, kind: "event", event: "session.closed", sessionId: value.sessionId, reason: value.reason },
+    };
+  }
+  if (value.event === "vm.message") {
+    const unknown = unexpectedKey(value, ["v", "kind", "event", "id", "sessionId", "callId", "messages"]);
+    if (unknown !== undefined) return fail(`unknown vm.message event field: ${unknown}`);
+    if (!isSafeId(value.id)) return fail("id is invalid");
+    if (!isSafeId(value.sessionId)) return fail("sessionId is invalid");
+    if (Object.hasOwn(value, "callId") && !isPositiveInteger(value.callId)) return fail("callId is invalid");
+    if (!Array.isArray(value.messages) || value.messages.length > PTC_MAX_VM_MESSAGES) {
+      return fail(`messages must be an array of at most ${PTC_MAX_VM_MESSAGES} entries`);
+    }
+    if (!value.messages.every(isPlainObject)) return fail("messages entries must be objects");
+    return {
+      ok: true,
+      value: {
+        v: 1,
+        kind: "event",
+        event: "vm.message",
+        id: value.id,
+        sessionId: value.sessionId,
+        messages: value.messages,
+        ...(Object.hasOwn(value, "callId") ? { callId: value.callId as number } : {}),
+      },
+    };
+  }
+  if (value.event === "tool.output") {
+    const unknown = unexpectedKey(value, ["v", "kind", "event", "id", "sessionId", "seq", "stream", "text", "skipped"]);
+    if (unknown !== undefined) return fail(`unknown tool.output event field: ${unknown}`);
+    if (!isSafeId(value.id)) return fail("id is invalid");
+    if (!isSafeId(value.sessionId)) return fail("sessionId is invalid");
+    if (!Number.isSafeInteger(value.seq) || (value.seq as number) < 0) return fail("seq is invalid");
+    if (value.stream !== "stdout" && value.stream !== "stderr") return fail("stream is invalid");
+    if (!isSafeText(value.text, RPC_MAX_OUTPUT_CHUNK_BYTES)) return fail("text is invalid");
+    let skipped: RpcSkippedOutput | undefined;
+    if (Object.hasOwn(value, "skipped")) {
+      if (!isPlainObject(value.skipped)
+        || unexpectedKey(value.skipped, ["bytes", "newlines", "endsWithNewline"]) !== undefined) {
+        return fail("skipped is invalid");
+      }
+      if (!Number.isSafeInteger(value.skipped.bytes) || (value.skipped.bytes as number) < 0
+        || !Number.isSafeInteger(value.skipped.newlines) || (value.skipped.newlines as number) < 0
+        || typeof value.skipped.endsWithNewline !== "boolean") {
+        return fail("skipped is invalid");
+      }
+      skipped = {
+        bytes: value.skipped.bytes as number,
+        newlines: value.skipped.newlines as number,
+        endsWithNewline: value.skipped.endsWithNewline,
+      };
+    }
+    return {
+      ok: true,
+      value: {
+        v: 1,
+        kind: "event",
+        event: "tool.output",
+        id: value.id,
+        sessionId: value.sessionId,
+        seq: value.seq as number,
+        stream: value.stream,
+        text: value.text,
+        ...(skipped === undefined ? {} : { skipped }),
+      },
     };
   }
   return fail("event is invalid");

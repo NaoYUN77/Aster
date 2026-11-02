@@ -442,7 +442,20 @@ test("Phase 0 only exposes the test executor and deduplicates request ids per co
       "not_implemented",
     );
 
-    connection.send(request("tool-1", "tool.call", { tool: "bash", args: { command: "id" } }, "sess-raw"));
+    // Well-formed for the protocol boundary even though this agent runs Phase 0: the frame is
+    // parsed (and so must be valid) before the dispatcher can answer `not_implemented`.
+    connection.send(request("tool-1", "tool.call", {
+      tool: "bash",
+      callId: 1,
+      args: {
+        command: "id",
+        cwd: "/workspace",
+        env: {},
+        inheritEnv: false,
+        timeoutMs: 1_000,
+        window: { maxBytes: 1_024, maxLines: 10, minIntervalMs: 0, bytesPerSecond: 0 },
+      },
+    }, "sess-raw"));
     assertErrorResponse(
       await frames.waitFor((frame) => frame.kind === "response" && frame.id === "tool-1"),
       "not_implemented",

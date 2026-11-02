@@ -462,11 +462,11 @@ type PtcToolCallPayload = {
 
 ### 10.4 控制面接入点
 
-- `createCodemodeHost()` 在远程模式下使用 `RemoteCodemodeSandbox`，由 Gateway session 提供 `remote()`；本地模式继续 `CodemodeSandbox`。
-- codemode 包装层在每次嵌套调用前把 `PTC_SESSION` 放进嵌套 context，从嵌套调用 options 的 `key`（`c<callId>`）取得 `callId`；`callId` 不从模型参数读取。
-- `HarnessOptions.env` 的 `(target, context)` 读取 `PTC_SESSION`：
-  - 有 session：构造带 session 的 `RemoteExecutionEnv`，`cwd=/workspace`；
-  - 无 session：保持现有 `execution.remoteCwd` 的 one-shot 行为。
+- `createCodemodeHost()` 在远程模式下使用 `SessionBoundCodemodeSandbox`（`RemoteCodemodeSandbox` 的子类），由 Gateway session 提供 `remote()`；本地模式继续 `CodemodeSandbox`。
+- 包装层每次 codemode 调用先打开或拒绝 session，然后用 `AsyncLocalStorage` 把该 session 绑定在整次 `execute()` 上；并发脚本各自拿到自己的 session，不会串用。
+- 嵌套调用不通过 context 传递身份：调度器的 `HarnessOptions.env` 只看到后台 context，看不到单次调用 context。绑定层改为包裹 `bash` 工具，从持久化嵌套任务输入读取 `parent`（codemode 任务 id）和 `key`（`c<callId>`），据此找到 session 并派生 `callId`；`callId` 不从模型参数读取，找不到 session 或 key 形状不符则失败关闭。
+- 每个嵌套 `bash` 调用构造一个 `PtcExecutionEnv`（`cwd=/workspace`），把 `env.exec` 转成同一 session 上的 `tool.call`；返回值带 `outputRef`／`spillTruncated`。`OutputRef` 在结果交付给 VM 之前提交到 `PtcOutputDoc`，提交失败则调用失败（命令可能已执行）。
+- 模型直接调用 `bash` 仍走原有 broker 路径；只有嵌套调用走 PTC，且不会静默回退到直连 broker。
 - `restrictScriptTools` Phase 1 远程白名单为 `{ "bash" }`；Phase 2 加 `{ "read", "write", "edit" }`；模型仍能看到全部工具。
 - 包装层继续串行化嵌套调用，并在 codemode 调用结束、失败、超时或取消时中止仍在运行的嵌套 context；随后关闭 RPC session。
 

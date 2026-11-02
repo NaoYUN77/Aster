@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
@@ -24,8 +25,11 @@ import {
 } from "../src/codemode.js";
 import { ConfigurationError, readCodemodeConfig, readConfig, readMemoryConfig } from "../src/config.js";
 import { startBrokerServer } from "../src/execution/broker.js";
+import { startRpcAgent } from "../src/execution/rpc-server.js";
+import { listenTlsRpc } from "../src/execution/rpc-transport.js";
 import type { ExecRequest } from "../src/execution/protocol.js";
 import type { TextRequest } from "../src/messages.js";
+import { TestPtcHost } from "./ptc-test-host.js";
 
 const request: TextRequest = {
   requestId: "telegram:test:codemode",
@@ -197,16 +201,29 @@ test("code mode runs one script whose nested calls stay out of the transcript", 
   }
 });
 
-test("code mode in remote execution exposes only bash to scripts", { skip: process.platform === "win32", timeout: 30_000 }, async () => {
+// The PTC transport is TLS, but the direct execution path still opens the broker's state directory
+// and the broker socket is a Unix domain socket, which Windows does not provide.
+test("code mode in remote execution exposes only bash to scripts", {
+  skip: process.platform === "win32" ? "the execution broker requires a Unix domain socket" : false,
+  timeout: 30_000,
+}, async () => {
   const directory = await mkdtemp(join(tmpdir(), "personal-agent-codemode-remote-"));
-  const socketPath = join(directory, "broker.sock");
+  const brokerSocket = join(directory, "broker.sock");
   const executionId = "0000000000000002";
-  const requests: ExecRequest[] = [];
+  const fixtureDirectory = fileURLToPath(new URL("./fixtures/rpc-tls", import.meta.url));
+  const [ca, serverCert, serverKey, clientCert, clientKey] = await Promise.all([
+    readFile(join(fixtureDirectory, "ca.crt")),
+    readFile(join(fixtureDirectory, "server.crt")),
+    readFile(join(fixtureDirectory, "server.key")),
+    readFile(join(fixtureDirectory, "client.crt")),
+    readFile(join(fixtureDirectory, "client.key")),
+  ]);
+  const brokerRequests: ExecRequest[] = [];
   const server = await startBrokerServer({
-    socketPath,
+    socketPath: brokerSocket,
     executionId,
     runner: async (message, sink) => {
-      requests.push(message);
+      brokerRequests.push(message);
       sink.stdout("remote\n");
       return { exitCode: 0 };
     },
@@ -214,6 +231,28 @@ test("code mode in remote execution exposes only bash to scripts", { skip: proce
     maxOutputBytes: 4096,
     maxOutputLines: 100,
     requestTimeoutMs: 2000,
+  });
+  const ptc = new TestPtcHost();
+  const rpcServer = await listenTlsRpc({
+    host: "127.0.0.1",
+    port: 0,
+    cert: serverCert,
+    key: serverKey,
+    ca,
+    requireClientCert: true,
+    allowedClientNames: ["aster-test-gateway"],
+    maxFrameBytes: 4 * 1024 * 1024,
+  });
+  const address = rpcServer.address();
+  assert.ok(!("path" in address));
+  const agent = startRpcAgent({
+    server: rpcServer,
+    executionId,
+    transport: "tls",
+    heartbeatMs: 60_000,
+    sessionTtlMs: 60_000,
+    testExecutorEnabled: true,
+    ptc,
   });
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
@@ -236,21 +275,32 @@ test("code mode in remote execution exposes only bash to scripts", { skip: proce
         const result = transcript.messages.find((message) => message.role === "toolResult");
         assert.ok(result?.role === "toolResult" && !result.isError);
         const text = result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
-        assert.match(text, /remote/);
+        assert.match(text, /out-1out-2/);
         return fauxAssistantMessage("remote done");
       },
     ]);
     app = await openAgent(appConfig(directory, {
       CODEMODE_ENABLED: "1",
       EXECUTION_MODE: "remote",
-      EXECUTION_BROKER_SOCKET: socketPath,
+      EXECUTION_BROKER_SOCKET: brokerSocket,
       EXECUTION_REMOTE_CWD: "/srv/work",
+      EXECUTION_RPC_ADDRESS: `127.0.0.1:${address.port}`,
+      EXECUTION_RPC_SERVER_NAME: "localhost",
+      EXECUTION_RPC_CA_PATH: join(fixtureDirectory, "ca.crt"),
+      EXECUTION_RPC_CERT_PATH: join(fixtureDirectory, "client.crt"),
+      EXECUTION_RPC_KEY_PATH: join(fixtureDirectory, "client.key"),
     }), fixture.models);
     assert.equal(await app.reply(request, running), "remote done");
-    assert.equal(requests.length, 2, "two nested calls reached the execution broker");
-    assert.deepEqual(requests.map(({ command }) => command), ["printf remote-first", "printf remote-second"]);
+    assert.equal(ptc.calls.length, 2, "two nested calls reached the PTC sandbox");
+    assert.deepEqual(
+      ptc.calls.map(({ args }) => args.command),
+      ["printf remote-first", "printf remote-second"],
+    );
+    assert.deepEqual(ptc.calls.map(({ callId }) => callId), [1, 2], "call ids come from the VM, not the model");
+    assert.equal(brokerRequests.length, 0, "nested calls never fall back to the direct broker");
   } finally {
     try { await app?.close(); } finally {
+      await agent.close();
       await server.close();
       await rm(directory, { recursive: true, force: true });
     }
