@@ -125,6 +125,7 @@ npm start
 - `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。
 - `TELEGRAM_API_ROOT`：Telegram Bot API 的根地址覆盖。服务器无法直连 `api.telegram.org` 时，可指向自建 https 反向代理。仓库没有记录这项是否在某台机器上使用。
 - `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭。其余 `MEMORY_*` 为预算、时区与归档超时。
+- `CODEMODE_ENABLED`：PTC／code mode 总开关，默认关；设 `1` 启用 `codemode` 工具。`CODEMODE_TIMEOUT_MS` 与 `CODEMODE_MEMORY_LIMIT_BYTES` 约束脚本期限和 QuickJS 内存。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
 - `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
 
@@ -147,6 +148,10 @@ npm start
 ## 工具
 
 常驻工具包括底座的 `bash`、`read`、`write`、`edit`，以及 `current_time`、上表中的记忆工具和配置 Web key 后启用的 `web_search`、`web_fetch`。内置工具使用底座 `defineTool` 注册；名称冲突在注册时直接拒绝。工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。MCP 的配置字段、pin、授权、OAuth 和检查命令见 [工具与 MCP](docs/mcp.md)，通用工具契约见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
+
+### 代码调用工具（PTC，可选）
+
+设置 `CODEMODE_ENABLED=1` 并重启后，模型获得 `codemode` 工具：它写一段 JavaScript，在 QuickJS WASM sandbox 中调用白名单工具，只有脚本结果回到对话。本地脚本可调用 `read`／`write`／`edit`／`bash`；远程执行模式只开放 `bash`。嵌套调用仍经过工具注册表和授权复核，并在宿主侧串行执行；模型可见结果上限 32 KiB／1000 行。QuickJS 只限制脚本运行时能力，不是 OS 沙箱，`bash` 仍具有宿主权限。配置、失败语义、恢复边界和远程大输出处理见 [代码调用工具](docs/codemode.md)，取舍见 [ADR-0019](docs/adr/codemode-ptc/0019-codemode-ptc.md)。
 
 ## 部署与运维
 
