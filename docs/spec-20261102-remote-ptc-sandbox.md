@@ -4,7 +4,7 @@
 - **日期**：2026-11-02
 - **功能**：remote-ptc-sandbox
 - **所属 ADR**：[ADR-0020](adr/remote-ptc-sandbox/0020-remote-ptc-sandbox.md)
-- **前置决策**：[ADR-0019](adr/codemode-ptc/0019-codemode-ptc.md)、[ADR-0015](adr/0015-control-execution-split.md)
+- **前置决策**：[ADR-0019](adr/codemode-ptc/0019-codemode-ptc.md)、[ADR-0021](adr/0021-control-execution-split.md)
 
 > 本文区分“仓库当前已实现”“Phase 0 已通过真实双 VPS 验收”“Phase 1／2 暂不实现”。除明确标注为已实现的内容外，均不是现有代码能力。Phase 0 的验收证据见 [2026-11-02 验收记录](acceptance/20261102-execution-rpc-phase0.md)。
 
@@ -105,7 +105,7 @@ Phase 0 验收通过后实施：
 - 嵌套 bash 的 `structuredOutput` 含 `output`（宿主保留的尾部）、`truncated`、可选 `fullOutputPath` 和 `exitCode`。`fullOutputPath` 在远程模式下只能是 sandbox 内路径，控制面不能打开它。
 - ADR-0009 要求同一回合工具顺序执行；ADR-0008 规定不安全工具不自动重放。`bash` 是 unsafe；codemode 工具本身是 safe replay。
 - 执行 VPS 是 Linux，执行用户示例为 `aster`，job 根目录为 `/home/aster/jobs`；要求支持 unprivileged user namespaces 和 cgroup v2，安装 bubblewrap。控制面是单台 4 核／4 GB 主机。
-- ADR-0015 的网络约束仍然有效：app 容器只能访问宿主 Unix socket，不能直接路由到执行 VPS；执行 VPS 不加入 MITM 网络，也不新增公网端口。
+- ADR-0021 的网络约束仍然有效：app 容器只能访问宿主 Unix socket，不能直接路由到执行 VPS；执行 VPS 不加入 MITM 网络，也不新增公网端口。
 
 ## 5. 目标架构
 
@@ -147,7 +147,7 @@ Phase 0 验收通过后实施：
 
 ### 5.2 为什么 app 不直接连执行 VPS
 
-ADR-0015 已确认 app 容器在 `aster_mitm_clients` 内没有到执行 VPS 的路由。为统一 RPC 给 app 加路由、发布端口或放宽 MITM 白名单会改变既有隔离语义。
+ADR-0021 已确认 app 容器在 `aster_mitm_clients` 内没有到执行 VPS 的路由。为统一 RPC 给 app 加路由、发布端口或放宽 MITM 白名单会改变既有隔离语义。
 
 因此：
 
@@ -884,7 +884,7 @@ npm run execution:rpc-e2e
 ## 18. 参考
 
 - [ADR-0019：PTC 代码调用工具（codemode）](adr/codemode-ptc/0019-codemode-ptc.md)
-- [ADR-0015：控制面与执行面分离](adr/0015-control-execution-split.md)
+- [ADR-0021：控制面与执行面分离](adr/0021-control-execution-split.md)
 - [ADR-0009：同一回合工具顺序执行](adr/0009-sequential-tool-execution.md)
 - [ADR-0008：外部工具调用不自动重放](adr/0008-unsafe-tool-replay.md)
 - [远程工具执行阶段 1](execution-remote.md)

@@ -7,7 +7,7 @@
 
 ## 上下文
 
-[ADR-0019](../codemode-ptc/0019-codemode-ptc.md) 在控制面用 QuickJS worker 实现了 PTC：模型写脚本，脚本通过 `tools.*` 调用白名单工具，只有脚本结果进入模型上下文。远程执行阶段 1（[ADR-0015](../0015-control-execution-split.md)）只有 `bash`，`RemoteExecutionEnv` 的文件 API 返回 `not_supported`；嵌套 `bash` 通过 one-shot broker 每次新建 SSH 连接。
+[ADR-0019](../codemode-ptc/0019-codemode-ptc.md) 在控制面用 QuickJS worker 实现了 PTC：模型写脚本，脚本通过 `tools.*` 调用白名单工具，只有脚本结果进入模型上下文。远程执行阶段 1（[ADR-0021](../0021-control-execution-split.md)）只有 `bash`，`RemoteExecutionEnv` 的文件 API 返回 `not_supported`；嵌套 `bash` 通过 one-shot broker 每次新建 SSH 连接。
 
 这留下两个问题：
 
@@ -115,7 +115,7 @@
 - 备选方案与不采用原因：
   - gRPC 双向流：需要引入 protobuf、HTTP/2 调优和额外依赖；Phase 0 的请求／响应、流式事件、取消和心跳用长度前缀 JSON 已足够。保留 Transport 抽象，后续可替换。
   - 只实现 Unix socket，TCP/mTLS 后置：不满足真实跨 VPS 验收目标，不采用。
-  - 由 app 容器直接连执行 VPS：违反 ADR-0015 的路由隔离；继续由控制面 gateway 连接。
+  - 由 app 容器直接连执行 VPS：违反 ADR-0021 的路由隔离；继续由控制面 gateway 连接。
   - 反向连接（Agent 主动连控制面）：仍需一个私网监听端点，且证书方向、NAT 和故障恢复更复杂；作为部署受限时的备选，不是 Phase 0 主路径。
   - 持久 SSH stdio 承载同一套 RPC 帧：可作为私网不可达时的兼容适配器，但仍需双向认证和帧协议，不把“SSH”当作 RPC 的安全边界。
   - Phase 0 开放进程执行器：会把 Agent 变成无约束远程命令服务；Phase 0 只开放受限测试能力，真实命令留到 Phase 1／2 并经过控制面授权。

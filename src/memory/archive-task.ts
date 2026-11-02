@@ -2,6 +2,8 @@
 // The Document owns target/coverage and pending publication, not agent execution or delivery.
 // All body and receipt writes precede the cursor commit. Closing preserves the current phase;
 // explicit abort keeps pending work and requires retryArchive to resume it.
+// When profile extraction is on, the cursor commit also puts current user-requirement segments
+// into the working profile. Preferences are not changed.
 import type { Context } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
@@ -12,13 +14,21 @@ import { Type, type Static } from "typebox";
 import {
   ArchiveBatchSchema, assertSchema, DAILY_MAX_PAGES, eventDate, MemoryError,
   MemoryErrorSchema, MemorySegmentSchema, SourceRangeSchema, WORKING_COMPLETED_KIND,
-  type ArchiveBatch, type MemorySegment,
+  WorkingDoc, WorkingStateSchema,
+  type ArchiveBatch, type MemorySegment, type WorkingState,
 } from "./contracts.js";
 import {
   ARCHIVE_INSTRUCTIONS, ARCHIVE_LIMITS, ArchiveExtractionSchema, archiveSource, validateExtraction,
   type ArchiveSource,
 } from "./archive.js";
-import { identityOfSegment, publishSegments, type DailyStore } from "./daily.js";
+import { identityOfSegment, publishSegments, readSegment, type DailyStore } from "./daily.js";
+import {
+  extractProfileDrafts,
+  profileOperationId,
+  profilePutChangesWithinLimit,
+  requireCurrentProfileEvidence,
+} from "./profile.js";
+import { applyWorkingUpdateInTx } from "./working.js";
 
 const Entry = SourceRangeSchema.properties.through;
 const NullableEntry = Type.Union([Entry, Type.Null()]);
@@ -50,11 +60,16 @@ export const ArchiveDoc = defineDoc({
 type Checkpoint = { phase: "run"; step: number } | { phase: "retry"; until: number };
 type Result = { archivedThrough: EntryId | null };
 type Runtime = TaskRuntime<Record<string, never>, Checkpoint, Result, object>;
-export type ArchiveBoundary = "extracted" | "saved" | "published" | "confirmed" | "before-cursor";
+export type ArchiveBoundary = "extracted" | "saved" | "published" | "confirmed" | "before-cursor" | "profile";
 export type ArchiveTaskOptions = {
   store: DailyStore;
   model: { provider: string; modelId: string };
   timeoutMs?: number;
+  /**
+   * Copy current user-requirement segments into the working profile when a batch is confirmed.
+   * Default true. `false` still publishes the daily log and advances the cursor.
+   */
+  profile?: boolean;
   /** Optional host instrumentation; rejecting a boundary faults the Task, leaving its checkpoint. */
   boundary?: (name: ArchiveBoundary, signal: AbortSignal) => Promise<void>;
 };
@@ -258,6 +273,24 @@ export function createArchiveTask(options: ArchiveTaskOptions) {
           return;
         }
         await boundary("before-cursor", runtime);
+        let profileDrafts: ReturnType<typeof extractProfileDrafts> = [];
+        if (options.profile !== false) {
+          try {
+            profileDrafts = await publishedProfileDrafts(options.store, pending.body ?? []);
+          } catch (error) {
+            runtime.signal.throwIfAborted();
+            const failure = error instanceof MemoryError
+              ? error
+              : new MemoryError("io-failure", "Profile update failed", { cause: error });
+            await runtime.commit(async (tx) => {
+              const current = await stateIn(tx, runtime.conversationId);
+              if (current.pending !== null) current.pending.attempts++;
+            }, context);
+            const retryable = failure.code === "io-failure" || failure.code === "missing-evidence";
+            await fail(runtime, failure, context, retryable);
+            return;
+          }
+        }
         await runtime.commit(async (tx) => {
           const current = await stateIn(tx, runtime.conversationId);
           const saved = current.pending!;
@@ -265,11 +298,31 @@ export function createArchiveTask(options: ArchiveTaskOptions) {
               saved.body.length !== saved.confirmed.length || saved.body.some((segment, i) => identityOfSegment(segment) !== saved.confirmed[i])) {
             throw new MemoryError("corrupt-state", "Archive confirmation is not a continuous complete prefix");
           }
+          if (profileDrafts.length > 0) {
+            const working = assertSchema<WorkingState>(
+              WorkingStateSchema,
+              await tx.doc(WorkingDoc, runtime.conversationId),
+              "corrupt-state",
+            );
+            const changes = profilePutChangesWithinLimit(working.profile, profileDrafts);
+            if (changes.length > 0) {
+              await applyWorkingUpdateInTx(tx, {
+                conversationId: runtime.conversationId,
+                operationId: profileOperationId(saved.batch.id),
+                expectedRevision: working.revision,
+                evidence: [],
+                changes,
+                now: runtime.now(),
+                resolveProfileEvidence: (refs) => requireCurrentProfileEvidence(options.store, refs),
+              });
+            }
+          }
           current.archivedThrough = saved.batch.sources.through;
           current.pending = null;
           current.failure = null;
           return { status: "running", checkpoint: { phase: "run", step: _task.state.checkpoint.step + 1 } };
         }, context);
+        if (options.profile !== false) await boundary("profile", runtime);
       },
       retry: async (task, runtime, context) => {
         await runtime.sleep(task.state.checkpoint.until, context);
@@ -288,6 +341,26 @@ export function createArchiveTask(options: ArchiveTaskOptions) {
   return task;
 }
 export type ArchiveTask = ReturnType<typeof createArchiveTask>;
+
+/**
+ * Drafts for the profile write that shares the cursor commit. A published segment that is not in
+ * the daily log is `missing-evidence`. A segment a later record has superseded is not current and
+ * is left out. File reads stay outside the session commit.
+ */
+async function publishedProfileDrafts(store: DailyStore, body: readonly MemorySegment[]) {
+  const current: MemorySegment[] = [];
+  for (const segment of body) {
+    const found = await readSegment(store, { id: segment.id, date: segment.date, page: segment.page });
+    if (!found.found) {
+      throw new MemoryError("missing-evidence", "Published profile source is not in the daily log", {
+        detail: { id: segment.id, date: segment.date, page: segment.page, reason: found.reason },
+      });
+    }
+    if (found.record.segment.supersededBy !== null) continue;
+    current.push(found.record.segment);
+  }
+  return extractProfileDrafts(current);
+}
 
 function saveBody(state: ArchiveState, body: MemorySegment[]): void {
   state.pending!.body = body;

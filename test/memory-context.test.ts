@@ -53,7 +53,15 @@ const id = (value: number) => value as EntryId;
 const FACTS: SnapshotFacts = { instructionsDigest: "a1b2c3", memoryDigest: "d4e5f6" };
 
 function state(overrides: Partial<WorkingState> = {}): WorkingState {
-  return { version: MEMORY_SCHEMA_VERSION, revision: 1, task: { status: "none" }, preferences: [], updatedAt: 0, ...overrides };
+  return {
+    version: MEMORY_SCHEMA_VERSION,
+    revision: 1,
+    task: { status: "none" },
+    preferences: [],
+    profile: [],
+    updatedAt: 0,
+    ...overrides,
+  };
 }
 
 function preference(name: string, text: string): Preference {

@@ -72,6 +72,8 @@ spec 在功能开发完成后删除，ADR 及其记录长期保留。ADR 中的 
 | 0012 | 安装方式改为 Docker，systemd 只留迁移 | Accepted，2026-10-27 | [0012-docker-replaces-systemd.md](0012-docker-replaces-systemd.md) |
 | 0013 | agent loop 只用 pi-durable | Accepted，2026-10-21 | [0013-pi-durable-agent-loop.md](0013-pi-durable-agent-loop.md) |
 | 0014 | 工具由人注册 | Accepted，2026-10-22 | [0014-humans-register-tools.md](0014-humans-register-tools.md) |
-| 0015 | 控制面与执行面分离，工具执行先下沉到执行 VPS | Proposed，2026-10-31 | [0015-control-execution-split.md](0015-control-execution-split.md) |
+| 0015 | 旧版画像字段导致 working memory 损坏态 | Accepted，2026-10-31 | [working-memory/0015-legacy-profile-memory-corrupt-state.md](working-memory/0015-legacy-profile-memory-corrupt-state.md) |
+| 0016 | 用户画像暂存 working memory | Accepted，2026-10-29 | [0016-user-profile-working-memory.md](0016-user-profile-working-memory.md) |
 | 0019 | PTC 代码调用工具（codemode） | Accepted，2026-11-02 | [codemode-ptc/0019-codemode-ptc.md](codemode-ptc/0019-codemode-ptc.md) |
 | 0020 | 远程 PTC sandbox（脚本与工具同在执行 VPS；2026-11-02 修订为统一 RPC） | Accepted，2026-11-02 | [remote-ptc-sandbox/0020-remote-ptc-sandbox.md](remote-ptc-sandbox/0020-remote-ptc-sandbox.md) |
+| 0021 | 控制面与执行面分离，工具执行先下沉到执行 VPS | Proposed，2026-10-31 | [0021-control-execution-split.md](0021-control-execution-split.md) |

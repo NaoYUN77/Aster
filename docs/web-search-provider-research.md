@@ -95,7 +95,7 @@ Accept: application/json
 }
 ```
 
-在适配边界校验上游正式字段类型、score／authority 范围、日期及绝对 HTTP(S) URL（拒绝含用户名／密码的 URL）；未知新增字段忽略。缺字段或非法字段返回 `UPSTREAM_PROTOCOL_ERROR`，不把 null 变成编造的站点／时间，不丢掉坏结果伪装完整成功。保留上游排序，结果数不得超过请求 count；score 与 authority 留在供应商边界内，不包装成跨提供商通用可信度。`results:[]` 是 `ok:true`，表示没有匹配。[R1][D1][D2]
+在适配边界只校验 Aster 实际消费的字段：`title`／`snippet`／`summary`／`site_name` 的类型与 Unicode、日期格式及绝对 HTTP(S) URL（拒绝含用户名／密码的 URL）；`rerank_score`、`authority`、`content`、`site_icon` 等未消费字段与未知新增字段忽略。空的展示文本归一为 `""`，缺失的 `summary` 归一为 `""`，`date` 为 null 或空字符串时为 `null`；类型错误、非法日期或非法 URL 返回 `UPSTREAM_PROTOCOL_ERROR`，不把 null 变成编造的站点／时间，不丢掉坏结果伪装完整成功。保留上游排序，结果多于请求 count 时只取前 count 条；不设 schema 未声明的单字段长度上限，资源由响应与输出总预算约束。score 与 authority 留在供应商边界内，不包装成跨提供商通用可信度。`results:[]` 是 `ok:true`，表示没有匹配。修复记录见 [WEB-01](web-tools-known-issues.md#web-01search-合法结果被判为上游协议错误)。[R1][D1][D2]
 
 内置工具返回底座原生 `output` JSON 文本与同值 `structuredOutput`，并声明覆盖成功与失败对象的 `structuredOutputSchema`。预期业务失败设置 `isError:true`，供模型修正或向用户解释；不复制 MCP 协议对象。[R1]
 

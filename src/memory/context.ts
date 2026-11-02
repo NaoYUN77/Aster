@@ -44,6 +44,7 @@ import {
   decodeCycleSnapshot,
   encodeCycleSnapshot,
   MEMORY_LIMITS,
+  migrateStoredSnapshot,
   MEMORY_SCHEMA_VERSION,
   MemoryError,
   REVISION_BLOCK_CLOSE,
@@ -378,9 +379,10 @@ export function buildSnapshot(facts: {
 }
 
 /**
- * Render B: the narrative, then the exact state at the boundary. Deterministic — no clock, no
- * per-write timestamp, no iteration over unordered maps — so the same snapshot always renders to the
- * same bytes and a cached prefix stays valid.
+ * Render B: the narrative, then the exact state at the boundary, including the profile section.
+ * Deterministic — no clock, no per-write timestamp (state or profile item), no iteration over
+ * unordered maps — so the same snapshot always renders to the same bytes and a cached prefix stays
+ * valid. The rendered text is still refused when it exceeds `snapshotTokens` or `snapshotText`.
  *
  * The bound is on the rendered text, not on each field: narrative and baseline share it, and an
  * oversized B is refused rather than truncated — a shortened baseline would assert a wrong state.
@@ -426,7 +428,7 @@ export function snapshotOfProjection(data: unknown): CycleSnapshot | undefined {
   if (typeof data !== "object" || data === null) return undefined;
   const candidate = (data as { snapshot?: unknown }).snapshot;
   if (candidate === undefined) return undefined;
-  return assertSchema<CycleSnapshot>(CycleSnapshotSchema, candidate, "corrupt-state");
+  return assertSchema<CycleSnapshot>(CycleSnapshotSchema, migrateStoredSnapshot(candidate), "corrupt-state");
 }
 
 /** Decode a published compaction body. `undefined` is a native or pre-upgrade summary, not an error. */

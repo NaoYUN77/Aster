@@ -10,7 +10,7 @@ PTC／Code Mode／CodeAct 的共同做法是：模型写一段程序，由宿主
 
 本仓库以 pi-durable 1.3.0 为 agent 底座，不另建模型循环。该版本已提供 `@earendil-works/pi-durable/codemode`：`codemode` 工具在 QuickJS WASM worker 中执行模型写的 JavaScript，脚本只能看到注入的工具、输出助手、`store`／`load` 和工具发现函数，没有文件系统、网络、计时器或模块加载。脚本按确定性日志重放，嵌套工具调用不进入对话记录。
 
-项目同时支持本地执行与远程执行（[ADR-0015](../0015-control-execution-split.md)）。远程执行阶段 1 只有 `bash`；`read`／`write`／`edit` 等文件工具返回 `not_supported`。既有约束还包括：同一回合工具顺序执行（[ADR-0009](../0009-sequential-tool-execution.md)）、工具执行前统一复核名称／状态／权限、模型可见输出有上限，以及不安全工具不自动重放（[ADR-0008](../0008-unsafe-tool-replay.md)）。
+项目同时支持本地执行与远程执行（[ADR-0021](../0021-control-execution-split.md)）。远程执行阶段 1 只有 `bash`；`read`／`write`／`edit` 等文件工具返回 `not_supported`。既有约束还包括：同一回合工具顺序执行（[ADR-0009](../0009-sequential-tool-execution.md)）、工具执行前统一复核名称／状态／权限、模型可见输出有上限，以及不安全工具不自动重放（[ADR-0008](../0008-unsafe-tool-replay.md)）。
 
 ## 决策驱动因素
 
