@@ -145,6 +145,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   const webApiKey = env.DEEPSEEK_WEB_API_KEY?.trim();
   if (webApiKey) assertValidCredentialShape("DEEPSEEK_WEB_API_KEY", webApiKey);
   const execution = readExecutionConfig(env);
+  const codemode = readCodemodeConfig(env);
   return {
     token,
     ownerId,
@@ -153,6 +154,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     telegramApiRoot,
     ...(webApiKey ? { webApiKey } : {}),
     ...(execution === undefined ? {} : { execution }),
+    ...(codemode.enabled ? { codemode } : {}),
     ...resolveMcpConfigPaths(env),
   };
 }
@@ -168,7 +170,7 @@ export type ExecutionConfig = {
   readonly maxTimeoutSeconds: number;
 };
 
-function executionInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
+function boundedInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
   const raw = env[key]?.trim();
   if (!raw) return fallback;
   if (!/^\d+$/.test(raw)) throw new ConfigurationError(`${key} must be an integer in ${min}..${max}`);
@@ -204,17 +206,50 @@ export function readExecutionConfig(env: NodeJS.ProcessEnv = process.env): Execu
   if (Buffer.byteLength(remoteCwd, "utf8") > 4096) {
     throw new ConfigurationError("EXECUTION_REMOTE_CWD must be at most 4096 bytes");
   }
-  const defaultTimeoutSeconds = executionInteger(env, "EXECUTION_DEFAULT_TIMEOUT_SECONDS", 300, 1, 86_400);
-  const maxTimeoutSeconds = executionInteger(env, "EXECUTION_MAX_TIMEOUT_SECONDS", 3600, 1, 86_400);
+  const defaultTimeoutSeconds = boundedInteger(env, "EXECUTION_DEFAULT_TIMEOUT_SECONDS", 300, 1, 86_400);
+  const maxTimeoutSeconds = boundedInteger(env, "EXECUTION_MAX_TIMEOUT_SECONDS", 3600, 1, 86_400);
   if (defaultTimeoutSeconds > maxTimeoutSeconds) {
     throw new ConfigurationError("EXECUTION_DEFAULT_TIMEOUT_SECONDS must not exceed EXECUTION_MAX_TIMEOUT_SECONDS");
   }
   return {
     brokerSocket,
     remoteCwd,
-    connectTimeoutMs: executionInteger(env, "EXECUTION_BROKER_CONNECT_TIMEOUT_MS", 5_000, 100, 60_000),
+    connectTimeoutMs: boundedInteger(env, "EXECUTION_BROKER_CONNECT_TIMEOUT_MS", 5_000, 100, 60_000),
     defaultTimeoutSeconds,
     maxTimeoutSeconds,
+  };
+}
+
+/** PTC / code mode (ADR-0019). Disabled unless explicitly enabled. */
+export type CodemodeConfig = {
+  readonly enabled: boolean;
+  /** Per-script deadline, including time spent in nested tool calls. */
+  readonly timeoutMs: number;
+  /** Maximum heap the QuickJS instance may allocate. */
+  readonly memoryLimitBytes: number;
+};
+
+/**
+ * Code mode runs model-written JavaScript in the base's QuickJS sandbox. It is opt-in because the
+ * tool adds a prompt section and a write-capable execution path. Both bounds are validated even
+ * when disabled so a malformed value cannot silently take effect after the switch is flipped.
+ */
+export function readCodemodeConfig(env: NodeJS.ProcessEnv = process.env): CodemodeConfig {
+  const enabledRaw = env.CODEMODE_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("CODEMODE_ENABLED must be 0 or 1");
+  }
+  return {
+    enabled: enabledRaw === "1",
+    // Keep headroom under the 300 s request wait so the script reports its own timeout first.
+    timeoutMs: boundedInteger(env, "CODEMODE_TIMEOUT_MS", 240_000, 1_000, 300_000),
+    memoryLimitBytes: boundedInteger(
+      env,
+      "CODEMODE_MEMORY_LIMIT_BYTES",
+      128 * 1024 * 1024,
+      16 * 1024 * 1024,
+      512 * 1024 * 1024,
+    ),
   };
 }
 

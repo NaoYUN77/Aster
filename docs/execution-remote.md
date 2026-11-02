@@ -2,6 +2,8 @@
 
 本文是阶段 1 的运行说明：把 `bash` 等命令工具放到第二台 VPS 上执行，控制面只保留会话、记忆、投递与工具调用记录。设计取舍见 [ADR-0015](adr/0015-control-execution-split.md)。
 
+> 统一 RPC Execution Agent（Phase 0）是独立通道，尚未接入 app、broker 或普通工具；其部署与验收见 [远程 PTC spec](spec-20261102-remote-ptc-sandbox.md)。本文所述的 one-shot SSH 路径仍是当前生产行为。
+
 阶段 1 只实现 **shell**。`read`／`write`／`edit` 等文件工具在远程模式下返回 `not_supported`，这是有意的失败关闭：避免模型在控制面读到与执行面不同的同名文件。文件工作请通过 `bash` 在执行主机上完成。
 
 ## 拓扑
