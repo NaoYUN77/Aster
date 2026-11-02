@@ -3,6 +3,7 @@
 - 状态：**自动化通过，真实双 VPS 验收待执行**
 - 分支：`feat/remote-ptc-sandbox-phase1`
 - Phase 1 commit：`b82aaeb`
+- Phase 2 commit：`4c304d1`
 - PR：[#59](https://github.com/NaoYUN77/Aster/pull/59)
 - 验收环境：Windows 11 + Node 24.19.0；POSIX-only 用例跳过
 - 标准：[远程 PTC 与统一 RPC 执行通道 spec](../spec-20261102-remote-ptc-sandbox.md) 16.2／16.3
