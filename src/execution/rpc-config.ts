@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
+import { join, resolve } from "node:path";
+import { DEFAULT_INTERRUPT_BUDGET } from "@earendil-works/pi-codemode";
 import { ConfigurationError } from "../errors.js";
+import type { PtcSandboxConfig } from "./ptc-sandbox.js";
 import { RPC_MAX_FRAME_BYTES } from "./rpc-protocol.js";
 
 export type RpcClientConfig =
@@ -44,6 +47,11 @@ export type RpcAgentConfig = {
   readonly maxFrameBytes: number;
   readonly maxBufferedBytes: number;
   readonly testExecutorEnabled: boolean;
+  /**
+   * Remote PTC sandbox (phase 1). Present only when `EXECUTION_AGENT_PTC=1`; the file and
+   * namespace probes run as a startup preflight in `rpc-main`, never here.
+   */
+  readonly ptc?: PtcSandboxConfig;
 };
 
 export type TlsMaterial = {
@@ -99,6 +107,70 @@ function booleanFlag(env: NodeJS.ProcessEnv, key: string, fallback: boolean): bo
   if (raw === "1" || raw === "true") return true;
   if (raw === "0" || raw === "false") return false;
   throw new ConfigurationError(`${key} must be 0, 1, true, or false`);
+}
+
+function pathSetting(env: NodeJS.ProcessEnv, key: string, fallback: string): string {
+  return optionalPath(env, key) ?? fallback;
+}
+
+const PTC_VERSION_SHAPE = /^[A-Za-z0-9.+_-]{1,64}$/;
+/** `cpu.max` is "<quota> <period>" in microseconds; keep both inside cgroup v2's own bounds. */
+const PTC_CPU_MAX_SHAPE = /^([1-9]\d{0,8}) ([1-9]\d{3,6})$/;
+
+function cpuMax(env: NodeJS.ProcessEnv): string {
+  const raw = optional(env, "PTC_CPU_MAX") ?? "100000 100000";
+  const match = PTC_CPU_MAX_SHAPE.exec(raw);
+  if (match === null) {
+    throw new ConfigurationError("PTC_CPU_MAX must be \"<quota> <period>\" in microseconds, e.g. \"100000 100000\"");
+  }
+  const quota = Number(match[1]);
+  const period = Number(match[2]);
+  if (quota > period * 64) {
+    throw new ConfigurationError("PTC_CPU_MAX must not exceed 64 CPUs");
+  }
+  return raw;
+}
+
+/**
+ * PTC sandbox settings on the execution host (ADR-0020 phase 1). The runner path is not
+ * configurable: the sandbox mounts `<appRoot>/dist` at a fixed in-sandbox path and runs
+ * `dist/src/execution/ptc-runner.js` from it, so preflight and spawn must agree on that file.
+ */
+export function readPtcSandboxConfig(env: NodeJS.ProcessEnv = process.env): PtcSandboxConfig | undefined {
+  if (!booleanFlag(env, "EXECUTION_AGENT_PTC", false)) return undefined;
+  const appRoot = pathSetting(env, "PTC_APP_ROOT", process.cwd());
+  const version = (key: string, fallback: string): string => {
+    const value = optional(env, key) ?? fallback;
+    if (!PTC_VERSION_SHAPE.test(value)) {
+      throw new ConfigurationError(`${key} must be 1..64 characters of [A-Za-z0-9.+_-]`);
+    }
+    return value;
+  };
+  const maxMemoryLimitBytes = integer(env, "PTC_MAX_MEMORY_LIMIT_BYTES", 1024 * 1024 * 1024, 16 * 1024 * 1024, 8 * 1024 * 1024 * 1024);
+  const memoryMaxBytes = integer(env, "PTC_MEMORY_MAX_BYTES", 512 * 1024 * 1024, 64 * 1024 * 1024, 8 * 1024 * 1024 * 1024);
+  if (memoryMaxBytes > maxMemoryLimitBytes) {
+    throw new ConfigurationError("PTC_MEMORY_MAX_BYTES must not exceed PTC_MAX_MEMORY_LIMIT_BYTES");
+  }
+  return {
+    appRoot,
+    nodePath: pathSetting(env, "PTC_NODE_PATH", process.execPath),
+    runnerEntry: join(appRoot, "dist/src/execution/ptc-runner.js"),
+    workspaceRoot: pathSetting(env, "PTC_WORKSPACE_ROOT", "/home/aster/jobs"),
+    cgroupRoot: pathSetting(env, "PTC_CGROUP_ROOT", "/sys/fs/cgroup/ptc"),
+    bwrapPath: pathSetting(env, "PTC_BWRAP_PATH", "/usr/bin/bwrap"),
+    prlimitPath: pathSetting(env, "PTC_PRLIMIT_PATH", "/usr/bin/prlimit"),
+    allowDegraded: booleanFlag(env, "PTC_ALLOW_DEGRADED", false),
+    memoryMaxBytes,
+    pidsMax: integer(env, "PTC_PIDS_MAX", 256, 16, 4096),
+    cpuMax: cpuMax(env),
+    outputMaxBytes: integer(env, "PTC_OUTPUT_MAX_BYTES", 64 * 1024 * 1024, 1024 * 1024, 256 * 1024 * 1024),
+    retentionMs: integer(env, "PTC_RETENTION_MS", 24 * 60 * 60 * 1000, 60_000, 30 * 24 * 60 * 60 * 1000),
+    startupTimeoutMs: integer(env, "PTC_STARTUP_TIMEOUT_MS", 20_000, 1_000, 120_000),
+    maxInterruptBudget: integer(env, "PTC_MAX_INTERRUPT_BUDGET", DEFAULT_INTERRUPT_BUDGET, 1_000, 1_000_000_000),
+    maxMemoryLimitBytes,
+    piCodemodeVersion: version("PTC_PI_CODEMODE_VERSION", "1.3.0"),
+    quickjsVersion: version("PTC_QUICKJS_VERSION", "3.6.2"),
+  };
 }
 
 /** Accept `host:port` and `[ipv6]:port`; hostnames are rejected so the bind address is explicit. */
@@ -229,6 +301,7 @@ export function readRpcAgentConfig(env: NodeJS.ProcessEnv = process.env): RpcAge
   if (configuredId !== undefined && !/^[a-f0-9]{16}$/.test(configuredId)) {
     throw new ConfigurationError("EXECUTION_AGENT_ID must be 16 lowercase hexadecimal characters");
   }
+  const ptc = readPtcSandboxConfig(env);
   return {
     transport,
     ...(socketPath === undefined ? {} : { socketPath }),
@@ -246,6 +319,7 @@ export function readRpcAgentConfig(env: NodeJS.ProcessEnv = process.env): RpcAge
     maxFrameBytes: integer(env, "EXECUTION_AGENT_MAX_FRAME_BYTES", RPC_MAX_FRAME_BYTES, 1024, 16 * 1024 * 1024),
     maxBufferedBytes: integer(env, "EXECUTION_AGENT_MAX_BUFFERED_BYTES", 1024 * 1024, 64 * 1024, 64 * 1024 * 1024),
     testExecutorEnabled: booleanFlag(env, "EXECUTION_AGENT_TEST_EXECUTOR", true),
+    ...(ptc === undefined ? {} : { ptc }),
   };
 }
 
@@ -273,6 +347,27 @@ export function describeRpcAgentConfig(config: RpcAgentConfig): Record<string, u
     maxFrameBytes: config.maxFrameBytes,
     maxBufferedBytes: config.maxBufferedBytes,
     testExecutorEnabled: config.testExecutorEnabled,
+    ptc: config.ptc === undefined ? null : {
+      enabled: true,
+      appRoot: config.ptc.appRoot,
+      nodePath: config.ptc.nodePath,
+      runnerEntry: config.ptc.runnerEntry,
+      workspaceRoot: config.ptc.workspaceRoot,
+      cgroupRoot: config.ptc.cgroupRoot,
+      bwrapPath: config.ptc.bwrapPath,
+      prlimitPath: config.ptc.prlimitPath,
+      allowDegraded: config.ptc.allowDegraded,
+      memoryMaxBytes: config.ptc.memoryMaxBytes,
+      pidsMax: config.ptc.pidsMax,
+      cpuMax: config.ptc.cpuMax,
+      outputMaxBytes: config.ptc.outputMaxBytes,
+      retentionMs: config.ptc.retentionMs,
+      startupTimeoutMs: config.ptc.startupTimeoutMs,
+      maxInterruptBudget: config.ptc.maxInterruptBudget,
+      maxMemoryLimitBytes: config.ptc.maxMemoryLimitBytes,
+      piCodemodeVersion: config.ptc.piCodemodeVersion,
+      quickjsVersion: config.ptc.quickjsVersion,
+    },
   };
 }
 

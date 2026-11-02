@@ -7,6 +7,14 @@ import {
   type RpcRequestFrame,
   type RpcTestExecutePayload,
 } from "./rpc-protocol.js";
+import {
+  parsePtcToolCallPayload,
+  type PtcToolCallPayload,
+} from "./ptc-protocol.js";
+import type { RunnerFrame } from "./ptc-runner-protocol.js";
+import type { PtcRunnerHandle, PtcSandboxManager, PtcSandboxStart } from "./ptc-sandbox.js";
+import { WorkspaceMissingError } from "./ptc-workspace.js";
+import type { CodemodeRemoteReply, CodemodeRemoteRequest } from "@earendil-works/pi-codemode";
 import { RpcAbortError, TestExecutionError, executeTestOperation } from "./rpc-test-executor.js";
 import type { RpcConnection, RpcPeerInfo, RpcServer } from "./rpc-transport.js";
 
@@ -14,6 +22,8 @@ export type RpcAgentOptions = {
   readonly server: RpcServer;
   readonly executionId: string;
   readonly transport: "unix" | "tls";
+  /** Present when the operator enabled the PTC sandbox on this execution host. */
+  readonly ptc?: PtcSandboxManager;
   readonly maxSessions?: number;
   readonly maxConcurrent?: number;
   readonly sessionTtlMs?: number;
@@ -27,17 +37,44 @@ export type RpcAgent = {
   close(): Promise<void>;
 };
 
+type PtcVm = {
+  readonly requestId: string;
+  done: boolean;
+  lastSeq: number;
+  timer?: NodeJS.Timeout;
+};
+
+type PtcTool = {
+  readonly requestId: string;
+  readonly callId: number;
+  timer?: NodeJS.Timeout;
+};
+
+type PtcSession = {
+  readonly runner: PtcRunnerHandle;
+  readonly workspace: PtcSandboxStart["workspace"];
+  readonly isolation: PtcRunnerHandle["isolation"];
+  vm?: PtcVm;
+  readonly tools: Map<number, PtcTool>;
+  closed: boolean;
+};
+
 type Session = {
   readonly sessionId: string;
   readonly jobId?: string;
   readonly createdAt: number;
   lastActiveAt: number;
   readonly requests: Set<string>;
+  readonly ptc?: PtcSession;
 };
 
 type PendingExecution = {
   readonly id: string;
   readonly sessionId: string;
+  readonly kind: "execute" | "vm" | "tool";
+  readonly callId?: number;
+  /** Only `execute` counts against `maxConcurrent`; PTC calls belong to an already-admitted VM. */
+  readonly counted: boolean;
   readonly controller: AbortController;
   deadline: NodeJS.Timeout | undefined;
   abortReason: "cancel" | "timeout" | "disconnect" | "session_close" | "server_shutdown" | undefined;
@@ -51,13 +88,34 @@ type Failure = {
   readonly outcome: RpcOutcome;
 };
 
-const PHASE0_METHODS = [
+function ptcToolFailure(
+  code: "timeout" | "spawn_error" | "aborted" | "output_too_large" | "failed",
+  message: string,
+): Failure {
+  switch (code) {
+    case "timeout":
+      return { code: "timeout", message, outcome: "unknown" };
+    case "aborted":
+      return { code: "aborted", message, outcome: "unknown" };
+    case "spawn_error":
+      return { code: "spawn_error", message, outcome: "failed" };
+    case "output_too_large":
+      return { code: "too_large", message, outcome: "failed" };
+    case "failed":
+      return { code: "internal", message, outcome: "failed" };
+  }
+}
+
+const AGENT_METHODS = [
   "health.check",
   "preflight",
   "session.open",
   "session.close",
   "execute",
   "cancel",
+  "vm.start",
+  "vm.reply",
+  "tool.call",
 ] as const;
 
 function nowMs(): number {
@@ -127,6 +185,7 @@ class AgentConnection {
       pending.controller.abort("disconnected");
     }
     for (const session of this.sessions.values()) {
+      if (session.ptc !== undefined) this.closePtc(session.ptc, reason);
       this.send({
         v: 1,
         kind: "event",
@@ -181,10 +240,14 @@ class AgentConnection {
           this.respondOk(frame.id, this.health());
           return;
         case "preflight":
-          this.respondOk(frame.id, this.preflight());
+          void this.preflight().then((result) => this.respondOk(frame.id, result), () => {
+            this.respondError(frame.id, "internal", "execution agent preflight failed", "failed");
+          });
           return;
         case "session.open":
-          this.openSession(frame);
+          void this.openSession(frame).catch(() => {
+            this.respondError(frame.id, "internal", "failed to open the session", "not_started");
+          });
           return;
         case "session.close":
           this.closeSessionFromRequest(frame);
@@ -195,11 +258,17 @@ class AgentConnection {
         case "cancel":
           this.cancelRequest(frame);
           return;
-        case "tool.call":
         case "vm.start":
+          this.startVm(frame);
+          return;
         case "vm.message":
+          this.respondError(frame.id, "not_implemented", "VM messages are delivered as events, not requests", "not_started");
+          return;
         case "vm.reply":
-          this.respondError(frame.id, "not_implemented", `${frame.method} is not implemented in Phase 0`);
+          this.vmReply(frame);
+          return;
+        case "tool.call":
+          this.startToolCall(frame);
           return;
       }
     } catch {
@@ -211,28 +280,42 @@ class AgentConnection {
     return {
       executionId: this.options.executionId,
       protocol: RPC_PROTOCOL_VERSION,
-      agentVersion: this.options.agentVersion ?? "phase0",
-      phase: 0,
+      agentVersion: this.options.agentVersion ?? "phase1",
+      phase: 1,
       transport: this.options.transport,
       peer: this.peer.peer ?? null,
-      methods: PHASE0_METHODS,
+      methods: AGENT_METHODS,
       testExecutor: this.testExecutorEnabled,
+      ptc: this.options.ptc !== undefined,
     };
   }
 
-  private preflight(): Record<string, unknown> {
+  private async preflight(): Promise<Record<string, unknown>> {
+    const ptc = this.options.ptc === undefined ? undefined : await this.options.ptc.preflight();
     return {
-      ok: this.testExecutorEnabled,
+      // A gateway needs one usable capability, not both: PTC deployments may keep the Phase 0
+      // test executor switched off, and vice versa.
+      ok: (this.testExecutorEnabled || ptc !== undefined) && (ptc?.ok ?? true),
       executionId: this.options.executionId,
-      agentVersion: this.options.agentVersion ?? "phase0",
+      agentVersion: this.options.agentVersion ?? "phase1",
       checks: {
         testExecutor: this.testExecutorEnabled,
         mutualTls: this.options.transport === "tls" ? this.peer.authorized : null,
+        ptc: ptc === undefined ? null : ptc.ok,
       },
+      ...(ptc === undefined ? {} : {
+        ptc: {
+          ok: ptc.ok,
+          isolation: ptc.isolation,
+          checks: ptc.checks,
+          diagnostics: ptc.diagnostics,
+        },
+      }),
     };
   }
 
-  private openSession(frame: RpcRequestFrame): void {
+  private async openSession(frame: RpcRequestFrame): Promise<void> {
+    if (this.closed) return;
     const sessionId = frame.payload.sessionId;
     if (typeof sessionId !== "string") {
       this.respondError(frame.id, "invalid_request", "sessionId is required", "not_started");
@@ -248,24 +331,85 @@ class AgentConnection {
     }
     const now = (this.options.now ?? nowMs)();
     const jobId = frame.payload.jobId;
+    const sandboxRequested = frame.payload.sandbox === true;
+    const workspaceReady = frame.payload.workspaceReady === true;
+    let ptc: PtcSession | undefined;
+    if (sandboxRequested) {
+      if (typeof jobId !== "string") {
+        this.respondError(frame.id, "invalid_request", "a sandbox session requires a jobId", "not_started");
+        return;
+      }
+      const sandbox = this.options.ptc;
+      if (sandbox === undefined) {
+        this.respondError(frame.id, "not_implemented", "PTC is not enabled on this execution agent", "not_started");
+        return;
+      }
+      let started: PtcSandboxStart;
+      try {
+        started = await sandbox.open(jobId, sessionId, workspaceReady, {
+          onFrame: (runnerFrame) => this.handleRunnerFrame(sessionId, runnerFrame),
+          onExit: (info) => this.handleRunnerExit(sessionId, info),
+          onStderr: (text) => process.stderr.write(`[ptc ${sessionId}] ${text}`),
+        });
+      } catch (error) {
+        const failure = this.ptcOpenFailure(error);
+        this.respondError(frame.id, failure.code, failure.message, "not_started");
+        return;
+      }
+      if (this.closed) {
+        await started.runner.kill("connection closed while the session was opening", true);
+        return;
+      }
+      ptc = {
+        runner: started.runner,
+        workspace: started.workspace,
+        isolation: started.runner.isolation,
+        tools: new Map(),
+        closed: false,
+      };
+    }
     const session: Session = {
       sessionId,
       ...(typeof jobId === "string" ? { jobId } : {}),
       createdAt: now,
       lastActiveAt: now,
       requests: new Set(),
+      ...(ptc === undefined ? {} : { ptc }),
     };
     this.sessions.set(sessionId, session);
     this.respondOk(frame.id, {
       sessionId,
       executionId: this.options.executionId,
       ...(session.jobId === undefined ? {} : { jobId: session.jobId }),
+      ...(ptc === undefined ? {} : {
+        workspace: {
+          path: ptc.workspace.hostPath,
+          created: ptc.workspace.created,
+          reused: ptc.workspace.reused,
+        },
+        isolation: {
+          mode: ptc.isolation.mode,
+          cgroup: ptc.isolation.cgroup,
+          network: ptc.isolation.network,
+        },
+      }),
       limits: {
         maxSessions: this.maxSessions,
         maxConcurrent: this.maxConcurrent,
         sessionTtlMs: this.sessionTtlMs,
       },
     });
+  }
+
+  private ptcOpenFailure(error: unknown): Failure {
+    if (error instanceof WorkspaceMissingError) {
+      return { code: "workspace_missing", message: error.message, outcome: "not_started" };
+    }
+    return {
+      code: "unavailable",
+      message: `PTC sandbox could not start: ${error instanceof Error ? error.message : "unknown error"}`,
+      outcome: "not_started",
+    };
   }
 
   private closeSessionFromRequest(frame: RpcRequestFrame): void {
@@ -283,13 +427,32 @@ class AgentConnection {
     const session = this.sessions.get(sessionId);
     if (session === undefined) return;
     this.sessions.delete(sessionId);
-    for (const requestId of session.requests) {
+    for (const requestId of [...session.requests]) {
       const pending = this.requests.get(requestId);
       if (pending === undefined) continue;
       pending.abortReason = "session_close";
       pending.controller.abort("session closed");
+      // A VM or tool request has no abort listener: the runner is about to be killed, so settle
+      // those requests here instead of leaving the caller to wait for its own deadline.
+      if (pending.kind === "vm" || pending.kind === "tool") {
+        this.finish(pending, session);
+        this.respondError(requestId, "aborted", "the session closed before the request completed", "unknown");
+      }
     }
+    if (session.ptc !== undefined) this.closePtc(session.ptc, reason);
     this.send({ v: 1, kind: "event", event: "session.closed", sessionId, reason });
+  }
+
+  /** Stops the runner and clears server-side deadlines; the workspace itself is retained. */
+  private closePtc(ptc: PtcSession, reason: string): void {
+    if (ptc.closed) return;
+    ptc.closed = true;
+    for (const tool of ptc.tools.values()) {
+      if (tool.timer !== undefined) clearTimeout(tool.timer);
+    }
+    ptc.tools.clear();
+    if (ptc.vm?.timer !== undefined) clearTimeout(ptc.vm.timer);
+    void ptc.runner.kill(reason).catch(() => undefined);
   }
 
   private sweepSessions(): void {
@@ -339,6 +502,8 @@ class AgentConnection {
     const pending: PendingExecution = {
       id: frame.id,
       sessionId,
+      kind: "execute",
+      counted: true,
       controller,
       deadline: undefined,
       abortReason: undefined,
@@ -389,6 +554,261 @@ class AgentConnection {
     }
   }
 
+  private beginPtcRequest(
+    frame: RpcRequestFrame,
+    session: Session,
+    kind: "vm" | "tool",
+    callId?: number,
+  ): PendingExecution {
+    const pending: PendingExecution = {
+      id: frame.id,
+      sessionId: session.sessionId,
+      kind,
+      counted: false,
+      ...(callId === undefined ? {} : { callId }),
+      controller: new AbortController(),
+      deadline: undefined,
+      abortReason: undefined,
+      settled: false,
+      seq: 0,
+    };
+    this.requests.set(frame.id, pending);
+    session.requests.add(frame.id);
+    session.lastActiveAt = (this.options.now ?? nowMs)();
+    return pending;
+  }
+
+  private ptcSession(frame: RpcRequestFrame): { session: Session; ptc: PtcSession } | undefined {
+    const sessionId = frame.sessionId;
+    if (typeof sessionId !== "string") {
+      this.respondError(frame.id, "invalid_request", "sessionId is required", "not_started");
+      return undefined;
+    }
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) {
+      this.respondError(frame.id, "not_found", "session is not open on this connection", "not_started");
+      return undefined;
+    }
+    const ptc = session.ptc;
+    if (ptc === undefined || ptc.closed) {
+      this.respondError(frame.id, "unavailable", "session has no running PTC sandbox", "not_started");
+      return undefined;
+    }
+    return { session, ptc };
+  }
+
+  private startVm(frame: RpcRequestFrame): void {
+    const target = this.ptcSession(frame);
+    if (target === undefined) return;
+    if (target.ptc.vm !== undefined) {
+      this.respondError(frame.id, "busy", "a VM is already running in this session", "not_started");
+      return;
+    }
+    const pending = this.beginPtcRequest(frame, target.session, "vm");
+    const vm: PtcVm = { requestId: frame.id, done: false, lastSeq: 0 };
+    target.ptc.vm = vm;
+    vm.timer = setTimeout(() => {
+      if (vm.done || pending.settled) return;
+      this.finish(pending, target.session);
+      this.respondError(frame.id, "timeout", "the PTC script deadline was exceeded", "unknown");
+      this.closeSession(target.session.sessionId, "PTC script deadline exceeded");
+    }, frame.deadlineMs);
+    vm.timer.unref();
+    if (!target.ptc.runner.send({
+      v: 1,
+      kind: "start",
+      request: frame.payload.request as CodemodeRemoteRequest,
+    })) {
+      if (vm.timer !== undefined) clearTimeout(vm.timer);
+      this.finish(pending, target.session);
+      target.ptc.vm = undefined;
+      this.respondError(frame.id, "unavailable", "the PTC runner is not accepting input", "not_started");
+    }
+  }
+
+  private vmReply(frame: RpcRequestFrame): void {
+    const target = this.ptcSession(frame);
+    if (target === undefined) return;
+    const vm = target.ptc.vm;
+    if (vm === undefined || vm.done) {
+      this.respondError(frame.id, "not_found", "no VM exchange is waiting for a reply", "not_started");
+      return;
+    }
+    const seq = Number(frame.correlationId);
+    if (!Number.isSafeInteger(seq) || seq < 1 || seq > vm.lastSeq) {
+      this.respondError(frame.id, "invalid_request", "vm.reply correlationId must name a delivered exchange", "not_started");
+      return;
+    }
+    if (!target.ptc.runner.send({
+      v: 1,
+      kind: "reply",
+      seq,
+      reply: frame.payload.reply as CodemodeRemoteReply,
+    })) {
+      this.respondError(frame.id, "unavailable", "the PTC runner is not accepting input", "unknown");
+      return;
+    }
+    target.session.lastActiveAt = (this.options.now ?? nowMs)();
+    this.respondOk(frame.id, { accepted: true, seq });
+  }
+
+  private startToolCall(frame: RpcRequestFrame): void {
+    const target = this.ptcSession(frame);
+    if (target === undefined) return;
+    const parsed = parsePtcToolCallPayload(frame.payload);
+    if (!parsed.ok) {
+      this.respondError(frame.id, "invalid_request", parsed.message, "not_started");
+      return;
+    }
+    const callId = parsed.value.callId;
+    if (target.ptc.tools.size > 0) {
+      this.respondError(frame.id, "busy", "a PTC tool call is already running in this session", "not_started");
+      return;
+    }
+    const pending = this.beginPtcRequest(frame, target.session, "tool", callId);
+    const tool: PtcTool = { requestId: frame.id, callId };
+    target.ptc.tools.set(callId, tool);
+    const hardDeadline = Math.min(frame.deadlineMs, parsed.value.args.timeoutMs + 10_000);
+    tool.timer = setTimeout(() => {
+      if (pending.settled) return;
+      target.ptc.tools.delete(callId);
+      target.ptc.runner.send({ v: 1, kind: "tool-cancel", callId });
+      this.finish(pending, target.session);
+      this.respondError(frame.id, "timeout", "the PTC command deadline was exceeded", "unknown");
+    }, hardDeadline);
+    tool.timer.unref();
+    const payload: PtcToolCallPayload = parsed.value;
+    if (!target.ptc.runner.send({ v: 1, kind: "tool", callId, args: payload.args })) {
+      clearTimeout(tool.timer);
+      target.ptc.tools.delete(callId);
+      this.finish(pending, target.session);
+      this.respondError(frame.id, "unavailable", "the PTC runner is not accepting input", "not_started");
+    }
+  }
+
+  private handleRunnerFrame(sessionId: string, frame: RunnerFrame): void {
+    const session = this.sessions.get(sessionId);
+    const ptc = session?.ptc;
+    if (session === undefined || ptc === undefined || ptc.closed) return;
+    switch (frame.kind) {
+      case "message": {
+        const vm = ptc.vm;
+        if (vm === undefined || vm.done) return;
+        if (frame.seq <= vm.lastSeq) {
+          this.closeSession(sessionId, "runner sent an out-of-order VM message");
+          return;
+        }
+        vm.lastSeq = frame.seq;
+        this.send({
+          v: 1,
+          kind: "event",
+          event: "vm.message",
+          id: vm.requestId,
+          sessionId,
+          seq: frame.seq,
+          messages: frame.messages,
+        });
+        return;
+      }
+      case "done": {
+        const vm = ptc.vm;
+        if (vm === undefined || vm.done) return;
+        vm.done = true;
+        if (vm.timer !== undefined) clearTimeout(vm.timer);
+        ptc.vm = undefined;
+        const pending = this.requests.get(vm.requestId);
+        if (pending !== undefined) {
+          this.finish(pending, session);
+          this.respondOk(vm.requestId, {});
+        }
+        return;
+      }
+      case "tool-output": {
+        const tool = ptc.tools.get(frame.callId);
+        if (tool === undefined) return;
+        const pending = this.requests.get(tool.requestId);
+        if (pending === undefined) return;
+        pending.seq++;
+        this.send({
+          v: 1,
+          kind: "event",
+          event: "output",
+          id: tool.requestId,
+          sessionId,
+          seq: pending.seq,
+          stream: frame.stream,
+          text: frame.text,
+          ...(frame.skipped === undefined ? {} : { skipped: frame.skipped }),
+        });
+        return;
+      }
+      case "tool-result": {
+        const tool = ptc.tools.get(frame.callId);
+        if (tool === undefined) return;
+        if (tool.timer !== undefined) clearTimeout(tool.timer);
+        ptc.tools.delete(frame.callId);
+        const pending = this.requests.get(tool.requestId);
+        if (pending === undefined) return;
+        this.finish(pending, session);
+        this.respondOk(tool.requestId, frame.result);
+        return;
+      }
+      case "tool-error": {
+        const tool = ptc.tools.get(frame.callId);
+        if (tool === undefined) return;
+        if (tool.timer !== undefined) clearTimeout(tool.timer);
+        ptc.tools.delete(frame.callId);
+        const pending = this.requests.get(tool.requestId);
+        if (pending === undefined) return;
+        this.finish(pending, session);
+        const failure = ptcToolFailure(frame.code, frame.message);
+        this.respondError(tool.requestId, failure.code, failure.message, failure.outcome);
+        return;
+      }
+      case "ready":
+        return;
+      default:
+        this.closeSession(sessionId, "runner sent an unexpected frame");
+    }
+  }
+
+  private handleRunnerExit(
+    sessionId: string,
+    info: { readonly code: number | null; readonly signal: NodeJS.Signals | null; readonly stderr: string },
+  ): void {
+    const session = this.sessions.get(sessionId);
+    const ptc = session?.ptc;
+    if (session === undefined || ptc === undefined || ptc.closed) return;
+    ptc.closed = true;
+    if (ptc.vm?.timer !== undefined) clearTimeout(ptc.vm.timer);
+    const vm = ptc.vm;
+    ptc.vm = undefined;
+    if (vm !== undefined && !vm.done) {
+      const pending = this.requests.get(vm.requestId);
+      if (pending !== undefined) {
+        this.finish(pending, session);
+        this.respondError(vm.requestId, "unavailable", "the PTC sandbox exited while the script was running", "unknown");
+      }
+    }
+    for (const tool of ptc.tools.values()) {
+      if (tool.timer !== undefined) clearTimeout(tool.timer);
+      const pending = this.requests.get(tool.requestId);
+      if (pending === undefined) continue;
+      this.finish(pending, session);
+      this.respondError(tool.requestId, "unavailable", "the PTC sandbox exited during the command", "unknown");
+    }
+    ptc.tools.clear();
+    this.sessions.delete(sessionId);
+    const detail = info.stderr.trim().slice(0, 512);
+    this.send({
+      v: 1,
+      kind: "event",
+      event: "session.closed",
+      sessionId,
+      reason: `PTC sandbox exited (${info.signal ?? info.code ?? "unknown"})${detail === "" ? "" : `: ${detail}`}`,
+    });
+  }
+
   private failureFor(error: unknown, pending: PendingExecution): Failure {
     if (error instanceof RpcAbortError) {
       if (pending.abortReason === "timeout") {
@@ -408,7 +828,7 @@ class AgentConnection {
     if (pending.deadline !== undefined) clearTimeout(pending.deadline);
     this.requests.delete(pending.id);
     session.requests.delete(pending.id);
-    this.active--;
+    if (pending.counted) this.active--;
   }
 
   private cancelRequest(frame: RpcRequestFrame): void {
@@ -422,6 +842,25 @@ class AgentConnection {
       this.respondError(frame.id, "not_found", "target request is not active", "not_started");
       return;
     }
+    if (pending.kind === "tool") {
+      const session = this.sessions.get(pending.sessionId);
+      const tool = pending.callId === undefined ? undefined : session?.ptc?.tools.get(pending.callId);
+      if (session?.ptc !== undefined && tool !== undefined) {
+        session.ptc.runner.send({ v: 1, kind: "tool-cancel", callId: tool.callId });
+      }
+      // The runner answers with tool-error aborted; the request settles there, not here.
+      this.respondOk(frame.id, { targetId, cancelled: true });
+      return;
+    }
+    if (pending.kind === "vm") {
+      // A computing remote VM cannot be interrupted; ending the session kills the runner.
+      const session = this.sessions.get(pending.sessionId);
+      if (session !== undefined) this.finish(pending, session);
+      this.respondError(targetId, "aborted", "the PTC script was cancelled", "unknown");
+      this.closeSession(pending.sessionId, "script cancelled");
+      this.respondOk(frame.id, { targetId, cancelled: true });
+      return;
+    }
     pending.abortReason = "cancel";
     pending.controller.abort("cancelled");
     this.respondOk(frame.id, { targetId, cancelled: true });
@@ -433,6 +872,9 @@ class AgentConnection {
     for (const pending of this.requests.values()) {
       pending.abortReason = "disconnect";
       pending.controller.abort("disconnected");
+    }
+    for (const session of this.sessions.values()) {
+      if (session.ptc !== undefined) this.closePtc(session.ptc, "connection closed");
     }
     this.requests.clear();
     this.sessions.clear();

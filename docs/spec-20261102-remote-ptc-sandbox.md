@@ -1,12 +1,12 @@
 # 远程 PTC 与统一 RPC 执行通道（Phase 0：跨 VPS RPC；Phase 1：远程 PTC sandbox；Phase 2：文件原语）
 
-- **状态**：Phase 0 已通过真实双 VPS 验收（2026-11-02，`executionId 3a0d7374b09e9b05`）；Phase 1／2 暂不实现
-- **日期**：2026-11-02
+- **状态**：Phase 0 已通过真实双 VPS 验收（2026-11-02，`executionId 3a0d7374b09e9b05`）；Phase 1 代码与自动化测试已落地，真实双 VPS 验收待执行；Phase 2 暂不实现
+- **日期**：2026-11-02（2026-11-03 更新 Phase 1 实现状态）
 - **功能**：remote-ptc-sandbox
 - **所属 ADR**：[ADR-0020](adr/remote-ptc-sandbox/0020-remote-ptc-sandbox.md)
 - **前置决策**：[ADR-0019](adr/codemode-ptc/0019-codemode-ptc.md)、[ADR-0021](adr/0021-control-execution-split.md)
 
-> 本文区分“仓库当前已实现”“Phase 0 已通过真实双 VPS 验收”“Phase 1／2 暂不实现”。除明确标注为已实现的内容外，均不是现有代码能力。Phase 0 的验收证据见 [2026-11-02 验收记录](acceptance/20261102-execution-rpc-phase0.md)。
+> 本文区分“仓库当前已实现”“仅完成自动化测试”“真实双 VPS 待验收”“Phase 2 暂不实现”。除明确标注为已实现的内容外，均不是现有代码能力。Phase 0 的验收证据见 [2026-11-02 验收记录](acceptance/20261102-execution-rpc-phase0.md)。Phase 1 的第 16.2 节中，自动化范围已由 `test/ptc.test.ts` 与 `test/execution-rpc.test.ts` 覆盖；真实双 VPS 的 bwrap／cgroup／网络隔离和大输出 Token 对比仍需按该节执行并记录证据。
 
 ## 1. 实现状态
 
@@ -15,17 +15,19 @@
 | 本地 codemode（`CodemodeSandbox`） | 已实现 | `src/codemode.ts`、`src/agent.ts`、`test/codemode.test.ts` |
 | 远程 `bash`（一次调用一条 Unix socket 请求 + 一条 SSH） | 已实现 | `src/execution/broker.ts`、`broker-client.ts`、`ssh.ts`、`remote-env.ts` |
 | `RemoteExecutionEnv` shell 半边 | 已实现 | 文件 API 仍返回 `not_supported` |
-| 远程 PTC（`RemoteCodemodeSandbox`） | 暂不实现 | 只有设计，没有生产代码 |
+| 远程 PTC（`RemoteCodemodeSandbox`） | Phase 1 已实现 | `src/ptc/control.ts`、`src/codemode.ts`；`PTC_ENABLED=1` 且远程执行时启用 |
 | 统一 RPC 协议、Transport、Gateway Client、Execution Agent | Phase 0 已实现 | `src/execution/rpc-protocol.ts`、`rpc-transport.ts`、`rpc-client.ts`、`rpc-server.ts`、`rpc-config.ts`、`rpc-main.ts`、`rpc-test-executor.ts` |
 | TCP/TLS + mTLS 私网通信 | Phase 0 代码已实现 | `listenTlsRpc`／`tlsRpcTransport`；TLS loopback 双向认证、客户端 CN allowlist 与拒绝测试通过 |
 | 端到端 CLI 闭环 | TLS loopback 与真实双 VPS 均已通过 | `execution:rpc-agent --check`、`execution:rpc-e2e` 完成 health／stream／cancel；真实跨 VPS 证据见验收记录 |
 | Session、心跳、流式响应、取消、deadline、断线处理 | Phase 0 已实现 | `rpc-server.ts`、`rpc-client.ts`；见 `test/execution-rpc.test.ts` |
 | 真实双 VPS RPC 闭环 | 已通过 | 2026-11-02，执行面 `executionId 3a0d7374b09e9b05`；正向／负向／断线证据见验收记录 |
-| PTC bwrap／cgroup／workspace／`OutputRef` | Phase 1 暂不实现 | 本文第 10～12 节 |
+| PTC bwrap／cgroup／workspace／`OutputRef` | Phase 1 已实现 | `src/execution/ptc-sandbox.ts`、`ptc-runner.ts`、`ptc-protocol.ts`、`ptc-output-store.ts`、`ptc-workspace.ts`、`ptc-runner-protocol.ts` |
+| PTC 自动化测试 | 已实现 | `test/ptc.test.ts`（协议、配置、预检、输出窗口／spill、runner 帧、workspace）；`test/execution-rpc.test.ts`（VM↔bash 桥、超时／取消、`workspace_missing`） |
+| PTC 真实双 VPS 验收 | 待执行 | 按本文第 16.2 节执行，包括同一 bwrap／cgroup、无网络、重放、强杀和大输出 Token 对比 |
 | 直接 `bash` 迁移到统一 RPC、远程文件工具 | Phase 2 暂不实现 | 本文第 13 节 |
 | gRPC、消息队列、额外数据库 | 暂不实现 | 不引入 |
 
-Phase 0 已通过真实双 VPS 验收；Unix socket 用例在 POSIX 验收中 9/9 通过。Phase 1 仍未开始。Phase 0 不改变现有 Tool Registry、pi-durable Journal、`NestedCallDoc` 或 QuickJS 执行核心。
+Phase 1 的代码路径已落地，并通过类型检查与自动化测试；真实双 VPS 上的 bwrap／cgroup／网络隔离、重放和 Token 对比验收仍待执行，不能以自动化测试替代。Phase 1 不改变现有 Tool Registry、pi-durable Journal、`NestedCallDoc` 或 QuickJS 执行核心。
 
 ## 2. 用户目标
 
@@ -54,7 +56,7 @@ Phase 0 只建立通道和执行代理，不接入 PTC，不迁移普通工具�
 - 受限测试执行器（只开放 `test.*` 能力，不接受任意命令）。
 - 本地 Unix socket 测试、TLS loopback 测试和真实跨 VPS 验收。
 
-实现状态：上述代码路径均已落地；TLS loopback 自动化测试通过，Unix socket 在 POSIX 验收中 9/9 通过。2026-11-02 已完成真实双 VPS 验收（PASS），证据见 [验收记录](acceptance/20261102-execution-rpc-phase0.md)。Phase 0 验收已完成，Phase 1 尚未开始。
+实现状态：上述代码路径均已落地；TLS loopback 自动化测试通过，Unix socket 在 POSIX 验收中 9/9 通过。2026-11-02 已完成真实双 VPS 验收（PASS），证据见 [验收记录](acceptance/20261102-execution-rpc-phase0.md)。Phase 0 验收已完成；Phase 1 代码已在此基础上接入，见第 10～12 节。
 
 Phase 0 明确不实现：
 
@@ -128,10 +130,12 @@ Phase 0 验收通过后实施：
 │ Execution Agent（常驻）                                  │
 │   RPC Server / Session Manager / Dispatcher              │
 │   ├─ TestExecutor（Phase 0，仅 test.*）                  │
-│   ├─ BwrapPtcExecutor（Phase 1）                         │
+│   ├─ PtcSandboxManager + ptc-runner（Phase 1）           │
 │   └─ FileExecutor（Phase 2）                             │
 └──────────────────────────────────────────────────────────┘
 ```
+
+> **已知偏差（Phase 1 实现）**：`PtcControl` 当前在 app 的 agent 进程内构造 `RpcExecutionClient`，直接使用 `EXECUTION_RPC_*` 连接执行 VPS，而不是经过 5.2 描述的 gateway 中转。这不新增监听端口，但要求 app 容器具备到执行 VPS 的私网路由；若部署按 ADR-0021 不允许 app 直连，则必须先把 `PtcControl`／`RemoteCodemodeSandbox` 的 RPC 客户端下沉到 gateway，再启用 `PTC_ENABLED=1`。该下沉尚未实现。
 
 ### 5.1 角色边界
 
@@ -142,7 +146,7 @@ Phase 0 验收通过后实施：
 | Gateway RPC Client | 建立 mTLS 连接、session、请求／响应、流式事件、取消、断线处理 | 业务授权、工具执行、journal |
 | Execution Agent | RPC 服务端、Session Manager、Dispatcher、执行器生命周期 | 自行授权任意工具、保存业务 journal、替代控制面 replay |
 | TestExecutor（Phase 0） | `test.echo`／`test.stream`／`test.sleep`／`test.fail` | 任意命令、文件、网络、环境变量 |
-| BwrapPtcExecutor（Phase 1） | 在 bwrap 内运行 QuickJS 和 bash、输出窗口、spill | 访问控制面状态、网络、宿主任意路径 |
+| PtcSandboxManager（Phase 1） | 在 bwrap 内运行 QuickJS 和 bash、输出窗口、spill | 访问控制面状态、网络、宿主任意路径 |
 | 旧 broker／SSH | 现有远程 `bash` 兼容路径 | 新 RPC 路径的授权或持久化 |
 
 ### 5.2 为什么 app 不直接连执行 VPS
@@ -401,7 +405,7 @@ Phase 0 的 TestExecutor 只有 `test.echo`、`test.stream`、`test.sleep`、`te
 
 - 根据 `method` 和执行器 allowlist 路由。
 - Phase 0 只路由 `test.*`；`tool.call` 和 `execute` 的 bash 形态返回 `not_implemented`。
-- Phase 1 路由 `vm.*` 和 `tool.call`（bash）到 `BwrapPtcExecutor`。
+- Phase 1：只有 `session.open` 显式携带 `sandbox: true` 的 session 才启动 PTC sandbox；该 session 的 `vm.start`／`vm.reply`／`tool.call` 路由到 `PtcSandboxManager` 启动的 bwrap runner。普通 session 上的 `vm.*` 和 `tool.call` 一律返回 `not_implemented`／`invalid_request`，`sandbox` 不能由模型参数指定。
 - 未知 method、未知 executor、未授权工具返回 `not_implemented`／`invalid_request`，不尝试“尽力执行”。
 
 ## 10. 远程 PTC（Phase 1）
@@ -409,15 +413,15 @@ Phase 0 的 TestExecutor 只有 `test.echo`、`test.stream`、`test.sleep`、`te
 ### 10.1 流程
 
 1. 模型调用 `codemode`。宿主从 `conversationId` 和 codemode durable `taskId` 派生稳定 `jobId`。
-2. 控制面提交 `PtcJobDoc`（`jobId`、`workspaceReady`、创建时间）。
-3. Gateway 打开 RPC session，发送 `session.open`。
+2. 控制面读取 `PtcJobDoc`（`jobId`、`workspaceReady`、创建时间）；首次运行时 `workspaceReady` 为未提交状态。
+3. Gateway 打开 RPC session，发送 `session.open`，显式携带 `sandbox: true`、`jobId` 和当前 `workspaceReady`。`sandbox: true` 是 PTC 的显式开关，不能让普通 session 仅凭 `jobId` 获得命令执行能力。
 4. Agent 创建或复用 `/home/aster/jobs/<jobId>/workspace`，准备 cgroup，启动 bwrap 内的 PTC runner。
-5. Agent 返回 `session.ready`，包含 workspace 状态和隔离信息。
-6. 控制面提交 `workspaceReady=true`，发送 `vm.start`；runner 调用 `serveCodemodeRemote`。
-7. VM 发出 `call`。控制面 `RemoteCodemodeSandbox` / codemode extension 以 `api.executeTool(name, args, context, { key: "c" + callId })` 进入正常工具路径。
+5. Agent 返回 `session.open` 响应，包含 workspace 状态和隔离信息；不存在的“`session.ready`”消息不作为独立方法。
+6. 控制面提交 `workspaceReady=true`（仅首次运行），发送 `vm.start`；runner 调用 `serveCodemodeRemote`。
+7. VM 发出 `call`。runner 通过 `vm.message` **事件**发送消息数组；控制面 `RemoteCodemodeSandbox` / codemode extension 以 `api.executeTool(name, args, context, { key: "c" + callId })` 进入正常工具路径。
 8. 通过 registry、schema、authz、审批后，嵌套 `bash` 以 `tool.call` 发到同一 RPC session；Agent 在 bwrap 内执行。
 9. 输出按窗口流式返回；完整输出写入 job workspace，控制面只保存有界结果和 `OutputRef`。
-10. 控制面把嵌套结果写入 `NestedCallDoc`，交付给 VM；只有最终脚本结果进入模型上下文。
+10. 控制面把嵌套结果写入 `NestedCallDoc`，交付给 VM；只有最终脚本结果进入模型上下文。`vm.message` 事件的 `seq` 必须由控制面的 `vm.reply` 以同一 `correlationId` 回答。
 11. 脚本结束、失败、超时或取消时关闭 RPC session；workspace 保留到保留期结束。
 
 ### 10.2 身份
@@ -429,46 +433,83 @@ Phase 0 的 TestExecutor 只有 `test.echo`、`test.stream`、`test.sleep`、`te
 
 ### 10.3 PTC 载荷
 
-Phase 1 在统一 RPC 信封内使用 `vm.*` 和 `tool.call` 方法；不再单独定义一条 SSH 协议。
+Phase 1 在统一 RPC 信封内使用 `session.open` 的 sandbox 选项、`vm.start`、`vm.message`、`vm.reply` 和 `tool.call` 方法；不再单独定义一条 SSH 协议，也不复用 `execute`／`executor` 形态。
+
+`session.open` 的 PTC 字段：
+
+```ts
+type SessionOpenPayload = {
+  sessionId: string;          // 16 位小写十六进制
+  jobId?: string;             // sandbox: true 时必填，格式 ptc-<32 hex>
+  workspaceReady?: boolean;   // 仅 sandbox: true 时允许
+  sandbox?: boolean;          // 只有显式 true 才启动 PTC sandbox
+};
+```
+
+`vm.start` 的请求与 `vm.message`／`vm.reply`：
 
 ```ts
 type PtcVmStartPayload = {
-  request: CodemodeRemoteRequest;
+  request: CodemodeRemoteRequest;   // { data, interruptBudget? }
 };
 
-type PtcVmMessagePayload = {
+// 事件，不是请求：id 是创建该 VM 的 vm.start 请求 id，seq 单调递增。
+type PtcVmMessageEvent = {
+  v: 1;
+  kind: "event";
+  event: "vm.message";
+  id: string;
+  sessionId: string;
+  seq: number;
   messages: CodemodeRemoteMessage[];
 };
 
 type PtcVmReplyPayload = {
-  reply: CodemodeRemoteReply;
-};
-
-type PtcToolCallPayload = {
-  tool: "bash";
-  callId: number;
-  args: {
-    command: string | string[];
-    cwd: "/workspace";
-    env: Record<string, string>;
-    inheritEnv: boolean;
-    timeoutMs: number;
-    window: PtcOutputWindow;
-  };
+  reply: CodemodeRemoteReply | null;
 };
 ```
 
-`PtcOutputWindow` 至少包含 `maxBytes`、`maxLines`、`minIntervalMs`、`bytesPerSecond`。Agent 用本机配置再 clamp，不能由控制面放宽本机上限。
+`vm.reply` 以 `correlationId = seq` 关联对应事件。一个 `vm.message` 事件中的消息按数组顺序交给 VM；控制面的回答必须覆盖该事件中的全部调用，不能在多个事件之间重排。事件 `seq` 在同一 session 内必须单调递增，跳号或回退视为协议错误并关闭 session。
+
+`tool.call`：
+
+```ts
+type PtcToolCallPayload = {
+  tool: "bash";
+  callId: number;             // 从 1 开始，与 NestedCallDoc 的 c<callId> 一致
+  args: {
+    command: string | string[];
+    cwd: "/workspace" | `/workspace/...`;   // 解析 .. 后仍必须在 /workspace 内
+    env: Record<string, string>;            // 不能覆盖 PATH／HOME／LD_* 等保留键
+    inheritEnv: boolean;                    // 记录但沙箱从不继承控制面环境
+    timeoutMs: number;                      // 毫秒；控制面会 clamp 到脚本剩余期限和 PTC_TOOL_TIMEOUT_MS
+    window: PtcOutputWindow;
+  };
+};
+
+type PtcBashResult = {
+  exitCode: number;
+  truncated: boolean;
+  skippedBytes: number;
+  skippedLines: number;
+  durationMs: number;
+  outputRef?: OutputRef;      // 降级模式不产生 OutputRef
+  spillTruncated?: boolean;
+};
+```
+
+`PtcOutputWindow` 包含 `maxBytes`、`maxLines`、`minIntervalMs`、`bytesPerSecond`。Agent 用本机配置再 clamp，不能由控制面放宽本机上限。`args.timeoutMs` 是毫秒，与 shell 工具 `timeout` 的秒不同；转换与 clamp 在控制面完成，执行面再按自己的 `PTC_MAX_...` 上限复核。
 
 ### 10.4 控制面接入点
 
-- `createCodemodeHost()` 在远程模式下使用 `RemoteCodemodeSandbox`，由 Gateway session 提供 `remote()`；本地模式继续 `CodemodeSandbox`。
-- codemode 包装层在每次嵌套调用前把 `PTC_SESSION` 放进嵌套 context，从嵌套调用 options 的 `key`（`c<callId>`）取得 `callId`；`callId` 不从模型参数读取。
-- `HarnessOptions.env` 的 `(target, context)` 读取 `PTC_SESSION`：
-  - 有 session：构造带 session 的 `RemoteExecutionEnv`，`cwd=/workspace`；
-  - 无 session：保持现有 `execution.remoteCwd` 的 one-shot 行为。
+- `createCodemodeHost()` 在远程模式下使用 `RemoteCodemodeSandbox`，由 `PtcControl` 提供 `remote()`；本地模式继续 `CodemodeSandbox`。
+- **已实现的上下文绑定（与初版设计不同）**：pi-durable 的嵌套工具任务运行在 harness 自己的 context 下，不在 codemode 调用者的嵌套 context 下，因此无法通过嵌套 context 传递 `PTC_SESSION`。实现改为 `PtcControl` 在脚本执行前按 `conversationId` 注册当前 `PtcExecution`；`HarnessOptions.env` 的 `(target, context)` 先查 `ptc.envFor(conversationId)`：
+  - 有活动执行：使用该执行的 `PtcExecutionEnv`，`cwd=/workspace`，`exec()` 只发送 `tool.call`；
+  - 无活动执行：保持现有 `execution.remoteCwd` 的 one-shot 行为。
+- `RemoteCodemodeSandbox.remote()` 通过 `AsyncLocalStorage` 选择当前 `PtcExecution`，因此同一个 `PtcControl` 可以安全处理并发会话中的不同 codemode 调用；同一 conversation 同时只允许一个 PTC 执行。
+- 每次嵌套调用仍由 codemode 包装层取得 `key`（`c<callId>`），`PtcControl` 只接受这一形态的 key 并预留 `callId`；`callId` 不从模型参数读取。执行环境消费预留 id 前不会启动命令；没有预留 id 的 `exec()` 直接失败关闭。
 - `restrictScriptTools` Phase 1 远程白名单为 `{ "bash" }`；Phase 2 加 `{ "read", "write", "edit" }`；模型仍能看到全部工具。
-- 包装层继续串行化嵌套调用，并在 codemode 调用结束、失败、超时或取消时中止仍在运行的嵌套 context；随后关闭 RPC session。
+- 包装层继续串行化嵌套调用，并在 codemode 调用结束、失败、超时或取消时中止仍在运行的嵌套 context；随后关闭 RPC session。`PtcExecutionEnv.cleanup()` 不中止脚本，只由 session 完成取消和强杀。
 
 ## 11. Workspace、重放与输出引用
 
@@ -484,7 +525,7 @@ type PtcToolCallPayload = {
 
 | 情况 | 行为 |
 | --- | --- |
-| 首次运行，目录不存在 | 创建；`session.ready.workspace.created=true`；提交 `workspaceReady` 后启动 VM |
+| 首次运行，目录不存在 | 创建；`session.open` 响应的 `workspace.created=true`；提交 `workspaceReady` 后启动 VM |
 | 首次运行，目录已存在 | 复用并记录 `reused=true`；不自动清空 |
 | 重放，`workspaceReady=true`，目录存在 | 复用；同一 `jobId` 的文件上下文衔接 |
 | 重放，`workspaceReady=true`，目录不存在 | 失败 `workspace_missing`；不创建空目录，不执行 live 调用 |
@@ -525,7 +566,9 @@ type OutputRef = {
 - 存储路径示例：`/workspace/.ptc/outputs/<sha256>`；写入先落到同目录临时文件，flush 后 rename，避免半写文件。
 - 控制面用独立的扩展 durable 文档 `PtcOutputDoc` 保存 `OutputRef` 元数据；不修改 pi-durable journal 核心，也不把完整内容写进 `NestedCallDoc`。
 - `NestedCallDoc` 保存有界尾部、`truncated` 和 `OutputRef` 元数据；完整内容只在执行 VPS。
-- 读取时校验 `size` 和 `sha256`；文件缺失或 hash 不符返回 `output_unavailable`，不当作空文件。
+- 读取时校验 `size` 和 `sha256`；文件缺失或 hash 不符返回 `output_unavailable`，不当作空文件。Phase 1 没有控制面读取路径（只有脚本内的 `bash`），该错误码已保留但尚未产生；Phase 2 的分块读取实现时必须落实校验。
+- 降级模式（`isolation.mode="degraded-prlimit"`，没有 `/workspace` 挂载）不产生 `outputRef`：runner 以 `PTC_OUTPUT_REF=disabled` 启动，避免把执行主机的真实 workspace 路径交给控制面。此时 `tool.call` 只返回有界尾部，`spillTruncated` 表示完整输出是否被丢弃；控制面不得伪造一个不可用的引用。
+- 同一 `jobId`／`sessionId`／`callId` 的引用只写一次；重放时若内容寻址路径或 sha256 变化，显式失败，不覆盖既有记录。
 - 清理与 workspace 保留期一致；有引用的 blob 不删除。清理前标记 `evicted`；崩溃后首次访问时重新校验，缺失则标记 `unknown`。
 
 ### 11.4 QuickJS 如何读取完整输出
@@ -564,53 +607,71 @@ QuickJS VM 仍然没有文件系统、网络、计时器或模块能力。它不
 
 ### 12.1 启动预检
 
-Execution Agent 的 `--check` 和 `preflight` 必须检查：
+Execution Agent 的 `--check` 和 RPC `preflight` 必须检查（已实现于 `PtcSandboxManager.preflight()`）：
 
-1. `bwrap` 可执行文件存在且可运行。
-2. user namespace 可用：实际执行 `bwrap --unshare-user --uid 0 --gid 0 true` 或等价 probe，不能只看 sysctl；处理 `unprivileged_userns_clone` 和 Ubuntu 24.04 `apparmor_restrict_unprivileged_userns`。
-3. cgroup v2 可用：`memory`、`pids`、`cpu` controller 可写，`PTC_CGROUP_ROOT` 可创建子 cgroup；检查 `cgroup.kill`。
-4. runner 版本、`@earendil-works/pi-codemode`／QuickJS 版本与构建指纹；与控制面不一致时启动失败。
-5. workspace 根目录可写；共享 workspace 路径（若配置）存在且不是危险符号链接。
-6. `prlimit` 可用（仅降级路径需要）。
+1. `bwrap`、`prlimit`、`node` 可执行文件存在且可执行。
+2. user namespace 可用：实际执行 `bwrap --unshare-user ... -- /usr/bin/true` 或 `/bin/true` probe，不能只看 sysctl；处理 `unprivileged_userns_clone` 和 Ubuntu 24.04 `apparmor_restrict_unprivileged_userns`。
+3. cgroup v2 可用：`memory`、`pids`、`cpu` controller 存在且可写，`PTC_CGROUP_ROOT` 可创建子 cgroup；检查 `cgroup.kill`。
+4. runner 入口 `<appRoot>/dist/src/execution/ptc-runner.js`、`<appRoot>/package.json` 存在；`node` 可执行。
+5. workspace 根目录可写（写入并删除 `.preflight-probe`）。
+6. `PTC_PI_CODEMODE_VERSION`／`PTC_QUICKJS_VERSION` 是操作者声明的版本标签，runner 在 `ready` 帧中回显，供日志核对；Phase 1 尚未把控制面与执行面的构建指纹做自动比对。这是已知限制，部署时必须由发布流程保证二者来自同一构建。
 
 失败策略：
 
+- 无 PTC 配置（`EXECUTION_AGENT_PTC` 未开启）时 `preflight` 不检查 PTC；开启后 `preflight.ok` 要求 PTC 预检通过。Agent 的 `--check` 输出包含 `ptcPreflight`，失败时退出码为 1。
+- 正式启动时预检失败直接 fail closed，抛出 `ConfigurationError`，不监听、不降级。
 - user namespace 或 bwrap 不可用：默认失败关闭；只有显式 `PTC_ALLOW_DEGRADED=1` 才允许 `prlimit`-only，并记录 `isolation.mode="degraded-prlimit"`。
 - cgroup 不可用但 bwrap 可用：保留 namespace 隔离，资源限制降级到 `prlimit`，记录 `cgroup="none"`。
-- `prlimit` 不能替代 user namespace。
+- `prlimit` 不能替代 user namespace；除“bwrap + cgroup v2”以外的模式都需要 `prlimit`，预检会单独检查。
 
 ### 12.2 bwrap
 
-目标命令形状（实现时按发行版调整只读运行时绑定）：
+实现形状（`src/execution/ptc-sandbox.ts`，按发行版用 `--ro-bind-try` 容忍缺失路径）：
 
 ```sh
 bwrap \
-  --die-with-parent --new-session \
-  --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
-  --unshare-cgroup --unshare-net \
-  --clearenv \
-  --setenv PATH /usr/local/bin:/usr/bin:/bin \
-  --setenv HOME /workspace --setenv TMPDIR /tmp \
-  --setenv LANG C.UTF-8 --setenv TZ UTC \
-  --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
-  --ro-bind /bin /bin --ro-bind /sbin /sbin \
-  --ro-bind /opt/aster/ptc /opt/aster/ptc \
+  --unshare-user --uid 0 --gid 0 \
+  --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try \
+  --unshare-net \
+  --cap-drop ALL --clearenv --die-with-parent --new-session \
+  --hostname aster-ptc \
+  --proc /proc --dev /dev --tmpfs /tmp \
+  --ro-bind /usr /usr \
+  --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 \
+  --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin \
+  --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache \
+  --ro-bind-try /etc/ld.so.conf /etc/ld.so.conf \
+  --ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
+  --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf \
   --ro-bind-try /etc/passwd /etc/passwd \
   --ro-bind-try /etc/group /etc/group \
-  --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf \
-  --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache \
-  --proc /proc --dev /dev --tmpfs /tmp \
-  --bind /home/aster/jobs/<jobId>/workspace /workspace \
+  --ro-bind-try /etc/localtime /etc/localtime \
+  --ro-bind-try /etc/ssl/certs /etc/ssl/certs \
+  --ro-bind <appRoot>/dist /opt/aster/ptc/dist \
+  --ro-bind <appRoot>/node_modules /opt/aster/ptc/node_modules \
+  --ro-bind <appRoot>/package.json /opt/aster/ptc/package.json \
+  --ro-bind <nodePath> /opt/aster/node \
+  --dir /workspace \
+  --bind <workspaceRoot>/<jobId>/workspace /workspace \
   --chdir /workspace \
-  --cap-drop ALL --no-new-privs \
-  -- /usr/bin/node /opt/aster/ptc/runner.mjs
+  --setenv PATH /usr/local/bin:/usr/bin:/bin \
+  --setenv HOME /workspace --setenv TMPDIR /tmp \
+  --setenv LANG C.UTF-8 --setenv LC_ALL C.UTF-8 --setenv TZ UTC \
+  --setenv PTC_JOB_ID <jobId> --setenv PTC_SESSION_ID <sessionId> \
+  --setenv PTC_OUTPUT_MAX_BYTES <n> --setenv PTC_OUTPUT_RETENTION_MS <ms> \
+  --setenv PTC_MAX_INTERRUPT_BUDGET <n> --setenv PTC_MAX_MEMORY_LIMIT_BYTES <n> \
+  -- /opt/aster/node /opt/aster/ptc/dist/src/execution/ptc-runner.js
 ```
 
+实现说明：
+
+- 使用 `--unshare-cgroup-try` 而不是 `--unshare-cgroup`：部分内核／容器不允许创建 cgroup namespace，失败时仍保留 PID／网络等隔离，并在 `isolation` 中记录 `cgroup="none"`；资源限制此时由 `prlimit` 承担。
+- runner 入口固定为 `<appRoot>/dist/src/execution/ptc-runner.js`，不通过环境变量改路径；预检与启动必须使用同一路径。
+- `/shared` 在 Phase 1 不实现、不挂载；没有 `PTC_SHARED_WORKSPACE*` 配置。
 - 不使用 `--unshare-all`：它的 `-try` 变体可能在 user namespace 不可用时静默继续。
-- `/shared` 默认不挂载；显式 `PTC_SHARED_WORKSPACE_MODE=ro` 时只读绑定，Phase 2 才允许 `rw`。
 - `/usr`、`/lib*`、`/bin`、`/sbin` 按发行版实际路径只读绑定；禁止整体 `--ro-bind / /`。
 - `/etc` 只绑定最小运行时文件；`/home`、SSH 目录、凭据不绑定。
-- `--die-with-parent`、`--new-session`、`--cap-drop ALL`、`--no-new-privs` 必须保留。
+- `--die-with-parent`、`--new-session`、`--cap-drop ALL`、`--no-new-privs`（由 bwrap 默认 user namespace 与 `--cap-drop ALL` 共同提供）必须保留。
 
 ### 12.3 cgroup 与 `prlimit`
 
@@ -618,21 +679,22 @@ bwrap \
 
 | 文件 | 默认 | 说明 |
 | --- | --- | --- |
-| `memory.max` | 512 MiB | 包含 Node、runner、QuickJS、bash、tmpfs |
+| `memory.max` | 512 MiB（`PTC_MEMORY_MAX_BYTES`） | 包含 Node、runner、QuickJS、bash、tmpfs |
 | `memory.swap.max` | 0 | 不用 swap 缓冲 |
-| `pids.max` | 128 | 限制 fork |
-| `cpu.max` | `200000 100000` | 2 核配额 |
-| `cgroup.kill` | 关闭时写 `1` | 强杀整个组 |
+| `pids.max` | 256（`PTC_PIDS_MAX`） | 限制 fork |
+| `cpu.max` | `100000 100000`（`PTC_CPU_MAX`） | 1 核配额；按执行主机实际核数配置，最多 64 核 |
 
-- 关闭时先写 `cgroup.kill`，等待 `cgroup.events` 为空，再删除 cgroup。
-- 内核不支持 `cgroup.kill` 时逐项 SIGKILL；记录该回退。
-- cgroup 不可用时用 `prlimit --nproc/--nofile/--fsize/--cpu/--core=0` 包裹 bwrap；记录 `cgroup="none"`。
+- 每个 session 使用 `<PTC_CGROUP_ROOT>/session-<sessionId>`；创建失败时回退到 `prlimit`，并把 `isolation.cgroup` 记为 `none`。
+- 关闭时先写 `cgroup.kill`（若存在），等待 `cgroup.events` 的 `populated 0`，再删除 cgroup；删除最多重试约 4 秒。
+- 内核不支持 `cgroup.kill` 时杀 bwrap 进程组并等待；记录该回退。
+- cgroup 不可用时用 `prlimit --as/--nproc/--nofile/--fsize/--core=0` 包裹 bwrap（或降级模式下的 node）；记录 `cgroup="none"`。
 - `prlimit` 不能可靠限制聚合进程组；这是显式接受的降级代价。
 
 ### 12.4 网络
 
-- PTC sandbox 默认 `--unshare-net`，无外部网络、无 DNS、无监听端口。
-- 验收检查 `/proc/net/dev` 只有 `lo`，`curl`／`wget` 失败，DNS 失败。
+- PTC sandbox 在 bwrap 模式下 `--unshare-net`，无外部网络、无 DNS、无监听端口。
+- 降级模式（`degraded-prlimit`）没有 user／network namespace，`isolation.network="host"`；这是显式接受的不安全模式，必须记录并在验收中单独标注，不能与 bwrap 模式混同。
+- 验收检查 bwrap 模式下 `/proc/net/dev` 只有 `lo`，`curl`／`wget` 失败，DNS 失败。
 - 执行 VPS 不加入控制面的 MITM 网络；模型调用仍由控制面经既有代理完成，sandbox 不持有模型密钥。
 - RPC 的 mTLS 监听属于 Agent 进程，不在 PTC sandbox 内；sandbox 不能访问该连接。
 
@@ -653,15 +715,15 @@ bwrap \
 | 请求取消 | 返回 aborted；外部副作用按未知记录 |
 | bash 非零退出 | 工具结果 `isError`＋`exitCode`；不是 sandbox 失败，脚本可继续 |
 | 输出截断 | 返回尾部、`truncated`、`OutputRef`；不把截断当完整 |
-| `OutputRef` 缺失／hash 不符 | `output_unavailable`；不伪造内容 |
+| `OutputRef` 缺失／hash 不符 | `output_unavailable`；不伪造内容。Phase 1 无控制面读取路径，错误码保留，Phase 2 分块读取时落实 |
 | 调用／journal 预算超限 | 拒绝后续调用并附加诊断 |
-| 指纹／版本不匹配 | 重放显式失败，不执行 live 调用 |
+| 指纹／版本不匹配 | Phase 1 的 `PTC_PI_CODEMODE_VERSION`／`PTC_QUICKJS_VERSION` 只是操作者声明并由 runner `ready` 帧回显，尚未自动比对；部署发布流程必须保证控制面与执行面同一构建，重放前人工核对日志 |
 
 ### 13.2 超时与强杀
 
-- 脚本期限：`CODEMODE_TIMEOUT_MS` 是主时钟；Agent session TTL 为期限加余量。
-- 工具期限：`bash` timeout 和 `EXECUTION_MAX_TIMEOUT_SECONDS` 生效；Agent 再 clamp 到 session 剩余时间。
-- 取消：控制面发送 `cancel`；Agent 中止对应执行器；PTC 关闭 session 时强杀 bwrap。
+- 脚本期限：`CODEMODE_TIMEOUT_MS` 是主时钟；控制面把整个期限作为 `vm.start` 的 deadline，并额外留 60 秒给关闭和清理。session 空闲清扫跳过仍有活动请求的 session，因此 `vm.start` 在途时不会被 TTL 误杀。
+- 工具期限：控制面把 `args.timeoutMs` 设为 `min(命令请求, 脚本剩余期限, PTC_TOOL_TIMEOUT_MS)`，再加 5 秒 RPC 余量；runner 仍按收到的 `timeoutMs` 强杀命令进程组。
+- 取消：控制面发送 `cancel`；Agent 中止对应执行器；`tool.call` 转发 `tool-cancel` 给 runner 并等其 `tool-error`；取消 VM 时直接关闭 session。
 - 强杀顺序：
   1. Gateway 发送 `session.close` 或断开连接；
   2. Agent 中止活动请求，关闭 bwrap；
@@ -717,23 +779,41 @@ bwrap \
 | `EXECUTION_AGENT_TEST_EXECUTOR` | `1` | Phase 0 测试执行器开关；生产 Phase 1 关闭 |
 | `EXECUTION_AGENT_UNIX_SOCKET` | 无 | 仅本地测试／同机部署 |
 
-Phase 1 PTC 配置（暂不实现）：
+Phase 1 PTC 配置（执行 Agent，`EXECUTION_AGENT_PTC=1` 时生效）：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `PTC_WORKSPACE_ROOT` | `/home/aster/jobs` | job 根目录 |
-| `PTC_SHARED_WORKSPACE` | `/home/aster/workspace` | 直接 `bash` 工作目录 |
-| `PTC_SHARED_WORKSPACE_MODE` | `none` | `none`／`ro`／`rw` |
-| `PTC_CGROUP_ROOT` | `/sys/fs/cgroup/aster-ptc` | cgroup v2 子树 |
-| `PTC_CGROUP_MEMORY_MAX_BYTES` | `536870912` | 512 MiB |
-| `PTC_CGROUP_PIDS_MAX` | `128` | 进程／线程上限 |
-| `PTC_CGROUP_CPU_MAX` | `200000 100000` | 2 核配额 |
-| `PTC_OUTPUT_CHUNK_BYTES` | `32768` | 分块读取上限 |
-| `PTC_NESTED_OUTPUT_MAX_BYTES` | `32768` | 单工具尾部上限 |
-| `PTC_NESTED_OUTPUT_MAX_LINES` | `1000` | 单工具行数上限 |
-| `PTC_SPILL_MAX_BYTES` | `67108864` | 单个完整输出上限 |
-| `PTC_ALLOW_DEGRADED` | `0` | 仅显式允许 `prlimit` 降级 |
-| `PTC_JOB_RETENTION_HOURS` | `168` | workspace 保留期 |
+| `EXECUTION_AGENT_PTC` | `0` | 只有显式为 `1` 才创建 PTC sandbox；否则 `session.open` 的 `sandbox: true` 返回 `not_implemented` |
+| `PTC_APP_ROOT` | `process.cwd()` | 包含 `dist`、`node_modules`、`package.json` 的应用根目录；runner 路径固定为其下的 `dist/src/execution/ptc-runner.js` |
+| `PTC_NODE_PATH` | `process.execPath` | 绑定进沙箱的 node 可执行文件 |
+| `PTC_BWRAP_PATH` | `/usr/bin/bwrap` | bwrap 路径 |
+| `PTC_PRLIMIT_PATH` | `/usr/bin/prlimit` | 降级／cgroup 缺失时的资源限制工具 |
+| `PTC_WORKSPACE_ROOT` | `/home/aster/jobs` | job 根目录；实际 workspace 为 `<root>/<jobId>/workspace` |
+| `PTC_CGROUP_ROOT` | `/sys/fs/cgroup/ptc` | cgroup v2 子树 |
+| `PTC_MEMORY_MAX_BYTES` | `536870912`（512 MiB） | `memory.max`；不得大于 `PTC_MAX_MEMORY_LIMIT_BYTES` |
+| `PTC_MAX_MEMORY_LIMIT_BYTES` | `1073741824`（1 GiB） | QuickJS／runner 的内存上限和预检边界 |
+| `PTC_PIDS_MAX` | `256` | `pids.max`；范围 16..4096 |
+| `PTC_CPU_MAX` | `100000 100000` | `cpu.max` 的 `<quota> <period>`（微秒） |
+| `PTC_OUTPUT_MAX_BYTES` | `67108864`（64 MiB） | 单个完整输出 blob 上限 |
+| `PTC_RETENTION_MS` | `86400000`（24 小时） | workspace／`OutputRef` 保留期 |
+| `PTC_STARTUP_TIMEOUT_MS` | `20000` | runner 必须在此时限内发出 `ready` 帧 |
+| `PTC_MAX_INTERRUPT_BUDGET` | pi-codemode `DEFAULT_INTERRUPT_BUDGET` | VM 中断预算上限 |
+| `PTC_PI_CODEMODE_VERSION` | `1.3.0` | 操作者声明的版本标签；runner `ready` 帧回显 |
+| `PTC_QUICKJS_VERSION` | `3.6.2` | 操作者声明的版本标签；runner `ready` 帧回显 |
+| `PTC_ALLOW_DEGRADED` | `0` | 仅显式允许 `prlimit` 降级；不允许时 userns 失败即启动失败 |
+
+控制面 PTC 配置（`src/config.ts`，要求 `CODEMODE_ENABLED=1`）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PTC_ENABLED` | `0` | 只有显式 `1` 才创建远程 PTC；启动时要求 Gateway 的 `health.ptc=true` 且 `preflight.ptc.ok=true` |
+| `PTC_MAX_TOOL_CALLS` | `100` | 单脚本嵌套工具调用上限 |
+| `PTC_MAX_JOURNAL_BYTES` | `8388608`（8 MiB） | 单脚本嵌套结果累计大小上限 |
+| `PTC_MAX_OUTPUT_BYTES` | `1048576`（1 MiB） | 发送给 runner 的单工具输出窗口上限 |
+| `PTC_MAX_OUTPUT_LINES` | `10000` | 输出窗口行数上限 |
+| `PTC_TOOL_TIMEOUT_MS` | `120000` | 单条命令上限，独立于脚本剩余期限 |
+
+脚本总期限使用 `CODEMODE_TIMEOUT_MS`，控制面再额外留 60 秒余量用于关闭和清理。
 
 ### 14.3 部署
 
@@ -755,13 +835,21 @@ export EXECUTION_AGENT_TLS_KEY_PATH=/run/aster/rpc/server.key
 export EXECUTION_AGENT_TLS_CA_PATH=/run/aster/rpc/ca.crt
 export EXECUTION_AGENT_CLIENT_CERT_CN=aster-gateway
 export EXECUTION_AGENT_REQUIRE_CLIENT_CERT=1
+export EXECUTION_AGENT_PTC=1
+export PTC_APP_ROOT=/opt/aster
+export PTC_WORKSPACE_ROOT=/home/aster/jobs
+export PTC_CGROUP_ROOT=/sys/fs/cgroup/ptc
 npm run execution:rpc-agent -- --check
 npm run execution:rpc-agent
 ```
 
-控制面（只运行受限测试执行器，不会执行 shell）：
+`--check` 会打印 `ptcPreflight`（`ok`、`isolation`、`checks`、`diagnostics`）；`ok=false` 时退出码为 1，正式启动也会拒绝服务。构建产物必须包含 `dist/src/execution/ptc-runner.js`。
+
+控制面（开启远程 PTC；仍不会执行普通 shell）：
 
 ```sh
+export CODEMODE_ENABLED=1
+export PTC_ENABLED=1
 export EXECUTION_RPC_TRANSPORT=tls
 export EXECUTION_RPC_ADDRESS=10.1.0.15:9443
 export EXECUTION_RPC_SERVER_NAME=execution.internal
@@ -809,12 +897,14 @@ npm run execution:rpc-e2e
 
 ### 15.2 Phase 1
 
-1. 增加 `vm.start`、`vm.message`、`vm.reply`、`tool.call`（bash）载荷和测试。
-2. `RemoteCodemodeSandbox` / `PTC_SESSION` 接入 Gateway Client。
-3. `aster-ptc-host`、`aster-ptc-runner`、bwrap、cgroup、workspace、`PtcJobDoc`。
-4. `OutputRef`、`PtcOutputDoc`、输出窗口、spill、分块读取。
-5. 预算、重放、强杀、预检。
-6. 大输出过滤和 Token 消耗对比验收。
+状态：以下 1～5 的代码与自动化测试已实现；第 6 项的真实双 VPS 大输出／Token 对比验收待执行。
+
+1. 已实现 `vm.start`、`vm.message`（事件）、`vm.reply`、`tool.call`（bash）载荷、严格解析与测试：`src/execution/ptc-protocol.ts`、`ptc-runner-protocol.ts`、`test/ptc.test.ts`。
+2. 已实现 `RemoteCodemodeSandbox` 接入 Gateway Client：`src/codemode.ts`、`src/agent.ts`、`src/ptc/control.ts`。上下文绑定采用 `PtcControl.envFor`＋`AsyncLocalStorage`，不是 `PTC_SESSION`（见 10.4）。
+3. 已实现 `PtcSandboxManager`（无独立 `aster-ptc-host` 进程；由 Execution Agent 直接管理 bwrap）、`ptc-runner.ts`、bwrap、cgroup、workspace、`PtcJobDoc`：`src/execution/ptc-sandbox.ts`、`ptc-runner.ts`、`ptc-workspace.ts`、`src/ptc/identity.ts`。
+4. 已实现 `OutputRef`、`PtcOutputDoc`、输出窗口、spill、内容寻址与去重：`ptc-output-store.ts`、`ptc-output-window.ts`、`src/ptc/control.ts`。Phase 1 不提供分块读取工具；脚本用同沙箱 `bash` 读取 `ref.path` 过滤。
+5. 已实现预算、重放、强杀、预检：`PtcExecution`／`PtcControl`、`PtcSandboxManager`、`rpc-server.ts`。版本／构建指纹自动比对尚未实现，见 12.1。
+6. 待执行：真实双 VPS 大输出过滤、Token 消耗对比和无遗留进程验收，按 11.5／16.2 记录原始数据。
 
 ### 15.3 Phase 2
 
@@ -850,6 +940,8 @@ npm run execution:rpc-e2e
 
 ### 16.2 Phase 1
 
+状态：自动化范围内的协议、配置、预检、workspace、输出窗口／spill、VM↔bash 桥、超时／取消和 `workspace_missing` 已由 `npm run check`、`npm test`、`test/ptc.test.ts`、`test/execution-rpc.test.ts` 覆盖；下列需要真实执行 VPS、bwrap／cgroup、网络隔离和 Token 对比的项目仍待验收。
+
 - 脚本 `tools.bash({ command: "hostname" })` 返回执行 VPS 主机名；控制面主机名不同。
 - 一个脚本内连续 10 次 bash 只使用一条 RPC 连接；嵌套调用经过 registry、`NestedCallDoc`；transcript 中只有一个 codemode `toolResult`。
 - VM 与 bash 在同一 bwrap 进程树／cgroup；`/proc/net/dev` 只有 `lo`；无外网和 DNS。
@@ -857,8 +949,9 @@ npm run execution:rpc-e2e
 - 超时／取消后无遗留 `sleep`、runner、bwrap 进程；cgroup 为空；workspace 保留。
 - 10 MiB 输出：模型可见结果 ≤ 32 KiB／1000 行；`NestedCallDoc` 只有有界尾部；SQLite 无完整输出；`OutputRef` 有效；缺失时 `output_unavailable`。
 - 大输出过滤与 Token 对比：按第 11.5 节记录 transcript 字节／估算 token 和下降比例。
-- 预算：超过 `CODEMODE_MAX_TOOL_CALLS` 或 `CODEMODE_MAX_JOURNAL_BYTES` 时拒绝后续调用并产生诊断。
+- 预算：超过 `PTC_MAX_TOOL_CALLS` 或 `PTC_MAX_JOURNAL_BYTES` 时拒绝后续调用并产生诊断。
 - 协议：未知帧、超大帧、错误 sessionId／callId、错误版本均关闭连接且不执行。
+- 降级模式：`PTC_ALLOW_DEGRADED=0` 且 userns 不可用时启动失败；显式允许时 `isolation.mode="degraded-prlimit"`、`network="host"` 且不产生 `OutputRef`，验收记录必须单独标注。
 
 ### 16.3 Phase 2
 

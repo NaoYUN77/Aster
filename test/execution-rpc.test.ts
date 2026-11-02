@@ -19,6 +19,15 @@ import {
   type RpcFrame,
   type RpcRequestFrame,
 } from "../src/execution/rpc-protocol.js";
+import type { RunnerFrame } from "../src/execution/ptc-runner-protocol.js";
+import type {
+  PtcPreflightResult,
+  PtcRunnerEvents,
+  PtcRunnerHandle,
+  PtcSandboxManager,
+  PtcSandboxStart,
+} from "../src/execution/ptc-sandbox.js";
+import { WorkspaceMissingError } from "../src/execution/ptc-workspace.js";
 import { startRpcAgent, type RpcAgentOptions } from "../src/execution/rpc-server.js";
 import {
   listenTlsRpc,
@@ -419,7 +428,7 @@ test("RPC rejects a missing client certificate, an unknown CA, a wrong server na
   }
 });
 
-test("Phase 0 only exposes the test executor and deduplicates request ids per connection", { timeout: 20_000 }, async () => {
+test("Phase 0 exposes the test executor, gates the PTC methods, and deduplicates request ids", { timeout: 20_000 }, async () => {
   const agent = await startAgent();
   const connection = await tlsRpcTransport({
     host: "127.0.0.1",
@@ -442,9 +451,32 @@ test("Phase 0 only exposes the test executor and deduplicates request ids per co
       "not_implemented",
     );
 
-    connection.send(request("tool-1", "tool.call", { tool: "bash", args: { command: "id" } }, "sess-raw"));
+    // A well-formed PTC call still needs a sandbox-backed session. This one was opened without
+    // `sandbox: true`, so it has no runner and the call is refused before it can execute.
+    connection.send(request("tool-1", "tool.call", {
+      tool: "bash",
+      callId: 1,
+      args: {
+        command: "id",
+        cwd: "/workspace",
+        env: {},
+        inheritEnv: false,
+        timeoutMs: 5_000,
+        window: { maxBytes: 65_536, maxLines: 2_000, minIntervalMs: 25, bytesPerSecond: 1_048_576 },
+      },
+    }, "sess-raw"));
     assertErrorResponse(
       await frames.waitFor((frame) => frame.kind === "response" && frame.id === "tool-1"),
+      "unavailable",
+    );
+
+    connection.send(request("sandbox-1", "session.open", {
+      sessionId: "sess-sandbox",
+      jobId: "ptc-0123456789abcdef0123456789abcdef",
+      sandbox: true,
+    }));
+    assertErrorResponse(
+      await frames.waitFor((frame) => frame.kind === "response" && frame.id === "sandbox-1"),
       "not_implemented",
     );
 
@@ -541,4 +573,220 @@ test("client configuration parses TLS and Unix transports without accepting host
 
   assert.throws(() => parseAddress("localhost:9443"), /IP literal/);
   assert.deepEqual(parseAddress("[::1]:9443"), { host: "::1", port: 9443 });
+});
+
+const PTC_JOB = "ptc-0123456789abcdef0123456789abcdef";
+
+type FakePtc = {
+  readonly manager: PtcSandboxManager;
+  readonly sent: RunnerFrame[];
+  readonly killed: string[];
+  emit(frame: RunnerFrame): void;
+};
+
+/** A sandbox manager whose runner is driven by the test instead of bwrap. */
+function fakePtc(options: { readonly openError?: Error } = {}): FakePtc {
+  const sent: RunnerFrame[] = [];
+  const killed: string[] = [];
+  let events: PtcRunnerEvents | undefined;
+  const runner: PtcRunnerHandle = {
+    pid: 4242,
+    isolation: { mode: "bwrap", cgroup: "v2", network: "none", cgroupKill: true },
+    exited: new Promise<void>(() => {}),
+    send(frame) {
+      sent.push(frame);
+      return true;
+    },
+    async kill(reason) {
+      killed.push(reason);
+    },
+  };
+  const preflight: PtcPreflightResult = {
+    ok: true,
+    checks: { bwrap: true, prlimit: true, node: true, runner: true, userns: true, cgroup: true },
+    isolation: { mode: "bwrap", cgroup: "v2", network: "none" },
+    diagnostics: [],
+  };
+  const manager = {
+    async preflight() {
+      return preflight;
+    },
+    async open(
+      jobId: string,
+      _sessionId: string,
+      _workspaceReady: boolean,
+      runnerEvents: PtcRunnerEvents,
+    ): Promise<PtcSandboxStart> {
+      if (options.openError !== undefined) throw options.openError;
+      events = runnerEvents;
+      return {
+        workspace: {
+          hostPath: `/home/aster/jobs/${jobId}/workspace`,
+          sandboxPath: "/workspace",
+          created: false,
+          reused: true,
+        },
+        runner,
+      };
+    },
+  } as unknown as PtcSandboxManager;
+  return {
+    manager,
+    sent,
+    killed,
+    emit: (frame) => events?.onFrame(frame),
+  };
+}
+
+function ptcToolPayload(callId: number): Record<string, unknown> {
+  return {
+    tool: "bash",
+    callId,
+    args: {
+      command: "echo hi",
+      cwd: "/workspace",
+      env: {},
+      inheritEnv: false,
+      timeoutMs: 5_000,
+      window: { maxBytes: 65_536, maxLines: 2_000, minIntervalMs: 25, bytesPerSecond: 1_048_576 },
+    },
+  };
+}
+
+async function waitForSent(fake: FakePtc, predicate: (frame: RunnerFrame) => boolean): Promise<RunnerFrame> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const found = fake.sent.find(predicate);
+    if (found !== undefined) return found;
+    await delay(5);
+  }
+  throw new Error("timed out waiting for a runner frame");
+}
+
+test("PTC sessions bridge a VM exchange and one nested bash call over the execution RPC", { timeout: 20_000 }, async () => {
+  const fake = fakePtc();
+  const agent = await startAgent({ ptc: fake.manager });
+  const client = clientFor(agent);
+  try {
+    await client.connect();
+    const health = await client.health();
+    assert.equal(health.ptc, true);
+    const preflight = await client.preflight();
+    assert.equal(preflight.ok, true);
+    assert.equal(preflight.ptc?.ok, true);
+
+    const opened = await client.openSession("sess-ptc", { jobId: PTC_JOB, sandbox: true });
+    assert.equal(opened.workspace?.path, `/home/aster/jobs/${PTC_JOB}/workspace`);
+    assert.equal(opened.isolation?.mode, "bwrap");
+
+    const messages: Array<{ seq: number; messages: readonly unknown[] }> = [];
+    const vm = client.startVm("sess-ptc", { data: { code: "1" } }, {
+      deadlineMs: 10_000,
+      onMessage: (event) => messages.push(event),
+    });
+    await waitForSent(fake, (frame) => frame.kind === "start");
+
+    fake.emit({
+      v: 1,
+      kind: "message",
+      seq: 1,
+      messages: [{ type: "call", id: 1, name: "bash", args: { command: "echo hi" } }] as never,
+    });
+    const deadline = Date.now() + 2_000;
+    while (messages.length === 0 && Date.now() < deadline) await delay(5);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0]!.seq, 1);
+
+    const output: Array<{ text: string; skipped?: unknown }> = [];
+    const tool = client.startToolCall("sess-ptc", ptcToolPayload(1) as never, {
+      deadlineMs: 6_000,
+      onOutput: (event) => output.push({ text: event.text, skipped: event.skipped }),
+    });
+    await waitForSent(fake, (frame) => frame.kind === "tool" && frame.callId === 1);
+    fake.emit({
+      v: 1,
+      kind: "tool-output",
+      callId: 1,
+      stream: "stdout",
+      text: "hi\n",
+      skipped: { bytes: 12, newlines: 1, endsWithNewline: true },
+    });
+    fake.emit({
+      v: 1,
+      kind: "tool-result",
+      callId: 1,
+      result: { exitCode: 0, truncated: true, skippedBytes: 12, skippedLines: 1, durationMs: 5 },
+    });
+    const toolResult = await tool.result;
+    assert.equal(toolResult.exitCode, 0);
+    assert.equal(toolResult.skippedBytes, 12);
+    assert.deepEqual(output, [{
+      text: "hi\n",
+      skipped: { bytes: 12, newlines: 1, endsWithNewline: true },
+    }]);
+
+    await client.vmReply("sess-ptc", 1, { type: "stop" });
+    await waitForSent(fake, (frame) => frame.kind === "reply" && frame.seq === 1);
+    fake.emit({ v: 1, kind: "done" });
+    await vm.result;
+
+    await client.closeSession("sess-ptc");
+    const closeDeadline = Date.now() + 2_000;
+    while (fake.killed.length === 0 && Date.now() < closeDeadline) await delay(5);
+    assert.deepEqual(fake.killed, ["session.close"]);
+  } finally {
+    await client.close();
+    await agent.close();
+  }
+});
+
+test("PTC tool failures keep their code and an unknown outcome", { timeout: 20_000 }, async () => {
+  const fake = fakePtc();
+  const agent = await startAgent({ ptc: fake.manager });
+  const client = clientFor(agent);
+  try {
+    await client.connect();
+    await client.openSession("sess-fail", { jobId: PTC_JOB, sandbox: true });
+    const tool = client.startToolCall("sess-fail", ptcToolPayload(7) as never, { deadlineMs: 6_000 });
+    await waitForSent(fake, (frame) => frame.kind === "tool" && frame.callId === 7);
+    fake.emit({
+      v: 1,
+      kind: "tool-error",
+      callId: 7,
+      code: "timeout",
+      message: "command deadline exceeded",
+    });
+    await assert.rejects(tool.result, (error: unknown) =>
+      error instanceof RpcClientError
+        && error.code === "timeout"
+        && error.options.outcome === "unknown");
+
+    // Cancelling a running command is forwarded to the runner; the runner settles it.
+    const cancelled = client.startToolCall("sess-fail", ptcToolPayload(8) as never, { deadlineMs: 6_000 });
+    await waitForSent(fake, (frame) => frame.kind === "tool" && frame.callId === 8);
+    await client.cancel("sess-fail", cancelled.id, "test cancel");
+    await waitForSent(fake, (frame) => frame.kind === "tool-cancel" && frame.callId === 8);
+    fake.emit({ v: 1, kind: "tool-error", callId: 8, code: "aborted", message: "cancelled" });
+    await assert.rejects(cancelled.result, (error: unknown) =>
+      error instanceof RpcClientError && error.code === "aborted");
+  } finally {
+    await client.close();
+    await agent.close();
+  }
+});
+
+test("a recorded workspace that disappeared is reported as workspace_missing", { timeout: 20_000 }, async () => {
+  const fake = fakePtc({ openError: new WorkspaceMissingError("workspace is gone") });
+  const agent = await startAgent({ ptc: fake.manager });
+  const client = clientFor(agent);
+  try {
+    await client.connect();
+    await assert.rejects(
+      client.openSession("sess-missing", { jobId: PTC_JOB, sandbox: true, workspaceReady: true }),
+      (error: unknown) => error instanceof RpcClientError && error.code === "workspace_missing",
+    );
+  } finally {
+    await client.close();
+    await agent.close();
+  }
 });

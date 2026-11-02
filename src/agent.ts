@@ -7,11 +7,15 @@ import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, type Exte
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { readMemoryConfig, type MemoryConfig, type readConfig } from "./config.js";
+import { readMemoryConfig, type MemoryConfig, type PtcConfig, type readConfig } from "./config.js";
 import { ConfigurationError } from "./errors.js";
 import { createCodemodeHost, LOCAL_SCRIPT_TOOLS, REMOTE_SCRIPT_TOOLS, restrictScriptTools } from "./codemode.js";
 import { BrokerClient, BrokerClientError } from "./execution/broker-client.js";
 import { RemoteExecutionEnv } from "./execution/remote-env.js";
+import { RpcExecutionClient } from "./execution/rpc-client.js";
+import { readTlsMaterial } from "./execution/rpc-config.js";
+import { tlsRpcTransport, unixRpcTransport, type RpcClientTransport } from "./execution/rpc-transport.js";
+import { PtcControl } from "./ptc/control.js";
 import { connectMcp, type McpHost } from "./mcp.js";
 import { readMcpConfig } from "./mcp-config.js";
 import type { TextRequest } from "./messages.js";
@@ -64,6 +68,66 @@ function memoryStartupError(error: unknown): unknown {
   return memoryAppError(error);
 }
 
+/**
+ * Remote PTC is a startup dependency like the execution broker: if the execution agent is
+ * unreachable or its sandbox preflight fails, the agent must not offer code mode and discover the
+ * failure after the model has already reasoned about a script. The client owns its connection; the
+ * control owns the client.
+ */
+async function openPtcControl(config: PtcConfig, signal: AbortSignal | undefined): Promise<PtcControl> {
+  const rpc = config.rpc;
+  let transport: RpcClientTransport;
+  if (rpc.transport === "unix") {
+    transport = unixRpcTransport(rpc.socketPath, {
+      connectTimeoutMs: rpc.connectTimeoutMs,
+      maxFrameBytes: rpc.maxFrameBytes,
+      maxBufferedBytes: rpc.maxBufferedBytes,
+    });
+  } else {
+    const material = await readTlsMaterial(rpc);
+    transport = tlsRpcTransport({
+      host: rpc.host,
+      port: rpc.port,
+      ...(rpc.servername === undefined ? {} : { servername: rpc.servername }),
+      ca: material.ca,
+      cert: material.cert,
+      key: material.key,
+      connectTimeoutMs: rpc.connectTimeoutMs,
+      maxFrameBytes: rpc.maxFrameBytes,
+      maxBufferedBytes: rpc.maxBufferedBytes,
+    });
+  }
+  const client = new RpcExecutionClient({ transport, requestTimeoutMs: rpc.requestTimeoutMs });
+  try {
+    await client.connect();
+    const health = await client.health({
+      deadlineMs: 10_000,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (health.ptc !== true) throw new Error("the execution agent does not support remote PTC");
+    const preflight = await client.preflight({
+      deadlineMs: 30_000,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (!preflight.ok || preflight.ptc?.ok !== true) {
+      throw new Error("the execution agent PTC preflight failed");
+    }
+  } catch (error) {
+    await client.close();
+    const reason = error instanceof Error ? error.message : "remote PTC check failed";
+    throw new ConfigurationError(`Remote PTC is unavailable: ${reason}`);
+  }
+  return new PtcControl({
+    client,
+    deadlineMs: config.deadlineMs,
+    maxToolCalls: config.maxToolCalls,
+    maxJournalBytes: config.maxJournalBytes,
+    maxOutputBytes: config.maxOutputBytes,
+    maxOutputLines: config.maxOutputLines,
+    toolTimeoutMs: config.toolTimeoutMs,
+  });
+}
+
 export type OpenAgentOptions = {
   /** Already-connected MCP host; the agent owns and closes it. Startup config is skipped. */
   readonly mcp?: McpHost;
@@ -109,21 +173,25 @@ export async function openAgent(
     }
   }
 
+  const ptc = config.ptc === undefined ? undefined : await openPtcControl(config.ptc, options.signal);
+
   const workingDirectory = execution?.remoteCwd ?? workspace;
   const executionNote = execution === undefined
     ? ""
     : " Commands run on the execution host through the host-side broker; file tools are unavailable in this mode, so use bash for file work.";
 
-  const codemode = config.codemode === undefined ? undefined : createCodemodeHost(config.codemode);
+  const codemode = config.codemode === undefined ? undefined : createCodemodeHost(config.codemode, ptc);
   // Scripts see only the allowlisted tools; the model keeps every registered tool. A codemode
   // tool call is one model tool call, so its nested calls are the only new execution path.
-  const scriptTools = execution === undefined ? LOCAL_SCRIPT_TOOLS : REMOTE_SCRIPT_TOOLS;
+  const scriptTools = execution === undefined && ptc === undefined ? LOCAL_SCRIPT_TOOLS : REMOTE_SCRIPT_TOOLS;
   const scriptPolicy = codemode === undefined
     ? (extension: Extension) => extension
     : (extension: Extension) => restrictScriptTools(extension, scriptTools);
   const codemodeNote = codemode === undefined
     ? ""
-    : " When one task needs several tool calls whose intermediate results you do not need to read, use the codemode tool to run them in one script and return only the summary. Nested tool calls run one at a time.";
+    : ptc === undefined
+      ? " When one task needs several tool calls whose intermediate results you do not need to read, use the codemode tool to run them in one script and return only the summary. Nested tool calls run one at a time."
+      : " When one task needs several tool calls whose intermediate results you do not need to read, use the codemode tool to run them in one script and return only the summary. In remote PTC, scripts run in a sandbox on the execution host: only bash is available inside a script, commands run in /workspace, only the script's final value returns to you, and full command output is stored in /workspace/.ptc/outputs for later reads.";
   const codemodeRemoteNote = codemode !== undefined && execution !== undefined
     ? " In codemode, write large intermediate output to a file on the execution host with bash; the control plane cannot open that file."
     : "";
@@ -181,16 +249,22 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
         toolExecution: "sequential",
         ...(memory ? { compaction: memoryCompactionSettings(memory) } : {}),
       },
-      env: ({ cwd }) => execution !== undefined && executionClient !== undefined && executionId !== undefined
-        ? new RemoteExecutionEnv({
-            client: executionClient,
-            executionId,
-            cwd: execution.remoteCwd,
-            defaultTimeoutSeconds: execution.defaultTimeoutSeconds,
-            maxTimeoutSeconds: execution.maxTimeoutSeconds,
-          })
-        : new NodeExecutionEnv({ cwd: cwd ?? workspace }),
+      env: ({ cwd, conversationId }) => {
+        const ptcEnv = ptc?.envFor(Number(conversationId));
+        if (ptcEnv !== undefined) return ptcEnv;
+        return execution !== undefined && executionClient !== undefined && executionId !== undefined
+          ? new RemoteExecutionEnv({
+              client: executionClient,
+              executionId,
+              cwd: execution.remoteCwd,
+              defaultTimeoutSeconds: execution.defaultTimeoutSeconds,
+              maxTimeoutSeconds: execution.maxTimeoutSeconds,
+            })
+          : new NodeExecutionEnv({ cwd: cwd ?? workspace });
+      },
     }, context);
+    // Code mode can run as soon as the harness exists; bind the durable session before any tool call.
+    ptc?.bindSession(harness);
   } catch (error) {
     await closeCodemode(codemode);
     unsubscribeMcp();

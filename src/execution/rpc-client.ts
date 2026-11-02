@@ -10,7 +10,9 @@ import {
   type RpcRequestFrame,
   type RpcResponseFrame,
   type RpcTestExecutePayload,
+  type RpcVmMessageEvent,
 } from "./rpc-protocol.js";
+import type { PtcBashResult, PtcToolCallPayload } from "./ptc-protocol.js";
 import type { RpcClientTransport, RpcConnection } from "./rpc-transport.js";
 import type { TestExecutionResult } from "./rpc-test-executor.js";
 
@@ -39,9 +41,11 @@ export type RpcClientOptions = {
 export type RpcRequestOptions = {
   readonly sessionId?: string;
   readonly jobId?: string;
+  readonly correlationId?: string;
   readonly deadlineMs?: number;
   readonly signal?: AbortSignal;
   readonly onOutput?: (event: RpcOutputEvent) => void;
+  readonly onMessage?: (event: RpcVmMessageEvent) => void;
 };
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -58,6 +62,18 @@ export type RpcExecuteHandle = {
   cancel(reason?: string): Promise<void>;
 };
 
+export type RpcVmHandle = {
+  readonly id: string;
+  readonly result: Promise<unknown>;
+  cancel(reason?: string): Promise<void>;
+};
+
+export type RpcToolCallHandle = {
+  readonly id: string;
+  readonly result: Promise<PtcBashResult>;
+  cancel(reason?: string): Promise<void>;
+};
+
 type Pending = {
   readonly id: string;
   readonly method: RpcRequestFrame["method"];
@@ -67,6 +83,7 @@ type Pending = {
   readonly signal?: AbortSignal;
   readonly onAbort?: () => void;
   readonly onOutput?: (event: RpcOutputEvent) => void;
+  readonly onMessage?: (event: RpcVmMessageEvent) => void;
 };
 
 export type RpcHealthResult = {
@@ -78,6 +95,8 @@ export type RpcHealthResult = {
   readonly peer: string | null;
   readonly methods: readonly string[];
   readonly testExecutor: boolean;
+  /** True when the agent built a PTC sandbox manager (`EXECUTION_AGENT_PTC=1`). */
+  readonly ptc?: boolean;
 };
 
 export type RpcPreflightResult = {
@@ -85,12 +104,33 @@ export type RpcPreflightResult = {
   readonly executionId: string;
   readonly agentVersion: string;
   readonly checks: Record<string, boolean | null>;
+  /** Sandbox preflight detail; absent when the agent has no PTC manager. */
+  readonly ptc?: {
+    readonly ok: boolean;
+    readonly isolation: {
+      readonly mode: "bwrap" | "bwrap-prlimit" | "degraded-prlimit";
+      readonly cgroup: "v2" | "none";
+      readonly network: "none" | "host";
+    };
+    readonly checks: Record<string, boolean>;
+    readonly diagnostics: readonly string[];
+  };
 };
 
 export type RpcSessionResult = {
   readonly sessionId: string;
   readonly executionId: string;
   readonly jobId?: string;
+  readonly workspace?: {
+    readonly path: string;
+    readonly created: boolean;
+    readonly reused: boolean;
+  };
+  readonly isolation?: {
+    readonly mode: "bwrap" | "bwrap-prlimit" | "degraded-prlimit";
+    readonly cgroup: "v2" | "none";
+    readonly network: "none" | "host";
+  };
   readonly limits: {
     readonly maxSessions: number;
     readonly maxConcurrent: number;
@@ -99,6 +139,7 @@ export type RpcSessionResult = {
 };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const CANCELLABLE_METHODS = new Set<RpcRequestFrame["method"]>(["execute", "vm.start", "tool.call"]);
 
 function clampDeadline(value: number | undefined, fallback: number): number {
   const candidate = value ?? fallback;
@@ -156,11 +197,20 @@ export class RpcExecutionClient {
 
   async openSession(
     sessionId: string,
-    options: { readonly jobId?: string; readonly deadlineMs?: number; readonly signal?: AbortSignal } = {},
+    options: {
+      readonly jobId?: string;
+      readonly workspaceReady?: boolean;
+      /** Start a PTC sandbox for this session; requires `jobId`. */
+      readonly sandbox?: boolean;
+      readonly deadlineMs?: number;
+      readonly signal?: AbortSignal;
+    } = {},
   ): Promise<RpcSessionResult> {
     const result = await this.request("session.open", {
       sessionId,
       ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
+      ...(options.workspaceReady === undefined ? {} : { workspaceReady: options.workspaceReady }),
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
     }, {
       sessionId,
       ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
@@ -195,6 +245,70 @@ export class RpcExecutionClient {
       id: request.id,
       result: request.promise as Promise<TestExecutionResult>,
       cancel: (reason?: string) => this.cancel(sessionId, request.id, reason),
+    };
+  }
+
+  /**
+   * Starts a VM inside an already-open PTC session. The returned handle resolves when the script
+   * finishes. VM messages are delivered through `onMessage`; each must be answered with `vmReply`
+   * carrying the event's `seq` as the request correlation id.
+   */
+  startVm(
+    sessionId: string,
+    request: unknown,
+    options: {
+      readonly deadlineMs?: number;
+      readonly signal?: AbortSignal;
+      readonly onMessage?: (event: RpcVmMessageEvent) => void;
+    } = {},
+  ): RpcVmHandle {
+    const begun = this.beginRequest("vm.start", { request }, {
+      sessionId,
+      ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.onMessage === undefined ? {} : { onMessage: options.onMessage }),
+    });
+    return {
+      id: begun.id,
+      result: begun.promise,
+      cancel: (reason?: string) => this.cancel(sessionId, begun.id, reason),
+    };
+  }
+
+  async vmReply(
+    sessionId: string,
+    seq: number,
+    reply: unknown,
+    options: { readonly deadlineMs?: number; readonly signal?: AbortSignal } = {},
+  ): Promise<void> {
+    await this.request("vm.reply", { reply }, {
+      sessionId,
+      correlationId: String(seq),
+      deadlineMs: options.deadlineMs ?? 10_000,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+  }
+
+  /** Runs one nested `bash` call in the PTC sandbox. Output events belong to this request id. */
+  startToolCall(
+    sessionId: string,
+    payload: PtcToolCallPayload,
+    options: {
+      readonly deadlineMs?: number;
+      readonly signal?: AbortSignal;
+      readonly onOutput?: (event: RpcOutputEvent) => void;
+    } = {},
+  ): RpcToolCallHandle {
+    const begun = this.beginRequest("tool.call", payload as unknown as Record<string, unknown>, {
+      sessionId,
+      ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.onOutput === undefined ? {} : { onOutput: options.onOutput }),
+    });
+    return {
+      id: begun.id,
+      result: begun.promise as Promise<PtcBashResult>,
+      cancel: (reason?: string) => this.cancel(sessionId, begun.id, reason),
     };
   }
 
@@ -256,14 +370,14 @@ export class RpcExecutionClient {
     });
     const timer = setTimeout(() => {
       this.settleError(id, new RpcClientError("timeout", "RPC request deadline exceeded", { outcome: "unknown" }));
-      if (method === "execute" && options.sessionId !== undefined) {
+      if (CANCELLABLE_METHODS.has(method) && options.sessionId !== undefined) {
         void this.cancel(options.sessionId, id, "deadline exceeded").catch(() => undefined);
       }
     }, deadlineMs);
     timer.unref();
     const onAbort = options.signal === undefined ? undefined : () => {
       this.settleError(id, new RpcClientError("aborted", "RPC request aborted", { outcome: "unknown" }));
-      if (method === "execute" && options.sessionId !== undefined) {
+      if (CANCELLABLE_METHODS.has(method) && options.sessionId !== undefined) {
         void this.cancel(options.sessionId, id, "aborted").catch(() => undefined);
       }
     };
@@ -277,6 +391,7 @@ export class RpcExecutionClient {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(onAbort === undefined ? {} : { onAbort }),
       ...(options.onOutput === undefined ? {} : { onOutput: options.onOutput }),
+      ...(options.onMessage === undefined ? {} : { onMessage: options.onMessage }),
     });
     const frame: RpcRequestFrame = {
       v: 1,
@@ -287,6 +402,7 @@ export class RpcExecutionClient {
       payload,
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
+      ...(options.correlationId === undefined ? {} : { correlationId: options.correlationId }),
     };
     try {
       connection.send(frame);
@@ -319,6 +435,17 @@ export class RpcExecutionClient {
   }
 
   private handleEvent(frame: RpcEventFrame): void {
+    if (frame.event === "vm.message") {
+      const pending = this.pending.get(frame.id);
+      if (pending === undefined) return;
+      try {
+        pending.onMessage?.(frame);
+      } catch (error) {
+        this.settleError(pending.id, new RpcClientError("internal", "VM message handler failed", { cause: error }));
+        void this.cancel(frame.sessionId, pending.id, "VM message handler failed").catch(() => undefined);
+      }
+      return;
+    }
     if (frame.event !== "output") return;
     const pending = this.pending.get(frame.id);
     if (pending === undefined) return;
@@ -326,7 +453,7 @@ export class RpcExecutionClient {
       pending.onOutput?.(frame);
     } catch (error) {
       this.settleError(pending.id, new RpcClientError("internal", "output handler failed", { cause: error }));
-      if (pending.method === "execute") {
+      if (CANCELLABLE_METHODS.has(pending.method)) {
         void this.cancel(frame.sessionId, pending.id, "output handler failed").catch(() => undefined);
       }
     }
@@ -371,7 +498,7 @@ export class RpcExecutionClient {
       if (entry.signal !== undefined && entry.onAbort !== undefined) {
         entry.signal.removeEventListener("abort", entry.onAbort);
       }
-      entry.reject(entry.method === "execute"
+      entry.reject(CANCELLABLE_METHODS.has(entry.method)
         ? error
         : new RpcClientError(error.code, error.message, { ...error.options, outcome: "failed" }));
     }

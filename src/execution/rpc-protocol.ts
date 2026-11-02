@@ -1,9 +1,17 @@
 /**
- * Phase 0 wire contract for the resident execution agent. Frames are length-prefixed JSON: a
- * 4-byte big-endian payload length followed by UTF-8 JSON. The protocol is deliberately small and
- * strict; the transport may be a Unix socket for local tests or TCP/TLS with mutual certificates
- * across VPS hosts. Phase 0 only exposes the restricted test executor through this protocol.
+ * Wire contract for the resident execution agent. Frames are length-prefixed JSON: a 4-byte
+ * big-endian payload length followed by UTF-8 JSON. The protocol is deliberately small and strict;
+ * the transport may be a Unix socket for local tests or TCP/TLS with mutual certificates across VPS
+ * hosts. Phase 1 adds the remote PTC methods (`vm.start`, `vm.message`, `vm.reply`, `tool.call`)
+ * beside the Phase 0 test executor; the PTC payloads themselves are defined in `ptc-protocol.ts`.
  */
+
+import {
+  parsePtcToolCallPayload,
+  parsePtcVmMessagePayload,
+  parsePtcVmReplyPayload,
+  parsePtcVmStartPayload,
+} from "./ptc-protocol.js";
 
 export const RPC_PROTOCOL_VERSION = 1;
 export const RPC_HEADER_BYTES = 4;
@@ -43,6 +51,8 @@ export type RpcErrorCode =
   | "unavailable"
   | "protocol_error"
   | "test_error"
+  | "workspace_missing"
+  | "output_unavailable"
   | "internal";
 
 export type RpcOutcome = "not_started" | "failed" | "unknown";
@@ -93,6 +103,12 @@ export type RpcOutputEvent = {
   readonly seq: number;
   readonly stream: "stdout" | "stderr";
   readonly text: string;
+  /** Output the environment omitted immediately before this chunk, when it samples a tail window. */
+  readonly skipped?: {
+    readonly bytes: number;
+    readonly newlines: number;
+    readonly endsWithNewline: boolean;
+  };
 };
 
 export type RpcHeartbeatEvent = {
@@ -111,7 +127,26 @@ export type RpcSessionClosedEvent = {
   readonly reason: string;
 };
 
-export type RpcEventFrame = RpcOutputEvent | RpcHeartbeatEvent | RpcSessionClosedEvent;
+/**
+ * Messages emitted by the VM runner while it waits for the gateway to answer a nested tool call.
+ * `id` is the request id of the `vm.start` that created the VM; `seq` matches the
+ * `correlationId` the gateway must put on its `vm.reply`.
+ */
+export type RpcVmMessageEvent = {
+  readonly v: 1;
+  readonly kind: "event";
+  readonly event: "vm.message";
+  readonly id: string;
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly messages: readonly unknown[];
+};
+
+export type RpcEventFrame =
+  | RpcOutputEvent
+  | RpcHeartbeatEvent
+  | RpcSessionClosedEvent
+  | RpcVmMessageEvent;
 
 export type RpcFrame = RpcRequestFrame | RpcResponseFrame | RpcEventFrame;
 
@@ -180,6 +215,8 @@ const ERROR_CODES = new Set<RpcErrorCode>([
   "unavailable",
   "protocol_error",
   "test_error",
+  "workspace_missing",
+  "output_unavailable",
   "internal",
 ]);
 
@@ -312,10 +349,24 @@ function validateRequestPayload(method: RpcMethod, payload: unknown): ParseResul
       return unknown === undefined ? { ok: true, value: payload } : fail(`unknown payload field: ${unknown}`);
     }
     case "session.open": {
-      const unknown = unexpectedKey(payload, ["sessionId", "jobId"]);
+      const unknown = unexpectedKey(payload, ["sessionId", "jobId", "workspaceReady", "sandbox"]);
       if (unknown !== undefined) return fail(`unknown session.open field: ${unknown}`);
       if (!isSafeId(payload.sessionId)) return fail("sessionId is invalid");
       if (Object.hasOwn(payload, "jobId") && !isSafeJobId(payload.jobId)) return fail("jobId is invalid");
+      if (Object.hasOwn(payload, "workspaceReady") && typeof payload.workspaceReady !== "boolean") {
+        return fail("workspaceReady must be a boolean");
+      }
+      if (Object.hasOwn(payload, "sandbox") && typeof payload.sandbox !== "boolean") {
+        return fail("sandbox must be a boolean");
+      }
+      // A PTC session always names its durable workspace. `workspaceReady` alone never starts a
+      // sandbox: the caller must opt in explicitly so a Phase 0 job id keeps its old meaning.
+      if (payload.sandbox === true && !Object.hasOwn(payload, "jobId")) {
+        return fail("sandbox requires a jobId");
+      }
+      if (payload.workspaceReady === true && payload.sandbox !== true) {
+        return fail("workspaceReady requires a sandbox session");
+      }
       return { ok: true, value: payload };
     }
     case "session.close": {
@@ -346,30 +397,26 @@ function validateRequestPayload(method: RpcMethod, payload: unknown): ParseResul
       const unknown = unexpectedKey(payload, ["tool", "callId", "args"]);
       if (unknown !== undefined) return fail(`unknown tool.call field: ${unknown}`);
       if (typeof payload.tool !== "string" || byteLength(payload.tool) > 64) return fail("tool is invalid");
-      if (Object.hasOwn(payload, "callId")
-        && (!Number.isSafeInteger(payload.callId) || (payload.callId as number) < 1)) {
-        return fail("callId must be a positive integer");
-      }
-      if (Object.hasOwn(payload, "args") && !isPlainObject(payload.args)) return fail("args must be an object");
-      return { ok: true, value: payload };
+      // Phase 1 defines only the bash call. A malformed PTC payload is rejected at the protocol
+      // boundary and never reaches the dispatcher.
+      const parsed = parsePtcToolCallPayload(payload);
+      if (!parsed.ok) return fail(parsed.message);
+      return { ok: true, value: parsed.value as unknown as Record<string, unknown> };
     }
     case "vm.start": {
-      const unknown = unexpectedKey(payload, ["request"]);
-      if (unknown !== undefined) return fail(`unknown vm.start field: ${unknown}`);
-      if (!isPlainObject(payload.request)) return fail("request must be an object");
-      return { ok: true, value: payload };
+      const parsed = parsePtcVmStartPayload(payload);
+      if (!parsed.ok) return fail(parsed.message);
+      return { ok: true, value: parsed.value as unknown as Record<string, unknown> };
     }
     case "vm.message": {
-      const unknown = unexpectedKey(payload, ["messages"]);
-      if (unknown !== undefined) return fail(`unknown vm.message field: ${unknown}`);
-      if (!Array.isArray(payload.messages)) return fail("messages must be an array");
-      return { ok: true, value: payload };
+      const parsed = parsePtcVmMessagePayload(payload);
+      if (!parsed.ok) return fail(parsed.message);
+      return { ok: true, value: parsed.value as unknown as Record<string, unknown> };
     }
     case "vm.reply": {
-      const unknown = unexpectedKey(payload, ["reply"]);
-      if (unknown !== undefined) return fail(`unknown vm.reply field: ${unknown}`);
-      if (!isPlainObject(payload.reply)) return fail("reply must be an object");
-      return { ok: true, value: payload };
+      const parsed = parsePtcVmReplyPayload(payload);
+      if (!parsed.ok) return fail(parsed.message);
+      return { ok: true, value: parsed.value as unknown as Record<string, unknown> };
     }
     default:
       return fail("unknown method");
@@ -435,13 +482,31 @@ function parseResponse(value: Record<string, unknown>): ParseResult<RpcResponseF
 
 function parseEvent(value: Record<string, unknown>): ParseResult<RpcEventFrame> {
   if (value.event === "output") {
-    const unknown = unexpectedKey(value, ["v", "kind", "event", "id", "sessionId", "seq", "stream", "text"]);
+    const unknown = unexpectedKey(value, ["v", "kind", "event", "id", "sessionId", "seq", "stream", "text", "skipped"]);
     if (unknown !== undefined) return fail(`unknown output event field: ${unknown}`);
     if (!isSafeId(value.id)) return fail("id is invalid");
     if (!isSafeId(value.sessionId)) return fail("sessionId is invalid");
     if (!Number.isSafeInteger(value.seq) || (value.seq as number) < 0) return fail("seq is invalid");
     if (value.stream !== "stdout" && value.stream !== "stderr") return fail("stream is invalid");
     if (!isSafeText(value.text, RPC_MAX_OUTPUT_CHUNK_BYTES)) return fail("text is invalid");
+    let skipped: { bytes: number; newlines: number; endsWithNewline: boolean } | undefined;
+    if (Object.hasOwn(value, "skipped")) {
+      if (!isPlainObject(value.skipped)) return fail("skipped is invalid");
+      const skippedUnknown = unexpectedKey(value.skipped, ["bytes", "newlines", "endsWithNewline"]);
+      if (skippedUnknown !== undefined) return fail(`unknown skipped field: ${skippedUnknown}`);
+      if (!Number.isSafeInteger(value.skipped.bytes) || (value.skipped.bytes as number) < 0) {
+        return fail("skipped.bytes is invalid");
+      }
+      if (!Number.isSafeInteger(value.skipped.newlines) || (value.skipped.newlines as number) < 0) {
+        return fail("skipped.newlines is invalid");
+      }
+      if (typeof value.skipped.endsWithNewline !== "boolean") return fail("skipped.endsWithNewline is invalid");
+      skipped = {
+        bytes: value.skipped.bytes as number,
+        newlines: value.skipped.newlines as number,
+        endsWithNewline: value.skipped.endsWithNewline,
+      };
+    }
     return {
       ok: true,
       value: {
@@ -453,6 +518,7 @@ function parseEvent(value: Record<string, unknown>): ParseResult<RpcEventFrame> 
         seq: value.seq as number,
         stream: value.stream,
         text: value.text,
+        ...(skipped === undefined ? {} : { skipped }),
       },
     };
   }
@@ -480,6 +546,27 @@ function parseEvent(value: Record<string, unknown>): ParseResult<RpcEventFrame> 
     return {
       ok: true,
       value: { v: 1, kind: "event", event: "session.closed", sessionId: value.sessionId, reason: value.reason },
+    };
+  }
+  if (value.event === "vm.message") {
+    const unknown = unexpectedKey(value, ["v", "kind", "event", "id", "sessionId", "seq", "messages"]);
+    if (unknown !== undefined) return fail(`unknown vm.message event field: ${unknown}`);
+    if (!isSafeId(value.id)) return fail("id is invalid");
+    if (!isSafeId(value.sessionId)) return fail("sessionId is invalid");
+    if (!Number.isSafeInteger(value.seq) || (value.seq as number) < 1) return fail("seq is invalid");
+    const parsed = parsePtcVmMessagePayload({ messages: value.messages });
+    if (!parsed.ok) return fail(parsed.message);
+    return {
+      ok: true,
+      value: {
+        v: 1,
+        kind: "event",
+        event: "vm.message",
+        id: value.id,
+        sessionId: value.sessionId,
+        seq: value.seq as number,
+        messages: parsed.value.messages,
+      },
     };
   }
   return fail("event is invalid");

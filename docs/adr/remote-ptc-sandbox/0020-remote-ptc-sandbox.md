@@ -1,9 +1,9 @@
 # ADR-0020：远程 PTC sandbox（脚本与工具同在执行 VPS）
 
-- **状态**：Accepted
-- **日期**：2026-11-02
+- **状态**：Accepted；Phase 0 已通过真实双 VPS 验收，Phase 1 代码与自动化测试已落地、真实双 VPS 待验收，Phase 2 未开始
+- **日期**：2026-11-02（2026-11-03 补充 Phase 1 实现记录）
 - **功能**：remote-ptc-sandbox
-- **当前决策口径**：2026-11-02 修订为统一 RPC Execution Agent，见文末「2026-11-02：统一 RPC 修订」。下文「决策」保留初次设计原文；两者冲突时以修订附记为准。
+- **当前决策口径**：2026-11-02 修订为统一 RPC Execution Agent，见文末「2026-11-02：统一 RPC 修订」；2026-11-03 的「Phase 1 实现」记录落地时的偏差。下文「决策」保留初次设计原文；与修订附记冲突时以附记为准备。
 
 ## 上下文
 
@@ -133,3 +133,20 @@
 - 权限：`test/execution-rpc.test.ts` 9/9 通过；未执行任何 `bash`／`tool.call`；Phase 0 仍只有受限 `test.*` 执行器。
 - 网络变更：部署方未修改主机、Docker／容器、`ufw` 或云安全组；用户在执行面实例的云安全组中单独加入 TCP 9443 ← 控制面私网 `/32` 的入站规则。该规则是环境准备，不是部署 agent 的防火墙变更。
 - 证据：[2026-11-02 验收记录](../../acceptance/20261102-execution-rpc-phase0.md)。Phase 1／2 未实现。
+
+### 2026-11-03：Phase 1 实现
+
+- 结果：Phase 1 的代码路径与自动化测试已落地；真实双 VPS 的 bwrap／cgroup／网络隔离、重放、无遗留进程和大输出 Token 对比验收待执行。Phase 2 未开始。
+- 已实现范围：
+  - 统一 RPC 信封新增 `vm.start`、`vm.message`（事件）、`vm.reply`、`tool.call`（bash only）和 `OutputRef`／`PtcBashResult` 的严格解析（`src/execution/ptc-protocol.ts`、`ptc-runner-protocol.ts`）。
+  - `PtcSandboxManager` 在 Execution Agent 内直接管理 bwrap runner（没有独立 `aster-ptc-host` 进程），每 session 一个 user／PID／IPC／UTS／cgroup-try／net namespace；cgroup v2 失败时退到 `prlimit`，userns 失败默认 fail closed，只有 `PTC_ALLOW_DEGRADED=1` 才进入 `degraded-prlimit`（`ptc-sandbox.ts`、`ptc-runner.ts`、`ptc-workspace.ts`）。
+  - 控制面 `PtcControl` 打开 RPC session（`session.open` 显式 `sandbox: true`）、派生稳定 `jobId`、提交 `PtcJobDoc.workspaceReady`、执行 `PtcExecutionEnv`、记录 `PtcOutputDoc`、执行调用与 journal 预算（`src/ptc/`、`src/codemode.ts`）。
+  - runner 本地合并尾部窗口、内容寻址 spill（`/workspace/.ptc/outputs/<sha256>`）、去重与 `OutputRef` 元数据；控制面不接收完整输出。
+- 与初版设计／2026-11-02 修订的偏差：
+  - **上下文绑定**：pi-durable 的嵌套工具任务运行在 harness context 下，无法通过嵌套 context 注入 `PTC_SESSION`。改为 `PtcControl` 按 `conversationId` 注册活动执行，`HarnessOptions.env` 通过 `PtcControl.envFor()` 取 `PtcExecutionEnv`；`RemoteCodemodeSandbox.remote()` 用 `AsyncLocalStorage` 选择执行。
+  - **`session.open` 显式开关**：普通 `jobId` 不再隐式启动 sandbox；只有 `sandbox: true` 才要求 PTC，避免 Phase 0 的 jobId 语义被悄悄扩大为命令执行。
+  - **`vm.message` 是事件**：带 `id`（创建 VM 的 `vm.start` 请求 id）与单调 `seq`，`vm.reply` 用 `correlationId=seq` 关联；不是独立 request。
+  - **降级模式无 `OutputRef`**：没有 `/workspace` 挂载时 runner 以 `PTC_OUTPUT_REF=disabled` 启动，避免把宿主真实路径交给控制面；只返回有界尾部。
+  - **版本／指纹**：`PTC_PI_CODEMODE_VERSION`／`PTC_QUICKJS_VERSION` 是操作者声明并由 runner `ready` 帧回显；尚未做控制面与执行面的自动比对，部署发布流程必须保证同一构建。
+  - **控制面连接位置（已知偏差）**：`PtcControl` 目前在 app 的 agent 进程内直接持有 `RpcExecutionClient`，使用 `EXECUTION_RPC_*` 连接执行 VPS，而不是经 broker/gateway 中转。这不新增监听端口，但要求 app 容器具备到执行 VPS 的私网路由；若部署坚持 ADR-0021 的“app 只能到 gateway”，必须先把 RPC 客户端下沉到 gateway 再启用 `PTC_ENABLED=1`。该下沉未实现。
+- 相关缺陷／待办：真实双 VPS 验收（第 16.2 节）尚未执行；`output_unavailable` 错误码保留但 Phase 1 没有控制面读取路径，Phase 2 分块 `read` 时必须落实 size／sha256 校验；runner 的返回码与 `spillTruncated` 语义需在 10 MiB fixture 上验证；降级模式不能称为 sandbox，验收记录必须单独标注。

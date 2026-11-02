@@ -5,8 +5,9 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { CODEMODE_TOOL_NAME, createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
-import { CodemodeSandbox } from "@earendil-works/pi-codemode";
+import { CodemodeSandbox, RemoteCodemodeSandbox } from "@earendil-works/pi-codemode";
 import type { CodemodeConfig } from "./config.js";
+import type { PtcControl } from "./ptc/control.js";
 
 /**
  * The script's result is the only thing that enters the conversation, so cap it well below the
@@ -80,27 +81,92 @@ export function serializeNestedCalls(tool: ToolRegistration): ToolRegistration {
 }
 
 /**
+ * Bind one code mode execution to a remote PTC sandbox. The nested-call wrapper is applied first
+ * (inside this one), so by the time a call reaches `api.executeTool` it is serialized and carries
+ * the durable `c<id>` key; this wrapper reserves that id for the environment and enforces the
+ * per-script call and journal budgets. Only `bash` is allowed in phase 1.
+ */
+export function withPtcExecution(tool: ToolRegistration, control: PtcControl): ToolRegistration {
+  const execute = tool.execute;
+  return {
+    ...tool,
+    execute: async (args, api, context) => {
+      const conversationId = Number(api.conversationId);
+      const taskId = Number(api.taskId);
+      if (!Number.isSafeInteger(conversationId) || !Number.isSafeInteger(taskId)) {
+        throw new Error("PTC requires numeric conversation and task ids");
+      }
+      const execution = await control.begin({
+        conversationId,
+        taskId,
+        context,
+      });
+      const originalExecuteTool = api.executeTool.bind(api);
+      try {
+        return await control.runWith(execution, () => execute(args, {
+          ...api,
+          executeTool: async (name, nestedArgs, nestedContext, options) => {
+            const key = options?.key;
+            const match = key === undefined ? null : /^c([1-9]\d*)$/.exec(key);
+            if (match === null) {
+              throw new Error("PTC nested calls require the code mode c<id> call key");
+            }
+            if (name !== "bash") {
+              throw new Error("Remote PTC phase 1 allows only the bash tool inside code mode");
+            }
+            execution.reserveToolCall(Number(match[1]));
+            const result = await originalExecuteTool(name, nestedArgs, nestedContext, options);
+            execution.accountJournal(result);
+            return result;
+          },
+        }, context));
+      } finally {
+        await control.end(conversationId, execution);
+      }
+    },
+  };
+}
+
+/**
  * The base's code mode tool plus its QuickJS WASM sandbox. Scripts see only `tools.*`,
  * `ALL_TOOLS`, `text`/`image`/`exit`, `console`, `store`/`load`, and the discovery globals; no
  * filesystem, network, timers, or modules are exposed to the VM.
+ *
+ * With PTC the VM runs on the execution host through `RemoteCodemodeSandbox`; the control plane
+ * still hosts the tool journal, the budgets and the output references.
  */
-export function createCodemodeHost(config: CodemodeConfig): CodemodeHost {
-  const sandbox = new CodemodeSandbox({
-    timeoutMs: config.timeoutMs,
-    memoryLimitBytes: config.memoryLimitBytes,
-  });
+export function createCodemodeHost(config: CodemodeConfig, ptc?: PtcControl): CodemodeHost {
+  const sandbox = ptc === undefined
+    ? new CodemodeSandbox({
+        timeoutMs: config.timeoutMs,
+        memoryLimitBytes: config.memoryLimitBytes,
+      })
+    : new RemoteCodemodeSandbox({
+        timeoutMs: config.timeoutMs,
+        memoryLimitBytes: config.memoryLimitBytes,
+        remote: () => ptc.current().remote,
+      });
   const base = createCodemodeExtension({ sandbox, models: false });
   const extension = defineExtension({
     ...base,
-    tools: (base.tools ?? []).map((tool) => tool.name === CODEMODE_TOOL_NAME
-      ? serializeNestedCalls({ ...tool, outputLimits: CODEMODE_OUTPUT_LIMITS })
-      : tool),
+    tools: (base.tools ?? []).map((tool) => {
+      if (tool.name !== CODEMODE_TOOL_NAME) return tool;
+      const bounded = { ...tool, outputLimits: CODEMODE_OUTPUT_LIMITS };
+      const serialized = serializeNestedCalls(bounded);
+      return ptc === undefined ? serialized : withPtcExecution(serialized, ptc);
+    }),
   });
   let closing: Promise<void> | undefined;
   return {
     extension,
     close() {
-      closing ??= sandbox.close();
+      closing ??= (async () => {
+        try {
+          await sandbox.close();
+        } finally {
+          await ptc?.close();
+        }
+      })();
       return closing;
     },
   };

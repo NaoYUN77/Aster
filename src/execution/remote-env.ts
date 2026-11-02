@@ -32,8 +32,11 @@ import {
 const FILE_TOOLS_UNAVAILABLE =
   "Remote execution phase 1 runs commands only; file tools are unavailable until remote file operations land. Use bash on the execution host.";
 
+/** The broker surface this environment uses; PTC reuses the class with a client that is never called. */
+export type RemoteShellClient = Pick<BrokerClient, "exec" | "abortAll">;
+
 export type RemoteExecutionEnvOptions = {
-  readonly client: BrokerClient;
+  readonly client: RemoteShellClient;
   readonly executionId: string;
   readonly cwd: string;
   readonly defaultTimeoutSeconds: number;
@@ -48,7 +51,7 @@ export type RemoteExecutionEnvOptions = {
 export class RemoteExecutionEnv implements ExecutionEnv {
   readonly id: string;
   cwd: string;
-  private readonly client: BrokerClient;
+  private readonly client: RemoteShellClient;
   private readonly defaultTimeoutSeconds: number;
   private readonly maxTimeoutSeconds: number;
 

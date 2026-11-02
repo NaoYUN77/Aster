@@ -3,6 +3,7 @@ import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
 import { isAbsoluteRemotePath } from "./execution/protocol.js";
+import { readRpcClientConfig, type RpcClientConfig } from "./execution/rpc-config.js";
 import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
 import {
   assertSchema,
@@ -146,6 +147,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   if (webApiKey) assertValidCredentialShape("DEEPSEEK_WEB_API_KEY", webApiKey);
   const execution = readExecutionConfig(env);
   const codemode = readCodemodeConfig(env);
+  const ptc = readPtcConfig(env, codemode);
   return {
     token,
     ownerId,
@@ -155,6 +157,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     ...(webApiKey ? { webApiKey } : {}),
     ...(execution === undefined ? {} : { execution }),
     ...(codemode.enabled ? { codemode } : {}),
+    ...(ptc === undefined ? {} : { ptc }),
     ...resolveMcpConfigPaths(env),
   };
 }
@@ -250,6 +253,54 @@ export function readCodemodeConfig(env: NodeJS.ProcessEnv = process.env): Codemo
       16 * 1024 * 1024,
       512 * 1024 * 1024,
     ),
+  };
+}
+
+/**
+ * Remote PTC (ADR-0020 phase 1). The VM and every nested bash command run on the execution host;
+ * this process keeps the journal and the durable output references. Disabled unless explicitly
+ * enabled, and it requires code mode because it replaces only the code mode VM.
+ */
+export type PtcConfig = {
+  /** Maximum nested tool calls in one script. */
+  readonly maxToolCalls: number;
+  /** Approximate cap on the serialized nested results kept for one script. */
+  readonly maxJournalBytes: number;
+  /** Upper clamp for the output tail sent back from the sandbox. */
+  readonly maxOutputBytes: number;
+  readonly maxOutputLines: number;
+  /** Per-command deadline; the remaining script deadline can only lower it. */
+  readonly toolTimeoutMs: number;
+  /** Whole-script RPC deadline, above the code mode timeout so the VM reports its own timeout. */
+  readonly deadlineMs: number;
+  readonly rpc: RpcClientConfig;
+};
+
+export function readPtcConfig(
+  env: NodeJS.ProcessEnv,
+  codemode: CodemodeConfig,
+): PtcConfig | undefined {
+  const enabledRaw = env.PTC_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("PTC_ENABLED must be 0 or 1");
+  }
+  const maxToolCalls = boundedInteger(env, "PTC_MAX_TOOL_CALLS", 100, 1, 10_000);
+  const maxJournalBytes = boundedInteger(env, "PTC_MAX_JOURNAL_BYTES", 8 * 1024 * 1024, 64 * 1024, 256 * 1024 * 1024);
+  const maxOutputBytes = boundedInteger(env, "PTC_MAX_OUTPUT_BYTES", 1024 * 1024, 1024, 64 * 1024 * 1024);
+  const maxOutputLines = boundedInteger(env, "PTC_MAX_OUTPUT_LINES", 10_000, 1, 1_000_000);
+  const toolTimeoutMs = boundedInteger(env, "PTC_TOOL_TIMEOUT_MS", 120_000, 1_000, 3_600_000);
+  if (enabledRaw !== "1") return undefined;
+  if (!codemode.enabled) {
+    throw new ConfigurationError("PTC_ENABLED=1 requires CODEMODE_ENABLED=1");
+  }
+  return {
+    maxToolCalls,
+    maxJournalBytes,
+    maxOutputBytes,
+    maxOutputLines,
+    toolTimeoutMs,
+    deadlineMs: codemode.timeoutMs + 60_000,
+    rpc: readRpcClientConfig(env),
   };
 }
 
