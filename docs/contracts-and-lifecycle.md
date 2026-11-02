@@ -123,6 +123,18 @@ OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、
 
 边界：MCP server 与应用同 uid，不构成安全边界；模型可通过 bash 读取进程环境与数据目录。真正的隔离需要独立用户、容器或远端 server。
 
+### 代码调用工具（PTC／codemode）
+
+`CODEMODE_ENABLED=1` 时安装底座的 `codemode` 工具。模型写一段 JavaScript，由 QuickJS WASM sandbox 执行；只有脚本结果进入模型上下文，嵌套工具结果不进入 transcript。设计取舍见 [ADR-0019](adr/codemode-ptc/0019-codemode-ptc.md)，配置与运行说明见 [代码调用工具](codemode.md)。
+
+- `codemode` 的 `callers` 为 `["model"]`，脚本不能再次调用 codemode；`replay` 为 `safe`。
+- 脚本工具面由 `callers` 白名单决定：本地为 `read`／`write`／`edit`／`bash`，远程执行阶段 1 只有 `bash`。模型仍能看到全部工具；每次嵌套调用仍经过 `createToolRegistry()` 的名称、state、authz、参数校验和恢复策略复核。
+- 模型可见结果上限为 32 KiB／1000 行、保留尾部。脚本首行的 `max_output_tokens`／`timeout_ms` 只能进一步收紧，仍受宿主上限和请求等待约束。
+- 嵌套调用在宿主侧串行执行（ADR-0009）；codemode 调用结束（完成、失败或超时）或被取消时，正在运行的嵌套调用被取消，尚未启动的排队调用不再启动。
+- 默认脚本期限 240 秒、QuickJS 内存上限 128 MiB；配置范围见 `src/config.ts`。应用关闭时 Harness 先取消工具上下文，再关闭 sandbox。
+- 远程模式下没有远程文件 API；codemode 的自动完整输出落盘不可用，大输出应由脚本用 `bash` 写到执行主机文件，再由后续 `bash` 读取。
+- QuickJS 只限制脚本运行时能力，不是 OS 沙箱；`bash` 与模型直接调用具有相同宿主权限。脚本源码和命令参数会进入 durable 会话记录，不得写入凭据。
+
 ## 请求生命周期
 
 区分三种标识：
