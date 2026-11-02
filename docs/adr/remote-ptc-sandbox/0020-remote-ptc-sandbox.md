@@ -121,5 +121,15 @@
   - Phase 0 开放进程执行器：会把 Agent 变成无约束远程命令服务；Phase 0 只开放受限测试能力，真实命令留到 Phase 1／2 并经过控制面授权。
   - 用 RPC request id 去重替代 durable replay：跨连接、重启和外部副作用都不成立；只保留同连接去重。
 - 后果：新增一个常驻 Execution Agent 和一套私网 mTLS 证书运维；Phase 0 的跨 VPS 验收需要两台真实主机和私网路由，CI 只覆盖 loopback TLS。Phase 0 不改变现有 broker／SSH 路径、Tool Registry、Journal 或 QuickJS 核心。Phase 1 才引入 bwrap、cgroup、workspace、`OutputRef` 和 `RemoteCodemodeSandbox`；Phase 2 才迁移直接 `bash` 和远程文件工具。
-- 实现状态：Phase 0 的协议、Transport 抽象、Gateway Client、常驻 Execution Agent、TCP/TLS + mTLS、客户端 CN allowlist、session／心跳／流式／取消／断线处理和受限测试执行器代码已落地；本地类型检查、TLS loopback 测试和 TLS loopback 的 `rpc-agent --check`＋`rpc-e2e` 闭环通过，Unix socket 用例已提供并在 Windows 上跳过（由 POSIX CI 执行）。真实双 VPS 跨私网验收尚未执行，因此 Phase 0 不视为验收完成；Phase 1／2 未实现。
-- 相关缺陷：Phase 0 代码已实现但跨 VPS 验收待执行。验收阶段需重点验证：Agent 不得绑定 `0.0.0.0`；无客户端证书／错误 CA／错误 SAN／错误客户端 CN 必须拒绝；流式事件和取消必须真实跨 VPS；断线后不得自动重跑；Phase 0 不存在任意命令路径；真实跨 VPS 验收记录必须包含执行 VPS 的 `executionId` 和监听地址证据。
+- 实现状态：Phase 0 的协议、Transport 抽象、Gateway Client、常驻 Execution Agent、TCP/TLS + mTLS、客户端 CN allowlist、session／心跳／流式／取消／断线处理和受限测试执行器代码已落地；本地类型检查、TLS loopback 测试和 TLS loopback 的 `rpc-agent --check`＋`rpc-e2e` 闭环通过，Unix socket 用例在 POSIX 验收中 9/9 通过。2026-11-02 已完成真实双 VPS 跨私网验收（PASS，执行面 `executionId 3a0d7374b09e9b05`），证据见 [验收记录](../../acceptance/20261102-execution-rpc-phase0.md)；Phase 1／2 未实现。
+- 相关缺陷：Phase 0 跨 VPS 验收已完成；剩余风险是证书轮换／吊销、现有网络策略的持续核验，以及断线验收需要独立测试客户端（`rpc-e2e` 当前约 0.2 秒完成，不能用 `timeout 1s` 稳定停在 sleep 阶段）。Phase 0 不存在任意命令路径；真实 `bash`／`tool.call` 仍留到 Phase 1／2。
+
+### 2026-11-02：Phase 0 真实双 VPS 验收
+
+- 结果：**PASS**。控制面与执行面位于同一 VPC、不同子网，通过私网 TCP 9443 建立 mTLS 连接；执行面 `executionId` 为 `3a0d7374b09e9b05`。
+- 正向：`rpc-e2e` 返回 `status: ok`、`transport: tls`、`protocol: 1`、`streamChunks: 3`、`cancelCode: aborted`、`cancelOutcome: unknown`；`executionId` 与执行面日志一致。
+- 负向：错误 CA、错误 SAN、错误客户端 CN、缺少客户端证书全部被拒绝；Agent 只监听私网地址，公网 9443 不可达。
+- 断线：在 `test.sleep` 期间 SIGKILL 客户端后无残留 `ESTABLISHED`，Agent 存活，TTL 后重新 e2e 成功；未观察到自动重跑。
+- 权限：`test/execution-rpc.test.ts` 9/9 通过；未执行任何 `bash`／`tool.call`；Phase 0 仍只有受限 `test.*` 执行器。
+- 网络变更：部署方未修改主机、Docker／容器、`ufw` 或云安全组；用户在执行面实例的云安全组中单独加入 TCP 9443 ← 控制面私网 `/32` 的入站规则。该规则是环境准备，不是部署 agent 的防火墙变更。
+- 证据：[2026-11-02 验收记录](../../acceptance/20261102-execution-rpc-phase0.md)。Phase 1／2 未实现。

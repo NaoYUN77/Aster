@@ -1,12 +1,12 @@
 # 远程 PTC 与统一 RPC 执行通道（Phase 0：跨 VPS RPC；Phase 1：远程 PTC sandbox；Phase 2：文件原语）
 
-- **状态**：Phase 0 代码已实现并通过 TLS loopback 测试与 `rpc-e2e` CLI 闭环；真实双 VPS 验收待执行；Phase 1／2 暂不实现
+- **状态**：Phase 0 已通过真实双 VPS 验收（2026-11-02，`executionId 3a0d7374b09e9b05`）；Phase 1／2 暂不实现
 - **日期**：2026-11-02
 - **功能**：remote-ptc-sandbox
 - **所属 ADR**：[ADR-0020](adr/remote-ptc-sandbox/0020-remote-ptc-sandbox.md)
 - **前置决策**：[ADR-0019](adr/codemode-ptc/0019-codemode-ptc.md)、[ADR-0015](adr/0015-control-execution-split.md)
 
-> 本文区分“仓库当前已实现”“Phase 0 已实现但待真实跨 VPS 验收”“Phase 1／2 暂不实现”。除明确标注为已实现的内容外，均不是现有代码能力。没有真实双 VPS 运行记录时，Phase 0 不视为验收完成。
+> 本文区分“仓库当前已实现”“Phase 0 已通过真实双 VPS 验收”“Phase 1／2 暂不实现”。除明确标注为已实现的内容外，均不是现有代码能力。Phase 0 的验收证据见 [2026-11-02 验收记录](acceptance/20261102-execution-rpc-phase0.md)。
 
 ## 1. 实现状态
 
@@ -18,14 +18,14 @@
 | 远程 PTC（`RemoteCodemodeSandbox`） | 暂不实现 | 只有设计，没有生产代码 |
 | 统一 RPC 协议、Transport、Gateway Client、Execution Agent | Phase 0 已实现 | `src/execution/rpc-protocol.ts`、`rpc-transport.ts`、`rpc-client.ts`、`rpc-server.ts`、`rpc-config.ts`、`rpc-main.ts`、`rpc-test-executor.ts` |
 | TCP/TLS + mTLS 私网通信 | Phase 0 代码已实现 | `listenTlsRpc`／`tlsRpcTransport`；TLS loopback 双向认证、客户端 CN allowlist 与拒绝测试通过 |
-| 端到端 CLI 闭环 | TLS loopback 已通过 | `execution:rpc-agent --check`、`execution:rpc-e2e` 在 127.0.0.1 完成 health／stream／cancel；真实双 VPS 仍待验收 |
+| 端到端 CLI 闭环 | TLS loopback 与真实双 VPS 均已通过 | `execution:rpc-agent --check`、`execution:rpc-e2e` 完成 health／stream／cancel；真实跨 VPS 证据见验收记录 |
 | Session、心跳、流式响应、取消、deadline、断线处理 | Phase 0 已实现 | `rpc-server.ts`、`rpc-client.ts`；见 `test/execution-rpc.test.ts` |
-| 真实双 VPS RPC 闭环 | 待验收 | 代码与 `rpc-e2e` 已提供；本环境没有两台带私网的主机，尚无真实跨 VPS 运行记录 |
+| 真实双 VPS RPC 闭环 | 已通过 | 2026-11-02，执行面 `executionId 3a0d7374b09e9b05`；正向／负向／断线证据见验收记录 |
 | PTC bwrap／cgroup／workspace／`OutputRef` | Phase 1 暂不实现 | 本文第 10～12 节 |
 | 直接 `bash` 迁移到统一 RPC、远程文件工具 | Phase 2 暂不实现 | 本文第 13 节 |
 | gRPC、消息队列、额外数据库 | 暂不实现 | 不引入 |
 
-Phase 0 代码闭环已在本机通过 TLS loopback 测试与 `rpc-e2e` CLI 验证；Unix socket 用例留给 POSIX CI。在真实双 VPS 验收完成前，不进入 Phase 1。Phase 0 不改变现有 Tool Registry、pi-durable Journal、`NestedCallDoc` 或 QuickJS 执行核心。
+Phase 0 已通过真实双 VPS 验收；Unix socket 用例在 POSIX 验收中 9/9 通过。Phase 1 仍未开始。Phase 0 不改变现有 Tool Registry、pi-durable Journal、`NestedCallDoc` 或 QuickJS 执行核心。
 
 ## 2. 用户目标
 
@@ -54,7 +54,7 @@ Phase 0 只建立通道和执行代理，不接入 PTC，不迁移普通工具�
 - 受限测试执行器（只开放 `test.*` 能力，不接受任意命令）。
 - 本地 Unix socket 测试、TLS loopback 测试和真实跨 VPS 验收。
 
-实现状态：上述代码路径均已落地；TLS loopback 自动化测试通过，Unix socket 用例已提供但在 Windows 上跳过（由 POSIX CI 执行）。真实跨 VPS 验收需要两台主机、私网路由和部署证书，当前尚未执行。因此 Phase 0 仍处于“代码完成、验收未完成”状态。
+实现状态：上述代码路径均已落地；TLS loopback 自动化测试通过，Unix socket 在 POSIX 验收中 9/9 通过。2026-11-02 已完成真实双 VPS 验收（PASS），证据见 [验收记录](acceptance/20261102-execution-rpc-phase0.md)。Phase 0 验收已完成，Phase 1 尚未开始。
 
 Phase 0 明确不实现：
 
@@ -779,7 +779,7 @@ npm run execution:rpc-e2e
 
 ### 15.1 Phase 0
 
-状态：以下代码步骤 1～6 已实现；步骤 6 的真实跨 VPS 验收尚未执行。步骤 7 的兼容边界已遵守。
+状态：以下代码步骤 1～7 已实现；步骤 6 的真实跨 VPS 验收已于 2026-11-02 通过。步骤 7 的兼容边界已遵守。
 
 1. **协议**
    - 已实现 `src/execution/rpc-protocol.ts`：帧类型、严格解析、长度前缀编解码、错误码、`RPC_PROTOCOL_VERSION`。
@@ -802,7 +802,7 @@ npm run execution:rpc-e2e
    - 测试证书夹具位于 `test/fixtures/rpc-tls/`；真实跨 VPS 仍需部署证书。
 6. **测试**
    - 已实现 `test/execution-rpc.test.ts`：协议解码、TLS loopback、mTLS 拒绝、流式、取消、断线、重复 id、配置校验。
-   - 真实跨 VPS 验收按第 16 节执行并记录证据；当前未执行。
+   - 真实跨 VPS 验收已按第 16 节执行并记录证据（2026-11-02，PASS）。
 7. **兼容**
    - 未修改 `broker.ts`、`ssh.ts`、`remote-env.ts` 的行为。
    - `package.json` 只增加 Agent／e2e 脚本。
@@ -827,7 +827,7 @@ npm run execution:rpc-e2e
 
 ### 16.1 Phase 0
 
-**本地／自动化**（本轮已执行：`npm run check`、`npm test`、`test/execution-rpc.test.ts`、TLS loopback 的 `execution:rpc-agent --check` 与 `execution:rpc-e2e`）
+**本地／自动化**（2026-11-02 已在控制面执行：`npm run check`、`npm test`、`test/execution-rpc.test.ts`、TLS loopback 的 `execution:rpc-agent --check` 与 `execution:rpc-e2e`）
 
 - 协议：未知字段、错误版本、超大帧、分片帧、错误响应均按预期拒绝或解析。
 - Unix socket：health、session.open、test.echo、session.close；该用例在 POSIX 运行，Windows 上跳过（Windows 使用命名管道语义，不代表 Unix socket 部署）。
@@ -839,14 +839,14 @@ npm run execution:rpc-e2e
 - 权限边界：`execute` 的 `executor: "bash"`、任意 `command`、`tool.call` 均返回 `not_implemented` 或 `invalid_request`；不存在任意命令执行路径。
 - 现有测试：`npm run check`、`npm test` 不回归。
 
-**真实跨 VPS**（状态：未执行；本环境没有两台带私网的主机；按 [Phase 0 部署与验收 Runbook](runbook-execution-rpc-phase0.md) 执行并保存证据）
+**真实跨 VPS**（状态：2026-11-02 已执行并通过；证据见 [验收记录](acceptance/20261102-execution-rpc-phase0.md)）
 
 - Agent 部署在执行 VPS，只绑定私网地址；`ss -ltn` 不显示公网监听，Docker 不发布端口。
 - Gateway 部署在控制面宿主，使用 mTLS 连接；`health.check` 返回执行 VPS 的 `executionId`。
 - `test.stream` 的字节实际跨 VPS 到达 Gateway；`test.sleep` 可取消。
 - 无客户端证书、错误 CA、错误 SAN、错误客户端 CN 的连接被拒绝。
 - 断开 Gateway 后，Agent 在 TTL 内清理 session，无活动请求残留。
-- 记录：命令、配置摘要（不含私钥）、Agent／Gateway 日志、`ss` 输出、health 和 stream／cancel 结果。
+- 记录：命令、配置摘要（不含私钥）、Agent／Gateway 日志、`ss` 输出、health 和 stream／cancel 结果；本次 `executionId` 为 `3a0d7374b09e9b05`。
 
 ### 16.2 Phase 1
 
@@ -870,7 +870,7 @@ npm run execution:rpc-e2e
 
 ## 17. 风险与待验证
 
-- **TCP/TLS 与证书运维**：mTLS 需要证书签发、轮换、SAN 和私网绑定；Phase 0 必须用真实证书验收，不能只用本地自签。
+- **TCP/TLS 与证书运维**：mTLS 需要证书签发、轮换、SAN 和私网绑定；Phase 0 已用真实证书验收，后续仍需轮换与吊销流程，不能只用本地自签。
 - **私网监听**：虽然不暴露公网，仍需绑定地址、客户端证书和现有网络策略三层限制；本阶段不改防火墙，Agent 不是任意命令服务。
 - **跨 VPS 验收环境**：需要两台真实主机和私网路由；CI 只能覆盖 loopback TLS，真实验收按 runbook 记录。
 - **userns 环境差异**：Debian／Ubuntu 的 sysctl、AppArmor 和 bwrap 版本可能使 `bwrap --unshare-user` 失败；必须实际 probe。

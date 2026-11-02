@@ -2,6 +2,8 @@
 
 本文只覆盖 **Phase 0：统一 RPC 最小闭环**。Phase 0 不包含远程 PTC、QuickJS、真实 `bash`、`tool.call` 或远程文件工具。验收通过前不得进入 Phase 1。
 
+> 2026-11-02 已在真实双 VPS 上按本 Runbook 验收通过（PASS，执行面 `executionId 3a0d7374b09e9b05`）；证据见 [验收记录](acceptance/20261102-execution-rpc-phase0.md)。后续复验仍按本文执行。
+
 ## 1. 通过判定
 
 Phase 0 必须同时满足两组条件：
@@ -414,16 +416,12 @@ openssl s_client \
 
 ### 6.5 断线处理
 
-1. 在控制面启动一次会在 `test.sleep` 阶段停留的验收：
+注意：当前 `rpc-e2e` 约 0.2 秒正常完成，`timeout 1s node dist/src/execution/rpc-e2e.js` 不能稳定停在 `test.sleep` 阶段，不能用它作为断线验收的唯一证据。应使用独立的测试客户端：
 
-   ```sh
-   cd /opt/aster
-   timeout 1s node dist/src/execution/rpc-e2e.js
-   ```
-
-   该命令会在 sleep/cancel 前被终止，模拟 Gateway 断线。
-
-2. 立即检查 Agent：
+1. 建立 session；
+2. 启动 `test.sleep`（5 秒）；
+3. 收到执行已开始后约 300ms，向客户端进程发送 `SIGKILL`；
+4. 立即检查 Agent：
 
    ```sh
    ss -tn state established '( sport = :9443 )'
@@ -431,7 +429,7 @@ openssl s_client \
 
    预期：没有来自控制面的 `ESTABLISHED` 连接。
 
-3. 等待至少 `EXECUTION_AGENT_SESSION_TTL_MS` 后重新执行：
+5. 等待至少 `EXECUTION_AGENT_SESSION_TTL_MS` 后重新执行：
 
    ```sh
    npm run execution:rpc-e2e
@@ -441,7 +439,9 @@ openssl s_client \
 
    为缩短验收，可在执行 VPS 的验收配置中临时设置 `EXECUTION_AGENT_SESSION_TTL_MS=10000` 并重启 Agent；验收后恢复默认 `270000`。该值只影响空闲 session 清理，不改变断线时的立即清理。
 
-4. Phase 0 的自动化测试已覆盖“客户端关闭后 pending 执行失败且不自动重跑”。当前 Agent 没有暴露公开的 session gauge，跨 VPS 验收以 TCP 连接消失、无残留执行进程、重新 e2e 成功和自动化测试结果为证据；不得把“连接断开”当作“执行未发生”。
+6. Phase 0 的自动化测试已覆盖“客户端关闭后 pending 执行失败且不自动重跑”。当前 Agent 没有暴露公开的 session gauge，跨 VPS 验收以 TCP 连接消失、无残留执行进程、重新 e2e 成功和自动化测试结果为证据；不得把“连接断开”当作“执行未发生”。
+
+2026-11-02 的真实双 VPS 验收采用上述 SIGKILL 方式，记录见 [Phase 0 验收记录](acceptance/20261102-execution-rpc-phase0.md)。
 
 ### 6.6 权限边界
 
