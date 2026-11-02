@@ -355,7 +355,7 @@ bwrap \
 
 - 脚本 VM 自身的内存上限仍由 `CODEMODE_MEMORY_LIMIT_BYTES`（默认 128 MiB）控制；cgroup 的 512 MiB 是进程组总预算，不是 VM 堆上限。
 - 启动 bwrap 后把 bwrap 的 PID 写入 `cgroup.procs`；关闭时先写 `cgroup.kill`，再等待 `cgroup.events` 变为 `populated 0`，最后删除 cgroup。内核不支持 `cgroup.kill` 时，读取 `cgroup.procs` 并逐项 SIGKILL，再等待为空；该回退必须记录，因为它可能漏掉检查后新 fork 的进程。
-- cgroup 不可用时使用 `prlimit`：`--nproc`、`--nofile`、`--fsize`、`--cpu`、`--core=0`；内存可用 `--as` 做尽力而为的上限，但 Node 的虚拟地址预留可能导致误杀或失效，不能承诺与 `memory.max` 等价。记录 `isolation.cgroup="none"`。
+- cgroup 不可用时使用 `prlimit`：以 `prlimit --nproc=... --nofile=... --fsize=... --cpu=... --core=0 -- bwrap ...` 的形式把限制施加在 bwrap 上，由子进程继承；内存可用 `--as` 做尽力而为的上限，但 Node 的虚拟地址预留可能导致误杀或失效，不能承诺与 `memory.max` 等价。记录 `isolation.cgroup="none"`。
 - `prlimit` 只限制单进程及其继承，不能可靠限制整个进程组的聚合资源；这是显式接受的降级代价。
 
 ### 网络
