@@ -1,6 +1,7 @@
 import { configureEnvProxy, resolveMcpConfigPaths } from "./config.js";
 import { mcpErrorCode, openMcpConnection } from "./mcp.js";
 import { readMcpConfig } from "./mcp-config.js";
+import { openGithubGate } from "./github-gate.js";
 
 /**
  * Connect every configured MCP server, list its tools, and close. This is the deployment smoke test:
@@ -30,6 +31,10 @@ async function main(): Promise<void> {
       const connection = await openMcpConnection(server, { dataDir, env: process.env });
       try {
         const tools = await connection.listTools();
+        if (server.transport === "http" && server.githubPolicy) {
+          await openGithubGate(connection, server.githubPolicy, tools, dataDir);
+          console.info(`${server.name}: declaration approval verified; read operations and PAT permissions are not exercised by this check`);
+        }
         console.info(`${server.name} (${server.transport}): ${tools.length} tools`);
         for (const tool of tools) console.info(`  ${printable(tool.name)}`);
       } finally {

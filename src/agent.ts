@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { AssistantEntry, Harness, ResetEntry, SessionFailed, type Extension, type Storage } from "@earendil-works/pi-durable";
+import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -19,7 +19,7 @@ import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError,
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
 import { createWebExtension } from "./web-tools.js";
-import { readResidentTools, withToolLedger } from "./tool-ledger.js";
+import { inspectGithubToolRecovery, readResidentTools, withToolLedger } from "./tool-ledger.js";
 import { installMcpTools, orderedMcpExtensions } from "./tool-pins.js";
 
 const context = BACKGROUND_CONTEXT;
@@ -162,10 +162,18 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
 
   let harness: Awaited<ReturnType<typeof Harness.open>>;
   let durableStorage: Storage;
+  let syncCatalog = false;
+  let githubRecovery: Awaited<ReturnType<typeof inspectGithubToolRecovery>>;
   try {
-    durableStorage = await withToolLedger(
-      storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite")), registry, context,
-    );
+    const rawStorage = storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite"));
+    try {
+      // Capture old declarations before ledger migration or startup observation can replace evidence.
+      githubRecovery = await inspectGithubToolRecovery(rawStorage, registry, context);
+    } catch (error) {
+      await rawStorage.close(context).catch(() => {});
+      throw error;
+    }
+    durableStorage = await withToolLedger(rawStorage, registry, context, { catalogSync: () => syncCatalog });
     harness = await Harness.open(durableStorage, {
       models,
       registry,
@@ -192,6 +200,18 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
 
   try {
     const root = await harness.root(context);
+    const checkGithubRecovery = async () => {
+      if (!githubRecovery.changed) return;
+      const inspection = await harness.inspect(context);
+      const unfinished = inspection.tasks.length > 0 || inspection.submissions.length > 0
+        || (memory !== undefined && await hasUnsubmittedMemoryProjection(durableStorage, root.id, context));
+      if (unfinished) {
+        throw Object.assign(new Error("GitHub approval changed while unfinished work exists; preserve the prior baseline and settle or explicitly stop that work before publishing new declarations."), {
+          code: "GITHUB_APPROVAL_RECOVERY",
+        });
+      }
+    };
+    await checkGithubRecovery();
     if (memory) {
       memory.attach(harness, root);
       try {
@@ -202,6 +222,8 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
         throw memoryStartupError(error);
       }
     }
+    // Memory reconciliation may itself queue durable work. Check again before an idle boundary.
+    await checkGithubRecovery();
     const priorPins = await readResidentTools(durableStorage, root.id, context);
     const inspection = await harness.inspect(context);
     const hasPins = priorPins.length > 0 || Object.values(mcp.pins?.tools ?? {}).some(({ pin }) => pin);
@@ -211,12 +233,23 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
       console.error("MCP pin configuration deferred until an idle restart (TOOL_PIN_RECOVERY)");
     }
     const pins = installMcpTools(registry, mcpExtensions, mcp.pins, console.error, recovering ? priorPins : undefined);
-    if (!recovering && JSON.stringify(pins) !== JSON.stringify(priorPins)) {
+    const boundaries = new Map(githubRecovery.conversations.map((conversation) => [conversation.id, conversation.remove]));
+    if (!recovering && JSON.stringify(pins) !== JSON.stringify(priorPins) && !boundaries.has(root.id)) boundaries.set(root.id, []);
+    for (const [id, remove] of boundaries) {
+      const conversation = await harness.conversation(id, context);
+      if (conversation === undefined) throw new Error("Missing GitHub recovery conversation");
       // Atomic context head and ledger settlement, with scheduling still paused. Never reset live work.
-      await root.commit(async (tx) => {
-        await tx.appendEntry(root.id, { kind: ResetEntry.kind, head: "self" });
+      await conversation.commit(async (tx) => {
+        if (remove.length > 0) {
+          const agent = await tx.doc(AgentDoc, id);
+          const names = new Set(remove);
+          if (Array.isArray(agent.modelTools)) agent.modelTools = agent.modelTools.filter((name) => !names.has(name));
+          else if (agent.modelTools?.add) agent.modelTools = { ...agent.modelTools, add: agent.modelTools.add.filter((name) => !names.has(name)) };
+        }
+        await tx.appendEntry(id, { kind: ResetEntry.kind, head: "self" });
       }, context);
     }
+    syncCatalog = true;
     await root.configure({
       model: { provider: config.provider, modelId: config.model },
       cwd: workingDirectory,

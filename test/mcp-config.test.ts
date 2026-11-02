@@ -27,7 +27,7 @@ test("the MCP config path defaults under DATA_DIR and can be overridden", () => 
 });
 
 function stdio(overrides: Record<string, unknown> = {}) {
-  return { name: "github", transport: "stdio", command: "npx", args: ["-y", "server-github"], ...overrides };
+  return { name: "fixture", transport: "stdio", command: "npx", args: ["-y", "server-github"], ...overrides };
 }
 
 test("a missing default MCP file means the feature is off", async () => {
@@ -119,7 +119,7 @@ test("a broken server entry is skipped without failing the others", () => {
     ],
   }, env);
   assert.equal(result.error, undefined);
-  assert.deepEqual(result.config?.servers.map((server) => server.name), ["github"]);
+  assert.deepEqual(result.config?.servers.map((server) => server.name), ["fixture"]);
   assert.equal(result.warnings.length, 4);
   assert.match(result.warnings[0]!, /servers\[0\]: .*command/);
 });
@@ -233,7 +233,7 @@ test("a UTF-8 BOM does not make the config file invalid", async () => {
     await writeFile(path, `﻿${JSON.stringify({ servers: [stdio()] })}`, "utf8");
     const result = await readMcpConfig(path, true, env);
     assert.equal(result.error, undefined);
-    assert.deepEqual(result.config?.servers.map((server) => server.name), ["github"]);
+    assert.deepEqual(result.config?.servers.map((server) => server.name), ["fixture"]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

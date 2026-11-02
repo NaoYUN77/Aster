@@ -6,6 +6,7 @@ import {
   defineTool,
   type Extension,
   type ToolRegistration,
+  type ToolExecutionResult,
 } from "@earendil-works/pi-durable";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import {
@@ -37,6 +38,9 @@ import type { McpAuthConfig, McpFileConfig, McpHttpServerConfig, McpServerConfig
 import { FileOAuthStateStore } from "./mcp-oauth-store.js";
 import type { GovernedTool, ToolAvailability, ToolGovernance } from "./tools.js";
 import type { ToolPinConfig } from "./tool-pins.js";
+import { openGithubGate, persistGithubDisabled, type GithubGate } from "./github-gate.js";
+import { assertGithubProxy, githubFetch, type GithubHttpScope } from "./github-transport.js";
+import { GITHUB_ENDPOINT, GITHUB_TOOL_NAMES, githubRegisteredName } from "./github-policy.js";
 
 const CLIENT_NAME = "personal-agent-base-durable";
 const CLIENT_VERSION = "0.1.0";
@@ -58,7 +62,7 @@ const MAX_OUTPUT_LINES = 1_000;
 const MAX_IMAGE_CHARS = 4 * 1024 * 1024;
 const CLOSE_TIMEOUT_MS = 2_000;
 
-export type McpToolInfo = Pick<McpTool, "name" | "description" | "inputSchema">;
+export type McpToolInfo = Pick<McpTool, "name" | "description" | "inputSchema"> & Record<string, unknown>;
 
 /** The part of a connected server the tool adapter and tests need. */
 export interface McpConnection {
@@ -72,6 +76,7 @@ export interface McpConnection {
   close(): Promise<void>;
   /** Synchronously reports current availability, then observed connection changes. */
   subscribeAvailability(listener: (state: ToolAvailability) => void): () => void;
+  subscribeDeclarationChanges?(listener: () => void): () => void;
 }
 
 export type McpConnectContext = {
@@ -129,11 +134,14 @@ export async function openMcpConnection(server: McpServerConfig, context: McpCon
     : createOAuthProvider(server, context.dataDir, context.onOAuthRedirect ?? (() => {
       throw new McpOAuthAuthorizationRequiredError();
     }));
+  let githubScope: GithubHttpScope | undefined;
+  if (server.name === "github") assertGithubProxy(context.env);
   const transport = new StreamableHttpTransport({
     url: server.url,
     headers: { ...server.headers },
     // The transport bounds SSE events but reads a JSON response whole, so bound those here too.
-    fetch: boundedFetch,
+    fetch: server.name === "github" ? githubFetch(() => githubScope) : boundedFetch,
+    ...(server.name === "github" ? { reconnect: { maxRetries: 0 } } : {}),
     maxMessageBytes: MAX_MESSAGE_BYTES,
     ...(provider === undefined ? {} : { authProvider: adaptOAuthProvider(provider) }),
   });
@@ -143,7 +151,7 @@ export async function openMcpConnection(server: McpServerConfig, context: McpCon
     await client.close().catch(() => {});
     throw error;
   }
-  return wrapConnection(client, server, context.log);
+  return wrapConnection(client, server, context.log, (scope) => { githubScope = scope; });
 }
 
 /** Flow options shared by the CLI and the runtime, so an authorization done once applies to both. */
@@ -205,15 +213,28 @@ function wrapConnection(
   client: McpClient,
   server: McpServerConfig,
   log: ((line: string) => void) | undefined,
+  setScope?: (scope: GithubHttpScope | undefined) => void,
 ): McpConnection {
   let closed = false;
+  async function scoped<T>(signal: AbortSignal | undefined, timeoutMs: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const effective = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    setScope?.({ signal: effective, received: 0 });
+    try { return await run(effective); } finally { setScope?.(undefined); }
+  }
   return {
     serverName: server.name,
-    listTools: (options) => listToolsBounded(client, server.timeoutMs, options?.signal, log),
-    callTool: (name, args, options) => client.callTool(name, args, {
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-      timeoutMs: options.timeoutMs,
-    }),
+    listTools: (options) => server.name === "github"
+      ? scoped(options?.signal, 10_000, (signal) => listToolsBounded(client, 10_000, signal, log, true))
+      : listToolsBounded(client, server.timeoutMs, options?.signal, log),
+    callTool: (name, args, options) => server.name === "github"
+      ? scoped(options.signal, options.timeoutMs, (signal) => client.callTool(name, args, { signal, timeoutMs: options.timeoutMs }))
+      : client.callTool(name, args, { ...(options.signal === undefined ? {} : { signal: options.signal }), timeoutMs: options.timeoutMs }),
+    subscribeDeclarationChanges(listener) {
+      const notification = client.onNotification("notifications/tools/list_changed", listener);
+      const error = client.onError(() => listener());
+      return () => { notification(); error(); };
+    },
     async close() {
       if (closed) return;
       closed = true;
@@ -238,6 +259,7 @@ export async function listToolsBounded(
   timeoutMs: number,
   signal?: AbortSignal,
   log: (line: string) => void = () => {},
+  strict = false,
 ): Promise<McpToolInfo[]> {
   const tools: McpToolInfo[] = [];
   // The deadline covers the whole listing: per-page timeouts alone would let 10 slow pages take 10 minutes.
@@ -256,15 +278,17 @@ export async function listToolsBounded(
         if (discovery.signal.aborted && !signal?.aborted) throw discovery.signal.reason;
         throw error;
       });
-      const parsed = parseToolList(result);
+      const parsed = parseToolList(result, strict);
       tools.push(...parsed.tools);
       if (tools.length >= MAX_TOOLS_PER_SERVER) {
+        if (strict) throw coded("GitHub discovery count limit", "GITHUB_DISCOVERY_INCOMPLETE");
         log(`MCP tool list truncated at ${MAX_TOOLS_PER_SERVER} tools`);
         return tools.slice(0, MAX_TOOLS_PER_SERVER);
       }
       cursor = parsed.nextCursor;
       if (cursor === undefined) return tools;
     }
+    if (strict) throw coded("GitHub discovery page limit", "GITHUB_DISCOVERY_INCOMPLETE");
     log(`MCP tool list truncated at ${MAX_TOOL_PAGES} pages (${tools.length} tools)`);
     return tools;
   } finally {
@@ -272,9 +296,10 @@ export async function listToolsBounded(
   }
 }
 
-function parseToolList(value: unknown): { tools: McpToolInfo[]; nextCursor?: string } {
+function parseToolList(value: unknown, strict = false): { tools: McpToolInfo[]; nextCursor?: string } {
   if (!isRecord(value) || !Array.isArray(value.tools)) throw new McpError(-32600, "Invalid MCP tools/list result");
-  const tools = value.tools.filter(isMcpTool).map((tool) => ({
+  if (strict && value.tools.some((tool) => !isMcpTool(tool))) throw coded("Invalid GitHub tool declaration", "GITHUB_DISCOVERY_INCOMPLETE");
+  const tools = value.tools.filter(isMcpTool).map((tool) => strict ? { ...tool } : ({
     name: tool.name,
     ...(typeof tool.description === "string" ? { description: tool.description } : {}),
     inputSchema: tool.inputSchema,
@@ -318,11 +343,21 @@ export async function connectMcp(
   const servers = config?.servers ?? [];
   const results = await Promise.all(servers.map(async (server) => {
     try {
+      if (server.name === "github" && (server.transport !== "http" || !server.githubPolicy || server.url !== GITHUB_ENDPOINT
+        || server.auth !== undefined || server.headers.Authorization !== "Bearer __vault_GITHUB_MCP_TOKEN__"
+        || server.headers["X-MCP-Readonly"] !== "true" || server.headers["X-MCP-Tools"] !== GITHUB_TOOL_NAMES.join(","))) {
+        throw coded("Invalid GitHub host configuration", "GITHUB_CONFIG_REJECTED");
+      }
       const connection = await connect(server, context);
       try {
         const tools = await connection.listTools({ signal: options.signal });
-        return { server, connection, tools };
+        const gate = server.name === "github" && server.transport === "http" && server.githubPolicy
+          ? await openGithubGate(connection, server.githubPolicy, tools, options.dataDir) : undefined;
+        return { server, connection, tools: gate?.effective ?? tools, gate };
       } catch (error) {
+        if (server.transport === "http" && server.githubPolicy && !mcpErrorCode(error).startsWith("GITHUB_")) {
+          await persistGithubDisabled(server.githubPolicy, options.dataDir, "GITHUB_DISCOVERY_FAILED");
+        }
         await connection.close().catch(() => {});
         throw error;
       }
@@ -348,7 +383,7 @@ export async function connectMcp(
       log(`MCP server ${result.server.name} unavailable (${mcpErrorCode(result.error)})`);
       continue;
     }
-    const { server, connection } = result;
+    const { server, connection, gate } = result;
     // Every member of a sanitized-name collision group gets its identity-derived name. Otherwise a
     // newly discovered raw name that sorts first could take the old bare name and inherit its config.
     const tools = [...result.tools].sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
@@ -360,12 +395,13 @@ export async function connectMcp(
     const registrations: ToolRegistration[] = [];
     for (const info of tools) {
       const base = mcpToolNameBase(server.name, info.name);
-      const name = mcpToolName(server.name, info.name, used, nameCounts.get(base)! > 1);
+      const name = gate ? (used.has(githubRegisteredName(info.name)) ? undefined : githubRegisteredName(info.name))
+        : mcpToolName(server.name, info.name, used, nameCounts.get(base)! > 1);
       if (name === undefined) {
         log(`MCP server ${server.name}: tool skipped (name collision)`);
         continue;
       }
-      const tool = buildMcpTool(server, connection, info, name, config?.tools?.[name]?.authz);
+      const tool = buildMcpTool(server, connection, info, name, gate ? "read" : config?.tools?.[name]?.authz, gate);
       if (tool === undefined) {
         log(`MCP server ${server.name}: tool skipped (unsupported schema)`);
         continue;
@@ -373,19 +409,30 @@ export async function connectMcp(
       used.add(name);
       registrations.push(tool);
     }
+    if (gate && registrations.length !== GITHUB_TOOL_NAMES.length) {
+      await gate.disable("GITHUB_REGISTRATION_REJECTED");
+      await connection.close().catch(() => {});
+      log("MCP server github unavailable (GITHUB_REGISTRATION_REJECTED)");
+      continue;
+    }
     if (registrations.length === 0) {
       await connection.close().catch(() => {});
       log(`MCP server ${server.name} provides no usable tools`);
       continue;
     }
-    const unsubscribe = connection.subscribeAvailability((state) => {
+    let blocked = false;
+    const disabled = gate?.subscribeDisabled(() => { blocked = true; update(server.name, "unavailable"); });
+    const changed = gate ? connection.subscribeDeclarationChanges?.(() => {
+      void gate.disable().catch(() => { blocked = true; update(server.name, "unavailable"); });
+    }) : undefined;
+    const health = connection.subscribeAvailability((state) => {
       const previous = availability.get(server.name);
-      update(server.name, state);
+      update(server.name, blocked ? "unavailable" : state);
       if (previous !== state && (previous !== undefined || state === "unavailable")) {
         log(`MCP server ${server.name} ${state === "available" ? "reconnected" : "disconnected"}`);
       }
     });
-    live.push({ connection, unsubscribe });
+    live.push({ connection, unsubscribe: () => { health(); disabled?.(); changed?.(); } });
     // Installing an extension with an existing name replaces it, so the server-derived names must never
     // coincide with the summary extension below. SERVER_NAME allows "info", and the prefix differs.
     extensions.push(defineExtension({ name: `mcp-server-${server.name}`, tools: registrations }));
@@ -459,13 +506,16 @@ export function buildMcpTool(
   info: McpToolInfo,
   name: string,
   authz: ToolGovernance["authz"] = "write",
+  github?: GithubGate,
 ): GovernedTool | undefined {
+  if (server.name === "github" && !github) return undefined;
   const schema = normalizeSchema(info.inputSchema);
   if (schema === undefined) return undefined;
   const governance: ToolGovernance = {
     source: { kind: "mcp", server: server.name },
     trust: "untrusted",
     authz,
+    ...(github ? { githubApproval: github.fingerprint } : {}),
   };
   return Object.assign(defineTool({
     name,
@@ -474,15 +524,28 @@ export function buildMcpTool(
     replay: "unsafe",
     deferred: true,
     outputLimits: { maxBytes: MAX_OUTPUT_BYTES, maxLines: MAX_OUTPUT_LINES, retain: "head" },
-    execute: async (args, _api, context) => {
+    execute: async (args, _api, context): Promise<ToolExecutionResult> => {
       let result: CallToolResult;
       try {
-        result = await connection.callTool(info.name, args, {
+        result = github ? await github.call(info.name, args, context.abortSignal, server.timeoutMs) : await connection.callTool(info.name, args, {
           ...(context.abortSignal === undefined ? {} : { signal: context.abortSignal }),
           timeoutMs: server.timeoutMs,
         });
       } catch (error) {
+        if (github) {
+          // Cancellation belongs to the base's tool task. Preserve it instead of reporting a
+          // GitHub business failure when the caller stopped waiting.
+          if (error instanceof McpAbortError || context.abortSignal?.aborted) throw error;
+          const code = isRecord(error) && typeof error.code === "string" && /^GITHUB_[A-Z_]+$/.test(error.code) ? error.code : mcpErrorCode(error);
+          const sent = code.startsWith("GITHUB_") ? "not_sent" : "possibly_sent";
+          const message = `${code}: GitHub ${sent === "not_sent" ? "business call was not sent" : "call failed; remote completion may be unknown"}. ${code === "MCP_HTTP_401" ? "Ask the owner to check the PAT; OAuth is disabled." : "No automatic retry; ask the owner to inspect the connection or approval."}`;
+          return { isError: true, output: [{ type: "text", text: message }], details: { code, stage: sent, approval: github.fingerprint }, diagnostics: [{ severity: "error", code, message }] };
+        }
         throw mapMcpToolError(error, server.name);
+      }
+      if (github && (byteLength(result) > MAX_MESSAGE_BYTES || !Array.isArray(result.content)
+        || result.content.some((block) => !isRecord(block) || block.type !== "text"))) {
+        return { isError: true, output: [{ type: "text", text: "GITHUB_RESULT_REJECTED: response exceeds the budget or contains unsupported content; no links or resources were fetched." }], details: { code: "GITHUB_RESULT_REJECTED", stage: "sent_result_rejected" } };
       }
       return {
         output: boundedLlmContent(toLlmContent(result), info.name),
@@ -609,6 +672,7 @@ async function connectWithTimeout(
 
 /** Safe code for logs; never includes a message, URL, header, or server stderr. */
 export function mcpErrorCode(error: unknown): string {
+  if (isRecord(error) && typeof error.code === "string" && /^GITHUB_[A-Z_]+$/.test(error.code)) return error.code;
   if (error instanceof McpOAuthAuthorizationRequiredError) return "MCP_AUTH_REQUIRED";
   if (error instanceof McpTimeoutError) return "MCP_TIMEOUT";
   if (error instanceof McpConnectionClosedError) return "MCP_CLOSED";

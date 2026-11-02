@@ -74,6 +74,7 @@ spec 在功能开发完成后删除，ADR 及其记录长期保留。ADR 中的 
 | 0014 | 工具由人注册 | Accepted，2026-10-22 | [0014-humans-register-tools.md](0014-humans-register-tools.md) |
 | 0015 | 旧版画像字段导致 working memory 损坏态 | Accepted，2026-10-31 | [working-memory/0015-legacy-profile-memory-corrupt-state.md](working-memory/0015-legacy-profile-memory-corrupt-state.md) |
 | 0016 | 用户画像暂存 working memory | Accepted，2026-10-29 | [0016-user-profile-working-memory.md](0016-user-profile-working-memory.md) |
+| 0018 | GitHub 官方托管 HTTP MCP 与 OpenBao 只读 PAT | Accepted，2026-11-01（实现与真实链路未验收） | [github-access/0018-github-access.md](github-access/0018-github-access.md) |
 | 0019 | PTC 代码调用工具（codemode） | Accepted，2026-11-02 | [codemode-ptc/0019-codemode-ptc.md](codemode-ptc/0019-codemode-ptc.md) |
 | 0020 | 远程 PTC sandbox（脚本与工具同在执行 VPS；2026-11-02 修订为统一 RPC） | Accepted，2026-11-02 | [remote-ptc-sandbox/0020-remote-ptc-sandbox.md](remote-ptc-sandbox/0020-remote-ptc-sandbox.md) |
 | 0021 | 控制面与执行面分离，工具执行先下沉到执行 VPS | Proposed，2026-10-31 | [0021-control-execution-split.md](0021-control-execution-split.md) |

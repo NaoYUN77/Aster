@@ -22,7 +22,8 @@
 | tier | 原生 `deferred` 工具为 2，其余为 1；启动结算通过的 MCP pin 去掉 `deferred`，成为常驻工具。 |
 | trust | 内置工具为 trusted，MCP 工具为 untrusted；外部描述不成为可信指令。 |
 | replay | 原生工具策略，未声明时为 unsafe；不从 authz 推断重放安全性。 |
-| authz | read 或 write。内置查询与搜索工具为 read，其余保守标记 write；MCP 默认 write，仅宿主配置可逐个覆盖，不采信外部 annotations。执行时与宿主权限复核。 |
+| authz | read 或 write。内置查询与搜索工具为 read，其余保守标记 write；MCP 默认 write，仅宿主配置可逐个覆盖，不采信外部 annotations。执行时与宿主权限复核。GitHub 条目由宿主策略强制 read，且拒绝 `authz: "write"`。 |
+| githubApproval | 仅 GitHub 工具记录：来自独立批准基线的规范化指纹，包含批准版本。启动目录比较、加载账本快照与恢复闸口使用该指纹；缺省表示非 GitHub 工具或旧记录。 |
 | schemaHash | 参数 schema 的 SHA-256，小写十六进制。对象键递归排序、数组顺序保留，不含 TypeBox symbol；只记录，不处理版本漂移。 |
 | state | available、unavailable 或 disabled。MCP 连接状态按 server 批量更新；内置工具安装后为 available。宿主 `setDisabled(name, boolean)` 只在当前进程禁用工具，优先于健康状态；解除禁用后恢复当前连接状态，不因健康恢复自动启用。 |
 
@@ -37,7 +38,7 @@
 
 ### 手动 pin 与声明边界
 
-`mcp.json` 顶层 `tools` 是按注册名索引的对象（最多 800 项），每项允许 `pin: boolean` 和 `authz: "read" | "write"`，至少设置其中一项，未知字段拒绝；未设 pin 等同未请求晋升，未设 authz 的 MCP 工具默认 write。`residentToolBudgetTokens` 默认 8192，范围 1～1048576。参数校验及默认值以 `src/mcp-config.ts` 为准。配置是宿主输入，不读取远端 annotations，不允许模型调用注册或晋升接口。
+`mcp.json` 顶层 `tools` 是按注册名索引的对象（最多 800 项），每项允许 `pin: boolean` 和 `authz: "read" | "write"`，至少设置其中一项，未知字段拒绝；未设 pin 等同未请求晋升，未设 authz 的 MCP 工具默认 write。GitHub 工具是例外：`pin: true` 与 `authz: "write"` 都会使整个 GitHub 条目配置失败，首期无 GitHub pin。`residentToolBudgetTokens` 默认 8192，范围 1～1048576。参数校验及默认值以 `src/mcp-config.ts` 为准。配置是宿主输入，不读取远端 annotations，不允许模型调用注册或晋升接口。
 
 启动时健康快照先进入 Register，`installMcpTools()` 按 extension 名及工具注册名固定排序，再按注册名依次验证 pin 的存在性、available 状态和剩余预算。预算按 `estimateTextTokens(JSON.stringify(declarations))` 计算，声明通过原生 `toToolDeclaration()` 转换，包含内置、记忆、搜索工具及接受的 pin 的 name／description／parameters 等模型字段；使用 pi-ai 1.3.0 的字符估算，与提供商精确 token 数有差异。基础集合已超预算时拒绝所有新增 pin，不移除内置工具。失败记录 `TOOL_NOT_FOUND`／`TOOL_UNAVAILABLE`／`TOOL_BUDGET_EXCEEDED`；已注册且可用的 MCP 工具仍可按需搜索。
 
@@ -108,12 +109,13 @@ MCP 工具由入口配置声明，不由模型注册。`src/mcp-config.ts` 在�
 - 参数 schema 必须缺省或为 `type: "object"`、深度 ≤12、属性总数 ≤256、不含 `$ref`，并通过 TypeBox 编译；深度检查先于字节检查，因为序列化本身是递归的。序列化 ≤16 KiB；不满足则跳过该工具。执行前的参数校验仍由底座完成。
 - `replay: "unsafe"`；`outputLimits` 为 32 KiB、1000 行、保留头部。`execute` 把 `context.abortSignal` 传给 MCP 请求，结果经 `toLlmContent` 转为底座内容类型；底座只约束文本，因此单张图片超过 4 MiB 时替换为文字说明，避免不受限的数据进入持久化会话。`isError` 保留为工具结果失败。异常映射为 `MCP_TIMEOUT`、`MCP_CLOSED`、`MCP_PROTOCOL`、`MCP_AUTH_REQUIRED`、`MCP_HTTP_<status>` 或 `MCP_FAILED`，不携带 header、args、env、stderr 或 server 消息。
 - stdio 子进程使用 `inheritEnv: false` 加允许列表（`PATH` 等运行所需变量），再合并配置的 `env`；stderr 只保留有界缓冲，不写日志。日志只有 server 名、工具数量和错误码。
-- 列工具自行翻页，每 server 100 个工具、10 页，且整次发现限时 30 秒；不调用会跟随全部分页的 `listTools()`。发生截断时记录日志，不静默丢弃。
-- HTTP 响应体按 1 MiB 上限读取（传输层只约束 SSE 事件，JSON 响应整体读取）。
+- 列工具自行翻页，每 server 100 个工具、10 页，且整次发现限时 30 秒；不调用会跟随全部分页的 `listTools()`。发生截断时记录日志，不静默丢弃。GitHub 更严格：达到 100 工具、10 页、任一无效应答或分页未结束都视为发现不完整并停用，不取“前 100 个”。
+- HTTP 响应体按 1 MiB 上限读取（传输层只约束 SSE 事件，JSON 响应整体读取）。GitHub 对 JSON/SSE 使用同一累计预算，超限取消 reader 并停用。
+- GitHub 例外：只注册独立批准基线中的 12 个精确原始身份，名称为 `mcp__github__<raw>`，全部 `authz: "read"`、deferred、不 pin。启动比较先于持久化目录覆盖、模型工具发布、pin 结算与恢复调度；无基线、集合/声明/策略漂移、发现被过滤或截断都停用整个条目并保留候选供人审阅。每次业务 `tools/call` 前在同一并发闸口内先做一次最多 10 秒的 `tools/list` 对账，GitHub 业务并发为 1，忙时直接拒绝而不排队，单次调用总限时 60 秒。策略/参数拒绝明确未发送；发送后失败保留“可能已发送、远端终态未知”，不自动重试。错误码为 `GITHUB_*`（策略、批准、对账、结果预算）或既有 `MCP_*`；结果只接受文本 block，非文本或超限响应以 `GITHUB_RESULT_REJECTED` 失败。完整契约见 [GitHub 只读接入](github-access.md)。
 
 关闭顺序：先关闭底座（取消工具上下文），再解除应用健康订阅并关闭 MCP host。host 先解除连接事件订阅、将状态置为 unavailable，再关闭连接（stdio 先关 stdin，超时后终止进程组），避免重复断线日志或迟到的恢复事件。顺序反过来会让正常停机被记录成工具失败。
 
-恢复：MCP 工具永不自动重放。启动时不可用的 server 不安装工具，遗留调用在恢复中表现为工具不可用；运行时已经发送的调用遇到连接关闭仍以 `MCP_CLOSED` 失败，已知不可用时的新调用按上述契约拦截。当前 SDK 最终关闭后必须重启创建新连接；本应用不增加重连、ping 探活或运行期 `listTools` 对账。改名、改 schema 或删除 server 都是不兼容变更，需要先收敛未完成调用。
+恢复：MCP 工具永不自动重放。启动时不可用的 server 不安装工具，遗留调用在恢复中表现为工具不可用；运行时已经发送的调用遇到连接关闭仍以 `MCP_CLOSED` 失败，已知不可用时的新调用按上述契约拦截。当前 SDK 最终关闭后必须重启创建新连接；本应用不为一般 server 增加重连、ping 探活或运行期 `listTools` 对账（GitHub 的逐次对账见上）。改名、改 schema 或删除 server 都是不兼容变更，需要先收敛未完成调用。
 
 OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、临时文件后原子替换），不进入模型上下文、工具参数或日志。一次写入失败只影响该次调用，不使后续读写持续失败。bot 只读取和刷新；交互授权由 `npm run mcp:auth` 在独立进程完成，bot 不监听回调端口。`mcp:auth` 与 bot 通过同一函数解析 `DATA_DIR` 和 `MCP_CONFIG`；配置的 `authorizationServerMetadataUrl` 同时用于 CLI 流程与运行时 401 后的重新授权，避免两者落在不同授权服务器。
 

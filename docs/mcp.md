@@ -10,12 +10,12 @@ MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代
 {
   "servers": [
     {
-      "name": "github",
+      "name": "local-tools",
       "transport": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "command": "node",
+      "args": ["/opt/aster/mcp-server.mjs"],
       "cwd": "/data/workspace",
-      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
+      "env": { "EXAMPLE_TOKEN": "${EXAMPLE_TOKEN}" },
       "timeoutMs": 60000,
       "connectTimeoutMs": 10000
     },
@@ -33,7 +33,8 @@ MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代
 
 - `name` 唯一，匹配 `^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$`；最多 8 个 server（stdio 最多 4 个），超出的条目忽略并告警。
 - stdio：`command` 必填；`cwd` 必须是存在的绝对路径；默认 `inheritEnv: false`，子进程只得到运行所需变量加 `env` 条目，bot 的凭据不会传入。
-- http：必须是 `https`（仅回环允许 `http`）；`auth.type` 目前只支持 `oauth`。
+- http：必须是 `https`（仅回环允许 `http`）；显式 `auth.type` 目前只支持 `oauth`。静态 header 凭据可省略 `auth`；GitHub 强制走这条路径且禁止 OAuth。
+- `name` 为 `github` 的条目保留给官方只读 HTTP 接入，必须使用精确 endpoint、占位 PAT header 与 `githubPolicy`，且不得 pin 或定为 write。配置与运维说明见 [GitHub 只读接入](github-access.md)。
 - `args`、env 值、header 值中的 `${NAME}` 从应用环境解析；缺失变量只禁用该条目并只报告变量名。单条无效、重名只跳过该条，不影响其他 server。
 - 配置文件含凭据引用，部署时设为 `600`，不要提交仓库。
 
@@ -47,7 +48,7 @@ MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代
 {
   "servers": [],
   "tools": {
-    "mcp__github__get_issue": { "pin": true, "authz": "read" }
+    "mcp__local-tools__read_file": { "pin": true, "authz": "read" }
   },
   "residentToolBudgetTokens": 8192
 }
@@ -60,6 +61,12 @@ MCP server 通过 `DATA_DIR/mcp.json`（或 `MCP_CONFIG`）接入，无需改代
 MCP 工具默认定级 `write`，不采信远端 annotations 的只读声明。所有者确认工具用途后，可按精确注册名配置 `authz: "read"`。此选项可单独使用，也可与 `pin` 合用，重启后生效。pin 只决定是否常驻，不授予权限。当前 Telegram 入口只接收所有者请求，拥有 read／write 全权。宿主 API 预留 `toolAuthority: "restricted"`，该实例及其恢复和嵌套调用只允许 read 工具。每次实际执行前复核注册、可用状态和授权。拒绝调用不发送外部请求。复核决定及原因码以 `tool_review` JSON 行写入 stderr，不含工具参数或结果。
 
 MCP 调用一律按不可重放处理（`replay: "unsafe"`，见 [ADR-0008](adr/0008-unsafe-tool-replay.md)）。进程中断后不自动重跑，避免重复外部副作用。启动时连不上的 server 只记录错误码并跳过。连接关闭时已发送的调用仍可能返回 `MCP_CLOSED`。当前 SDK 只公开最终关闭事件，关闭后需重启建立新连接。HTTP SSE 的内部重连不提供健康事件。本应用不增加探活或自动重连策略，具体边界见 [契约与生命周期](contracts-and-lifecycle.md)。
+
+## GitHub 只读接入
+
+GitHub 使用官方托管 HTTP MCP、OpenBao 占位 PAT 与宿主四层只读策略，是 [ADR-0001](adr/0001-mcp-access-stdio-first-oauth-out-of-band.md) 默认路线的局部例外（[ADR-0018](adr/github-access/0018-github-access.md)）。它不接受 `pin`、`authz: "write"`、OAuth、toolsets、额外 header、远程 endpoint 或远程 gh 后备；12 个允许工具全部 deferred，经 `tool_search` 按需加载。
+
+发布前必须有独立的、经人审阅的批准基线。缺少基线或发现声明漂移时整个 GitHub 条目停用，候选声明写入 `DATA_DIR/github-policy/candidate.json` 供操作者审阅，不能由启动、健康恢复或模型自动批准。每次业务调用前还会做一次有界 `tools/list` 对账；对账失败同样停用，直到以新的 `approvalVersion` 更新基线。配置样例、字段限制、错误语义和后续运维验收见 [GitHub 只读接入](github-access.md)。
 
 ## 检查与 OAuth
 
@@ -74,6 +81,8 @@ npm run build && node dist/src/check-config.js
 ```sh
 npm run build && npm run mcp:check
 ```
+
+对 GitHub，`mcp:check` 还会比对批准基线；缺少批准时只生成候选并使检查失败。它不执行业务读取，不能证明 PAT 权限、只读 method 或代理/OpenBao 链路已验收。
 
 OAuth 首次授权或重新授权时先停 bot，再执行：
 
