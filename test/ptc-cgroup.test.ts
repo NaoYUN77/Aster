@@ -9,7 +9,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { preparePtcCgroupRoot, spawnInCgroup } from "../src/execution/ptc-cgroup.js";
+import { isInsideCgroup, preparePtcCgroupRoot, spawnInCgroup } from "../src/execution/ptc-cgroup.js";
 
 // `process.execve` is POSIX-only; Windows has no cgroups either.
 const skip = process.platform === "linux" ? false : "cgroup accounting needs a Linux host";
@@ -36,6 +36,26 @@ function collected(child: ChildProcess): Promise<{ code: number | null; signal: 
 // The kernel only lets a task enter a cgroup when the nearest common ancestor of its current and
 // target cgroup is writable by it, so the root must live inside the unit's delegated subtree. The
 // controller setup is plain file work and runs everywhere; a real migration needs a Linux host.
+
+test("only a checker inside the unit cgroup gets the real migration probe", () => {
+  const unit = "/sys/fs/cgroup/system.slice/aster-rpc-agent.service";
+
+  assert.equal(
+    isInsideCgroup("/system.slice/aster-rpc-agent.service/agent", "/sys/fs/cgroup", unit),
+    true,
+    "the agent runs in the DelegateSubgroup of its own unit",
+  );
+  assert.equal(
+    isInsideCgroup("/user.slice/user-0.slice/session-2.scope", "/sys/fs/cgroup", unit),
+    false,
+    "an operator shell cannot migrate and only gets the static check",
+  );
+  assert.equal(
+    isInsideCgroup("/system.slice/aster-rpc-agent.service/agent", "/sys/fs/cgroup", "/system.slice/aster-rpc-agent.service"),
+    false,
+    "a namespace-relative path must never be compared with a cgroupfs path directly",
+  );
+});
 
 test("preparing the root enables only the controllers the sessions are missing", async (t) => {
   const base = await mkdtemp(join(tmpdir(), "aster-cgroup-root-"));

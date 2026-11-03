@@ -286,12 +286,40 @@ async function probeUserNamespace(): Promise<boolean | null> {
 
 type CgroupProbe = { readonly ok: boolean; readonly reason?: string };
 
-/** This process's cgroup v2 path, as the cgroupfs mount shows it. */
+/** This process's own cgroup, relative to the cgroup namespace root (`/proc/self/cgroup`). */
 async function ownCgroupPath(): Promise<string | undefined> {
   try {
     const text = await readFile("/proc/self/cgroup", "utf8");
     const path = text.split("\n").find((entry) => entry.startsWith("0::"))?.slice("0::".length) ?? "";
     return path.startsWith("/") ? path : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a process whose `/proc/self/cgroup` entry is `own` runs inside `directory`, which is a
+ * cgroupfs path. Comparing the namespace-relative entry with a cgroupfs path directly would never
+ * match and would silently turn the real migration probe into the weaker static check.
+ */
+export function isInsideCgroup(own: string, mount: string, directory: string): boolean {
+  const path = own === "/" ? mount : `${mount}${own}`;
+  return path === directory || path.startsWith(`${directory}/`);
+}
+
+/** The cgroup2 mount that holds `path`; the two proc files use different roots. */
+async function cgroupMountPoint(path: string): Promise<string | undefined> {
+  try {
+    const text = await readFile("/proc/self/mounts", "utf8");
+    let longest: string | undefined;
+    for (const line of text.split("\n")) {
+      const fields = line.split(" ");
+      if (fields[2] !== "cgroup2" || fields[1] === undefined) continue;
+      const mount = fields[1].replace(/\\040/g, " ");
+      if (mount !== path && !path.startsWith(`${mount}/`)) continue;
+      if (longest === undefined || mount.length > longest.length) longest = mount;
+    }
+    return longest;
   } catch {
     return undefined;
   }
@@ -318,8 +346,10 @@ async function probeCgroup(config: PtcConfig): Promise<CgroupProbe> {
     await preparePtcCgroupRoot(root);
     await mkdir(probe, { mode: 0o700 });
     await write(join(probe, "pids.max"), "8");
+    // `/proc/self/cgroup` is relative to the cgroup namespace root, the configured root is not.
     const own = await ownCgroupPath();
-    if (own !== undefined && (own === unit || own.startsWith(`${unit}/`))) {
+    const mount = own === undefined ? undefined : await cgroupMountPoint(root);
+    if (own !== undefined && mount !== undefined && isInsideCgroup(own, mount, unit)) {
       const accounted = spawnInCgroup(probe, process.execPath, ["-e", "process.exit(0)"], {
         env: {},
         stdio: ["ignore", "ignore", "ignore"],
