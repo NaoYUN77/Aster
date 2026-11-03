@@ -46,6 +46,11 @@ async function openClient(socketPath: string): Promise<Socket> {
   return client;
 }
 
+/** Wait for the peer to close; a socket that is already gone must not hang the wait. */
+async function waitForClose(socket: Socket): Promise<void> {
+  if (!socket.destroyed) await once(socket, "close");
+}
+
 test("the gateway relays bytes between the app socket and the upstream", { skip: !posix }, async (t) => {
   const socketPath = await temporarySocket(t);
   const { port, server } = await startEchoUpstream();
@@ -75,9 +80,9 @@ test("a connection beyond the limit is closed without reaching the upstream", { 
     const [echo] = await once(first, "data") as [Buffer];
     assert.equal(echo.toString(), "first");
 
+    // The gateway refuses this connection at accept time, so it may already be gone by now.
     const second = await openClient(socketPath);
-    second.write("second");
-    await once(second, "close");
+    await waitForClose(second);
 
     // The rejected connection must not have displaced the first tunnel.
     first.write("still-here");
@@ -99,8 +104,7 @@ test("an upstream failure closes the app connection", { skip: !posix }, async (t
   });
   const client = await openClient(socketPath);
   try {
-    client.write("hello");
-    await once(client, "close");
+    await waitForClose(client);
   } finally {
     client.destroy();
     await gateway.close();
