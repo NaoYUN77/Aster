@@ -14,7 +14,7 @@
 | --- | --- |
 | `npx tsc --noEmit -p tsconfig.json` | 0 |
 | `npx tsx --test test/*.test.ts`（Windows 11） | 366 tests，352 pass，0 fail，14 skipped |
-| 同一套件（GitHub Actions Linux） | 见 PR 检查：`test/ptc-cgroup.test.ts` 在 Linux 实际执行 |
+| 同一套件（GitHub Actions Linux，run `41578419369`） | 366 tests，358 pass，0 fail，8 skipped |
 
 Windows 的 14 个 skipped：8 个记忆库／部署文件权限类、Unix socket RPC、Windows 无法创建的符号链接用例、4 个依赖 `process.execve` 与 cgroup 的用例。Linux 上符号链接、Unix socket、远程 codemode 与 cgroup 入组用例实际执行并通过；剩余 8 个 skipped 是部署文件权限类用例，需要相应的宿主条件。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。
 

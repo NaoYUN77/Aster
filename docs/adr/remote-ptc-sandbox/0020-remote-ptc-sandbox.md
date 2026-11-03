@@ -159,3 +159,4 @@
 - 处理：移除 `PtcCgroup.addProcess`。新增 `spawnInCgroup`：先以 Node 启动一个短命 helper，helper 把自身 PID 写入目标 cgroup，经额外 fd 3 报告成功后再 `process.execve` bwrap；PID、进程组与 cgroup 归属随 exec 保留，因此入组发生在 unshare 之前，全部后代（runner、bash 子进程）仍在同一 cgroup 内，`cgroup.kill` 与 `memory.max`／`pids.max`／`cpu.max` 继续有效。入组失败通过 fd 3 的 `error:` 行成为执行失败（`internal`／`not_started`），不会伪装成命令退出码；5 秒未确认则拒绝启动并强杀。
 - 部署前提（写入 Runbook）：`ProtectHome=false`、`ProtectKernelTunables=false`、`ProtectControlGroups=false`，否则 `ProtectSystem=strict` 会隐藏 `/home/aster` 或让 cgroupfs 只读；`aster-ptc` 作为独立委派根，父节点不运行进程。
 - 验证：Linux 专用 `test/ptc-cgroup.test.ts` 用临时目录代替 cgroup，覆盖“先写 PID 再 exec、PID 不变”“exec 失败按命令失败退出 125”“入组被拒时在启动前失败”。Windows 跳过该用例（无 `process.execve`／cgroup）。真实双 VPS 需要按 Runbook 复验后才能改判 PASS。
+- 实现注意：确认通道不能对该 stdio 流调用 `removeAllListeners()`——那会同时移除 Node 自己用于登记 stdio 关闭的监听，导致子进程的 `close` 事件永不触发；两个执行器都用 `close` 结算命令与 runner 退出，实际会话会因此挂起。改为只摘除本模块的监听并 `resume()` 读到 EOF；helper 在 exec 前关闭 fd 3，sandbox 不再继承该通道。
