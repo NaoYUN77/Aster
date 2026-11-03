@@ -13,9 +13,10 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npx tsc --noEmit -p tsconfig.json` | 0 |
-| `npx tsx --test test/*.test.ts` | 362 tests，352 pass，0 fail，10 skipped |
+| `npx tsx --test test/*.test.ts`（Windows 11） | 362 tests，352 pass，0 fail，10 skipped |
+| 同一套件（GitHub Actions Linux，run `41562632710`） | 362 tests，354 pass，0 fail，8 skipped |
 
-10 个 skipped：7 个记忆库／部署文件权限类、Unix socket RPC、Windows 无法创建的符号链接用例。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。远程 codemode 用例改用 direct-session 拓扑，已在 Windows 与 Linux 上运行。
+Windows 的 10 个 skipped：8 个记忆库／部署文件权限类、Unix socket RPC、Windows 无法创建的符号链接用例。Linux 上符号链接、Unix socket 和远程 codemode 用例实际执行并通过；剩余 8 个 skipped 是部署文件权限类用例，需要相应的宿主条件。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。
 
 ## Phase 1：远程 PTC
 

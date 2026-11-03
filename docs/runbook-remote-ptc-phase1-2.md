@@ -28,7 +28,7 @@ npm run build
 npm test
 ```
 
-预期：三个命令退出码为 0，测试为 0 fail。Windows 会跳过依赖 POSIX 符号链接和 Unix socket 的用例；不得把跳过当作通过，必须在 Linux 主机上补跑完整套件。当前基线为 362 tests、352 pass、0 fail、10 skipped（Windows）；Linux 上跳过数应更少，`test/ptc-files.test.ts` 的符号链接用例和 Unix socket 用例必须实际执行。远程 codemode 用例已改为 direct-session 拓扑，在所有平台运行。
+预期：三个命令退出码为 0，测试为 0 fail。Windows 会跳过依赖 POSIX 符号链接和 Unix socket 的用例；不得把跳过当作通过。当前基线：Windows 362 tests、352 pass、0 fail、10 skipped；Linux CI 362 tests、354 pass、0 fail、8 skipped，符号链接与 Unix socket 用例均实际执行。远程 codemode 用例已改为 direct-session 拓扑，在所有平台运行。
 
 ## 2. 部署位置与拓扑
 
