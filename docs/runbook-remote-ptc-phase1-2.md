@@ -70,7 +70,7 @@ npm test
 | 共享工作区 | `/srv/shared` | `PTC_SHARED_WORKSPACE`，挂到沙箱 `/shared` |
 | 共享工作区模式 | `rw` | Phase 2 direct 与文件工具要求 `rw`；`ro` 只能验收只读边界 |
 | direct tmp 根 | `/run/aster` | `PTC_DIRECT_TMP_ROOT`；每个 session 在其下建私有目录 |
-| cgroup 根 | `/sys/fs/cgroup/aster-ptc` | 需要可写委派；不能写入时 Agent 拒绝启动 |
+| cgroup 根 | `/sys/fs/cgroup/system.slice/aster-rpc-agent.service/ptc` | 单元 cgroup 的委派子树内；不能进入时 Agent 拒绝启动 |
 | bwrap | `/usr/bin/bwrap` | 实际 probe，不以安装包存在为准 |
 
 ## 3. 执行 VPS 前提与预检
@@ -113,29 +113,38 @@ sysctl kernel.apparmor_restrict_unprivileged_userns
 
 ### 3.2 cgroup v2 委派
 
-Agent 需要在 `PTC_CGROUP_ROOT` 下创建每个 session 的子 cgroup，并写入 `memory.max`、`pids.max`、`cpu.max`。在 root 下执行：
+Agent 在 `PTC_CGROUP_ROOT` 下创建每个 session 的子 cgroup，并写入 `memory.max`、`pids.max`、`cpu.max`。根的位置不是任意的：内核做 cgroup 迁移时，除了目标 `cgroup.procs`，还要求写入者拥有**源与目标最近公共祖先**的写权限。Agent 自己运行在单元 cgroup 里，所以根必须是单元 cgroup 之内的目录；像 `/sys/fs/cgroup/aster-ptc` 这样的旁挂根，公共祖先是 root 拥有的 `/sys/fs/cgroup`（`0644`），未提权服务写 `cgroup.procs` 会得到 `EACCES`。
+
+单元 cgroup 只有在没有自身进程时才能开启控制器（“no internal process”），因此用 `DelegateSubgroup=` 把 Agent 放进子组 `agent`。systemd 254 起支持该设置，并把整个单元 cgroup 交给服务用户；systemd 只让控制器“可用”，不会替服务开启，所以 Agent 自己在启动时写入 `subtree_control`（幂等，每次创建 session 前也会补写）。
+
+```ini
+[Service]
+User=aster-exec
+Delegate=yes
+DelegateSubgroup=agent
+```
+
+`PTC_CGROUP_ROOT` 用默认值即可（Agent 从 `/proc/self/cgroup` 推导出单元 cgroup，再取同级的 `ptc` 目录）：
 
 ```sh
-sudo install -d -m 0700 -o aster-exec -g aster-exec /sys/fs/cgroup/aster-ptc
-echo '+memory +pids +cpu' | sudo tee /sys/fs/cgroup/cgroup.subtree_control
-echo '+memory +pids +cpu' | sudo tee /sys/fs/cgroup/aster-ptc/cgroup.subtree_control
+PTC_CGROUP_ROOT=/sys/fs/cgroup/system.slice/aster-rpc-agent.service/ptc
 ```
 
 说明：
 
-- 根 cgroup 不受 “no internal process” 限制，开启 `subtree_control` 是安全的；它只让子 cgroup 出现控制器文件。
-- `aster-ptc` 自身不运行进程，只作为每个 session 的父节点。
-- 如果主机由 systemd 管理并已有更严格的委派方案，可用等价配置替代；验收以 Agent 的 `--check` 和真实 session 创建为准。
-- 不要试图用 `Delegate=yes` + `DelegateSubgroup=agent` 让服务自身进入可写子树：`aster-ptc` 是独立于服务 cgroup 的委派根，父节点没有内部进程；服务 cgroup 上加控制器会因 “no internal process” 返回 `EBUSY`。
-- 进程必须在 bwrap 启动前进入目标 cgroup。bwrap 带 `--unshare-cgroup`，一旦执行，父进程再写该 session 的 `cgroup.procs` 会被内核拒绝（`EACCES`／`ENODEV`），sandbox 就不受内存／pids／cpu 限制，也无法被 `cgroup.kill` 回收。当前实现由 helper 先写入自身 PID 再 `execve` bwrap；验证时观察日志里不应出现 `could not be accounted for`。
+- 布局是 `<unit>/agent`（Agent 自身）与 `<unit>/ptc/<session>`（sandbox）；迁移的公共祖先是 `<unit>`，已委派给 `aster-exec`，可写。systemd 在启动服务时会把单元 cgroup 目录连同 `cgroup.procs`、`cgroup.subtree_control` 一起交给服务用户（`cg_set_access`），所以这里不需要任何 root 侧的 `echo > cgroup.procs` 预置。
+- 不设置 `DelegateSubgroup=` 时 Agent 留在 `<unit>` 内，开启控制器返回 `EBUSY`。`--check` 的 `cgroupReason` 会指出这一点。
+- 不要继续沿用 `/sys/fs/cgroup/aster-ptc`：即使 root 手动建好目录并开启两级 `subtree_control`，未提权服务也无法把任务迁入（2026-11-03 验收实测 `EACCES`）。
+- 进程必须在 bwrap 启动前进入目标 cgroup。bwrap 带 `--unshare-cgroup`，一旦执行，父进程再写该 session 的 `cgroup.procs` 会被内核拒绝（`EACCES`／`ENODEV`）。当前实现由 helper 先写入自身 PID 再 `execve` bwrap；验证时观察日志里不应出现 `could not be accounted for`。
 - 这是对执行主机的配置变更，不是防火墙变更；记录到证据中。
 
-验证 `aster-exec` 确实能创建、进入并清理子 cgroup：
+`--check` 现在会做与真实 session 相同的自迁移，`cgroup: true` 才代表 Agent 真能进入自己的 session cgroup。可以再手工复验一次：
 
 ```sh
 sudo -u aster-exec sh -c '
-  d=/sys/fs/cgroup/aster-ptc/acceptance-probe
-  mkdir "$d"
+  unit=/sys/fs/cgroup/system.slice/aster-rpc-agent.service
+  d=$unit/ptc/acceptance-probe
+  mkdir -p "$d"
   echo 8 > "$d/pids.max"
   # 与运行时相同：进程在 exec 之前把自己的 PID 写入 cgroup.procs。
   sh -c "echo \$\$ > $d/cgroup.procs"
@@ -144,7 +153,7 @@ sudo -u aster-exec sh -c '
 '
 ```
 
-自迁移写入失败（`Permission denied`／`No such device`）说明委派或挂载权限不对，此时不要继续 Phase 1／2。
+自迁移写入失败（`Permission denied`／`No such device`／`No such file`）说明位置、委派或控制器不对，此时不要继续 Phase 1／2。
 
 ### 3.3 目录与挂载
 
@@ -185,7 +194,7 @@ PTC_SHARED_WORKSPACE=/srv/shared
 PTC_SHARED_WORKSPACE_MODE=rw
 PTC_DIRECT_ENABLED=1
 PTC_DIRECT_TMP_ROOT=/run/aster
-PTC_CGROUP_ROOT=/sys/fs/cgroup/aster-ptc
+PTC_CGROUP_ROOT=/sys/fs/cgroup/system.slice/aster-rpc-agent.service/ptc
 PTC_CGROUP_MEMORY_MAX_BYTES=536870912
 PTC_CGROUP_PIDS_MAX=128
 PTC_CGROUP_CPU_MAX="200000 100000"
@@ -237,7 +246,9 @@ sudo -u aster-exec sh -c '
 }
 ```
 
-`ptc` 的 `bwrap`、`userNamespace`、`cgroup`、`workspaceRoot`、`sharedWorkspace`、`directTmpRoot`、`usable` 必须全为 `true`。运行时 `health.isolation` 必须是 `{"mode":"bwrap","bwrap":true,"userNamespace":true,"cgroup":"v2","network":"none"}`；出现 `degraded-prlimit`、`cgroup: "none"`、`network: "host"` 或任一 `false` 时停止，先修复主机能力。
+`ptc` 的 `bwrap`、`userNamespace`、`cgroup`、`workspaceRoot`、`sharedWorkspace`、`directTmpRoot`、`usable` 必须全为 `true`。任一为 `false` 且输出里带 `cgroupReason` 时，按该内核错误修正 3.2 的委派；不要把 `cgroupReason` 抄进验收结论而不修配置。
+
+这个 `--check` 从 SSH shell 运行，进程不在单元 cgroup 里，因此它检查的是单元 cgroup 可写、控制器可用这两项前提；真正“把任务迁入 session cgroup”的探针由 Agent 启动时在单元内执行。服务能正常启动且 journal 不出现 `PTC is enabled but this host cannot provide`，才代表迁移路径成立。运行时 `health.isolation` 必须是 `{"mode":"bwrap","bwrap":true,"userNamespace":true,"cgroup":"v2","network":"none"}`；出现 `degraded-prlimit`、`cgroup: "none"`、`network: "host"` 或任一 `false` 时停止，先修复主机能力。
 
 ### 4.4 systemd
 
@@ -247,7 +258,10 @@ sudo -u aster-exec sh -c '
 [Service]
 RuntimeDirectory=aster
 RuntimeDirectoryMode=0750
-ReadWritePaths=/home/aster/jobs /srv/shared /run/aster /sys/fs/cgroup/aster-ptc
+# 委派给单元自己的 cgroup 子树：Agent 要在这里建 session cgroup 并写 cgroup.procs。
+Delegate=yes
+DelegateSubgroup=agent
+ReadWritePaths=/home/aster/jobs /srv/shared /run/aster /sys/fs/cgroup/system.slice/aster-rpc-agent.service
 # ProtectSystem=strict 默认同时隐藏 home 与只读 cgroupfs；PTC 与 direct 路径都在 /home/aster 下。
 ProtectHome=false
 ProtectKernelTunables=false
@@ -256,7 +270,13 @@ ProtectControlGroups=false
 
 `ProtectSystem=strict` 会把文件系统其余部分挂成只读；没有上面的 `ReadWritePaths`，Agent 能启动但无法创建 job workspace、写入共享目录或创建 cgroup，错误会在第一次 session 打开时才出现。`PrivateTmp=true` 保留；`PTC_DIRECT_TMP_ROOT=/run/aster` 不使用服务的私有 `/tmp`。不要启用 `ProtectKernelTunables=true`，否则 Agent 无法写入 cgroup 控制文件；`ProtectHome=true` 会让 `/home/aster/jobs` 不可见，`ProtectControlGroups=true` 会让 `/sys/fs/cgroup` 整个只读。三项都必须显式设为 `false`，因为 `ProtectSystem=strict` 的默认值不是 `false`。
 
-> 实测：在 2026-11-03 的双 VPS 验收中，只按旧版单元配置会在第一次 `vm.start`／`session.open` 失败。除上述 unit 设置外，根因是进程在 bwrap `--unshare-cgroup` 之后才被写入 `cgroup.procs`，内核会拒绝把任务迁移到该 cgroup namespace 之外（`EACCES`／`ENODEV`）。当前实现改为先由 helper 把自身 PID 写入目标 cgroup，再 `execve` bwrap，PID 与归属随 exec 保留，因此迁移发生在 unshare 之前。若仍出现 "the sandbox process could not be accounted for: …"，检查的是该 cgroup 是否真的可写，而不再是 unit 的 ReadWritePaths。
+> 实测：2026-11-03 的两轮真实双 VPS 验收都失败在两个部署前提上，第二轮（head `415bb67`）的结论已并入本节。
+>
+> 第一轮：进程在 bwrap `--unshare-cgroup` 之后才被写入 `cgroup.procs`（`EACCES`／`ENODEV`）。修复为先由 helper 把自身 PID 写入目标 cgroup，再 `execve` bwrap，PID 与归属随 exec 保留，迁移发生在 unshare 之前。
+>
+> 第二轮：入组顺序正确后仍报 `EACCES`，因为根是旁挂的 `/sys/fs/cgroup/aster-ptc`，迁移的公共祖先是 root 拥有的 `/sys/fs/cgroup`。修复为把根放进单元 cgroup 的委派子树（`Delegate=yes`＋`DelegateSubgroup=agent`）；`--check` 同时改为执行真实自迁移，不再用“能建目录、能写 `pids.max`”冒充可用。同一轮还暴露出 bubblewrap 0.11.1 不认识 `--no-new-privs`（`bwrap: Unknown option`，exit 1）：该标志已移除，bwrap 在解析参数前就自行设置 `PR_SET_NO_NEW_PRIVS`。
+>
+> 若出现 "the sandbox process could not be accounted for: …"，先看 `--check` 的 `cgroupReason`；控制器启用、公共祖先权限与入组位置都会在那里给出内核原始错误。
 
 ```sh
 sudo systemctl daemon-reload
@@ -540,13 +560,13 @@ node /root/aster-accept/phase1.mjs
 
 ```sh
 pgrep -a -f 'aster-ptc-runner|bwrap' || true
-ls /sys/fs/cgroup/aster-ptc
+ls /sys/fs/cgroup/system.slice/aster-rpc-agent.service/ptc
 ```
 
 通过 PTC 脚本执行 `sleep 30`，`tool.call` 的 `timeoutMs` 设为 1000，或用 `AbortController` 在调用开始后取消 VM。预期：
 
 - 工具调用以 `timeout` 或 `aborted` 失败，`outcome` 为 `unknown`；脚本不会返回成功。
-- `session.close` 后，`pgrep` 不再出现该 session 的 runner、bwrap 或 `sleep 30`；`/sys/fs/cgroup/aster-ptc` 下没有残留 session 子目录。
+- `session.close` 后，`pgrep` 不再出现该 session 的 runner、bwrap 或 `sleep 30`；`/sys/fs/cgroup/system.slice/aster-rpc-agent.service/ptc` 下没有残留 session 子目录。
 - job workspace 保留，便于重放；清理只发生在 `PTC_JOB_RETENTION_HOURS` 之后，不由取消触发。
 - 同一 `jobId` 再次打开时仍能复用 workspace，未完成的 bash 不会自动重跑。
 
@@ -799,7 +819,8 @@ Agent journal：
 
 - `--check` 出现 `degraded-prlimit`／`cgroup: "none"`／`network: "host"`：停止，不继续验收，不启用 `PTC_ALLOW_DEGRADED`。
 - bwrap 或 user namespace 不可用：按 3.1 由主机安全负责人处理；不以关闭隔离或改用本地执行替代。
-- cgroup 创建失败：检查 `PTC_CGROUP_ROOT` 的属主、`subtree_control` 和 systemd 单元；不要让 Agent 在 root 下运行。
+- cgroup 失败：先看 `--check` 的 `cgroupReason`。`EBUSY` 说明单元没有 `DelegateSubgroup=`；`EACCES` 说明 `PTC_CGROUP_ROOT` 不在单元委派的 cgroup 子树内（典型是旧的 `/sys/fs/cgroup/aster-ptc`）；`ENOENT` 说明控制器没有开启。按 3.2 修正，不要让 Agent 在 root 下运行。
+- bwrap 启动即 exit 1 且 stderr 为 `Unknown option …`：安装的 bubblewrap 不支持某个参数。参数以实际版本为准（0.11.1 已移除 `--no-new-privs`），不要用包装脚本吞掉该错误。
 - 越界读取、符号链接逃逸或 `/tmp` 跨 session 可见：视为严重失败，停止验收并修复实现。
 - 超时／取消后仍有残余进程或 cgroup 子目录：视为失败；不得把“连接断开”当作“执行未发生”。
 - 同一 `jobId` 重放执行了已完成的 bash，或 workspace 缺失时自动重建：视为失败。

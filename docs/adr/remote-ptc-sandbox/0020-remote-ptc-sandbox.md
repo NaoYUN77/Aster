@@ -157,6 +157,18 @@
 - 结果：**FAIL**。在 `63091e8` 上按 Runbook 部署，Phase 1 首次 `vm.start` 返回 `code: internal`、`outcome: not_started`，错误为 `the sandbox process could not be accounted for: ENODEV: no such device, write`；Phase 2 首次 direct `session.open` 返回同一类错误的 `EACCES: permission denied, write`。
 - 根因：`createPtcCgroup().addProcess()` 在子进程已经由 bwrap 执行 `--unshare-cgroup` 之后，才由 agent 把 PID 写入 `PTC_CGROUP_ROOT/<session>/cgroup.procs`。此时该任务处在新的 cgroup namespace 中，目标 cgroup 不在其命名空间根下，内核拒绝迁移（新版内核报 `ENODEV`，旧报 `EACCES`），与 systemd 委派无关。用普通 `sleep` 复现；`Delegate=yes`＋`DelegateSubgroup=agent` 因父节点有内部进程返回 `EBUSY`，不是可行替代。
 - 处理：移除 `PtcCgroup.addProcess`。新增 `spawnInCgroup`：先以 Node 启动一个短命 helper，helper 把自身 PID 写入目标 cgroup，经额外 fd 3 报告成功后再 `process.execve` bwrap；PID、进程组与 cgroup 归属随 exec 保留，因此入组发生在 unshare 之前，全部后代（runner、bash 子进程）仍在同一 cgroup 内，`cgroup.kill` 与 `memory.max`／`pids.max`／`cpu.max` 继续有效。入组失败通过 fd 3 的 `error:` 行成为执行失败（`internal`／`not_started`），不会伪装成命令退出码；5 秒未确认则拒绝启动并强杀。
-- 部署前提（写入 Runbook）：`ProtectHome=false`、`ProtectKernelTunables=false`、`ProtectControlGroups=false`，否则 `ProtectSystem=strict` 会隐藏 `/home/aster` 或让 cgroupfs 只读；`aster-ptc` 作为独立委派根，父节点不运行进程。
+- 部署前提（写入 Runbook）：`ProtectHome=false`、`ProtectKernelTunables=false`、`ProtectControlGroups=false`，否则 `ProtectSystem=strict` 会隐藏 `/home/aster` 或让 cgroupfs 只读。
 - 验证：Linux 专用 `test/ptc-cgroup.test.ts` 用临时目录代替 cgroup，覆盖“先写 PID 再 exec、PID 不变”“exec 失败按命令失败退出 125”“入组被拒时在启动前失败”。Windows 跳过该用例（无 `process.execve`／cgroup）。真实双 VPS 需要按 Runbook 复验后才能改判 PASS。
 - 实现注意：确认通道不能对该 stdio 流调用 `removeAllListeners()`——那会同时移除 Node 自己用于登记 stdio 关闭的监听，导致子进程的 `close` 事件永不触发；两个执行器都用 `close` 结算命令与 runner 退出，实际会话会因此挂起。改为只摘除本模块的监听并 `resume()` 读到 EOF；helper 在 exec 前关闭 fd 3，sandbox 不再继承该通道。
+
+### 2026-11-03：真实双 VPS 第二轮失败与 cgroup 委派模型修正
+
+- 结果：**FAIL**（head `415bb67`）。自动化基线通过（Linux 366 tests／358 pass／0 fail／8 skipped，`ptc-cgroup` 4/4），但 Phase 1 首次 `vm.start` 与 Phase 2 首次 `session.open` 都返回 `the sandbox process could not be accounted for: EACCES: permission denied, write`。Runbook 3.2 自带的自迁移探针同样失败（`sh: 1: echo: echo: I/O error`）。
+- 归因一：迁移方向对了，位置不对。cgroup v2 在迁移任务时检查的不只是目标 `cgroup.procs`，还包括源与目标**最近公共祖先**的写权限。`PTC_CGROUP_ROOT=/sys/fs/cgroup/aster-ptc` 时，源是 `system.slice/aster-rpc-agent.service`，公共祖先是 root 拥有的 `/sys/fs/cgroup`（`0644`），`aster-exec` 无权写入。此时即使 root 手工建好目录并开启两级 `subtree_control`，也只有 `--check` 的旧探针（建目录、写 `pids.max`）会通过。
+- 归因二（独立阻塞）：bubblewrap 0.11.1 不认识 `--no-new-privs`，启动即 `bwrap: Unknown option --no-new-privs`、exit 1。`buildBwrapArgv` 与 `buildDirectBwrapArgv` 都传了该参数，cgroup 修好后 Phase 1／2 仍会在 bwrap 启动阶段失败。bwrap 的 `main` 在解析参数之前就调用 `prctl(PR_SET_NO_NEW_PRIVS, 1)`（0.11.1 源码），该参数既无效也多余。
+- 决策：session cgroup 必须位于单元委派的子树内，与 Agent 自身 cgroup 共享 `<unit>` 作为最近公共祖先。
+  - 单元使用 `Delegate=yes`＋`DelegateSubgroup=agent`：systemd 把服务主进程放入 `<unit>/agent`，使 `<unit>` 成为没有内部进程的中间节点，可开启控制器；委派让 `aster-exec` 拥有该子树。
+  - `PTC_CGROUP_ROOT` 默认从 `/proc/self/cgroup` 推导为 `<unit>/ptc`；Agent 自己写入两级 `cgroup.subtree_control`（systemd 只让控制器可用，不替服务开启），并在每次创建 session 前幂等补写。无法推导出委派子组时，配置读取直接失败，要求显式指定，而不是选一个必然不可用的默认值。
+  - 旁挂根 `/sys/fs/cgroup/aster-ptc` 不可用于未提权服务，从 Runbook 移除。
+- 探针改为真实自迁移：`probeCgroup` 执行与生产相同的 `spawnInCgroup`（先把自身 PID 写入 `<root>/.probe-*`，再 exec），并继续写入 `pids.max`；失败原因进入 `--check` 的 `cgroupReason` 和启动错误信息，`cgroup: true` 才表示 Agent 真能把任务放进 session cgroup。
+- 验证：新增 `test/ptc-bwrap.test.ts` 固定隔离参数（含“不得出现 `--no-new-privs`／`--unshare-all`”）；`ptc-cgroup` 增加“只补写缺失控制器”“非 cgroup 目录在创建 session 前被拒绝”。真实双 VPS 需按新 Runbook 重新验收才能改判 PASS。

@@ -734,7 +734,7 @@ Phase 1／2 执行面配置（已实现）：
 | `PTC_SHARED_WORKSPACE_MODE` | `none` | `none`／`ro`／`rw`；Phase 2 直接模式要求 `rw` |
 | `PTC_DIRECT_ENABLED` | `0` | `1` 时开放 direct session（`execute` bash＋文件工具）；需要 `PTC_SHARED_WORKSPACE` |
 | `PTC_DIRECT_TMP_ROOT` | `/tmp/aster-direct` | 每个 direct session 的私有 `/tmp` 根 |
-| `PTC_CGROUP_ROOT` | `/sys/fs/cgroup/aster-ptc` | cgroup v2 子树 |
+| `PTC_CGROUP_ROOT` | `<单元 cgroup>/ptc`（由 `/proc/self/cgroup` 推导） | cgroup v2 子树；必须位于 systemd 委派的单元 cgroup 内，否则无法把 sandbox 迁入（最近公共祖先只读） |
 | `PTC_CGROUP_MEMORY_MAX_BYTES` | `536870912` | 512 MiB |
 | `PTC_CGROUP_PIDS_MAX` | `128` | 进程／线程上限 |
 | `PTC_CGROUP_CPU_MAX` | `200000 100000` | 2 核配额 |

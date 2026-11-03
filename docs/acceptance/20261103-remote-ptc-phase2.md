@@ -1,6 +1,6 @@
 # Remote PTC Phase 1／2 自动化验收记录（2026-11-03）
 
-- 状态：**自动化通过；真实双 VPS 首轮 FAIL（cgroup 入组顺序），修复后待复验**
+- 状态：**自动化通过；真实双 VPS 两轮 FAIL（cgroup 入组顺序、cgroup 委派位置与 bwrap 参数），修复后待复验**
 - 分支：`feat/remote-ptc-sandbox-phase1`
 - Phase 1 commit：`b82aaeb`
 - Phase 2 commit：`4c304d1`
@@ -13,8 +13,8 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npx tsc --noEmit -p tsconfig.json` | 0 |
-| `npx tsx --test test/*.test.ts`（Windows 11） | 366 tests，352 pass，0 fail，14 skipped |
-| 同一套件（GitHub Actions Linux，run `41578419369`） | 366 tests，358 pass，0 fail，8 skipped |
+| `npx tsx --test test/*.test.ts`（Windows 11） | 370 tests，356 pass，0 fail，14 skipped |
+| 同一套件（GitHub Actions Linux） | 待本轮 CI 记录 |
 
 Windows 的 14 个 skipped：8 个记忆库／部署文件权限类、Unix socket RPC、Windows 无法创建的符号链接用例、4 个依赖 `process.execve` 与 cgroup 的用例。Linux 上符号链接、Unix socket、远程 codemode 与 cgroup 入组用例实际执行并通过；剩余 8 个 skipped 是部署文件权限类用例，需要相应的宿主条件。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。
 
@@ -27,6 +27,15 @@ Windows 的 14 个 skipped：8 个记忆库／部署文件权限类、Unix socke
 - systemd 侧同时确认：`ProtectSystem=strict` 下需要 `ProtectHome=false`、`ProtectKernelTunables=false`、`ProtectControlGroups=false`，否则 `/home/aster` 不可见或 cgroupfs 只读。
 - 修复：先由 helper 把自身 PID 写入目标 cgroup，再 `execve` bwrap（PID／进程组／归属保留），入组确认后才让 sandbox 运行；失败即拒绝启动，不伪造成功。见 ADR-0020“cgroup 入组顺序修复”、Runbook 3.2／4.4。
 - 结论：首轮不能判定通过；验收主机已恢复 Phase 0 状态，未改动防火墙、安全组、Docker、SSH broker、Tool Registry、Journal 或 QuickJS。修复后的 commit 需按 Runbook 重新执行 16.2／16.3 才算通过。
+
+## 真实双 VPS 第二轮验收（2026-11-03，`415bb67`）：FAIL
+
+- 环境：同首轮（Ubuntu、systemd 259.5、bubblewrap 0.11.1、Node v24.19.0）；cgroup 根仍是 `/sys/fs/cgroup/aster-ptc`，两级 `subtree_control` 由 root 开启；`rpc-main --check` 通过，`health.isolation` 为 bwrap／userns／cgroup v2／none。
+- Phase 1：首次 `vm.start` 失败，`code: internal`、`outcome: not_started`：`the sandbox process could not be accounted for: EACCES: permission denied, write`。Phase 2：首次 direct `session.open` 同样失败。
+- 归因 A：迁移顺序已正确（helper 先入组再 exec），但位置错误。内核在迁移任务时还要求写者拥有源与目标最近公共祖先的 `cgroup.procs` 权限；Agent 在 `system.slice/aster-rpc-agent.service`，目标在 `/sys/fs/cgroup/aster-ptc/<session>`，公共祖先是 root 拥有的 `/sys/fs/cgroup`（`0644`），因此 `EACCES`。Runbook 旧版的自迁移探针也复现失败（`sh: 1: echo: echo: I/O error`），而旧 `--check` 只建目录、写 `pids.max`，无法发现这一点。
+- 归因 B（独立阻塞）：bubblewrap 0.11.1 不支持 `--no-new-privs`，`bwrap: Unknown option --no-new-privs`、exit 1；两个 argv 构造器都传了该参数，cgroup 修好后仍会在 bwrap 启动阶段失败。bwrap 在解析参数前自行设置 `PR_SET_NO_NEW_PRIVS`（0.11.1 源码第 2915 行），参数无效且多余。
+- 修复：session cgroup 根迁到单元委派子树（`Delegate=yes`＋`DelegateSubgroup=agent`，默认 `<unit>/ptc`）；Agent 自己开启两级 `subtree_control`；`--check` 改为执行真实自迁移并把内核原因写进 `cgroupReason`；移除 `--no-new-privs` 并新增 `test/ptc-bwrap.test.ts` 固定隔离参数。见 ADR-0020“第二轮失败与 cgroup 委派模型修正”、Runbook 3.2／4.4。
+- 结论：第二轮仍不能判定通过。修正后的 head 需按新 Runbook 重新执行 16.2／16.3；首轮与第二轮共用同一套验收记录，不重复记录已恢复的 Phase 0 证据。
 
 ## Phase 1：远程 PTC
 
