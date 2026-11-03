@@ -1,6 +1,6 @@
 # Remote PTC Phase 1／2 自动化验收记录（2026-11-03）
 
-- 状态：**自动化通过；真实双 VPS 两轮 FAIL（cgroup 入组顺序、cgroup 委派位置与 bwrap 参数），修复后待复验**
+- 状态：**自动化通过；静态复核修复了 5 个实现缺陷与 8 个 Runbook 缺陷；真实双 VPS 两轮 FAIL（cgroup 入组顺序、cgroup 委派位置与 bwrap 参数），修复后待复验**
 - 分支：`feat/remote-ptc-sandbox-phase1`
 - Phase 1 commit：`b82aaeb`
 - Phase 2 commit：`4c304d1`
@@ -13,8 +13,9 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npx tsc --noEmit -p tsconfig.json` | 0 |
-| `npx tsx --test test/*.test.ts`（Windows 11） | 370 tests，356 pass，0 fail，14 skipped |
-| 同一套件（GitHub Actions Linux） | 待本轮 CI 记录 |
+| `npx tsx --test test/*.test.ts`（Windows 11，`71d94c1` 之前的 head） | 370 tests，356 pass，0 fail，14 skipped |
+| 同一套件（Windows 11，含静态修复） | 374 tests，360 pass，0 fail，14 skipped |
+| 同一套件（GitHub Actions Linux，`71d94c1`） | 371 tests，363 pass，0 fail，8 skipped（run `41583892171`） |
 
 Windows 的 14 个 skipped：8 个记忆库／部署文件权限类、Unix socket RPC、Windows 无法创建的符号链接用例、4 个依赖 `process.execve` 与 cgroup 的用例。Linux 上符号链接、Unix socket、远程 codemode 与 cgroup 入组用例实际执行并通过；剩余 8 个 skipped 是部署文件权限类用例，需要相应的宿主条件。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。
 
@@ -36,6 +37,23 @@ Windows 的 14 个 skipped：8 个记忆库／部署文件权限类、Unix socke
 - 归因 B（独立阻塞）：bubblewrap 0.11.1 不支持 `--no-new-privs`，`bwrap: Unknown option --no-new-privs`、exit 1；两个 argv 构造器都传了该参数，cgroup 修好后仍会在 bwrap 启动阶段失败。bwrap 在解析参数前自行设置 `PR_SET_NO_NEW_PRIVS`（0.11.1 源码第 2915 行），参数无效且多余。
 - 修复：session cgroup 根迁到单元委派子树（`Delegate=yes`＋`DelegateSubgroup=agent`，默认 `<unit>/ptc`）；Agent 自己开启两级 `subtree_control`；`--check` 改为执行真实自迁移并把内核原因写进 `cgroupReason`；移除 `--no-new-privs` 并新增 `test/ptc-bwrap.test.ts` 固定隔离参数。见 ADR-0020“第二轮失败与 cgroup 委派模型修正”、Runbook 3.2／4.3。
 - 结论：第二轮仍不能判定通过。修正后的 head 需按新 Runbook 重新执行 16.2／16.3；首轮与第二轮共用同一套验收记录，不重复记录已恢复的 Phase 0 证据。
+
+## 静态复核修复（基于 `71d94c1` 的缺陷报告）
+
+报告见外部审阅记录（BUG-1..BUG-6、RB-1..RB-8）。逐条核对后处理如下：
+
+| 项 | 结论 | 修复与覆盖 |
+| --- | --- | --- |
+| BUG-1 帧 payload 错误断连 | 属实 | 解析器把“帧外壳合法、payload 非法”表示为请求级 `payloadError`，`RpcServer` 用原请求 id 应答并保留连接；只有外壳错误才关闭连接。`test/execution-rpc.test.ts` 覆盖分类，`test/direct-rpc.test.ts` 覆盖同一连接在负向用例后仍可用 |
+| BUG-2 16 hex sessionId 被报成 `internal` | 属实，但错误发生在 `vm.start`／`spawnRunner` 的 cgroup 创建，不是 `session.open` | `openSession` 在带 `jobId` 时先校验 16 hex 并返回 `invalid_request`；`spawnRunner` 保留 `PtcHostError`，不再包成 `internal`。`test/ptc-rpc.test.ts` 覆盖 |
+| BUG-3 根内绝对虚拟链接 `file.canonical` 返回 `not_found` | 属实 | 文件服务改为逐组件解析：同根内的绝对虚拟链接目标映射回宿主树，跨根或逃逸目标拒绝。`test/ptc-files.test.ts` 覆盖虚拟绝对链接、悬空链接与跨根链接 |
+| BUG-4 `workspace_missing` 仍创建空 job 目录 | 属实 | 先校验既有 job 目录，不再无条件 `mkdir`；`workspaceReady: true` 且 workspace 缺失时直接失败。新增 `test/ptc-workspace.test.ts` |
+| BUG-5 错误 `callId` 的 `vm.reply` 被静默接受 | 属实 | `RpcServer`（wire 契约）与 `PtcExecutor`（runner 状态）都只接受 VM 当前等待的调用；投递成功后只清除被消费的 id，避免清除同一 await 中新到达的下一次调用。`test/ptc-rpc.test.ts` 覆盖 |
+| BUG-6 沙箱内 `hostname` 为空 | **未证实** | 报告中“fd 1 被关闭”的推断与代码不符：`executeLocalBash` 与 DirectExecutor 都用 `stdio: ["ignore","pipe","pipe"]`，入组 helper 只关闭 fd 3，没有路径关闭 fd 1；报告自身的证据也互相矛盾（直接 `hostname` 可用，重定向到文件为 0 字节）。根因未定位，未修改实现；Runbook 改用 `uname -n` 并把空身份判为失败，实机复验时单独记录 |
+
+Runbook 同步修复（RB-1..RB-8）：PTC sessionId（含重放）改为独立 16 hex；`done.value` 先 `JSON.parse` 再处理；身份判据改用 `uname -n` 并断言非空；网络结果解析两层；客户端只回传 32 KiB 有界尾部；cgroup 探针加 `set -e`，失败不得打印成功标记；负向用例与 `file.canonical` 期望和实现对齐，并检查连接仍可用；§6.5 明确 `workspace_missing` 不重建 job 目录。
+
+归因更正两条：BUG-2 的 `internal` 来自 `vm.start` 的 cgroup 创建路径，改在 `session.open` 校验才能真正给出 `invalid_request`；BUG-6 的 fd-1 假设不成立，保持“未证实”。
 
 ## Phase 1：远程 PTC
 
@@ -62,7 +80,7 @@ Windows 的 14 个 skipped：8 个记忆库／部署文件权限类、Unix socke
 | 原子写入与上限 | `test/ptc-files.test.ts`：写入后目录只保留目标文件，失败不留临时文件；写 >2 MiB、读文本 >2 MiB 显式拒绝，超限在发送前拦截 |
 | 句柄隔离 | `test/ptc-files.test.ts`：句柄只属于打开它的 session，关闭或跨 session 访问返回 `not_found` |
 | 嵌套文件工具 | `test/ptc-control.test.ts`：PTC 环境把 `readText`／`write` 交给 session，虚拟路径跨线，主机路径不出现 |
-| 协议边界 | `test/execution-rpc.test.ts`：Phase 0 agent 对 bash `execute` 与 `tool.call` 仍返回 `not_implemented`；格式非法的 bash 载荷在帧解析阶段被拒绝 |
+| 协议边界 | `test/execution-rpc.test.ts`：Phase 0 agent 对 bash `execute` 与 `tool.call` 仍返回 `not_implemented`；非法 bash 载荷作为请求级 `payloadError` 分类（`invalid_request`／`permission_denied`），连接不因此关闭 |
 
 ## 未覆盖与下一步
 

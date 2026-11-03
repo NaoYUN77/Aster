@@ -649,9 +649,11 @@ bwrap \
 | 预检失败（TLS／证书） | Agent 或 Gateway 启动失败，不降级到明文 |
 | 预检失败（bwrap／userns） | Phase 1 默认启动失败；显式 `PTC_ALLOW_DEGRADED=1` 才进入 `degraded-prlimit` |
 | cgroup 不可用 | bwrap 仍在；资源限制降级到 `prlimit`，记录 |
-| `workspace_missing` | 已初始化 job 在重放时找不到 workspace；显式失败，不创建空目录 |
+| `workspace_missing` | 已初始化 job 在重放时找不到 workspace；显式失败，不创建空目录（也不创建 job 父目录） |
 | `busy` | 并发 session 或请求超限；显式拒绝，不排队 |
-| `protocol_error` | 未知帧／字段／版本／id 错配；关闭连接，不执行 |
+| `invalid_request`（payload 级） | 帧外壳合法但参数非法（未知项、`cwd`／`tool` 不符、NUL／相对路径、PTC sessionId 非 16 hex、`vm.reply` 的 `callId` 不是 VM 当前等待的调用）：以该请求的 id 返回错误，`outcome: "not_started"`，连接保持可用 |
+| `permission_denied`（payload 级） | 虚拟路径中的 `..` 越界，或符号链接指向根外／另一个根：请求级拒绝，连接保持可用 |
+| `protocol_error`（帧外壳级） | 未知帧类型／字段／版本、无法解析的帧、超大帧、id 错配：关闭连接，不执行 |
 | RPC 连接断开 | 在途请求结果未知；执行类 `outcome: "unknown"`；不自动重跑 |
 | 脚本超时 | 关闭 session、强杀 VM 和命令进程组；返回 timeout |
 | 请求取消 | 返回 aborted；外部副作用按未知记录 |
@@ -874,7 +876,7 @@ npm run execution:rpc-e2e
 - 10 MiB 输出：模型可见结果 ≤ 32 KiB／1000 行；`NestedCallDoc` 只有有界尾部；SQLite 无完整输出；`OutputRef` 有效；缺失时 `output_unavailable`。
 - 大输出过滤与 Token 对比：按第 11.5 节记录 transcript 字节／估算 token 和下降比例。
 - 预算：超过 `CODEMODE_MAX_TOOL_CALLS` 或 `CODEMODE_MAX_JOURNAL_BYTES` 时拒绝后续调用并产生诊断。
-- 协议：未知帧、超大帧、错误 sessionId／callId、错误版本均关闭连接且不执行。
+- 协议：帧外壳错误（未知帧类型／字段、超大帧、错误版本）关闭连接且不执行；合法帧的 payload 错误（错误 `sessionId`／`callId`、越界路径、错误 `cwd`／`tool`）以该请求的 id 返回 `invalid_request`／`permission_denied`，连接保持可用。错误 `callId` 的 `vm.reply` 不得被当成已投递。
 
 ### 16.3 Phase 2
 

@@ -28,7 +28,7 @@ npm run build
 npm test
 ```
 
-预期：三个命令退出码为 0，测试为 0 fail。Windows 会跳过依赖 POSIX 符号链接、Unix socket 与 `process.execve` 的用例；不得把跳过当作通过。当前基线：Windows 366 tests、352 pass、0 fail、14 skipped；Linux CI（run `41578419369`）366 tests、358 pass、0 fail、8 skipped，符号链接、Unix socket 与 cgroup 预入组用例均实际执行。远程 codemode 用例已改为 direct-session 拓扑，在所有平台运行。
+预期：三个命令退出码为 0，测试为 0 fail。Windows 会跳过依赖 POSIX 符号链接、Unix socket 与 `process.execve` 的用例；不得把跳过当作通过。当前 Windows 基线（含本分支修复）：374 tests、360 pass、0 fail、14 skipped；Linux CI 在上一 head `71d94c1` 上为 371 tests、363 pass、0 fail、8 skipped（run `41583892171`），符号链接、Unix socket 与 cgroup 预入组用例均实际执行。远程 codemode 用例已改为 direct-session 拓扑，在所有平台运行。
 
 ## 2. 部署位置与拓扑
 
@@ -237,17 +237,19 @@ journalctl -u aster-rpc-agent -n 50 --no-pager
 单元第一次启动后，单元 cgroup 与 `ptc` 目录才存在。这时可以按生产路径手工复验一次自迁移：
 
 ```sh
-sudo -u aster-exec sh -c '
+sudo -u aster-exec sh -eu -c '
   unit=/sys/fs/cgroup/system.slice/aster-rpc-agent.service
   d=$unit/ptc/acceptance-probe
   mkdir -p "$d"
   echo 8 > "$d/pids.max"
   # 与运行时相同：进程在 exec 之前把自己的 PID 写入 cgroup.procs。
-  sh -c "echo \$\$ > $d/cgroup.procs"
+  sh -euc "echo \$\$ > $d/cgroup.procs"
   rmdir "$d"
   echo cgroup-probe-ok
 '
 ```
+
+`-e` 让任一前提失败（目录不可写、`pids.max` 写不进、迁移被拒、目录残留）在打印 `cgroup-probe-ok` 之前以非零退出；看到 `cgroup-probe-ok` 才说明探针成功，不要把错误输出和成功标记一起抄进证据。若 `rmdir` 报 `Device or resource busy`，说明进程仍留在该 cgroup，按 3.2 检查委派与入组顺序。
 
 ### 4.4 配置检查
 
@@ -350,7 +352,7 @@ CODEMODE_ENABLED=1
 mkdir -p /root/aster-accept
 ```
 
-把脚本保存为 `/root/aster-accept/phase1.mjs`。`jobId` 使用固定的验收值，便于在证据中引用；不要复用真实会话的 jobId。
+把脚本保存为 `/root/aster-accept/phase1.mjs`。`jobId` 使用固定的验收值，便于在证据中引用；不要复用真实会话的 jobId。PTC sessionId 同时是 cgroup 目录名，必须是 16 个小写十六进制字符（`/^[a-f0-9]{16}$/`）；带 `jobId` 的 `session.open` 传入其他格式会得到 `invalid_request`，重放 session 也要单独生成一个 16 hex id（不能拼接后缀）。direct session 没有这个格式限制。
 
 ```js
 import { randomBytes } from "node:crypto";
@@ -358,7 +360,8 @@ import { readRpcClientConfig } from "/opt/aster/dist/src/execution/rpc-config.js
 import { connectRpcClient } from "/opt/aster/dist/src/execution/rpc-connect.js";
 
 const client = await connectRpcClient(readRpcClientConfig());
-const sessionId = `acc-${randomBytes(4).toString("hex")}`;
+const sessionId = randomBytes(8).toString("hex");
+const replaySessionId = randomBytes(8).toString("hex");
 const jobId = `ptc-${"1".repeat(32)}`;
 const report = {};
 const toolResults = [];
@@ -374,9 +377,20 @@ const callArgs = (command) => ({
   window: { maxBytes: 32 * 1024, maxLines: 1_000, minIntervalMs: 0, bytesPerSecond: 0 },
 });
 
-function startScript(code) {
+// `done.value` 是脚本返回值的 JSON 文本（stringify），所以字符串返回值要解析一次才拿到原文。
+// 只保留有界尾部：模型可见窗口是 32 KiB，回传完整 10 MiB 会直接违反下面的可见长度断言。
+const MAX_VISIBLE_BYTES = 32 * 1024;
+function tailBytes(text, max) {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= max) return text;
+  let start = buf.length - max;
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
+  return buf.subarray(start).toString("utf8");
+}
+
+function startScript(code, scriptSessionId = sessionId) {
   terminal = undefined;
-  return client.startVm(sessionId, { request: { data: {
+  return client.startVm(scriptSessionId, { request: { data: {
     code,
     tools: [{ name: "bash", jsName: "bash", description: "Run a command" }],
     globals: [],
@@ -390,14 +404,14 @@ function startScript(code) {
       const call = event.messages.find((message) => message.type === "call" && message.id === event.callId);
       if (call === undefined) return;
       const args = JSON.parse(String(call.args));
-      const chunks = [];
-      const tool = client.startToolCall(sessionId, {
+      let tail = "";
+      const tool = client.startToolCall(scriptSessionId, {
         tool: "bash",
         callId: event.callId,
         args: callArgs(args.command),
       }, {
         deadlineMs: 120_000,
-        onToolOutput: (chunk) => chunks.push(chunk.text),
+        onToolOutput: (chunk) => { tail = tailBytes(tail + chunk.text, MAX_VISIBLE_BYTES); },
       });
       void tool.result.then(
         (result) => {
@@ -407,15 +421,15 @@ function startScript(code) {
             spillTruncated: result.spillTruncated,
             exitCode: result.exitCode,
           });
-          return client.replyVm(sessionId, {
+          return client.replyVm(scriptSessionId, {
             callId: event.callId,
             reply: {
               type: "result", id: event.callId, ok: true,
-              payload: JSON.stringify({ output: chunks.join(""), exitCode: result.exitCode }),
+              payload: JSON.stringify({ output: tail, exitCode: result.exitCode }),
             },
           });
         },
-        (error) => client.replyVm(sessionId, {
+        (error) => client.replyVm(scriptSessionId, {
           callId: event.callId,
           reply: { type: "result", id: event.callId, ok: false, payload: String(error?.message ?? error) },
         }),
@@ -448,14 +462,18 @@ try {
   const ten = startScript(`
     const values = [];
     for (let i = 0; i < 10; i++) {
-      const result = await tools.bash({ command: "hostname" });
+      const result = await tools.bash({ command: "uname -n" });
       values.push(String(result.output).trim());
     }
     return values.join(",");
   `);
   await ten.result;
   if (terminal?.ok !== true) fail(`the ten-call script failed: ${String(terminal?.value)}`);
-  report.hostnames = String(terminal.value).split(",");
+  const hostnamesText = JSON.parse(String(terminal.value));
+  if (typeof hostnamesText !== "string") fail("the ten-call script did not return a string");
+  report.hostnames = hostnamesText.split(",");
+  if (report.hostnames.length !== 10) fail("the ten-call script did not return ten values");
+  if (report.hostnames.some((name) => name.length === 0)) fail("a sandbox identity came back empty");
   if (new Set(report.hostnames).size !== 1) fail("the ten bash calls did not all return the same hostname");
 
   const net = startScript(`
@@ -465,7 +483,10 @@ try {
   `);
   await net.result;
   if (terminal?.ok !== true) fail(`the network script failed: ${String(terminal?.value)}`);
-  report.network = JSON.parse(String(terminal.value));
+  // 脚本返回 JSON.stringify(...)（字符串），`done.value` 又是该字符串的 JSON 文本，所以要解析两层。
+  const networkText = JSON.parse(String(terminal.value));
+  if (typeof networkText !== "string") fail("the network script did not return a JSON string");
+  report.network = JSON.parse(networkText);
   if (!/^\s*lo:/m.test(report.network.dev)) fail("/proc/net/dev does not contain lo");
   if (/\b(eth|ens|enp|docker|veth)[0-9]/m.test(report.network.dev)) fail("/proc/net/dev shows a non-loopback interface");
   if (report.network.route.trim().split("\n").length > 1) fail("/proc/net/route is not empty beyond the header");
@@ -475,37 +496,47 @@ try {
     return String(first.output);
   `);
   await write.result;
-  if (terminal?.ok !== true || String(terminal.value).trim() !== "reusable") fail("the workspace write failed");
+  if (terminal?.ok !== true) fail(`the workspace write failed: ${String(terminal?.value)}`);
+  if (JSON.parse(String(terminal.value)).trim() !== "reusable") fail("the workspace write did not round-trip");
 
   report.tenCallConnection = "one RPC connection; verify with ss on the control plane and the agent session count";
   await client.closeSession(sessionId);
 
-  const reopened = await client.openSession(`${sessionId}-replay`, { jobId, workspaceReady: true });
+  const reopened = await client.openSession(replaySessionId, { jobId, workspaceReady: true });
   report.replayWorkspace = reopened.workspaceReady;
   if (reopened.workspaceReady?.reused !== true) fail("the same jobId did not reuse its workspace");
-  await client.closeSession(`${sessionId}-replay`);
+  await client.closeSession(replaySessionId);
 
+  // 重放 session 已关闭；后续脚本继续使用原 sessionId 会得到 not_found，所以再开一个同 job 的 session。
+  const bigSessionId = randomBytes(8).toString("hex");
+  report.bigSessionId = bigSessionId;
+  await client.openSession(bigSessionId, { jobId, workspaceReady: true });
   const big = startScript(`
     const result = await tools.bash({ command: "head -c 10485760 /dev/zero | tr '\\0' x" });
     return String(result.output.length);
-  `);
+  `, bigSessionId);
   await big.result;
   if (terminal?.ok !== true) fail(`the 10 MiB script failed: ${String(terminal?.value)}`);
+  const visibleLength = Number(JSON.parse(String(terminal.value)));
+  if (!Number.isSafeInteger(visibleLength)) fail("the 10 MiB script did not return a length");
   const bigCall = toolResults.at(-1);
   report.bigOutput = {
-    visibleLength: Number(terminal.value),
+    visibleLength,
     outputRef: bigCall?.outputRef ?? null,
     spillTruncated: bigCall?.spillTruncated,
   };
+  // 客户端只回传有界尾部，脚本收到的长度必须落在 32 KiB 窗口内。
+  if (visibleLength > MAX_VISIBLE_BYTES) fail("the model-visible result exceeded the window");
   if (bigCall?.outputRef === null || bigCall?.outputRef === undefined) fail("the 10 MiB call produced no OutputRef");
   if (bigCall.outputRef.jobId !== jobId) fail("the OutputRef names another job");
   if (bigCall.outputRef.size !== 10 * 1024 * 1024) fail("the OutputRef size is not the full output size");
   if (bigCall.spillTruncated !== false) fail("the output was truncated instead of spilled");
-  if (report.bigOutput.visibleLength > 32 * 1024) fail("the model-visible result exceeded the window");
 
   console.log(JSON.stringify({ status: "ok", ...report }, null, 2));
 } finally {
   await client.closeSession(sessionId).catch(() => undefined);
+  await client.closeSession(replaySessionId).catch(() => undefined);
+  await client.closeSession(report.bigSessionId ?? "").catch(() => undefined);
   await client.close();
 }
 ```
@@ -520,9 +551,9 @@ node /root/aster-accept/phase1.mjs
 
 - `status` 为 `ok`。
 - `health.phase` 为 `2`，`isolation.cgroup` 为 `"v2"`，`network` 为 `"none"`。
-- `hostnames` 的 10 个值相同，且等于执行 VPS 的 `hostname`；与控制面主机名不同。
+- `hostnames` 恰好 10 个、全部非空且相同，用 `uname -n` 取值（`hostname` 在沙箱内可能为空，不能作为身份判据）；再与执行 VPS 的 `uname -n` 对比，且与控制面不同。`ledger` 中这类空值必须判失败，不能当成“一致”。
 - `network.dev` 只有 `lo`；`network.route` 除表头外为空。
-- `workspace.created === true`；重开同一 jobId 时 `workspace.reused === true`。
+- `workspace.created === true`；重开同一 jobId 时 `workspace.reused === true`。重放使用独立的 16 hex sessionId，不是带后缀的字符串。
 - 运行期间在控制面执行 `ss -tnp dport = :9443`，只看到一条到执行面的连接用于该脚本；在 Agent 侧 `journalctl` 或 `ss` 中不应出现每个 bash 调用一条新连接。
 
 ### 6.2 输出上限与 `OutputRef`
@@ -584,18 +615,20 @@ ls /sys/fs/cgroup/system.slice/aster-rpc-agent.service/ptc
    ```
 
 3. 重新打开同一 `jobId` 且 `workspaceReady: true`。
+4. 确认 `/home/aster/jobs/ptc-22222222222222222222222222222222` 没有被重建（`test -e` 必须为假）。
 
-预期：返回 `workspace_missing`，不会创建空目录继续执行。验收记录必须写明这是有意删除的验收 job。
+预期：返回 `workspace_missing`，`outcome` 为 `not_started`，既不创建 `<jobId>/workspace`，也不创建父目录 `<jobId>`；不会以空目录继续执行。验收记录必须写明这是有意删除的验收 job。
 
 ### 6.6 协议负向
 
-- 未知帧字段、错误协议版本、超大帧：连接关闭，不执行。
-- 错误 `sessionId` 或 `callId`：请求失败，不产生嵌套执行。
+- 未知帧字段、错误协议版本、超大帧、无法解析的 JSON：帧外壳无效，连接关闭，不执行。
+- 合法帧但 payload 非法（未知项、`..` 越界、NUL／相对路径、错误 `cwd`／`tool`）：请求级错误，`invalid_request` 或 `permission_denied`，连接保持可用；随后同一连接上的 `health.check` 必须成功。不能把请求参数错误当成传输错误而断开整条连接。
+- 错误 `sessionId`（含带 `jobId` 的非 16 hex PTC id）或错误 `callId`：请求失败，`outcome` 为 `not_started`，不产生嵌套执行。
 - `tool.call` 的 `cwd` 不是 `/workspace`：`invalid_request`。
 - 非 `bash` 的 `tool`：`invalid_request`。
 - 同一脚本内超过 `CODEMODE_MAX_TOOL_CALLS`／`CODEMODE_MAX_JOURNAL_BYTES`：后续调用被拒绝并产生诊断，不静默截断。
 
-这些在自动化测试中已有覆盖；实机至少复核一条错误 `callId` 和一条错误 `cwd`。
+这些在自动化测试中已有覆盖；实机至少复核一条错误 `callId`、一条错误 `cwd`，并确认两次负向之后连接仍能完成 `health.check`。
 
 ## 7. Phase 2 验收（direct RPC bash 与文件原语）
 
@@ -609,8 +642,9 @@ import { readRpcClientConfig } from "/opt/aster/dist/src/execution/rpc-config.js
 import { connectRpcClient } from "/opt/aster/dist/src/execution/rpc-connect.js";
 
 const client = await connectRpcClient(readRpcClientConfig());
-const sessionId = `acc-direct-${randomBytes(4).toString("hex")}`;
-const otherId = `${sessionId}-b`;
+// direct session 不建 cgroup，没有 16 hex 限制；仍统一用 16 hex，便于同一脚本改开 PTC session。
+const sessionId = randomBytes(8).toString("hex");
+const otherId = randomBytes(8).toString("hex");
 const report = {};
 
 const fail = (message) => { throw new Error(message); };
@@ -660,9 +694,13 @@ try {
   const setup = await command({ command: "mkdir -p /shared/acceptance", cwd: "/shared" });
   if (setup.exitCode !== 0) fail(`mkdir failed: ${setup.output}`);
 
-  const identity = await command({ command: "printf '%s\\n%s\\n' \"$(hostname)\" \"$(pwd)\"" });
-  report.identity = identity.output.trim().split("\n");
+  // `hostname` 在沙箱内可能为空，身份判据用 uname -n；空值必须判失败。
+  const identity = await command({ command: "printf '%s\\n%s\\n' \"$(uname -n)\" \"$(pwd)\"" });
   if (identity.exitCode !== 0) fail("identity command failed");
+  report.identity = identity.output.trim().split("\n");
+  if (report.identity.length !== 2 || report.identity.some((value) => value.length === 0)) {
+    fail("the sandbox identity or cwd came back empty");
+  }
 
   const net = await command({ command: "cat /proc/net/dev" });
   if (!/^\s*lo:/m.test(net.output)) fail("/proc/net/dev does not contain lo");
@@ -672,6 +710,8 @@ try {
   await expectCode(client.fileRequest(sessionId, "file.readText", { path: "/shared/../etc/passwd" }), "permission_denied");
   await expectCode(client.fileRequest(sessionId, "file.readText", { path: "/shared/a\0.txt" }), "invalid_request");
   await expectCode(client.fileRequest(sessionId, "file.readText", { path: "passwd" }), "invalid_request");
+  // payload 错误是请求级的：同一条连接必须还能服务请求，不能被负向用例打断。
+  await client.health();
 
   const written = await client.fileRequest(sessionId, "file.write", {
     path: "/shared/acceptance/hello.txt",
@@ -702,12 +742,16 @@ try {
   if (!Buffer.concat(chunks).equals(bytes)) fail("the chunked read did not reconstruct the file");
   await client.fileRequest(sessionId, "file.close", { handle: openedFile.handle });
 
-  await command({ command: "printf target > /shared/acceptance/target.txt && ln -sfn /etc/passwd /shared/acceptance/escape-link && ln -sfn /shared/acceptance/target.txt /shared/acceptance/inside-link" });
+  await command({ command: "printf target > /shared/acceptance/target.txt && ln -sfn /etc/passwd /shared/acceptance/escape-link && ln -sfn /shared/acceptance/target.txt /shared/acceptance/inside-link && ln -sfn /tmp/cross-root.txt /shared/acceptance/cross-root-link" });
   await expectCode(client.fileRequest(sessionId, "file.readText", { path: "/shared/acceptance/escape-link" }), "permission_denied");
+  await expectCode(client.fileRequest(sessionId, "file.readText", { path: "/shared/acceptance/cross-root-link" }), "permission_denied");
   await expectCode(client.fileRequest(sessionId, "file.open", { path: "/shared/acceptance/escape-link", noFollow: true }), "invalid_request");
   await expectCode(client.fileRequest(sessionId, "file.open", { path: "/shared/acceptance/inside-link", noFollow: true }), "invalid_request");
+  // 根内绝对虚拟路径的链接按虚拟路径解析，返回虚拟路径而非宿主机路径。
   const canonical = await client.fileRequest(sessionId, "file.canonical", { path: "/shared/acceptance/inside-link" });
   if (canonical.path !== "/shared/acceptance/target.txt") fail("a link inside the root was not resolved");
+  const inside = await client.fileRequest(sessionId, "file.readText", { path: "/shared/acceptance/inside-link" });
+  if (Buffer.from(inside.data, "base64").toString("utf8") !== "target") fail("a link inside the root did not read its target");
 
   await client.fileRequest(sessionId, "file.write", {
     path: "/shared/acceptance/atomic.txt",
@@ -747,9 +791,10 @@ node /root/aster-accept/phase2.mjs
 检查：
 
 - `session.direct.sharedMode === "rw"`，`session.direct.workspace === "/shared"`。
-- `identity[0]` 是执行 VPS 主机名，`identity[1]` 是 `/shared/acceptance`；说明命令确实在远端，且 cwd 已固定。
+- `identity[0]` 是执行 VPS 的 `uname -n`（非空），`identity[1]` 是 `/shared/acceptance`；说明命令确实在远端，且 cwd 已固定。`hostname` 为空不算通过。
 - `/proc/net/dev` 只有 `lo`；direct sandbox 的网络也为空。
-- 越界、`..`、NUL、相对路径全部被拒绝，错误码与表一致；`/shared` 下的符号链接逃逸为 `permission_denied`，`noFollow` 打开的链接本身为 `invalid_request`。
+- 越界、`..`、NUL、相对路径全部被拒绝，错误码与表一致；`/shared` 下的符号链接逃逸为 `permission_denied`，跨根虚拟链接同样拒绝，`noFollow` 打开的链接本身为 `invalid_request`；根内绝对虚拟链接的 `file.canonical` 返回虚拟路径，`file.readText` 读到目标内容。
+- 四条负向用例之后 `client.health()` 仍成功：payload 错误不关闭连接。若这里失败，先怀疑 BUG-1 类回归。
 - 300 KiB 文件被拆成至少 2 次读取，`nextOffset` 连续，重组后字节一致。
 - 写入后目录中没有 `.aster-tmp-*` 残留。
 - `timeoutOutcome === "unknown"`；随后在 Agent 主机确认没有残留 `sleep 30`／bwrap／runner，cgroup 子目录已删除。
