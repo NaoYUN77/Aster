@@ -27,6 +27,10 @@ async function startEchoUpstream(): Promise<{ port: number; server: Server }> {
   return { port: (server.address() as AddressInfo).port, server };
 }
 
+function stopServer(server: Server): Promise<void> {
+  return new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
 function upstreamConnector(port: number): () => Promise<Duplex> {
   return () => new Promise<Duplex>((resolve, reject) => {
     const socket = connect(port, "127.0.0.1");
@@ -45,42 +49,45 @@ async function openClient(socketPath: string): Promise<Socket> {
 test("the gateway relays bytes between the app socket and the upstream", { skip: !posix }, async (t) => {
   const socketPath = await temporarySocket(t);
   const { port, server } = await startEchoUpstream();
-  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const gateway = await startRpcGateway({ socketPath, maxConnections: 4, connectUpstream: upstreamConnector(port) });
-  t.after(() => gateway.close());
-
   const client = await openClient(socketPath);
-  t.after(() => client.destroy());
-  client.write("ping");
-  const [data] = await once(client, "data") as [Buffer];
-  assert.equal(data.toString(), "ping");
-  client.write("pong");
-  const [second] = await once(client, "data") as [Buffer];
-  assert.equal(second.toString(), "pong");
+  try {
+    client.write("ping");
+    const [data] = await once(client, "data") as [Buffer];
+    assert.equal(data.toString(), "ping");
+    client.write("pong");
+    const [second] = await once(client, "data") as [Buffer];
+    assert.equal(second.toString(), "pong");
+  } finally {
+    client.destroy();
+    await gateway.close();
+    await stopServer(server);
+  }
 });
 
 test("a connection beyond the limit is closed without reaching the upstream", { skip: !posix }, async (t) => {
   const socketPath = await temporarySocket(t);
   const { port, server } = await startEchoUpstream();
-  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const gateway = await startRpcGateway({ socketPath, maxConnections: 1, connectUpstream: upstreamConnector(port) });
-  t.after(() => gateway.close());
-
   const first = await openClient(socketPath);
-  t.after(() => first.destroy());
-  first.write("first");
-  const [echo] = await once(first, "data") as [Buffer];
-  assert.equal(echo.toString(), "first");
+  try {
+    first.write("first");
+    const [echo] = await once(first, "data") as [Buffer];
+    assert.equal(echo.toString(), "first");
 
-  const second = await openClient(socketPath);
-  second.on("error", () => undefined);
-  second.write("second");
-  await once(second, "close");
+    const second = await openClient(socketPath);
+    second.write("second");
+    await once(second, "close");
 
-  // The rejected connection must not have displaced the first tunnel.
-  first.write("still-here");
-  const [again] = await once(first, "data") as [Buffer];
-  assert.equal(again.toString(), "still-here");
+    // The rejected connection must not have displaced the first tunnel.
+    first.write("still-here");
+    const [again] = await once(first, "data") as [Buffer];
+    assert.equal(again.toString(), "still-here");
+  } finally {
+    first.destroy();
+    await gateway.close();
+    await stopServer(server);
+  }
 });
 
 test("an upstream failure closes the app connection", { skip: !posix }, async (t) => {
@@ -90,12 +97,14 @@ test("an upstream failure closes the app connection", { skip: !posix }, async (t
     maxConnections: 2,
     connectUpstream: async () => Promise.reject(new Error("upstream refused")),
   });
-  t.after(() => gateway.close());
-
   const client = await openClient(socketPath);
-  client.on("error", () => undefined);
-  client.write("hello");
-  await once(client, "close");
+  try {
+    client.write("hello");
+    await once(client, "close");
+  } finally {
+    client.destroy();
+    await gateway.close();
+  }
 });
 
 test("close removes the socket and a second start can reuse the path", { skip: !posix }, async (t) => {
@@ -113,8 +122,11 @@ test("close removes the socket and a second start can reuse the path", { skip: !
     maxConnections: 1,
     connectUpstream: async () => new PassThrough() as Duplex,
   });
-  t.after(() => second.close());
-  await access(socketPath);
+  try {
+    await access(socketPath);
+  } finally {
+    await second.close();
+  }
 });
 
 test("a regular file at the socket path is never deleted", { skip: !posix }, async (t) => {
