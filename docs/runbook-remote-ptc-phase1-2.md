@@ -630,6 +630,23 @@ ls /sys/fs/cgroup/system.slice/aster-rpc-agent.service/ptc
 
 这些在自动化测试中已有覆盖；实机至少复核一条错误 `callId`、一条错误 `cwd`，并确认两次负向之后连接仍能完成 `health.check`。
 
+### 6.7 沙箱身份与 fd 诊断（BUG-6 待查）
+
+静态复核中有一条**未证实**的观察：沙箱内 `hostname` 返回空，而 `uname -n` 正常。报告把它归因于 fd 1 被关闭，但代码里没有关闭 fd 1 的路径（`executeLocalBash`／DirectExecutor 用 `stdio: ["ignore","pipe","pipe"]`，入组 helper 只关闭 fd 3），报告自身的证据也矛盾。根因未定位，因此实现未改，只把身份判据改为 `uname -n` 并在空值时判失败。
+
+实机复验时用同一脚本记录以下输出（全部经过 `tools.bash`，结果进入证据，不进入模型上下文）：
+
+```js
+const identity = await tools.bash({ command: "uname -n; cat /proc/sys/kernel/hostname; hostname; ls -l /proc/self/fd" });
+return JSON.stringify({ identity: identity.output, exitCode: identity.exitCode });
+```
+
+判读：
+
+- 三个身份值都非空且一致：BUG-6 未复现，按自动化基线通过处理。
+- `uname -n` 非空而 `hostname` 为空：记录两者的 exitCode 与 `ls -l /proc/self/fd` 中 `1 ->` 的目标。若 fd 1 指向 `/dev/null` 或已关闭，才是报告所说的路径；否则根因在 `hostname` 自身或 bwrap 的 `/proc` 视图，继续收集 `strace -f -e trace=execve,write` 的对应片段。
+- 任何身份值为空都不得作为通过证据；不得把“与另一个空值一致”当成一致。
+
 ## 7. Phase 2 验收（direct RPC bash 与文件原语）
 
 以下检查使用 direct session（`openSession` 不带 `jobId`）。所有路径都是虚拟路径；主机路径不能出现在请求或响应中。
