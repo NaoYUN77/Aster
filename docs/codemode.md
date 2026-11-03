@@ -37,7 +37,7 @@ return files.output;
 | 执行模式 | 脚本可调用 |
 | --- | --- |
 | 本地（默认） | `read`、`write`、`edit`、`bash` |
-| 远程（`EXECUTION_MODE=remote`） | 仅 `bash` |
+| 远程（`EXECUTION_MODE=remote`） | `read`、`write`、`edit`、`bash` |
 
 限制通过工具注册的 `callers` 实现。模型仍能看到全部工具；白名单只决定哪些工具进入 `agent.callable`，也就是脚本的 `tools.*` 和 codemode section。每次嵌套调用仍经过注册表的名称、状态、authz 和参数校验。
 

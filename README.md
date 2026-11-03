@@ -2,7 +2,7 @@
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![Telegram](https://img.shields.io/badge/Telegram-grammY_1.46.0-26A5E4?logo=telegram&logoColor=white)](https://grammy.dev/) [![SQLite](https://img.shields.io/badge/SQLite-node:sqlite-003B57?logo=sqlite&logoColor=white)](https://nodejs.org/api/sqlite.html) [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/) [![MCP](https://img.shields.io/badge/MCP-pi--mcp_1.3.0-111111)](docs/mcp.md) [![pi-durable](https://img.shields.io/badge/pi--durable-1.3.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
 
-个人 AI agent，当前从单 owner 的 Telegram 私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。
+个人 AI agent，当前从单 owner 的 Telegram 私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。它有长期记忆、能接入 MCP 工具，面向小规格云服务器长期运行；可选把命令与文件工具放到第二台执行 VPS。
 
 功能开发按 `docs/spec-YYYYMMDD-<feature-name>.md` 临时规格推进，日期取本次开发开始当天。一个功能可有多个 spec，均引用同一份长期保留的功能 ADR；ADR 按时间记录各部分的取舍、缺陷与 spec 名称。功能开发完成后删除临时 spec，见 [按功能的临时规格](docs/README.md#按功能的临时规格)。下面描述当前可用能力。
 
@@ -19,6 +19,8 @@ flowchart LR
   runtime --> memory["记忆：规则 / 快照 / 近期原文"]
   memory --> model["模型提供商"]
   runtime --> tools["常驻工具与 MCP"]
+  tools --> exec["执行层：本地或远程执行"]
+  exec --> tools
   tools --> runtime
   model --> runtime
   runtime --> saved["回复先落盘"]
@@ -32,6 +34,7 @@ flowchart LR
 | 运行时 | 基于 pi-durable 的 Session：durable 执行、checkpoint、replay 恢复 | `src/agent.ts` |
 | 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具 | `src/memory/` |
 | 工具 | 工具注册表（常驻 + deferred）、MCP 接入与 OAuth 凭据保管 | `src/tools.ts`、`src/mcp*.ts` |
+| 执行 | 本地执行；可选 SSH broker 或统一 RPC 的远程执行；远程 PTC sandbox、文件原语与 codemode | `src/execution/`、`src/ptc-*.ts`、`src/codemode.ts` |
 | 模型 | 提供商注册表与模型解析、启动前目录校验 | `src/providers.ts` |
 | 配置 | `.env` 解析与严格校验（缺项/错项启动前失败） | `src/config.ts` |
 | 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`inbox.sqlite` |
@@ -55,7 +58,7 @@ flowchart LR
 
 **已有记录**
 
-- 类型检查、离线测试和构建。2026-10-29 的 main 运行 [40826470475](https://github.com/NaoYUN77/Aster/actions/runs/40826470475)（提交 `07876f8`）中，Node job 为 235 项、227 过、0 失败、8 跳过。这 8 项是卷预检里需要 root 或单独 Docker 开关的用例；同一运行的镜像 job 另跑了对应检查（8 过 1 跳过，以及只读 WAL 1/1）。
+- 类型检查、离线测试和构建。2026-11-03 的 main 运行 [41654885450](https://github.com/NaoYUN77/Aster/actions/runs/41654885450)（合并提交 `0ea4da5`）中，Node job 为 382 项、374 过、0 失败、8 跳过；跳过的 8 项是部署文件权限类用例。同一运行的镜像 job 另跑了卷预检 9 项（8 过 1 跳过）、只读 WAL 1/1，以及最终 Compose 拓扑 6 项检查。Windows 本地同一套件为 382 项、363 过、0 失败、19 跳过；POSIX 符号链接、Unix socket 与 cgroup 用例只在 Linux 上实际执行，跳过不算通过。
 - 最终镜像与单服务拓扑 6 项：Compose 边界、缺 provider key 时不回显凭据、同卷 `flock`、离线卷预检与整卷备份还原、容器日志不含合成凭据。脚本写明不覆盖真实 Telegram／模型链路，见 [CI 运行入口](docs/ci-entrypoint.md)。
 - 记忆机制的离线验收，以及一次 DeepSeek 真实模型补测（28 次调用里 27 次前缀缓存命中，约 87%）。腾讯云 4 核、7680 MB 的机器在同一份记录里跑过验收测试和资源测量（峰值 RSS 约 136 MiB）。那是测试补测，不是部署验收。见 [记忆系统验收](docs/memory-verification.md)。
 - 启动配置在联网前拒绝未知提供商和未知模型 id；进程日志只打印本应用的配置／状态错误或错误码（`src/config.ts`、`src/main.ts`）。这是代码和测试里的行为，不是一份生产日志审计。
@@ -66,12 +69,13 @@ flowchart LR
 - CI 里的 Telegram → 模型 → 投递业务链。当前拓扑日志写的是 NOT COVERED。
 - 镜像发布、签名和手动生产更新。没有 `release.yml` / `deploy.yml`；离线发布预检成功时仍标注 `productionAdmission: "not-evaluated"`。
 - DeepSeek 以外的提供商的真实摘要与归档质量。
+- 远程 PTC Phase 1／2 的真实双 VPS 验收。自动化基线已通过，但 2026-11-03 的两轮实机记录均为 FAIL（cgroup 入组顺序／位置与 bwrap 参数），修复后尚未复验；Phase 0 已于 2026-11-02 通过双 VPS 验收。全线 RPC 的 app 容器 + 宿主 gateway 形态也还没有独立的实机验收记录。见 [Phase 2 验收记录](docs/acceptance/20261103-remote-ptc-phase2.md)。
 
 **已知限制**
 
 - 回复已持久化但请求收尾未执行时进程被杀，该轮的轮数计数会永久滞后一轮（回复与状态一致，压缩评估点后移）。见 issue #26。
 - 单会话串行。长期繁忙时消息留在 Telegram 侧。
-- `bash` 等工具不是沙箱。
+- 本地模式的 `bash` 等工具不是 OS 沙箱，具有应用进程的宿主权限；远程 PTC 的 `bash` 与文件工具受执行主机上的 bwrap + cgroup 约束。
 
 ## 对话示例
 
@@ -147,25 +151,32 @@ npm start
 
 ## 工具
 
-常驻工具包括底座的 `bash`、`read`、`write`、`edit`，以及 `current_time`、上表中的记忆工具和配置 Web key 后启用的 `web_search`、`web_fetch`。内置工具使用底座 `defineTool` 注册；名称冲突在注册时直接拒绝。工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。MCP 的配置字段、pin、授权、OAuth 和检查命令见 [工具与 MCP](docs/mcp.md)，通用工具契约见 [契约与生命周期](docs/contracts-and-lifecycle.md)。
+常驻工具包括底座的 `bash`、`read`、`write`、`edit`，以及 `current_time`、上表中的记忆工具和配置 Web key 后启用的 `web_search`、`web_fetch`。内置工具使用底座 `defineTool` 注册；名称冲突在注册时直接拒绝。本地工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。MCP 的配置字段、pin、授权、OAuth 和检查命令见 [工具与 MCP](docs/mcp.md)，通用工具契约见 [契约与生命周期](docs/contracts-and-lifecycle.md)。GitHub 只读接入默认关闭，需要独立审批基线和代理链路；12 个工具全部 deferred，审批缺失或声明漂移时整体停用，见 [GitHub 只读接入](docs/github-access.md)。
 
 ### 代码调用工具（PTC，可选）
 
-设置 `CODEMODE_ENABLED=1` 并重启后，模型获得 `codemode` 工具：它写一段 JavaScript，在 QuickJS WASM sandbox 中调用白名单工具，只有脚本结果回到对话。本地脚本可调用 `read`／`write`／`edit`／`bash`；远程执行模式只开放 `bash`。嵌套调用仍经过工具注册表和授权复核，并在宿主侧串行执行；模型可见结果上限 32 KiB／1000 行。QuickJS 只限制脚本运行时能力，不是 OS 沙箱，`bash` 仍具有宿主权限。配置、失败语义、恢复边界和远程大输出处理见 [代码调用工具](docs/codemode.md)，取舍见 [ADR-0019](docs/adr/codemode-ptc/0019-codemode-ptc.md)。
+设置 `CODEMODE_ENABLED=1` 并重启后，模型获得 `codemode` 工具：它写一段 JavaScript，在 QuickJS WASM sandbox 中调用白名单工具，只有脚本结果回到对话。本地脚本可调用 `read`／`write`／`edit`／`bash`；远程执行模式的脚本同样可调用这四项，嵌套 `bash` 与文件访问都在执行主机的 PTC sandbox 内完成，控制面不打开这些文件。嵌套调用仍经过工具注册表和授权复核，并在宿主侧串行执行；模型可见结果上限 32 KiB／1000 行。QuickJS 只限制脚本运行时能力，不是 OS 沙箱；本地 `bash` 具有宿主权限，远程 PTC `bash` 受 bwrap + cgroup 约束。配置、失败语义、恢复边界和远程大输出处理见 [代码调用工具](docs/codemode.md)，取舍见 [ADR-0019](docs/adr/codemode-ptc/0019-codemode-ptc.md)。
 
 ## 部署与运维
 
-生产形态是单个 Docker 服务。镜像构建、Compose、卷备份和上线清单见 [部署指南](docs/deployment-test-guide.md)。同机 test／production 的环境描述见 [部署环境](docs/deployment-environments.md)。结果未知的 Telegram 发送如何核查和补发见 [投递核查与补发](docs/deliveries.md)。
+默认生产形态是单个 Docker 服务；远程执行使用可选 overlay，基础拓扑不变。镜像构建、Compose、卷备份和上线清单见 [部署指南](docs/deployment-test-guide.md)。同机 test／production 的环境描述见 [部署环境](docs/deployment-environments.md)。结果未知的 Telegram 发送如何核查和补发见 [投递核查与补发](docs/deliveries.md)。
 
 凭据只经部署环境提供。应用只做存在性与形状校验，不把秘密写入工具参数或 durable 状态。
 
 可选的 MITM 占位符模式（密钥留在 OpenBao，应用只见 `__vault_<NAME>__`）见 [OpenBao + MITM 部署](deploy/openbao-mitm/README.md)，应用侧 overlay 为 `docker-compose.mitm.yml`。代理只在客户端显式发送占位符、且目标 Host 精确命中 [`allowlist.json`](deploy/openbao-mitm/addon/allowlist.json) 时才填充；不按目标自动补 `Authorization`，不替换请求体，无映射返回 `403`。
 
-### 远程工具执行（阶段 1，可选）
+### 远程工具执行（可选）
 
-可选的 `docker-compose.execution.yml` overlay 把命令工具（`bash`）放到第二台 VPS 执行：应用容器经宿主共享 Unix socket 调用宿主网络里的 `execution-broker`，由 broker 从 Aster 主机 SSH 到执行 VPS。控制面仍保留会话、记忆与投递状态；应用容器不新增网络、不发布端口，MITM／OpenBao／allowlist 的隔离语义不变。
+远程执行把命令与文件工具放到第二台 VPS，控制面只保留会话、记忆、投递与调用记录。应用启动时连接执行面并做 health 检查；不可达或能力不满足时启动失败，不回退本地执行。两种传输互斥，切换前先让未完成任务收敛。
 
-阶段 1 只支持 shell；`read`／`write`／`edit` 等文件工具在远程模式下返回 `not_supported`，文件工作请用 `bash`。broker 不可达时应用启动失败，不回退本地执行。socket 目录权限、SSH 密钥与 known-hosts 路径（示例均为占位）、检查命令与失败语义见 [远程工具执行](docs/execution-remote.md)，设计取舍见 [ADR-0021](docs/adr/0021-control-execution-split.md)。
+| 传输 | 选择 | 模型工具 | 路径 |
+| --- | --- | --- | --- |
+| RPC（Phase 1／2） | `EXECUTION_REMOTE_TRANSPORT=rpc` | 直接 `bash`／`read`／`write`／`edit`；codemode 同为这四项 | 经 mTLS 连接执行 VPS 的 RPC agent；命令与文件访问在 PTC sandbox（bwrap + cgroup）内 |
+| SSH（阶段 1，兼容路径） | `EXECUTION_REMOTE_TRANSPORT=ssh`（默认） | 仅 `bash`；文件工具显式返回 `not_supported` | 应用容器 → 宿主 Unix socket → `execution-broker` → SSH |
+
+RPC 的生产形态由 `docker-compose.rpc.yml` 提供：app 容器保持 MITM-only 网络，只连宿主 Unix socket；宿主网络里的 `rpc-gateway` 持有 `aster-gateway` 客户端证书，经私网 TCP 9443 以 mTLS 连接执行 agent，逐字节转发帧，不解释、不重放、不授权。两种形态都不给 app 容器增加执行 VPS 路由，也不发布端口；执行 agent 只绑定私网／loopback，校验证书 CN，隔离不可用时拒绝监听。
+
+主要变量为 `EXECUTION_MODE=remote`、`EXECUTION_REMOTE_TRANSPORT`、`EXECUTION_REMOTE_CWD`；RPC 另有 `EXECUTION_RPC_ADDRESS`、`EXECUTION_RPC_SERVER_NAME`，以及 gateway 形态的 `EXECUTION_RPC_CERT_DIR` 或宿主直连形态的 `EXECUTION_RPC_*_PATH`。完整配置、cgroup／bwrap 前提、验收与回滚见 [Remote PTC Runbook](docs/runbook-remote-ptc-phase1-2.md)；SSH broker 的 socket 权限、密钥与失败语义见 [远程工具执行](docs/execution-remote.md)；设计取舍见 [ADR-0021](docs/adr/0021-control-execution-split.md)，验收条件见 [远程 PTC spec](docs/spec-20261102-remote-ptc-sandbox.md)。实机验收状态见上文的「已验证与尚未验证」。
 
 ### 内置 Web 工具
 
@@ -187,8 +198,13 @@ npm test        # 全量离线测试
 - [部署指南](docs/deployment-test-guide.md)：镜像交付、备份恢复、维护命令、上线清单
 - [投递核查与补发](docs/deliveries.md)
 - [工具与 MCP](docs/mcp.md)
+- [代码调用工具（PTC）](docs/codemode.md)
+- [GitHub 只读接入](docs/github-access.md)
 - [部署环境描述](docs/deployment-environments.md)
-- [远程工具执行](docs/execution-remote.md)：阶段 1 的宿主 broker、SSH 基线、配置与失败语义
+- [远程工具执行](docs/execution-remote.md)：SSH broker 的宿主 socket、密钥、配置与失败语义
+- [Remote PTC 部署与验收 Runbook](docs/runbook-remote-ptc-phase1-2.md)：Phase 1／2 双 VPS 部署、cgroup／bwrap 前提与全线 RPC gateway
+- [Phase 0 Runbook](docs/runbook-execution-rpc-phase0.md)：mTLS 通道、证书与负向检查
+- [远程 PTC 与统一 RPC 执行通道 spec](docs/spec-20261102-remote-ptc-sandbox.md) / [Phase 2 验收记录](docs/acceptance/20261103-remote-ptc-phase2.md)
 - [契约与生命周期](docs/contracts-and-lifecycle.md)
 - [ADR](docs/adr/)：决策记录
 - [Memory 与 Context 实施方案](docs/memory-and-context-design.md) / [记忆系统验收](docs/memory-verification.md)
