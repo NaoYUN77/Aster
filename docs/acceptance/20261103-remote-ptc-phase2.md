@@ -13,9 +13,9 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npx tsc --noEmit -p tsconfig.json` | 0 |
-| `npx tsx --test test/*.test.ts` | 362 tests，351 pass，0 fail，11 skipped |
+| `npx tsx --test test/*.test.ts` | 362 tests，352 pass，0 fail，10 skipped |
 
-11 个 skipped：7 个记忆库／部署文件权限类、Unix socket RPC、Unix socket 上的远程 codemode、Windows 无法创建的符号链接用例。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。
+10 个 skipped：7 个记忆库／部署文件权限类、Unix socket RPC、Windows 无法创建的符号链接用例。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。远程 codemode 用例改用 direct-session 拓扑，已在 Windows 与 Linux 上运行。
 
 ## Phase 1：远程 PTC
 

@@ -141,3 +141,13 @@
 - Phase 2：直接 `bash` 通过统一 RPC `execute`（direct session）执行，文件原语以 `file.stat`／`exists`／`canonical`／`open`／`read`／`scanLines`／`close`／`readText`／`write` 提供；PTC 嵌套调用在 runner 内、直接工具在 agent 内共用 `PtcFileService` 的路径与原子写实现。控制面用 `EXECUTION_REMOTE_TRANSPORT=ssh|rpc` 显式选择传输（默认 `ssh`）；rpc 模式要求执行面同时支持 direct bash、文件工具和可写 `/shared`，否则启动失败，不静默回退。
 - 会话修复：direct session 被 Agent TTL 清理后，只有请求被明确拒绝为 `not_found`＋`not_started` 时才重建一次并重试；文件级 `not_found` 与结果未知的情况都不重试，保持“未知不当作未执行”。
 - 证据：[2026-11-03 自动化验收记录](../../acceptance/20261103-remote-ptc-phase2.md)。真实双 VPS 的 bwrap／cgroup、`/shared` 一致性和断线重放仍按 spec 16.2／16.3 待执行。
+
+### 2026-11-03：Phase 1／2 自动化缺陷修复
+
+- 触发原因：Phase 1／2 的 Linux CI 基线在执行此前被 Windows 跳过的用例时连续暴露缺陷。
+- 缺陷与处理：
+  - `file.open` 的 `noFollow` 先解析最终路径再检查，逃逸链接被报成 `permission_denied`，内核 `O_NOFOLLOW` 也作用在目标而不是调用方命名的链接上。改为只解析父目录、先 `lstat` 拒绝最终组件的符号链接，并把竞态下的 `ELOOP` 映射为同一种 `invalid_request`。
+  - `file.write` 通过链接写入后报告链接的虚拟路径，而内容落在目标文件。改为从实际写入的目标反推虚拟路径。
+  - `ensurePtcJobInTx` 返回 chord 的 overlay 代理；调用方在 commit 结束后读取 `workspaceReady` 时触发 `Cannot use a settled overlay`。改为返回脱离的 `PtcJobState` 快照。
+  - `RpcCodemodeRemote` 把每个 `vm.message` 批次串行串在 `exchange` 之后；一次 call 的 exchange 要等工具结束，而工具启动依赖紧随其后的 idle 确认批次，两侧互相等待。改为按到达顺序立即投递，只串行化 `vm.reply`，并等待本执行产生的全部投递结束再归因失败。
+- 验证：远程 codemode 用例改用 direct-session 拓扑，在 Windows 与 Linux 都实际运行；Windows 基线 362 tests、352 pass、0 fail、10 skipped。真实双 VPS 验收仍未执行。

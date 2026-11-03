@@ -10,7 +10,7 @@
 
 Phase 1／2 必须同时满足：
 
-1. 自动化基线全部通过，且在 POSIX 上实际执行符号链接、Unix socket 和远程 codemode 用例。
+1. 自动化基线全部通过，且在 POSIX 上实际执行符号链接和 Unix socket 用例。
 2. Phase 1 的 16.2 检查全部通过。
 3. Phase 2 的 16.3 检查全部通过。
 4. 负向用例全部按预期失败，没有静默回退、越界读取或重复执行。
@@ -28,7 +28,7 @@ npm run build
 npm test
 ```
 
-预期：三个命令退出码为 0，测试为 0 fail。Windows 会跳过依赖 POSIX 符号链接和 Unix socket 的用例；不得把跳过当作通过，必须在 Linux 主机上补跑完整套件。当前基线为 362 tests、0 fail、11 skipped（Windows）；Linux 上跳过数应更少，`test/ptc-files.test.ts` 的符号链接用例和 `test/codemode.test.ts` 的远程用例必须实际执行。
+预期：三个命令退出码为 0，测试为 0 fail。Windows 会跳过依赖 POSIX 符号链接和 Unix socket 的用例；不得把跳过当作通过，必须在 Linux 主机上补跑完整套件。当前基线为 362 tests、352 pass、0 fail、10 skipped（Windows）；Linux 上跳过数应更少，`test/ptc-files.test.ts` 的符号链接用例和 Unix socket 用例必须实际执行。远程 codemode 用例已改为 direct-session 拓扑，在所有平台运行。
 
 ## 2. 部署位置与拓扑
 
@@ -182,7 +182,7 @@ PTC_DIRECT_TMP_ROOT=/run/aster
 PTC_CGROUP_ROOT=/sys/fs/cgroup/aster-ptc
 PTC_CGROUP_MEMORY_MAX_BYTES=536870912
 PTC_CGROUP_PIDS_MAX=128
-PTC_CGROUP_CPU_MAX=200000 100000
+PTC_CGROUP_CPU_MAX="200000 100000"
 PTC_ALLOW_DEGRADED=0
 PTC_BWRAP_PATH=/usr/bin/bwrap
 PTC_NODE_PATH=/usr/local/bin:/usr/bin:/bin
@@ -230,19 +230,20 @@ sudo -u aster-exec sh -c '
 }
 ```
 
-`isolation` 必须是 `{"mode":"bwrap","bwrap":true,"userNamespace":true,"cgroup":"v2","network":"none"}`。出现 `degraded-prlimit`、`cgroup: "none"`、`network: "host"` 或任一 `false` 时停止，先修复主机能力。
+`ptc` 的 `bwrap`、`userNamespace`、`cgroup`、`workspaceRoot`、`sharedWorkspace`、`directTmpRoot`、`usable` 必须全为 `true`。运行时 `health.isolation` 必须是 `{"mode":"bwrap","bwrap":true,"userNamespace":true,"cgroup":"v2","network":"none"}`；出现 `degraded-prlimit`、`cgroup: "none"`、`network: "host"` 或任一 `false` 时停止，先修复主机能力。
 
 ### 4.4 systemd
 
-在 Phase 0 单元基础上增加运行目录：
+在 Phase 0 单元基础上增加运行目录和可写路径：
 
 ```ini
 [Service]
 RuntimeDirectory=aster
 RuntimeDirectoryMode=0750
+ReadWritePaths=/home/aster/jobs /srv/shared /run/aster /sys/fs/cgroup/aster-ptc
 ```
 
-`PrivateTmp=true` 保留；`PTC_DIRECT_TMP_ROOT=/run/aster` 不使用服务的私有 `/tmp`。不要启用 `ProtectKernelTunables=true`，否则 Agent 无法写入 cgroup 控制文件。
+`ProtectSystem=strict` 会把文件系统其余部分挂成只读；没有上面的 `ReadWritePaths`，Agent 能启动但无法创建 job workspace、写入共享目录或创建 cgroup，错误会在第一次 session 打开时才出现。`PrivateTmp=true` 保留；`PTC_DIRECT_TMP_ROOT=/run/aster` 不使用服务的私有 `/tmp`。不要启用 `ProtectKernelTunables=true`，否则 Agent 无法写入 cgroup 控制文件。
 
 ```sh
 sudo systemctl daemon-reload
@@ -325,6 +326,7 @@ const client = await connectRpcClient(readRpcClientConfig());
 const sessionId = `acc-${randomBytes(4).toString("hex")}`;
 const jobId = `ptc-${"1".repeat(32)}`;
 const report = {};
+const toolResults = [];
 let terminal;
 
 const fail = (message) => { throw new Error(message); };
@@ -363,13 +365,21 @@ function startScript(code) {
         onToolOutput: (chunk) => chunks.push(chunk.text),
       });
       void tool.result.then(
-        (result) => client.replyVm(sessionId, {
-          callId: event.callId,
-          reply: {
-            type: "result", id: event.callId, ok: true,
-            payload: JSON.stringify({ output: chunks.join(""), exitCode: result.exitCode }),
-          },
-        }),
+        (result) => {
+          toolResults.push({
+            callId: event.callId,
+            outputRef: result.outputRef ?? null,
+            spillTruncated: result.spillTruncated,
+            exitCode: result.exitCode,
+          });
+          return client.replyVm(sessionId, {
+            callId: event.callId,
+            reply: {
+              type: "result", id: event.callId, ok: true,
+              payload: JSON.stringify({ output: chunks.join(""), exitCode: result.exitCode }),
+            },
+          });
+        },
         (error) => client.replyVm(sessionId, {
           callId: event.callId,
           reply: { type: "result", id: event.callId, ok: false, payload: String(error?.message ?? error) },
@@ -440,6 +450,24 @@ try {
   if (reopened.workspaceReady?.reused !== true) fail("the same jobId did not reuse its workspace");
   await client.closeSession(`${sessionId}-replay`);
 
+  const big = startScript(`
+    const result = await tools.bash({ command: "head -c 10485760 /dev/zero | tr '\\0' x" });
+    return String(result.output.length);
+  `);
+  await big.result;
+  if (terminal?.ok !== true) fail(`the 10 MiB script failed: ${String(terminal?.value)}`);
+  const bigCall = toolResults.at(-1);
+  report.bigOutput = {
+    visibleLength: Number(terminal.value),
+    outputRef: bigCall?.outputRef ?? null,
+    spillTruncated: bigCall?.spillTruncated,
+  };
+  if (bigCall?.outputRef === null || bigCall?.outputRef === undefined) fail("the 10 MiB call produced no OutputRef");
+  if (bigCall.outputRef.jobId !== jobId) fail("the OutputRef names another job");
+  if (bigCall.outputRef.size !== 10 * 1024 * 1024) fail("the OutputRef size is not the full output size");
+  if (bigCall.spillTruncated !== false) fail("the output was truncated instead of spilled");
+  if (report.bigOutput.visibleLength > 32 * 1024) fail("the model-visible result exceeded the window");
+
   console.log(JSON.stringify({ status: "ok", ...report }, null, 2));
 } finally {
   await client.closeSession(sessionId).catch(() => undefined);
@@ -464,31 +492,17 @@ node /root/aster-accept/phase1.mjs
 
 ### 6.2 输出上限与 `OutputRef`
 
-单独运行一个大输出脚本，检查窗口、spill 和引用：
+`phase1.mjs` 的最后一段已经执行 10 MiB 输出检查，结果记录在 `bigOutput`。要求：
 
-```js
-// 保存为 /root/aster-accept/phase1-output.mjs，复用 phase1.mjs 的 client/startScript 结构，
-// 把脚本内容换成：
-const big = startScript(`
-  const result = await tools.bash({
-    command: "head -c 10485760 /dev/zero | tr '\\\\0' x",
-  });
-  return String(result.output.length);
-`);
-await big.result;
-```
-
-要求：
-
-- 模型可见的 `terminal.value` 不超过 32 KiB／1000 行；脚本返回的长度只反映它收到的有界尾部。
-- 该次 `tool.call` 的 `result.outputRef` 存在，`size` 为 10485760，`spillTruncated` 为 `false`；输出窗口总数不超过 `maxBytes`。
-- 在执行 VPS 上校验引用：
+- `bigOutput.visibleLength` 不超过 32 KiB／1000 行；脚本返回的长度只反映它收到的有界尾部。
+- `bigOutput.outputRef.jobId` 等于验收用的 `jobId`，`size` 为 10485760，`spillTruncated` 为 `false`。
+- 窗口只限制模型可见部分，完整输出留在执行 VPS。用 `outputRef.blobId` 校验内容：
 
   ```sh
   sha256sum /home/aster/jobs/<jobId>/workspace/.ptc/outputs/<blobId>
   ```
 
-  结果必须等于 `outputRef.sha256`。控制面不保存完整输出；`journal` 只保留有界结果和引用元数据。
+  结果必须等于 `bigOutput.outputRef.sha256`。控制面不保存完整输出；journal 只保留有界结果和引用元数据。
 
 ### 6.3 应用级 codemode 检查
 
