@@ -21,6 +21,7 @@
     "mcp:check": "node --env-file-if-exists=.env dist/src/mcp-check.js",
     "execution:broker": "node --env-file-if-exists=.env dist/src/execution/broker-main.js",
     "execution:rpc-agent": "node --env-file-if-exists=.env dist/src/execution/rpc-main.js",
+    "execution:rpc-gateway": "node --env-file-if-exists=.env dist/src/execution/rpc-gateway-main.js",
     "execution:rpc-e2e": "node --env-file-if-exists=.env dist/src/execution/rpc-e2e.js"
   },
   "dependencies": {

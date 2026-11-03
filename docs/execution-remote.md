@@ -3,6 +3,8 @@
 本文是阶段 1 的运行说明：把 `bash` 等命令工具放到第二台 VPS 上执行，控制面只保留会话、记忆、投递与工具调用记录。设计取舍见 [ADR-0021](adr/0021-control-execution-split.md)。
 
 > 统一 RPC Execution Agent 的 Phase 1／2 已在仓库实现：控制面设置 `EXECUTION_REMOTE_TRANSPORT=rpc` 时，直接 `bash` 与 `read`／`write`／`edit` 走同一条 RPC direct session，详见 [远程 PTC spec](spec-20261102-remote-ptc-sandbox.md) 与 [Phase 2 验收记录](acceptance/20261103-remote-ptc-phase2.md)。本文所述的 one-shot SSH 路径仍可显式选择（默认 `EXECUTION_REMOTE_TRANSPORT=ssh`），作为迁移验收前的兼容路径。
+>
+> 生产容器形态由 `docker-compose.rpc.yml` 提供：app 容器只连宿主 Unix socket，宿主网络里的 `rpc-gateway` 持有 mTLS 身份；部署步骤见 [Runbook 5.4](runbook-remote-ptc-phase1-2.md#54-全线-rpcapp-容器--宿主-gateway)。
 
 SSH 传输只实现 **shell**。`read`／`write`／`edit` 等文件工具在该模式下返回 `not_supported`，这是有意的失败关闭：避免模型在控制面读到与执行面不同的同名文件。文件工作请通过 `bash` 在执行主机上完成；需要远程文件工具时改用 rpc 传输。
 

@@ -376,7 +376,8 @@ function connectSocket(factory: () => Socket, timeoutMs: number): Promise<Socket
   });
 }
 
-function connectTlsSocket(config: TlsClientConfig): Promise<TLSSocket> {
+/** Shared by the RPC client and the host-network gateway; resolves after the handshake. */
+export function connectTlsSocket(config: TlsClientConfig): Promise<TLSSocket> {
   return new Promise<TLSSocket>((resolve, reject) => {
     const socket = connectTls({
       host: config.host,

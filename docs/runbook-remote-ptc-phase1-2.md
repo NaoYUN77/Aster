@@ -43,11 +43,9 @@ npm test
     └─ direct session：每个请求一个 bwrap + 共享目录 + 私有 /tmp
 ```
 
-**部署位置必须明确**：当前实现中，打开 RPC 连接的是持有 `EXECUTION_MODE=remote` 的应用进程（`openAgent` 在启动时连接并做 health 检查），没有独立的 RPC gateway 容器。因此：
+**部署位置必须明确**：打开 RPC 连接的是持有 `EXECUTION_MODE=remote` 的进程（`openAgent` 在启动时连接并做 health 检查）。本 Runbook 的 Phase 1／2 验收在**控制面主机的宿主环境**运行应用或验收脚本，与 Phase 0 相同；该主机必须能通过私网访问执行 VPS 的 9443。
 
-- 本阶段验收在**控制面主机的宿主环境**运行应用或验收脚本，与 Phase 0 相同；该主机必须能通过私网访问执行 VPS 的 9443。
-- 现有 Docker app 容器只允许访问宿主 Unix socket，**不要**为了 Phase 1／2 给容器增加执行 VPS 路由。容器内的生产执行在迁移完成前继续使用 `EXECUTION_REMOTE_TRANSPORT=ssh`。
-- “把 RPC client 放进 gateway 容器、app 只连 Unix socket”属于后续部署工作，不在本 Runbook 的验收范围内；不能声称已由本阶段覆盖。
+Docker app 容器只允许访问宿主 Unix socket，**不要**为了 RPC 给容器增加执行 VPS 路由。全线 RPC 的生产形态由宿主网络里的 `rpc-gateway` 容器承担 mTLS 客户端身份，app 容器只连 Unix socket；部署与回滚见 5.4。该 gateway 是本分支新增的部署能力，Phase 1／2 的既有验收证据仍来自宿主环境运行，不因 5.4 而回溯改写。
 
 前提沿用 Phase 0：
 
@@ -341,6 +339,73 @@ CODEMODE_ENABLED=1
 ### 5.3 通道回归
 
 沿用 Phase 0 的 6 节正向与负向检查，确认通道本身没有回归。Phase 1／2 的 Agent 仍应通过 `health.check` 返回执行面的 `executionId`，且 TLS 负向用例仍被拒绝。`EXECUTION_AGENT_TEST_EXECUTOR` 在生产应为 `0`；验收期间如需运行 `execution:rpc-e2e`，可临时设为 `1`，验收后恢复。Phase 1／2 的检查不依赖 test executor。
+
+### 5.4 全线 RPC：app 容器 + 宿主 gateway
+
+app 容器在 `aster_mitm_clients` 内没有到执行 VPS 的路由（ADR-0021）。迁移后这一点不变：`rpc-gateway` 容器使用宿主网络命名空间持有 mTLS 客户端身份，app 容器只连宿主上的 Unix socket。gateway 逐字节转发 RPC 帧，不解释、不重放、不授权；身份仍由 `aster-gateway` 客户端证书和 agent 的 CN 校验决定。
+
+```text
+app 容器 ── /run/aster/execution/rpc.sock ──▶ rpc-gateway（宿主网络）── TCP 9443 mTLS ──▶ agent
+```
+
+准备（控制面宿主）：
+
+```sh
+# gateway 只挂载这三件套；目录 0700、私钥 0600
+install -d -m 0700 ~/Aster/secrets/execution-rpc
+install -m 0644 /etc/aster/rpc/ca.crt ~/Aster/secrets/execution-rpc/ca.crt
+install -m 0644 /etc/aster/rpc/client.crt ~/Aster/secrets/execution-rpc/client.crt
+install -m 0600 /etc/aster/rpc/client.key ~/Aster/secrets/execution-rpc/client.key
+
+# app 与 gateway 共享的 socket 目录
+install -d -m 0700 -o 1000 -g 1000 ~/Aster/run/execution
+```
+
+执行主机上创建直接命令的默认 cwd（`/shared` 就是 `/srv/shared`）：
+
+```sh
+sudo install -d -m 0775 -o aster-exec -g aster-exec /srv/shared/aster
+```
+
+`.env` 追加（app 容器不再需要任何执行证书路径）：
+
+```sh
+EXECUTION_REMOTE_CWD=/shared/aster
+EXECUTION_RPC_ADDRESS=10.1.0.15:9443
+EXECUTION_RPC_SERVER_NAME=execution.internal
+EXECUTION_RPC_CERT_DIR=/home/ubuntu/Aster/secrets/execution-rpc
+CODEMODE_ENABLED=1
+```
+
+启动时**不要**叠加 `docker-compose.execution.yml`（它定义的是旧 SSH broker）：
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.mitm.yml \
+  -f docker-compose.rpc.yml --env-file .env up -d personal-agent rpc-gateway
+```
+
+验证：
+
+```sh
+# gateway 配置与 TLS 材料可读，不监听、不连接
+docker compose ... run --rm rpc-gateway --check
+# 启动日志只出现 rpc-gateway-ready，不打印证书或帧内容
+docker compose ... logs rpc-gateway
+# 从宿主经同一个 socket 做 health 检查（与 app 走同一路径）
+cd /opt/aster && EXECUTION_RPC_TRANSPORT=unix \
+  EXECUTION_RPC_SOCKET=/home/ubuntu/Aster/run/execution/rpc.sock \
+  node --input-type=module -e '
+    import { readRpcClientConfig } from "./dist/src/execution/rpc-config.js";
+    import { connectRpcClient } from "./dist/src/execution/rpc-connect.js";
+    const client = await connectRpcClient(readRpcClientConfig());
+    console.log(JSON.stringify(await client.health()));
+    await client.close();'
+```
+
+- gateway 只接受 `EXECUTION_RPC_TRANSPORT=tls`，socket 路径必须是绝对 POSIX 路径；路径上已有非 socket 文件时拒绝启动，不会删除它。
+- app 容器的环境与镜像里不出现 `EXECUTION_RPC_*_PATH`、客户端证书或私钥；它只能打开 socket。
+- socket 权限为 0600，所在目录 0700（uid 1000）；同一宿主上的其他用户不能借 gateway 访问执行面。
+- 回滚：`docker compose ... stop rpc-gateway`，改回 `docker-compose.execution.yml` 的 SSH 路径并重建 app；回滚前先让未完成任务收敛。
 
 ## 6. Phase 1 验收（远程 PTC）
 
@@ -905,7 +970,7 @@ EXECUTION_REMOTE_CWD=/home/aster/workspace
 
 ## 11. 不在本 Runbook
 
-- RPC client 移入独立 gateway 容器、app 容器只连宿主 Unix socket 的部署改造。
+- RPC client 移入独立 gateway 容器的**生产验收**（实现、部署与回滚步骤见 5.4；本 Runbook 的 Phase 1／2 证据仍来自控制面宿主环境）。
 - 多租户、跨用户共享执行主机、脚本递归、外网访问、GPU 或 Windows 执行主机。
 - 用 RPC request id 去重替代 durable replay 或外部副作用幂等。
 - 证书轮换与吊销流程的自动化；沿用 Phase 0 的手工签发与分发。
