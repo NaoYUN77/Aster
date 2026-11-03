@@ -151,3 +151,11 @@
   - `ensurePtcJobInTx` 返回 chord 的 overlay 代理；调用方在 commit 结束后读取 `workspaceReady` 时触发 `Cannot use a settled overlay`。改为返回脱离的 `PtcJobState` 快照。
   - `RpcCodemodeRemote` 把每个 `vm.message` 批次串行串在 `exchange` 之后；一次 call 的 exchange 要等工具结束，而工具启动依赖紧随其后的 idle 确认批次，两侧互相等待。改为按到达顺序立即投递，只串行化 `vm.reply`，并等待本执行产生的全部投递结束再归因失败。
 - 验证：远程 codemode 用例改用 direct-session 拓扑，在 Windows 与 Linux 都实际运行；Windows 基线 362 tests、352 pass、0 fail、10 skipped。真实双 VPS 验收仍未执行。
+
+### 2026-11-03：真实双 VPS 验收失败与 cgroup 入组顺序修复
+
+- 结果：**FAIL**。在 `63091e8` 上按 Runbook 部署，Phase 1 首次 `vm.start` 返回 `code: internal`、`outcome: not_started`，错误为 `the sandbox process could not be accounted for: ENODEV: no such device, write`；Phase 2 首次 direct `session.open` 返回同一类错误的 `EACCES: permission denied, write`。
+- 根因：`createPtcCgroup().addProcess()` 在子进程已经由 bwrap 执行 `--unshare-cgroup` 之后，才由 agent 把 PID 写入 `PTC_CGROUP_ROOT/<session>/cgroup.procs`。此时该任务处在新的 cgroup namespace 中，目标 cgroup 不在其命名空间根下，内核拒绝迁移（新版内核报 `ENODEV`，旧报 `EACCES`），与 systemd 委派无关。用普通 `sleep` 复现；`Delegate=yes`＋`DelegateSubgroup=agent` 因父节点有内部进程返回 `EBUSY`，不是可行替代。
+- 处理：移除 `PtcCgroup.addProcess`。新增 `spawnInCgroup`：先以 Node 启动一个短命 helper，helper 把自身 PID 写入目标 cgroup，经额外 fd 3 报告成功后再 `process.execve` bwrap；PID、进程组与 cgroup 归属随 exec 保留，因此入组发生在 unshare 之前，全部后代（runner、bash 子进程）仍在同一 cgroup 内，`cgroup.kill` 与 `memory.max`／`pids.max`／`cpu.max` 继续有效。入组失败通过 fd 3 的 `error:` 行成为执行失败（`internal`／`not_started`），不会伪装成命令退出码；5 秒未确认则拒绝启动并强杀。
+- 部署前提（写入 Runbook）：`ProtectHome=false`、`ProtectKernelTunables=false`、`ProtectControlGroups=false`，否则 `ProtectSystem=strict` 会隐藏 `/home/aster` 或让 cgroupfs 只读；`aster-ptc` 作为独立委派根，父节点不运行进程。
+- 验证：Linux 专用 `test/ptc-cgroup.test.ts` 用临时目录代替 cgroup，覆盖“先写 PID 再 exec、PID 不变”“exec 失败按命令失败退出 125”“入组被拒时在启动前失败”。Windows 跳过该用例（无 `process.execve`／cgroup）。真实双 VPS 需要按 Runbook 复验后才能改判 PASS。

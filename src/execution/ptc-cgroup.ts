@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import type { Readable } from "node:stream";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { access, mkdir, readFile, rmdir, writeFile } from "node:fs/promises";
@@ -10,10 +11,12 @@ import type { PtcIsolationState } from "./rpc-protocol.js";
 
 const run = promisify(execFile);
 const SESSION_ID_PATTERN = /^[a-f0-9]{16}$/;
+/** A local helper writes one line; anything longer means it is not the helper. */
+const ACCOUNTING_TIMEOUT_MS = 5_000;
+const ACCOUNTING_MAX_BYTES = 4_096;
 
 export type PtcCgroup = {
   readonly path: string;
-  addProcess(pid: number): Promise<void>;
   /** Kills every process in the subtree; used for cancellation and shutdown. */
   kill(): Promise<void>;
   release(): Promise<void>;
@@ -24,8 +27,9 @@ async function write(path: string, value: string): Promise<void> {
 }
 
 /**
- * A cgroup v2 subtree per session. The caller adds the bwrap process, so every descendant
- * (the runner and the bash children) is accounted for and can be killed as one unit.
+ * A cgroup v2 subtree per session. The sandbox enters it before it runs (see `spawnInCgroup`), so
+ * every descendant (the runner and the bash children) is accounted for and can be killed as one
+ * unit.
  */
 export async function createPtcCgroup(config: PtcConfig, sessionId: string): Promise<PtcCgroup> {
   if (!SESSION_ID_PATTERN.test(sessionId)) {
@@ -50,9 +54,6 @@ export async function createPtcCgroup(config: PtcConfig, sessionId: string): Pro
   }
   return {
     path,
-    async addProcess(pid) {
-      await write(join(path, "cgroup.procs"), String(pid));
-    },
     async kill() {
       try {
         await write(join(path, "cgroup.kill"), "1");
@@ -64,6 +65,144 @@ export async function createPtcCgroup(config: PtcConfig, sessionId: string): Pro
       await rmdir(path).catch(() => undefined);
     },
   };
+}
+
+/**
+ * The sandbox must enter its cgroup before bwrap unshares the cgroup namespace: afterwards the
+ * kernel refuses to migrate the task into a cgroup outside that namespace (`EACCES`/`ENODEV`), and
+ * the agent would have started a sandbox it cannot account for or kill. `spawn` has no pre-exec
+ * hook, so a short-lived helper moves itself into the cgroup and then `execve`s the sandbox; the
+ * PID and its membership carry over to bwrap and every descendant.
+ *
+ * The helper reports through an extra pipe so a failed move is an execution failure, never a
+ * command exit code. `ready` resolves only after the kernel accepted the PID.
+ */
+const CGROUP_EXEC_HELPER = `
+import { writeFileSync, writeSync } from "node:fs";
+const [path, file, ...args] = process.argv.slice(1);
+const report = (line) => {
+  try { writeSync(3, line + "\\n"); } catch { process.exit(125); }
+};
+try {
+  writeFileSync(path + "/cgroup.procs", String(process.pid));
+} catch (error) {
+  const message = error && typeof error.message === "string" ? error.message : String(error);
+  report("error:" + message);
+  console.error("aster: cannot move the sandbox into " + path + ": " + message);
+  process.exit(125);
+}
+report("ok");
+try {
+  // execve takes the array verbatim as argv: without this, the sandbox would lose argv[0] and see
+  // its first flag as its program name. The CLI flag also keeps its experimental warning off the
+  // sandbox's stderr, which is command output here.
+  process.execve(file, [file, ...args], process.env);
+} catch (error) {
+  const message = error && typeof error.message === "string" ? error.message : String(error);
+  console.error("aster: cannot start " + file + ": " + message);
+  process.exit(125);
+}
+`.trim();
+
+export type AccountedProcess = {
+  readonly child: ChildProcess;
+  /** Settles when the helper wrote its PID to the cgroup, or rejects with the kernel's reason. */
+  readonly ready: Promise<void>;
+};
+
+type AccountedStdio = "pipe" | "ignore" | "inherit" | null;
+
+/** The helper is spawned detached, so killing its group also reaches an already-exec'd sandbox. */
+function killTree(child: ChildProcess): void {
+  if (child.pid === undefined) {
+    child.kill("SIGKILL");
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+export function spawnInCgroup(
+  cgroupPath: string,
+  file: string,
+  args: readonly string[],
+  options: Omit<SpawnOptions, "stdio"> & { readonly stdio: readonly AccountedStdio[] },
+): AccountedProcess {
+  const child: ChildProcess = spawn(process.execPath, [
+    // execve is still experimental in Node 24 and would write a warning to the sandbox's stderr.
+    "--no-warnings",
+    "--input-type=module",
+    "-e",
+    CGROUP_EXEC_HELPER,
+    // Everything after `--` is the helper's argv; without it Node would parse bwrap's flags.
+    "--",
+    cgroupPath,
+    file,
+    ...args,
+  ], {
+    ...options,
+    stdio: [...options.stdio, "pipe"],
+  });
+  // A spawn failure arrives asynchronously; without a listener it would crash the agent before
+  // the caller attaches its own handler. This listener never swallows the event for the caller.
+  child.on("error", () => undefined);
+
+  const ready = new Promise<void>((resolve, reject) => {
+    const channel = child.stdio[3];
+    if (channel === null || channel === undefined || typeof (channel as { on?: unknown }).on !== "function") {
+      killTree(child);
+      reject(new Error("the sandbox accounting channel is unavailable"));
+      return;
+    }
+    let settled = false;
+    let data = "";
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      (channel as Readable).removeAllListeners();
+      (channel as unknown as { destroy?: () => void }).destroy?.();
+      if (error === undefined) resolve();
+      else {
+        killTree(child);
+        reject(error);
+      }
+    };
+    const timer = setTimeout(() => finish(new Error("the sandbox did not enter its cgroup in time")), ACCOUNTING_TIMEOUT_MS);
+    timer.unref();
+    (channel as Readable).setEncoding("utf8");
+    (channel as Readable).on("data", (chunk: string | Buffer) => {
+      data += chunk.toString();
+      if (data.length > ACCOUNTING_MAX_BYTES) {
+        finish(new Error("the sandbox accounting channel sent an invalid response"));
+        return;
+      }
+      const newline = data.indexOf("\n");
+      if (newline === -1) return;
+      const line = data.slice(0, newline);
+      if (line === "ok") finish();
+      else if (line.startsWith("error:")) finish(new Error(line.slice("error:".length)));
+      else finish(new Error("the sandbox accounting channel sent an invalid response"));
+    });
+    (channel as Readable).on("end", () => {
+      finish(new Error("the sandbox exited before it entered its cgroup"));
+    });
+    (channel as Readable).on("error", (error: Error) => {
+      finish(new Error(`the sandbox accounting channel failed: ${error.message}`));
+    });
+    child.once("error", (error: Error) => {
+      finish(new Error(`the sandbox could not start: ${error.message}`));
+    });
+  });
+
+  return { child, ready };
 }
 
 async function probeBwrap(config: PtcConfig): Promise<boolean> {

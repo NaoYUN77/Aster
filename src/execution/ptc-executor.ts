@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { buildBwrapArgv, buildDegradedArgv, runnerEnvironment } from "./ptc-bwrap.js";
-import { createPtcCgroup, type PtcCgroup } from "./ptc-cgroup.js";
+import { createPtcCgroup, spawnInCgroup, type PtcCgroup } from "./ptc-cgroup.js";
 import type { PtcConfig } from "./ptc-config.js";
 import { PtcHostError, type PtcEventSink, type PtcHost } from "./ptc-host.js";
 import { preparePtcWorkspace, jobWorkspacePath, PTC_SANDBOX_WORKSPACE } from "./ptc-workspace.js";
@@ -313,13 +313,21 @@ export class PtcExecutor implements PtcHost {
       await cgroup?.release();
       throw new PtcHostError("internal", "the sandbox command is empty", "not_started");
     }
+    const spawnOptions = {
+      cwd: session.hostPath,
+      env,
+      stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
+      detached: true,
+    };
+    let ready: Promise<void> | undefined;
     try {
-      child = spawn(file, args, {
-        cwd: session.hostPath,
-        env,
-        stdio: ["pipe", "pipe", "pipe"],
-        detached: true,
-      });
+      if (cgroup === undefined) {
+        child = spawn(file, args, spawnOptions);
+      } else {
+        const accounted = spawnInCgroup(cgroup.path, file, args, spawnOptions);
+        child = accounted.child;
+        ready = accounted.ready;
+      }
     } catch (error) {
       await cgroup?.release();
       throw new PtcHostError(
@@ -327,6 +335,20 @@ export class PtcExecutor implements PtcHost {
         `the sandbox could not start: ${error instanceof Error ? error.message : "spawn failed"}`,
         "not_started",
       );
+    }
+    if (ready !== undefined) {
+      try {
+        // bwrap unshares the cgroup namespace, so the process must be accounted for before it runs.
+        await ready;
+      } catch (error) {
+        child.kill("SIGKILL");
+        await cgroup?.release();
+        throw new PtcHostError(
+          "internal",
+          `the sandbox process could not be accounted for: ${error instanceof Error ? error.message : "cgroup write failed"}`,
+          "not_started",
+        );
+      }
     }
 
     const runner: Runner = {
@@ -388,18 +410,6 @@ export class PtcExecutor implements PtcHost {
       }
     });
 
-    if (child.pid !== undefined && runner.cgroup !== undefined) {
-      try {
-        await runner.cgroup.addProcess(child.pid);
-      } catch (error) {
-        this.kill(runner);
-        throw new PtcHostError(
-          "internal",
-          `the sandbox process could not be accounted for: ${error instanceof Error ? error.message : "cgroup write failed"}`,
-          "not_started",
-        );
-      }
-    }
     return runner;
   }
 

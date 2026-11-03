@@ -7,14 +7,14 @@
 // area — is never mounted here. Direct mode is available only with full bwrap isolation; there is
 // no degraded fallback.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { OutputWindow } from "./broker.js";
 import { chunkText, signalNumber } from "./output-chunks.js";
 import { buildDirectBwrapArgv } from "./ptc-bwrap.js";
-import { createPtcCgroup, type PtcCgroup, type PtcRuntimeProbe } from "./ptc-cgroup.js";
+import { createPtcCgroup, spawnInCgroup, type PtcCgroup, type PtcRuntimeProbe } from "./ptc-cgroup.js";
 import type { PtcConfig } from "./ptc-config.js";
 import { FileServiceError, PtcFileService } from "./ptc-fs.js";
 import { PtcHostError, type DirectHost } from "./ptc-host.js";
@@ -152,13 +152,16 @@ export class DirectExecutor implements DirectHost {
 
     const cgroup = await createPtcCgroup(config, this.executionId(session.sessionId, input.payload));
     let child: ChildProcess;
+    let ready: Promise<void>;
     try {
-      child = spawn(file, args, {
+      const accounted = spawnInCgroup(cgroup.path, file, args, {
         cwd: session.tmpPath,
         env: { PATH: config.nodePath, LANG: "C.UTF-8" },
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
       });
+      child = accounted.child;
+      ready = accounted.ready;
     } catch (error) {
       await cgroup.release();
       throw new PtcHostError(
@@ -167,21 +170,19 @@ export class DirectExecutor implements DirectHost {
         "not_started",
       );
     }
-    session.active = { child, cgroup };
-    if (child.pid !== undefined) {
-      try {
-        await cgroup.addProcess(child.pid);
-      } catch (error) {
-        this.#kill(session.active);
-        await cgroup.release();
-        session.active = undefined;
-        throw new PtcHostError(
-          "internal",
-          `the sandbox process could not be accounted for: ${error instanceof Error ? error.message : "cgroup write failed"}`,
-          "not_started",
-        );
-      }
+    try {
+      // bwrap unshares the cgroup namespace, so the process must be accounted for before it runs.
+      await ready;
+    } catch (error) {
+      child.kill("SIGKILL");
+      await cgroup.release();
+      throw new PtcHostError(
+        "internal",
+        `the sandbox process could not be accounted for: ${error instanceof Error ? error.message : "cgroup write failed"}`,
+        "not_started",
+      );
     }
+    session.active = { child, cgroup };
 
     const startedAt = Date.now();
     const window = clampWindow(input.payload, config);

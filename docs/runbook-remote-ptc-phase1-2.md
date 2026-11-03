@@ -28,7 +28,7 @@ npm run build
 npm test
 ```
 
-预期：三个命令退出码为 0，测试为 0 fail。Windows 会跳过依赖 POSIX 符号链接和 Unix socket 的用例；不得把跳过当作通过。当前基线：Windows 362 tests、352 pass、0 fail、10 skipped；Linux CI 362 tests、354 pass、0 fail、8 skipped，符号链接与 Unix socket 用例均实际执行。远程 codemode 用例已改为 direct-session 拓扑，在所有平台运行。
+预期：三个命令退出码为 0，测试为 0 fail。Windows 会跳过依赖 POSIX 符号链接、Unix socket 与 `process.execve` 的用例；不得把跳过当作通过。当前基线：Windows 366 tests、352 pass、0 fail、14 skipped；Linux CI 366 tests、358 pass、0 fail、8 skipped，符号链接、Unix socket 与 cgroup 预入组用例均实际执行。远程 codemode 用例已改为 direct-session 拓扑，在所有平台运行。
 
 ## 2. 部署位置与拓扑
 
@@ -126,19 +126,25 @@ echo '+memory +pids +cpu' | sudo tee /sys/fs/cgroup/aster-ptc/cgroup.subtree_con
 - 根 cgroup 不受 “no internal process” 限制，开启 `subtree_control` 是安全的；它只让子 cgroup 出现控制器文件。
 - `aster-ptc` 自身不运行进程，只作为每个 session 的父节点。
 - 如果主机由 systemd 管理并已有更严格的委派方案，可用等价配置替代；验收以 Agent 的 `--check` 和真实 session 创建为准。
+- 不要试图用 `Delegate=yes` + `DelegateSubgroup=agent` 让服务自身进入可写子树：`aster-ptc` 是独立于服务 cgroup 的委派根，父节点没有内部进程；服务 cgroup 上加控制器会因 “no internal process” 返回 `EBUSY`。
+- 进程必须在 bwrap 启动前进入目标 cgroup。bwrap 带 `--unshare-cgroup`，一旦执行，父进程再写该 session 的 `cgroup.procs` 会被内核拒绝（`EACCES`／`ENODEV`），sandbox 就不受内存／pids／cpu 限制，也无法被 `cgroup.kill` 回收。当前实现由 helper 先写入自身 PID 再 `execve` bwrap；验证时观察日志里不应出现 `could not be accounted for`。
 - 这是对执行主机的配置变更，不是防火墙变更；记录到证据中。
 
-验证 `aster-exec` 确实能创建并清理子 cgroup：
+验证 `aster-exec` 确实能创建、进入并清理子 cgroup：
 
 ```sh
 sudo -u aster-exec sh -c '
   d=/sys/fs/cgroup/aster-ptc/acceptance-probe
   mkdir "$d"
   echo 8 > "$d/pids.max"
+  # 与运行时相同：进程在 exec 之前把自己的 PID 写入 cgroup.procs。
+  sh -c "echo \$\$ > $d/cgroup.procs"
   rmdir "$d"
   echo cgroup-probe-ok
 '
 ```
+
+自迁移写入失败（`Permission denied`／`No such device`）说明委派或挂载权限不对，此时不要继续 Phase 1／2。
 
 ### 3.3 目录与挂载
 
@@ -192,6 +198,7 @@ PTC_JOB_RETENTION_HOURS=168
 注意：
 
 - `PTC_CGROUP_CPU_MAX` 含空格，写入 EnvironmentFile 时保持原样；systemd 会按整行传值。
+- 入组 helper 是一个短暂的 Node 进程（约 11 个任务、40 MiB 左右），它先计入 session cgroup，再 `execve` bwrap 变成只有一个任务的 sandbox。`PTC_CGROUP_PIDS_MAX` 不能低于 ~16，`PTC_CGROUP_MEMORY_MAX_BYTES` 不能低于 ~64 MiB，否则 helper 自己会被拒绝入组（`EAGAIN`）；上面的 128／512 MiB 是留有余量的取值。
 - `PTC_ALLOW_DEGRADED` 只能是 `0` 或 `1`；验收必须为 `0`。
 - `PTC_DIRECT_ENABLED=1` 同时要求 `PTC_SHARED_WORKSPACE` 和可写的 `PTC_DIRECT_TMP_ROOT`，否则 `--check` 失败。
 - `PTC_ENABLED=1` 且隔离不可用时，Agent 直接拒绝监听；这是有意的失败关闭，不要绕过。
@@ -241,9 +248,15 @@ sudo -u aster-exec sh -c '
 RuntimeDirectory=aster
 RuntimeDirectoryMode=0750
 ReadWritePaths=/home/aster/jobs /srv/shared /run/aster /sys/fs/cgroup/aster-ptc
+# ProtectSystem=strict 默认同时隐藏 home 与只读 cgroupfs；PTC 与 direct 路径都在 /home/aster 下。
+ProtectHome=false
+ProtectKernelTunables=false
+ProtectControlGroups=false
 ```
 
-`ProtectSystem=strict` 会把文件系统其余部分挂成只读；没有上面的 `ReadWritePaths`，Agent 能启动但无法创建 job workspace、写入共享目录或创建 cgroup，错误会在第一次 session 打开时才出现。`PrivateTmp=true` 保留；`PTC_DIRECT_TMP_ROOT=/run/aster` 不使用服务的私有 `/tmp`。不要启用 `ProtectKernelTunables=true`，否则 Agent 无法写入 cgroup 控制文件。
+`ProtectSystem=strict` 会把文件系统其余部分挂成只读；没有上面的 `ReadWritePaths`，Agent 能启动但无法创建 job workspace、写入共享目录或创建 cgroup，错误会在第一次 session 打开时才出现。`PrivateTmp=true` 保留；`PTC_DIRECT_TMP_ROOT=/run/aster` 不使用服务的私有 `/tmp`。不要启用 `ProtectKernelTunables=true`，否则 Agent 无法写入 cgroup 控制文件；`ProtectHome=true` 会让 `/home/aster/jobs` 不可见，`ProtectControlGroups=true` 会让 `/sys/fs/cgroup` 整个只读。三项都必须显式设为 `false`，因为 `ProtectSystem=strict` 的默认值不是 `false`。
+
+> 实测：在 2026-11-03 的双 VPS 验收中，只按旧版单元配置会在第一次 `vm.start`／`session.open` 失败。除上述 unit 设置外，根因是进程在 bwrap `--unshare-cgroup` 之后才被写入 `cgroup.procs`，内核会拒绝把任务迁移到该 cgroup namespace 之外（`EACCES`／`ENODEV`）。当前实现改为先由 helper 把自身 PID 写入目标 cgroup，再 `execve` bwrap，PID 与归属随 exec 保留，因此迁移发生在 unshare 之前。若仍出现 "the sandbox process could not be accounted for: …"，检查的是该 cgroup 是否真的可写，而不再是 unit 的 ReadWritePaths。
 
 ```sh
 sudo systemctl daemon-reload
