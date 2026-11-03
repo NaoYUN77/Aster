@@ -13,6 +13,8 @@ import { spawnInCgroup } from "../src/execution/ptc-cgroup.js";
 
 // `process.execve` is POSIX-only; Windows has no cgroups either.
 const skip = process.platform === "linux" ? false : "cgroup accounting needs a Linux host";
+// A child that never reports its `close` event must fail here, not hang the whole suite.
+const timeout = 15_000;
 
 async function fakeCgroup(t: { after(fn: () => Promise<void>): void }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "aster-cgroup-"));
@@ -31,7 +33,7 @@ function collected(child: ChildProcess): Promise<{ code: number | null; text: st
   });
 }
 
-test("the sandbox enters its cgroup before it runs and keeps its pid across the exec", { skip }, async (t) => {
+test("the sandbox enters its cgroup before it runs and keeps its pid across the exec", { skip, timeout }, async (t) => {
   const root = await fakeCgroup(t);
   const { child, ready } = spawnInCgroup(root, "/bin/sh", ["-c", "echo $$"], {
     env: { PATH: "/usr/bin:/bin" },
@@ -50,7 +52,7 @@ test("the sandbox enters its cgroup before it runs and keeps its pid across the 
   );
 });
 
-test("an exec failure is reported as a command failure, not as a missing cgroup", { skip }, async (t) => {
+test("an exec failure is reported as a command failure, not as a missing cgroup", { skip, timeout }, async (t) => {
   const root = await fakeCgroup(t);
   const { child, ready } = spawnInCgroup(root, "/nonexistent/aster-sandbox", [], {
     env: { PATH: "/usr/bin:/bin" },
@@ -63,7 +65,7 @@ test("an exec failure is reported as a command failure, not as a missing cgroup"
   assert.equal((await result).code, 125);
 });
 
-test("a refused migration rejects before anything runs", { skip }, async (t) => {
+test("a refused migration rejects before anything runs", { skip, timeout }, async (t) => {
   const root = await fakeCgroup(t);
   const { ready } = spawnInCgroup(join(root, "missing"), process.execPath, ["-e", "process.exit(0)"], {
     env: { PATH: "/usr/bin:/bin" },
@@ -72,7 +74,7 @@ test("a refused migration rejects before anything runs", { skip }, async (t) => 
   await assert.rejects(ready, /ENOENT|cannot move/);
 });
 
-test("the accounting channel settles even when the sandbox exits immediately", { skip }, async (t) => {
+test("the accounting channel settles even when the sandbox exits immediately", { skip, timeout }, async (t) => {
   const root = await fakeCgroup(t);
   const { child, ready } = spawnInCgroup(root, process.execPath, ["-e", "process.exit(3)"], {
     env: { PATH: "/usr/bin:/bin" },

@@ -78,7 +78,7 @@ export async function createPtcCgroup(config: PtcConfig, sessionId: string): Pro
  * command exit code. `ready` resolves only after the kernel accepted the PID.
  */
 const CGROUP_EXEC_HELPER = `
-import { writeFileSync, writeSync } from "node:fs";
+import { closeSync, writeFileSync, writeSync } from "node:fs";
 const [path, file, ...args] = process.argv.slice(1);
 const report = (line) => {
   try { writeSync(3, line + "\\n"); } catch { process.exit(125); }
@@ -92,10 +92,11 @@ try {
   process.exit(125);
 }
 report("ok");
+// The sandbox must not inherit the report channel; closing it also ends the parent's stream.
+try { closeSync(3); } catch {}
 try {
   // execve takes the array verbatim as argv: without this, the sandbox would lose argv[0] and see
-  // its first flag as its program name. The CLI flag also keeps its experimental warning off the
-  // sandbox's stderr, which is command output here.
+  // its first flag as its program name.
   process.execve(file, [file, ...args], process.env);
 } catch (error) {
   const message = error && typeof error.message === "string" ? error.message : String(error);
@@ -163,22 +164,7 @@ export function spawnInCgroup(
     }
     let settled = false;
     let data = "";
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      (channel as Readable).removeAllListeners();
-      (channel as unknown as { destroy?: () => void }).destroy?.();
-      if (error === undefined) resolve();
-      else {
-        killTree(child);
-        reject(error);
-      }
-    };
-    const timer = setTimeout(() => finish(new Error("the sandbox did not enter its cgroup in time")), ACCOUNTING_TIMEOUT_MS);
-    timer.unref();
-    (channel as Readable).setEncoding("utf8");
-    (channel as Readable).on("data", (chunk: string | Buffer) => {
+    const onData = (chunk: string | Buffer): void => {
       data += chunk.toString();
       if (data.length > ACCOUNTING_MAX_BYTES) {
         finish(new Error("the sandbox accounting channel sent an invalid response"));
@@ -190,16 +176,37 @@ export function spawnInCgroup(
       if (line === "ok") finish();
       else if (line.startsWith("error:")) finish(new Error(line.slice("error:".length)));
       else finish(new Error("the sandbox accounting channel sent an invalid response"));
-    });
-    (channel as Readable).on("end", () => {
-      finish(new Error("the sandbox exited before it entered its cgroup"));
-    });
-    (channel as Readable).on("error", (error: Error) => {
-      finish(new Error(`the sandbox accounting channel failed: ${error.message}`));
-    });
-    child.once("error", (error: Error) => {
-      finish(new Error(`the sandbox could not start: ${error.message}`));
-    });
+    };
+    const onEnd = (): void => finish(new Error("the sandbox exited before it entered its cgroup"));
+    const onError = (error: Error): void => finish(new Error(`the sandbox accounting channel failed: ${error.message}`));
+    const onChildError = (error: Error): void => finish(new Error(`the sandbox could not start: ${error.message}`));
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const stream = channel as Readable;
+      // Detach only this module's listeners. Node tracks child stdio through listeners of its own;
+      // `removeAllListeners()` would drop them and the sandbox's `close` event would never fire.
+      stream.off("data", onData);
+      stream.off("end", onEnd);
+      stream.off("error", onError);
+      child.off("error", onChildError);
+      // Drain to EOF rather than destroying: the helper's exec closes fd 3, so the stream ends by
+      // itself and the process stays fully accounted for.
+      stream.resume();
+      if (error === undefined) resolve();
+      else {
+        killTree(child);
+        reject(error);
+      }
+    };
+    const timer = setTimeout(() => finish(new Error("the sandbox did not enter its cgroup in time")), ACCOUNTING_TIMEOUT_MS);
+    timer.unref();
+    (channel as Readable).setEncoding("utf8");
+    (channel as Readable).on("data", onData);
+    (channel as Readable).on("end", onEnd);
+    (channel as Readable).on("error", onError);
+    child.once("error", onChildError);
   });
 
   return { child, ready };
