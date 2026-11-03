@@ -16,6 +16,7 @@
 | `npx tsx --test test/*.test.ts`（Windows 11，`71d94c1` 之前的 head） | 370 tests，356 pass，0 fail，14 skipped |
 | 同一套件（Windows 11，含静态修复） | 374 tests，360 pass，0 fail，14 skipped |
 | 同一套件（GitHub Actions Linux，`71d94c1`） | 371 tests，363 pass，0 fail，8 skipped（run `41583892171`） |
+| 同一套件（GitHub Actions Linux，含静态修复，`dc5560e`） | 374 tests，366 pass，0 fail，8 skipped（run `41602806264`） |
 
 Windows 的 14 个 skipped：8 个记忆库／部署文件权限类、Unix socket RPC、Windows 无法创建的符号链接用例、4 个依赖 `process.execve` 与 cgroup 的用例。Linux 上符号链接、Unix socket、远程 codemode 与 cgroup 入组用例实际执行并通过；剩余 8 个 skipped 是部署文件权限类用例，需要相应的宿主条件。涉及 bwrap／cgroup／user namespace／`/shared` 绑定和真实跨 VPS 的检查不在本机执行范围内。
 
