@@ -3,7 +3,7 @@ import type { Readable } from "node:stream";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { access, mkdir, readFile, rmdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { PtcConfig } from "./ptc-config.js";
 import { PtcHostError } from "./ptc-host.js";
@@ -22,8 +22,67 @@ export type PtcCgroup = {
   release(): Promise<void>;
 };
 
+/** Controllers every session needs: the memory, process-count and CPU limits written per session. */
+const SESSION_CONTROLLERS = ["memory", "pids", "cpu"] as const;
+
 async function write(path: string, value: string): Promise<void> {
   await writeFile(path, value, { encoding: "utf8", flag: "w" });
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Asks a cgroup for the controllers its children need. systemd makes the delegated controllers
+ * available to a unit but never enables them (`CGROUP_DELEGATION`), so the agent does it; enabling
+ * an already enabled controller is a no-op, which keeps this safe to repeat on every session.
+ */
+async function ensureControllers(directory: string, controllers: readonly string[]): Promise<void> {
+  const file = join(directory, "cgroup.subtree_control");
+  let current: string;
+  try {
+    current = await readFile(file, "utf8");
+  } catch (error) {
+    throw new PtcHostError("internal", `cgroup v2 is not usable at ${directory}: ${describe(error)}`, "not_started");
+  }
+  const enabled = new Set(current.split(/\s+/).filter(Boolean).map((name) => name.replace(/^\+/, "")));
+  const missing = controllers.filter((name) => !enabled.has(name));
+  if (missing.length === 0) return;
+  try {
+    await write(file, missing.map((name) => `+${name}`).join(" "));
+  } catch (error) {
+    throw new PtcHostError(
+      "internal",
+      `cgroup v2 controllers cannot be enabled at ${directory}: ${describe(error)}. ` +
+        "PTC_CGROUP_ROOT must sit inside the systemd-delegated unit cgroup (Delegate=yes) and the unit's " +
+        "main process must run in a subgroup (DelegateSubgroup=), or that cgroup cannot take controllers.",
+      "not_started",
+    );
+  }
+}
+
+/**
+ * Prepares the directory session cgroups are created in. The kernel checks write access on the
+ * nearest common ancestor of a task's current and target cgroup, not only on the target: a sandbox
+ * the agent starts from the unit cgroup can only enter cgroups that share an ancestor inside the
+ * delegated subtree. A root beside the unit (such as `/sys/fs/cgroup/aster-ptc`) has the cgroup
+ * root as that ancestor and is refused with `EACCES`, so `PTC_CGROUP_ROOT` is a directory below the
+ * unit's cgroup, next to the subgroup that runs the agent.
+ */
+export async function preparePtcCgroupRoot(root: string): Promise<void> {
+  const parent = dirname(root);
+  if (parent === root) {
+    throw new PtcHostError("internal", `PTC_CGROUP_ROOT cannot be the cgroup root: ${root}`, "not_started");
+  }
+  // The parent needs the controllers for the root to have them, the root for the sessions.
+  await ensureControllers(parent, SESSION_CONTROLLERS);
+  try {
+    await mkdir(root, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    throw new PtcHostError("internal", `cgroup v2 is not usable at ${root}: ${describe(error)}`, "not_started");
+  }
+  await ensureControllers(root, SESSION_CONTROLLERS);
 }
 
 /**
@@ -37,8 +96,8 @@ export async function createPtcCgroup(config: PtcConfig, sessionId: string): Pro
   }
   const root = config.cgroupRoot;
   const path = join(root, sessionId);
+  await preparePtcCgroupRoot(root);
   try {
-    await mkdir(root, { recursive: true, mode: 0o700 });
     await mkdir(path, { recursive: false, mode: 0o700 });
     await write(join(path, "memory.max"), String(config.cgroupMemoryMaxBytes));
     await write(join(path, "memory.swap.max"), "0");
@@ -225,16 +284,66 @@ async function probeUserNamespace(): Promise<boolean | null> {
   }
 }
 
-async function probeCgroup(config: PtcConfig): Promise<boolean> {
-  const probe = join(config.cgroupRoot, `.probe-${randomBytes(6).toString("hex")}`);
+type CgroupProbe = { readonly ok: boolean; readonly reason?: string };
+
+/** This process's cgroup v2 path, as the cgroupfs mount shows it. */
+async function ownCgroupPath(): Promise<string | undefined> {
   try {
-    await mkdir(config.cgroupRoot, { recursive: true, mode: 0o700 });
+    const text = await readFile("/proc/self/cgroup", "utf8");
+    const path = text.split("\n").find((entry) => entry.startsWith("0::"))?.slice("0::".length) ?? "";
+    return path.startsWith("/") ? path : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Creates the root the way a session does, then proves a task can enter it: preparing directories
+ * and limits is no evidence of that. A helper runs from this process's cgroup, so a read-only
+ * common ancestor fails here the same way it would for the sandbox, rather than the first VM start
+ * failing after the agent advertised isolation.
+ *
+ * `--check` is normally run from an operator shell, which is not inside the unit cgroup and could
+ * never migrate even on a correct host (its common ancestor with the sessions is the cgroup root).
+ * There the probe checks the two conditions the migration depends on — the unit cgroup is writable
+ * and the delegated controllers are enabled — while the agent's own startup probe, running inside
+ * the unit, remains the authoritative test.
+ */
+async function probeCgroup(config: PtcConfig): Promise<CgroupProbe> {
+  const root = config.cgroupRoot;
+  const unit = dirname(root);
+  const probe = join(root, `.probe-${randomBytes(6).toString("hex")}`);
+  let child: ChildProcess | undefined;
+  try {
+    await preparePtcCgroupRoot(root);
     await mkdir(probe, { mode: 0o700 });
     await write(join(probe, "pids.max"), "8");
-    return true;
-  } catch {
-    return false;
+    const own = await ownCgroupPath();
+    if (own !== undefined && (own === unit || own.startsWith(`${unit}/`))) {
+      const accounted = spawnInCgroup(probe, process.execPath, ["-e", "process.exit(0)"], {
+        env: {},
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+      child = accounted.child;
+      const closed = new Promise<void>((resolve) => { accounted.child.once("close", () => resolve()); });
+      await accounted.ready;
+      // The accounting is what this probe proves; the placeholder does not need to run.
+      accounted.child.kill("SIGKILL");
+      await closed;
+    } else {
+      // The agent's own sandbox enters the cgroup from inside this subtree; it needs the unit's
+      // cgroup.procs writable and the controllers enabled above, both checked here.
+      try {
+        await access(join(unit, "cgroup.procs"), constants.W_OK);
+      } catch (error) {
+        throw new Error(`the agent cannot write ${unit}/cgroup.procs: ${describe(error)}`);
+      }
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: describe(error) };
   } finally {
+    child?.kill("SIGKILL");
     await rmdir(probe).catch(() => undefined);
   }
 }
@@ -252,6 +361,8 @@ export type PtcRuntimeProbe = {
   readonly isolation: PtcIsolationState;
   readonly checks: Record<string, boolean | null>;
   readonly cgroupAvailable: boolean;
+  /** Why cgroup v2 cannot account for sandboxes; host diagnostics for the operator and the log. */
+  readonly cgroupReason?: string;
 };
 
 /**
@@ -259,12 +370,13 @@ export type PtcRuntimeProbe = {
  * agent refuses PTC unless the operator explicitly opted into the prlimit-only fallback.
  */
 export async function probePtcRuntime(config: PtcConfig): Promise<PtcRuntimeProbe> {
-  const [bwrap, userNamespace, cgroup, workspaceRoot] = await Promise.all([
+  const [bwrap, userNamespace, cgroupProbe, workspaceRoot] = await Promise.all([
     probeBwrap(config),
     probeUserNamespace(),
     probeCgroup(config),
     probeDirectory(config.workspaceRoot),
   ]);
+  const cgroup = cgroupProbe.ok;
   const degradedAllowed = config.allowDegraded;
   // bwrap alone is not the isolation contract: resource limits must come from cgroup v2, or the
   // operator must explicitly accept the prlimit-only fallback.
@@ -281,6 +393,7 @@ export async function probePtcRuntime(config: PtcConfig): Promise<PtcRuntimeProb
         directTmpRoot: null,
       },
       cgroupAvailable: cgroup,
+      ...(cgroupProbe.reason === undefined ? {} : { cgroupReason: cgroupProbe.reason }),
     };
   }
   let sharedWorkspace: boolean | null = null;
@@ -314,5 +427,6 @@ export async function probePtcRuntime(config: PtcConfig): Promise<PtcRuntimeProb
       degraded: useBwrap ? null : true,
     },
     cgroupAvailable: useBwrap && cgroup,
+    ...(useBwrap || cgroupProbe.reason === undefined ? {} : { cgroupReason: cgroupProbe.reason }),
   };
 }

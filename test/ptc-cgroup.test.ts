@@ -5,11 +5,11 @@
 
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { spawnInCgroup } from "../src/execution/ptc-cgroup.js";
+import { preparePtcCgroupRoot, spawnInCgroup } from "../src/execution/ptc-cgroup.js";
 
 // `process.execve` is POSIX-only; Windows has no cgroups either.
 const skip = process.platform === "linux" ? false : "cgroup accounting needs a Linux host";
@@ -32,6 +32,39 @@ function collected(child: ChildProcess): Promise<{ code: number | null; signal: 
     child.once("close", (code, signal) => resolve({ code, signal, text, stderr }));
   });
 }
+
+// The kernel only lets a task enter a cgroup when the nearest common ancestor of its current and
+// target cgroup is writable by it, so the root must live inside the unit's delegated subtree. The
+// controller setup is plain file work and runs everywhere; a real migration needs a Linux host.
+
+test("preparing the root enables only the controllers the sessions are missing", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "aster-cgroup-root-"));
+  t.after(async () => { await rm(base, { recursive: true, force: true }); });
+  await writeFile(join(base, "cgroup.subtree_control"), "+memory +pids\n");
+  // A real cgroup exposes this file as soon as the directory exists.
+  await mkdir(join(base, "ptc"));
+  await writeFile(join(base, "ptc", "cgroup.subtree_control"), "");
+
+  await preparePtcCgroupRoot(join(base, "ptc"));
+
+  assert.equal(
+    await readFile(join(base, "cgroup.subtree_control"), "utf8"),
+    "+cpu",
+    "an already enabled controller is not rewritten",
+  );
+  assert.equal(
+    await readFile(join(base, "ptc", "cgroup.subtree_control"), "utf8"),
+    "+memory +pids +cpu",
+    "the sessions get every controller they write limits for",
+  );
+});
+
+test("a root that is not a cgroup is refused before any session creates one", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "aster-cgroup-not-"));
+  t.after(async () => { await rm(base, { recursive: true, force: true }); });
+
+  await assert.rejects(preparePtcCgroupRoot(join(base, "ptc")), /cgroup v2 is not usable/);
+});
 
 test("the sandbox enters its cgroup before it runs and keeps its pid across the exec", { skip, timeout }, async (t) => {
   const root = await fakeCgroup(t);

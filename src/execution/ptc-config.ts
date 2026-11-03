@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,6 +48,35 @@ function integer(
     throw new ConfigurationError(`${name} must be an integer in ${min}..${max}`);
   }
   return value;
+}
+
+/** The standard cgroup v2 mount on systemd hosts; `PTC_CGROUP_ROOT` overrides the whole path. */
+const CGROUP_MOUNT = "/sys/fs/cgroup";
+
+/**
+ * Session cgroups must share a writable ancestor with the agent's own cgroup, which only the
+ * systemd-delegated unit subtree provides. The default is therefore `ptc` inside the unit's
+ * cgroup, next to the subgroup that runs the agent (`DelegateSubgroup=`). Without that subgroup
+ * the unit's cgroup itself holds the agent and cannot take controllers, so there is no usable
+ * default: refuse rather than pick a root that fails on first use.
+ */
+function defaultCgroupRoot(): string {
+  let own = "";
+  try {
+    const line = readFileSync("/proc/self/cgroup", "utf8").split("\n").find((entry) => entry.startsWith("0::"));
+    own = line === undefined ? "" : line.slice("0::".length);
+  } catch {
+    // Not a Linux cgroup v2 host; the operator must name the root.
+  }
+  const unit = own.slice(0, own.lastIndexOf("/"));
+  const member = own.slice(own.lastIndexOf("/") + 1);
+  const inSubgroup = !member.endsWith(".service") && !member.endsWith(".scope") && !member.endsWith(".slice");
+  if (own === "" || unit === "" || !inSubgroup) {
+    throw new ConfigurationError(
+      `PTC_CGROUP_ROOT is required: /proc/self/cgroup shows "${own}", not a delegated unit subgroup`,
+    );
+  }
+  return `${CGROUP_MOUNT}${unit}/ptc`;
 }
 
 function absolutePath(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
@@ -109,7 +138,9 @@ export function readPtcConfig(env: NodeJS.ProcessEnv = process.env): PtcConfig |
     sharedWorkspaceMode: mode,
     directEnabled,
     directTmpRoot,
-    cgroupRoot: absolutePath(env, "PTC_CGROUP_ROOT", "/sys/fs/cgroup/aster-ptc"),
+    cgroupRoot: env.PTC_CGROUP_ROOT === undefined || env.PTC_CGROUP_ROOT === ""
+      ? defaultCgroupRoot()
+      : absolutePath(env, "PTC_CGROUP_ROOT", ""),
     cgroupMemoryMaxBytes: integer(env, "PTC_CGROUP_MEMORY_MAX_BYTES", 512 * 1024 * 1024, 16 * 1024 * 1024, 8 * 1024 * 1024 * 1024),
     cgroupPidsMax: integer(env, "PTC_CGROUP_PIDS_MAX", 128, 8, 4_096),
     cgroupCpuMax: `${cpuParts[0]} ${cpuParts[1]}`,

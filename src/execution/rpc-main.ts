@@ -1,7 +1,7 @@
 import { createSecureContext } from "node:tls";
 import { ConfigurationError } from "../errors.js";
 import { describeRpcAgentConfig, readRpcAgentConfig, readTlsMaterial } from "./rpc-config.js";
-import { probePtcRuntime } from "./ptc-cgroup.js";
+import { probePtcRuntime, type PtcRuntimeProbe } from "./ptc-cgroup.js";
 import { readPtcConfig } from "./ptc-config.js";
 import { DirectExecutor } from "./direct-executor.js";
 import { PtcExecutor } from "./ptc-executor.js";
@@ -26,8 +26,9 @@ async function main(): Promise<void> {
   let direct: DirectExecutor | undefined;
   let ptcChecks: Record<string, boolean | null> | undefined;
   let directChecks: Record<string, boolean | null> | undefined;
+  let probe: PtcRuntimeProbe | undefined;
   if (ptcConfig !== undefined) {
-    const probe = await probePtcRuntime(ptcConfig);
+    probe = await probePtcRuntime(ptcConfig);
     ptc = new PtcExecutor({ config: ptcConfig, probe });
     ptcChecks = await ptc.preflight();
     // Direct sessions share the PTC runtime probe; they are only advertised when isolation,
@@ -37,7 +38,11 @@ async function main(): Promise<void> {
   }
   const checkReport = (): string => `${JSON.stringify({
     ...describeRpcAgentConfig(config),
-    ...(ptcChecks === undefined ? {} : { ptc: ptcChecks }),
+    // The cgroup reason is the operator's only clue when the unit's delegation is wrong; the
+    // booleans alone cannot say whether the root, the controllers or the migration was refused.
+    ...(ptcChecks === undefined ? {} : {
+      ptc: probe?.cgroupReason === undefined ? ptcChecks : { ...ptcChecks, cgroupReason: probe.cgroupReason },
+    }),
     ...(directChecks === undefined ? {} : { direct: directChecks }),
   }, null, 2)}\n`;
   let server: RpcServer;
@@ -86,13 +91,15 @@ async function main(): Promise<void> {
     // Refusing to listen is the only fail-closed answer: a host that cannot isolate must not
     // advertise the Phase 1 surface at all.
     throw new ConfigurationError(
-      "PTC is enabled but this host cannot provide bwrap, user namespaces and cgroup v2 (or an explicitly allowed degraded fallback)",
+      "PTC is enabled but this host cannot provide bwrap, user namespaces and cgroup v2 (or an explicitly allowed degraded fallback)"
+        + (probe?.cgroupReason === undefined ? "" : `: ${probe.cgroupReason}`),
     );
   }
   if (direct !== undefined && ptcConfig?.directEnabled === true && !direct.enabled) {
     // A gateway would otherwise open direct sessions that fail per request; refuse to advertise it.
     throw new ConfigurationError(
-      "PTC_DIRECT_ENABLED is set but this host cannot provide bwrap, user namespaces, cgroup v2, a readable shared workspace and a writable tmp root",
+      "PTC_DIRECT_ENABLED is set but this host cannot provide bwrap, user namespaces, cgroup v2, a readable shared workspace and a writable tmp root"
+        + (probe?.cgroupReason === undefined ? "" : `: ${probe.cgroupReason}`),
     );
   }
   const agent = startRpcAgent({
