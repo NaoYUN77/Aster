@@ -21,7 +21,7 @@
 
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { open, lstat, mkdir, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
+import { open, lstat, mkdir, readlink, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { LineScanner, type FileInfo, type LineScan } from "@earendil-works/pi-durable/env";
 import {
@@ -95,6 +95,23 @@ type ResolvedPath = {
 
 const SCAN_CHUNK_BYTES = 256 * 1024;
 const OPEN_FLAGS = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK);
+/** Matches the kernel's own symlink limit closely enough to refuse cycles promptly. */
+const MAX_LINK_HOPS = 40;
+
+/** Result of resolving a root-relative path one component at a time. */
+type WalkResult = {
+  /** Host path of the deepest resolved component; always inside `root.realHost`. */
+  readonly real: string;
+  /** Components that do not exist yet, in order, relative to `real`. */
+  readonly missing: readonly string[];
+  /** True when the missing component came from a symbolic link's target. */
+  readonly dangling: boolean;
+};
+
+function linkComponents(target: string): string[] {
+  const raw = sep === "/" ? target.split("/") : target.split(/[\\/]/);
+  return raw.filter((part) => part !== "" && part !== ".");
+}
 
 function normalizedVirtual(value: string): string {
   if (value.length === 0 || !value.startsWith("/") || value.includes("\0") || value.includes("\\")) {
@@ -246,21 +263,102 @@ export class PtcFileService {
     return { root: match, relativePath };
   }
 
+  /**
+   * A symbolic link inside the sandbox usually holds a virtual path (`/workspace/x`, `/shared/y`).
+   * Reading the link and then asking the host for that path would look outside every root, so an
+   * absolute target that names this root is mapped back to its host directory. Targets naming a
+   * different root are not followed: each root has its own write permission, and crossing roots
+   * through a link would let a read-only root be written through a writable one.
+   */
+  #virtualLinkTarget(root: ResolvedRoot, target: string): string[] | undefined {
+    if (!isAbsolute(target) || target.includes("\0") || target.includes("\\")) return undefined;
+    if (target === root.virtual) return [];
+    if (!target.startsWith(`${root.virtual}/`)) return undefined;
+    return linkComponents(target.slice(root.virtual.length + 1));
+  }
+
+  /**
+   * Resolve a path inside one root component by component. Following links here rather than with
+   * `realpath` is what lets a virtual absolute link target stay inside its root; every intermediate
+   * result is containment-checked before it is used.
+   */
+  async #walk(root: ResolvedRoot, relativePath: string, virtualPath: string): Promise<WalkResult> {
+    const pending: { readonly name: string; readonly fromLink: boolean }[] = linkComponents(relativePath)
+      .reverse()
+      .map((name) => ({ name, fromLink: false }));
+    let current = root.realHost;
+    let hops = 0;
+    while (pending.length > 0) {
+      const entry = pending.pop() as { readonly name: string; readonly fromLink: boolean };
+      const name = entry.name;
+      if (name === "..") {
+        const parent = dirname(current);
+        if (!inside(root.realHost, parent)) {
+          throw new FileServiceError("permission_denied", `the path resolves outside its root: ${virtualPath}`);
+        }
+        current = parent;
+        continue;
+      }
+      const candidate = join(current, name);
+      if (!inside(root.realHost, candidate)) {
+        throw new FileServiceError("permission_denied", `the path resolves outside its root: ${virtualPath}`);
+      }
+      let stats: import("node:fs").Stats;
+      try {
+        stats = await lstat(candidate);
+      } catch (error) {
+        if ((error as { code?: string }).code === "ENOENT") {
+          return { real: current, missing: [name, ...pending.map((item) => item.name)], dangling: entry.fromLink };
+        }
+        throw mapNodeError(error, virtualPath);
+      }
+      if (!stats.isSymbolicLink()) {
+        current = candidate;
+        continue;
+      }
+      hops += 1;
+      if (hops > MAX_LINK_HOPS) {
+        throw new FileServiceError("permission_denied", `too many symbolic links: ${virtualPath}`);
+      }
+      let target: string;
+      try {
+        target = await readlink(candidate);
+      } catch (error) {
+        throw mapNodeError(error, virtualPath);
+      }
+      const virtual = this.#virtualLinkTarget(root, target);
+      if (virtual !== undefined) {
+        current = root.realHost;
+        pending.push(...virtual.reverse().map((part) => ({ name: part, fromLink: true })));
+        continue;
+      }
+      if (isAbsolute(target)) {
+        const hostTarget = resolve(target);
+        if (!inside(root.realHost, hostTarget)) {
+          throw new FileServiceError("permission_denied", `the path resolves outside its root: ${virtualPath}`);
+        }
+        current = root.realHost;
+        pending.push(...linkComponents(relative(root.realHost, hostTarget))
+          .reverse()
+          .map((part) => ({ name: part, fromLink: true })));
+        continue;
+      }
+      // A relative target is resolved from the link's own directory, which is `current`.
+      pending.push(...linkComponents(target).reverse().map((part) => ({ name: part, fromLink: true })));
+    }
+    return { real: current, missing: [], dangling: false };
+  }
+
   /** Resolve an existing path and prove its real target stays inside its root. */
   async #existing(virtualPath: string, write = false): Promise<ResolvedPath> {
     const normalized = normalizedVirtual(virtualPath);
     const { root, relativePath } = await this.#rootFor(normalized, write);
     const hostPath = resolve(root.host, relativePath);
-    let realPath: string;
-    try {
-      realPath = await realpath(hostPath);
-    } catch (error) {
-      throw mapNodeError(error, normalized);
+    const walked = await this.#walk(root, relativePath, normalized);
+    if (walked.missing.length > 0) {
+      throw new FileServiceError("not_found", `not found: ${normalized}`);
     }
-    if (!inside(root.realHost, realPath)) {
-      throw new FileServiceError("permission_denied", `the path resolves outside its root: ${normalized}`);
-    }
-    return { root, hostPath, realPath, virtualPath: normalized };
+    return { root, hostPath, realPath: walked.real, virtualPath: normalized };
   }
 
   /**
@@ -271,44 +369,26 @@ export class PtcFileService {
   async #forWrite(virtualPath: string): Promise<ResolvedPath> {
     const normalized = normalizedVirtual(virtualPath);
     const { root, relativePath } = await this.#rootFor(normalized, true);
-    const hostPath = resolve(root.host, relativePath);
-    let existing: import("node:fs").Stats | undefined;
-    try {
-      existing = await lstat(hostPath);
-    } catch (error) {
-      if ((error as { code?: string }).code !== "ENOENT") throw mapNodeError(error, normalized);
-    }
-    if (existing?.isDirectory() === true) {
-      throw new FileServiceError("is_directory", `the path is a directory: ${normalized}`);
-    }
+    const walked = await this.#walk(root, relativePath, normalized);
     let target: string;
-    if (existing !== undefined) {
+    if (walked.missing.length === 0) {
+      let stats: import("node:fs").Stats;
       try {
-        target = await realpath(hostPath);
+        stats = await lstat(walked.real);
       } catch (error) {
-        // A dangling symbolic link: writing through it would create an unnamed file outside the
-        // root, so it is refused rather than guessed at.
-        if ((error as { code?: string }).code === "ENOENT") {
-          throw new FileServiceError("not_found", `the symbolic link target is missing: ${normalized}`);
-        }
         throw mapNodeError(error, normalized);
       }
-    } else {
-      const missing: string[] = [];
-      let ancestor = dirname(hostPath);
-      for (;;) {
-        try {
-          const realAncestor = await realpath(ancestor);
-          target = join(realAncestor, ...missing.reverse(), basename(hostPath));
-          break;
-        } catch (error) {
-          if ((error as { code?: string }).code !== "ENOENT") throw mapNodeError(error, normalized);
-          const parent = dirname(ancestor);
-          if (parent === ancestor) throw mapNodeError(error, normalized);
-          missing.push(basename(ancestor));
-          ancestor = parent;
-        }
+      if (stats.isDirectory()) {
+        throw new FileServiceError("is_directory", `the path is a directory: ${normalized}`);
       }
+      target = walked.real;
+    } else {
+      // A dangling symbolic link would make the write create a file nobody named; refuse it
+      // instead of guessing at the intended target. A merely missing tail is created below.
+      if (walked.dangling) {
+        throw new FileServiceError("not_found", `the symbolic link target is missing: ${normalized}`);
+      }
+      target = join(walked.real, ...walked.missing);
     }
     if (!inside(root.realHost, dirname(target))) {
       throw new FileServiceError("permission_denied", `the path resolves outside its root: ${normalized}`);
@@ -363,16 +443,14 @@ export class PtcFileService {
       throw mapNodeError(error, normalized);
     }
     // Ancestors are still followed, so a directory symlink that leaves the root stays refused.
-    let realParent: string;
-    try {
-      realParent = await realpath(dirname(hostPath));
-    } catch (error) {
-      throw mapNodeError(error, normalized);
+    const cut = relativePath.lastIndexOf("/");
+    const parentRelative = cut === -1 ? "" : relativePath.slice(0, cut);
+    const parent = await this.#walk(root, parentRelative, normalized);
+    if (parent.missing.length > 0) {
+      throw new FileServiceError("not_found", `not found: ${normalized}`);
     }
-    if (!inside(root.realHost, realParent)) {
-      throw new FileServiceError("permission_denied", `the path resolves outside its root: ${normalized}`);
-    }
-    return { root, hostPath, realPath: hostPath, virtualPath: normalized };
+    const realPath = relativePath === "" ? parent.real : join(parent.real, basename(hostPath));
+    return { root, hostPath, realPath, virtualPath: normalized };
   }
 
   async open(

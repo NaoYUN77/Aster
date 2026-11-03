@@ -155,6 +155,24 @@ test("symbolic links cannot reach outside a root", { skip: process.platform === 
   assert.equal(written.info.path, "/workspace/target.txt", "the real target is reported");
   assert.equal((await files.readText("/workspace/inside-link")).data, Buffer.from("new").toString("base64"));
   assert.equal(await files.info("/workspace/inside-link").then(({ info }) => info.kind), "symlink");
+
+  // A sandbox link usually names a virtual path. That target must resolve inside this root rather
+  // than being looked up as a host path, which would report a present file as missing.
+  await symlink("/workspace/target.txt", join(workspace, "virtual-link"));
+  assert.equal(await files.canonical("/workspace/virtual-link"), "/workspace/target.txt");
+  assert.equal((await files.readText("/workspace/virtual-link")).data, Buffer.from("new").toString("base64"));
+  const viaVirtual = await files.write("/workspace/virtual-link", Buffer.from("virtual").toString("base64"));
+  assert.equal(viaVirtual.info.path, "/workspace/target.txt");
+  await mkdir(join(workspace, "dir"));
+  await writeFile(join(workspace, "dir", "f.txt"), "nested");
+  await symlink("/workspace/dir", join(workspace, "dir-link"));
+  assert.equal(await files.canonical("/workspace/dir-link/f.txt"), "/workspace/dir/f.txt");
+  assert.equal((await files.readText("/workspace/dir-link/f.txt")).data, Buffer.from("nested").toString("base64"));
+  await symlink("/workspace/void.txt", join(workspace, "virtual-dangling"));
+  await expectCode(files.write("/workspace/virtual-dangling", Buffer.from("x").toString("base64")), "not_found");
+  // Crossing roots through a virtual link would let a writable root reach a read-only one.
+  await symlink("/shared/secret.txt", join(workspace, "cross-root"));
+  await expectCode(files.readText("/workspace/cross-root"), "permission_denied");
 });
 
 test("the remote file system splits large reads and rejects oversized writes locally", async () => {

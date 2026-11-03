@@ -155,6 +155,44 @@ test("direct sessions run bash and file primitives over RPC", { timeout: 30_000 
         && error.options.outcome === "failed",
     );
 
+    // A syntactically valid frame with a bad payload is answered on that request only: traversal is
+    // an authorization failure, a NUL or relative path is a malformed one, and the connection stays.
+    await assert.rejects(
+      client.fileRequest("0123456789abcdef", "file.readText", { path: "/shared/../etc/passwd" }),
+      (error: unknown) => error instanceof RpcClientError
+        && error.code === "permission_denied"
+        && error.options.outcome === "not_started",
+    );
+    await assert.rejects(
+      client.fileRequest("0123456789abcdef", "file.readText", { path: "/shared/a\0b" }),
+      (error: unknown) => error instanceof RpcClientError
+        && error.code === "invalid_request"
+        && error.options.outcome === "not_started",
+    );
+    await assert.rejects(
+      client.fileRequest("0123456789abcdef", "file.readText", { path: "shared/a.txt" }),
+      (error: unknown) => error instanceof RpcClientError && error.code === "invalid_request",
+    );
+    await assert.rejects(
+      client.startToolCall("0123456789abcdef", {
+        tool: "bash",
+        callId: 1,
+        args: {
+          command: "id",
+          // Deliberately outside the sandbox workspace; the payload gate must refuse it.
+          cwd: "/etc" as unknown as "/workspace",
+          env: {},
+          inheritEnv: false,
+          timeoutMs: 1_000,
+          window: { maxBytes: 1_024, maxLines: 10, minIntervalMs: 0, bytesPerSecond: 0 },
+        },
+      }).result,
+      (error: unknown) => error instanceof RpcClientError && error.code === "invalid_request",
+    );
+    const healthAfterBadPayloads = await client.health();
+    assert.equal(healthAfterBadPayloads.executionId, "0123456789abcdef");
+    assert.equal(direct.files.length, 3, "no rejected payload reached the host");
+
     // A job-scoped session belongs to the PTC sandbox and never gets the direct bash executor.
     await client.openSession("fedcba9876543210", { jobId: `ptc-${"a".repeat(32)}` });
     await assert.rejects(

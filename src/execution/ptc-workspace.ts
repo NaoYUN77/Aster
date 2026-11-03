@@ -57,9 +57,9 @@ export async function preparePtcWorkspace(
     await mkdir(root, { recursive: true, mode: 0o700 });
   }
   const jobDirectory = join(root, jobId);
-  if (await ensureDirectory(jobDirectory, "job directory") === "missing") {
-    await mkdir(jobDirectory, { recursive: true, mode: 0o700 });
-  }
+  // Validate an existing job directory without creating one: a replay whose workspace vanished
+  // must not leave a fresh empty job directory behind.
+  await ensureDirectory(jobDirectory, "job directory");
 
   let created = false;
   let reused = false;

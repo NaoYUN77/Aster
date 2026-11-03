@@ -17,6 +17,7 @@ import {
   type RpcFileMethod,
 } from "./rpc-protocol.js";
 import { PtcHostError, type DirectHost, type PtcEventSink, type PtcHost } from "./ptc-host.js";
+import { isPtcSessionId } from "./ptc-cgroup.js";
 import { RpcAbortError, TestExecutionError, executeTestOperation } from "./rpc-test-executor.js";
 import type { RpcConnection, RpcPeerInfo, RpcServer } from "./rpc-transport.js";
 
@@ -50,6 +51,8 @@ type Session = {
   lastActiveAt: number;
   readonly requests: Set<string>;
   vmRequestId?: string;
+  /** The call the VM last asked the gateway to answer; the only valid `vm.reply` id. */
+  pendingVmCallId?: number;
   toolCallRequestId?: string;
 };
 
@@ -228,6 +231,12 @@ class AgentConnection {
       this.close("request id table exceeded its bound");
       return;
     }
+    // A valid envelope with an invalid payload is a request error, not a transport error: answer
+    // the caller and keep the connection, so one bad parameter cannot fail every other session on it.
+    if (frame.payloadError !== undefined) {
+      this.respondError(frame.id, frame.payloadError.code, frame.payloadError.message, "not_started");
+      return;
+    }
     try {
       switch (frame.method) {
         case "health.check":
@@ -340,6 +349,18 @@ class AgentConnection {
       this.respondError(frame.id, "invalid_request", "sessionId is required", "not_started");
       return;
     }
+    const jobId = typeof frame.payload.jobId === "string" ? frame.payload.jobId : undefined;
+    // The PTC sandbox names its cgroup after the session, so the format is a request precondition.
+    // Rejecting it here names the client's mistake instead of surfacing it as a sandbox failure.
+    if (jobId !== undefined && this.options.ptc?.enabled === true && !isPtcSessionId(sessionId)) {
+      this.respondError(
+        frame.id,
+        "invalid_request",
+        "a PTC sessionId must be 16 lowercase hexadecimal characters",
+        "not_started",
+      );
+      return;
+    }
     if (this.sessions.has(sessionId)) {
       this.respondError(frame.id, "busy", "session already exists on this connection", "not_started");
       return;
@@ -349,7 +370,6 @@ class AgentConnection {
       return;
     }
     const now = (this.options.now ?? nowMs)();
-    const jobId = typeof frame.payload.jobId === "string" ? frame.payload.jobId : undefined;
     const direct = jobId === undefined && this.options.direct?.enabled === true;
     const session: Session = {
       sessionId,
@@ -758,6 +778,7 @@ class AgentConnection {
     const sink: PtcEventSink = {
       vmMessage: (callId, messages) => {
         if (pending.settled || this.closed) return;
+        if (callId !== undefined) session.pendingVmCallId = callId;
         this.send({
           v: 1,
           kind: "event",
@@ -886,9 +907,18 @@ class AgentConnection {
       this.respondError(frame.id, "invalid_request", parsed.message, "not_started");
       return;
     }
+    // A reply is only meaningful for the call the VM is blocked on. Accepting another id would
+    // report `delivered: true` for a reply nobody consumes.
+    if (session.pendingVmCallId === undefined || session.pendingVmCallId !== parsed.value.callId) {
+      this.respondError(frame.id, "invalid_request", "callId does not answer the VM's pending call", "not_started");
+      return;
+    }
     try {
       await ptc.replyVm(session.sessionId, parsed.value);
       if (this.closed) return;
+      // Delivering this reply lets the VM run on and emit its next call from inside the same await;
+      // only the id this reply consumed is cleared, so that new call stays pending.
+      if (session.pendingVmCallId === parsed.value.callId) session.pendingVmCallId = undefined;
       this.respondOk(frame.id, { callId: parsed.value.callId, delivered: true });
     } catch (error) {
       const failure = this.hostFailure(error);
@@ -928,7 +958,10 @@ class AgentConnection {
     if (pending.deadline !== undefined) clearTimeout(pending.deadline);
     this.requests.delete(pending.id);
     session.requests.delete(pending.id);
-    if (session.vmRequestId === pending.id) session.vmRequestId = undefined;
+    if (session.vmRequestId === pending.id) {
+      session.vmRequestId = undefined;
+      session.pendingVmCallId = undefined;
+    }
     if (session.toolCallRequestId === pending.id) session.toolCallRequestId = undefined;
     this.active--;
   }

@@ -119,6 +119,12 @@ export type RpcRequestFrame = {
   readonly correlationId?: string;
   readonly deadlineMs: number;
   readonly payload: Record<string, unknown>;
+  /**
+   * Set when the frame envelope is valid but the method's payload is not. The request keeps its id
+   * and is answered with this error; only envelope failures close the connection. `payload` is
+   * empty in that case and the dispatcher must not touch it.
+   */
+  readonly payloadError?: RpcErrorPayload;
 };
 
 export type RpcResponseFrame =
@@ -213,6 +219,11 @@ export type RpcFrame = RpcRequestFrame | RpcResponseFrame | RpcEventFrame;
 export type ParseResult<TValue> =
   | { readonly ok: true; readonly value: TValue }
   | { readonly ok: false; readonly message: string };
+
+/** Payload validation never fails a connection; it carries the code the request is answered with. */
+type PayloadResult =
+  | { readonly ok: true; readonly value: Record<string, unknown> }
+  | { readonly ok: false; readonly code: RpcErrorCode; readonly message: string };
 
 export class RpcProtocolError extends Error {
   override name = "RpcProtocolError";
@@ -569,15 +580,30 @@ function isNonNegativeInteger(value: unknown, max = Number.MAX_SAFE_INTEGER): va
 }
 
 /**
- * A virtual path is absolute, POSIX-shaped and already free of `..` segments, so a host mapping
- * built from it can never climb out of its root. The service still resolves symlinks and checks
- * containment; this is the first gate, not the only one.
+ * A virtual path is absolute and POSIX-shaped. `..` is not a syntax error but an authorization
+ * failure: the service normalizes the path and only exposed roots survive, so the caller sees
+ * `permission_denied` rather than a dropped connection. Every failure here becomes a per-request
+ * error response; only the frame envelope can close the connection.
+ */
+function virtualPathIssue(value: unknown): { readonly code: RpcErrorCode; readonly message: string } | undefined {
+  if (typeof value !== "string" || value.length === 0) return { code: "invalid_request", message: "path is invalid" };
+  if (byteLength(value) > FILE_MAX_PATH_BYTES) return { code: "invalid_request", message: "path is too long" };
+  if (!value.startsWith("/") || value.includes("\0") || value.includes("\\")) {
+    return { code: "invalid_request", message: "path is invalid" };
+  }
+  if (value.split("/").some((segment) => segment === "..")) {
+    return { code: "permission_denied", message: "the path leaves its root" };
+  }
+  return undefined;
+}
+
+/**
+ * A working directory is stricter than a file path: it must already be normalized, because the
+ * executor compares it against a fixed root rather than resolving it. A `..` segment is therefore
+ * a malformed request, not a path that would merely be refused.
  */
 function isVirtualPath(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0) return false;
-  if (byteLength(value) > FILE_MAX_PATH_BYTES) return false;
-  if (!value.startsWith("/") || value.includes("\0") || value.includes("\\")) return false;
-  return !value.split("/").some((segment) => segment === "..");
+  return typeof value === "string" && value.length > 0 && virtualPathIssue(value) === undefined;
 }
 
 function isFileHandle(value: unknown): value is string {
@@ -621,16 +647,18 @@ export function parseBashExecutePayload(value: unknown): ParseResult<RpcBashExec
   };
 }
 
-function validateFilePayload(method: RpcFileMethod, value: unknown): ParseResult<Record<string, unknown>> {
-  if (!isPlainObject(value)) return fail(`${method} payload must be an object`);
+function validateFilePayload(method: RpcFileMethod, value: unknown): PayloadResult {
+  const invalid = (message: string): PayloadResult => ({ ok: false, code: "invalid_request", message });
+  if (!isPlainObject(value)) return invalid(`${method} payload must be an object`);
   switch (method) {
     case "file.stat":
     case "file.open": {
       const unknown = unexpectedKey(value, ["path", "noFollow"]);
-      if (unknown !== undefined) return fail(`unknown ${method} field: ${unknown}`);
-      if (!isVirtualPath(value.path)) return fail("path is invalid");
+      if (unknown !== undefined) return invalid(`unknown ${method} field: ${unknown}`);
+      const issue = virtualPathIssue(value.path);
+      if (issue !== undefined) return { ok: false, ...issue };
       if (Object.hasOwn(value, "noFollow") && typeof value.noFollow !== "boolean") {
-        return fail("noFollow must be a boolean");
+        return invalid("noFollow must be a boolean");
       }
       return { ok: true, value };
     }
@@ -638,50 +666,52 @@ function validateFilePayload(method: RpcFileMethod, value: unknown): ParseResult
     case "file.canonical":
     case "file.readText": {
       const unknown = unexpectedKey(value, ["path"]);
-      if (unknown !== undefined) return fail(`unknown ${method} field: ${unknown}`);
-      if (!isVirtualPath(value.path)) return fail("path is invalid");
+      if (unknown !== undefined) return invalid(`unknown ${method} field: ${unknown}`);
+      const issue = virtualPathIssue(value.path);
+      if (issue !== undefined) return { ok: false, ...issue };
       return { ok: true, value };
     }
     case "file.read": {
       const unknown = unexpectedKey(value, ["handle", "offset", "length"]);
-      if (unknown !== undefined) return fail(`unknown file.read field: ${unknown}`);
-      if (!isFileHandle(value.handle)) return fail("handle is invalid");
-      if (!isNonNegativeInteger(value.offset)) return fail("offset is invalid");
+      if (unknown !== undefined) return invalid(`unknown file.read field: ${unknown}`);
+      if (!isFileHandle(value.handle)) return invalid("handle is invalid");
+      if (!isNonNegativeInteger(value.offset)) return invalid("offset is invalid");
       if (!isPositiveInteger(value.length, FILE_MAX_READ_CHUNK_BYTES)) {
-        return fail(`length must be an integer in 1..${FILE_MAX_READ_CHUNK_BYTES}`);
+        return invalid(`length must be an integer in 1..${FILE_MAX_READ_CHUNK_BYTES}`);
       }
       return { ok: true, value };
     }
     case "file.scanLines": {
       const unknown = unexpectedKey(value, ["handle", "startLine", "endLine"]);
-      if (unknown !== undefined) return fail(`unknown file.scanLines field: ${unknown}`);
-      if (!isFileHandle(value.handle)) return fail("handle is invalid");
-      if (!isNonNegativeInteger(value.startLine, FILE_MAX_SCAN_LINES)) return fail("startLine is invalid");
+      if (unknown !== undefined) return invalid(`unknown file.scanLines field: ${unknown}`);
+      if (!isFileHandle(value.handle)) return invalid("handle is invalid");
+      if (!isNonNegativeInteger(value.startLine, FILE_MAX_SCAN_LINES)) return invalid("startLine is invalid");
       if (Object.hasOwn(value, "endLine")) {
         if (!isNonNegativeInteger(value.endLine, FILE_MAX_SCAN_LINES)
           || (value.endLine as number) <= (value.startLine as number)) {
-          return fail("endLine must be an integer greater than startLine");
+          return invalid("endLine must be an integer greater than startLine");
         }
       }
       return { ok: true, value };
     }
     case "file.close": {
       const unknown = unexpectedKey(value, ["handle"]);
-      if (unknown !== undefined) return fail(`unknown file.close field: ${unknown}`);
-      if (!isFileHandle(value.handle)) return fail("handle is invalid");
+      if (unknown !== undefined) return invalid(`unknown file.close field: ${unknown}`);
+      if (!isFileHandle(value.handle)) return invalid("handle is invalid");
       return { ok: true, value };
     }
     case "file.write": {
       const unknown = unexpectedKey(value, ["path", "content"]);
-      if (unknown !== undefined) return fail(`unknown file.write field: ${unknown}`);
-      if (!isVirtualPath(value.path)) return fail("path is invalid");
+      if (unknown !== undefined) return invalid(`unknown file.write field: ${unknown}`);
+      const issue = virtualPathIssue(value.path);
+      if (issue !== undefined) return { ok: false, ...issue };
       if (!isBase64(value.content, FILE_MAX_WRITE_BYTES)) {
-        return fail(`content must be base64 of at most ${FILE_MAX_WRITE_BYTES} bytes`);
+        return invalid(`content must be base64 of at most ${FILE_MAX_WRITE_BYTES} bytes`);
       }
       return { ok: true, value };
     }
     default:
-      return fail("unknown file method");
+      return invalid("unknown file method");
   }
 }
 
@@ -1151,48 +1181,49 @@ export function parsePtcToolCallResult(value: unknown): ParseResult<PtcToolCallR
   };
 }
 
-function validateRequestPayload(method: RpcMethod, payload: unknown): ParseResult<Record<string, unknown>> {
-  if (!isPlainObject(payload)) return fail("request payload must be an object");
+function validateRequestPayload(method: RpcMethod, payload: unknown): PayloadResult {
+  const invalid = (message: string): PayloadResult => ({ ok: false, code: "invalid_request", message });
+  if (!isPlainObject(payload)) return invalid("request payload must be an object");
   switch (method) {
     case "health.check":
     case "preflight": {
       const unknown = unexpectedKey(payload, []);
-      return unknown === undefined ? { ok: true, value: payload } : fail(`unknown payload field: ${unknown}`);
+      return unknown === undefined ? { ok: true, value: payload } : invalid(`unknown payload field: ${unknown}`);
     }
     case "session.open": {
       const unknown = unexpectedKey(payload, ["sessionId", "jobId", "workspaceReady"]);
-      if (unknown !== undefined) return fail(`unknown session.open field: ${unknown}`);
-      if (!isSafeId(payload.sessionId)) return fail("sessionId is invalid");
-      if (Object.hasOwn(payload, "jobId") && !isSafeJobId(payload.jobId)) return fail("jobId is invalid");
+      if (unknown !== undefined) return invalid(`unknown session.open field: ${unknown}`);
+      if (!isSafeId(payload.sessionId)) return invalid("sessionId is invalid");
+      if (Object.hasOwn(payload, "jobId") && !isSafeJobId(payload.jobId)) return invalid("jobId is invalid");
       if (Object.hasOwn(payload, "workspaceReady") && typeof payload.workspaceReady !== "boolean") {
-        return fail("workspaceReady must be a boolean");
+        return invalid("workspaceReady must be a boolean");
       }
       return { ok: true, value: payload };
     }
     case "session.close": {
       const unknown = unexpectedKey(payload, ["sessionId"]);
-      if (unknown !== undefined) return fail(`unknown session.close field: ${unknown}`);
-      if (!isSafeId(payload.sessionId)) return fail("sessionId is invalid");
+      if (unknown !== undefined) return invalid(`unknown session.close field: ${unknown}`);
+      if (!isSafeId(payload.sessionId)) return invalid("sessionId is invalid");
       return { ok: true, value: payload };
     }
     case "cancel": {
       const unknown = unexpectedKey(payload, ["targetId", "reason"]);
-      if (unknown !== undefined) return fail(`unknown cancel field: ${unknown}`);
-      if (!isSafeId(payload.targetId)) return fail("targetId is invalid");
-      if (Object.hasOwn(payload, "reason") && !isSafeReason(payload.reason)) return fail("reason is invalid");
+      if (unknown !== undefined) return invalid(`unknown cancel field: ${unknown}`);
+      if (!isSafeId(payload.targetId)) return invalid("targetId is invalid");
+      if (Object.hasOwn(payload, "reason") && !isSafeReason(payload.reason)) return invalid("reason is invalid");
       return { ok: true, value: payload };
     }
     case "execute": {
       if (typeof payload.executor !== "string" || payload.executor.length > 32) {
-        return fail("execute.executor must be a string of at most 32 bytes");
+        return invalid("execute.executor must be a string of at most 32 bytes");
       }
       if (payload.executor === "test") {
         const parsed = parseTestExecutePayload(payload);
-        if (!parsed.ok) return fail(parsed.message);
+        if (!parsed.ok) return invalid(parsed.message);
       }
       if (payload.executor === "bash") {
         const parsed = parseBashExecutePayload(payload);
-        if (!parsed.ok) return fail(parsed.message);
+        if (!parsed.ok) return invalid(parsed.message);
       }
       // Other executors are parsed but rejected by the dispatcher; they are never executed.
       return { ok: true, value: payload };
@@ -1209,30 +1240,30 @@ function validateRequestPayload(method: RpcMethod, payload: unknown): ParseResul
       return validateFilePayload(method, payload);
     case "tool.call": {
       const parsed = parsePtcToolCallPayload(payload);
-      if (!parsed.ok) return fail(parsed.message);
+      if (!parsed.ok) return invalid(parsed.message);
       return { ok: true, value: payload };
     }
     case "vm.start": {
       const parsed = parsePtcVmStartPayload(payload);
-      if (!parsed.ok) return fail(parsed.message);
+      if (!parsed.ok) return invalid(parsed.message);
       return { ok: true, value: payload };
     }
     case "vm.message": {
       const unknown = unexpectedKey(payload, ["messages"]);
-      if (unknown !== undefined) return fail(`unknown vm.message field: ${unknown}`);
+      if (unknown !== undefined) return invalid(`unknown vm.message field: ${unknown}`);
       if (!Array.isArray(payload.messages) || payload.messages.length > PTC_MAX_VM_MESSAGES) {
-        return fail(`messages must be an array of at most ${PTC_MAX_VM_MESSAGES} entries`);
+        return invalid(`messages must be an array of at most ${PTC_MAX_VM_MESSAGES} entries`);
       }
-      if (!payload.messages.every(isPlainObject)) return fail("messages entries must be objects");
+      if (!payload.messages.every(isPlainObject)) return invalid("messages entries must be objects");
       return { ok: true, value: payload };
     }
     case "vm.reply": {
       const parsed = parsePtcVmReplyPayload(payload);
-      if (!parsed.ok) return fail(parsed.message);
+      if (!parsed.ok) return invalid(parsed.message);
       return { ok: true, value: payload };
     }
     default:
-      return fail("unknown method");
+      return invalid("unknown method");
   }
 }
 
@@ -1255,7 +1286,6 @@ function parseRequest(value: Record<string, unknown>): ParseResult<RpcRequestFra
   }
   const method = value.method as RpcMethod;
   const payload = validateRequestPayload(method, value.payload);
-  if (!payload.ok) return fail(payload.message);
   return {
     ok: true,
     value: {
@@ -1264,7 +1294,8 @@ function parseRequest(value: Record<string, unknown>): ParseResult<RpcRequestFra
       id: value.id,
       method,
       deadlineMs: value.deadlineMs as number,
-      payload: payload.value,
+      payload: payload.ok ? payload.value : {},
+      ...(payload.ok ? {} : { payloadError: { code: payload.code, message: payload.message } }),
       ...(Object.hasOwn(value, "sessionId") ? { sessionId: value.sessionId as string } : {}),
       ...(Object.hasOwn(value, "jobId") ? { jobId: value.jobId as string } : {}),
       ...(Object.hasOwn(value, "correlationId") ? { correlationId: value.correlationId as string } : {}),

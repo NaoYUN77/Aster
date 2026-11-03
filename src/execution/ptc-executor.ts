@@ -69,6 +69,8 @@ type Runner = {
   writes: Promise<void>;
   exit: Promise<void>;
   vm?: PendingVm;
+  /** The call the VM is waiting on; the only `callId` that may be answered with `vm.reply`. */
+  pendingVmCallId?: number;
   tool?: PendingTool;
   readonly files: Map<number, PendingFile>;
   finished: boolean;
@@ -184,7 +186,19 @@ export class PtcExecutor implements PtcHost {
     const session = this.requireSession(sessionId);
     const runner = session.runner;
     if (runner === undefined) throw new PtcHostError("not_found", "no VM is running in this session", "not_started");
+    // The runner drops a reply whose id is not pending, so accepting one here would report
+    // `delivered: true` for a reply the VM never receives.
+    if (runner.pendingVmCallId === undefined || runner.pendingVmCallId !== payload.callId) {
+      throw new PtcHostError(
+        "invalid_request",
+        "callId does not answer the VM's pending call",
+        "not_started",
+      );
+    }
     this.send(runner, { t: "reply", callId: payload.callId, reply: payload.reply });
+    // The runner may already have emitted the next call by the time its stdin write returns;
+    // only the id this reply consumed is cleared.
+    if (runner.pendingVmCallId === payload.callId) runner.pendingVmCallId = undefined;
   }
 
   async toolCall(input: {
@@ -299,6 +313,9 @@ export class PtcExecutor implements PtcHost {
       try {
         cgroup = await createPtcCgroup(config, session.sessionId);
       } catch (error) {
+        // A rejected session id is the caller's mistake; wrapping it as `internal` would hide the
+        // only actionable part of the failure.
+        if (error instanceof PtcHostError) throw error;
         throw new PtcHostError(
           "internal",
           `the sandbox could not be constrained: ${error instanceof Error ? error.message : "cgroup setup failed"}`,
@@ -421,6 +438,7 @@ export class PtcExecutor implements PtcHost {
           this.failRunner(session, runner, new RunnerFailure("protocol_error", "the sandbox reported VM messages after the VM ended"));
           return;
         }
+        if (frame.callId !== undefined) runner.pendingVmCallId = frame.callId;
         runner.vm.sink.vmMessage(frame.callId, frame.messages);
         return;
       case "tool.output": {
@@ -499,6 +517,7 @@ export class PtcExecutor implements PtcHost {
   private finishRunner(session: SessionState, runner: Runner, error: PtcHostError | undefined): void {
     if (runner.finished) return;
     runner.finished = true;
+    runner.pendingVmCallId = undefined;
     const tool = runner.tool;
     runner.tool = undefined;
     const vm = runner.vm;

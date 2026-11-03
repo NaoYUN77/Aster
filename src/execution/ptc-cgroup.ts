@@ -11,6 +11,10 @@ import type { PtcIsolationState } from "./rpc-protocol.js";
 
 const run = promisify(execFile);
 const SESSION_ID_PATTERN = /^[a-f0-9]{16}$/;
+/** Session ids double as cgroup directory names, so the format is part of the wire contract. */
+export function isPtcSessionId(value: string): boolean {
+  return SESSION_ID_PATTERN.test(value);
+}
 /** A local helper writes one line; anything longer means it is not the helper. */
 const ACCOUNTING_TIMEOUT_MS = 5_000;
 const ACCOUNTING_MAX_BYTES = 4_096;
@@ -91,7 +95,7 @@ export async function preparePtcCgroupRoot(root: string): Promise<void> {
  * unit.
  */
 export async function createPtcCgroup(config: PtcConfig, sessionId: string): Promise<PtcCgroup> {
-  if (!SESSION_ID_PATTERN.test(sessionId)) {
+  if (!isPtcSessionId(sessionId)) {
     throw new PtcHostError("invalid_request", "sessionId is not a 16-hex identifier", "not_started");
   }
   const root = config.cgroupRoot;
