@@ -292,8 +292,9 @@ test("code mode in remote execution exposes the sandbox tools to scripts", {
       },
       (transcript) => {
         const result = transcript.messages.find((message) => message.role === "toolResult");
-        assert.ok(result?.role === "toolResult" && !result.isError);
+        assert.ok(result?.role === "toolResult", "the codemode call must settle a result");
         const text = result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+        assert.equal(result.isError, false, `the codemode call failed: ${text}`);
         assert.match(text, /out-1out-2/);
         return fauxAssistantMessage("remote done");
       },

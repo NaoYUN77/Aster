@@ -345,6 +345,36 @@ export class PtcFileService {
     return toVirtual(resolved.root, resolved.realPath);
   }
 
+  /**
+   * Resolve a path whose final component must not be followed. The link itself is refused, not its
+   * target: resolving first would run the containment check against a path the caller never named
+   * and would make the kernel's `O_NOFOLLOW` check meaningless.
+   */
+  async #existingNoFollow(virtualPath: string): Promise<ResolvedPath> {
+    const normalized = normalizedVirtual(virtualPath);
+    const { root, relativePath } = await this.#rootFor(normalized, false);
+    const hostPath = resolve(root.host, relativePath);
+    try {
+      if ((await lstat(hostPath)).isSymbolicLink()) {
+        throw new FileServiceError("invalid_request", `symbolic links are refused: ${normalized}`);
+      }
+    } catch (error) {
+      if (error instanceof FileServiceError) throw error;
+      throw mapNodeError(error, normalized);
+    }
+    // Ancestors are still followed, so a directory symlink that leaves the root stays refused.
+    let realParent: string;
+    try {
+      realParent = await realpath(dirname(hostPath));
+    } catch (error) {
+      throw mapNodeError(error, normalized);
+    }
+    if (!inside(root.realHost, realParent)) {
+      throw new FileServiceError("permission_denied", `the path resolves outside its root: ${normalized}`);
+    }
+    return { root, hostPath, realPath: hostPath, virtualPath: normalized };
+  }
+
   async open(
     session: string,
     virtualPath: string,
@@ -353,22 +383,19 @@ export class PtcFileService {
     if (this.#handles.size >= this.#maxHandles) {
       throw new FileServiceError("busy", "the execution host has too many open files for this service");
     }
-    const resolved = await this.#existing(virtualPath);
-    if (options.noFollow === true) {
-      try {
-        if ((await lstat(resolved.hostPath)).isSymbolicLink()) {
-          throw new FileServiceError("invalid_request", `symbolic links are refused: ${resolved.virtualPath}`);
-        }
-      } catch (error) {
-        if (error instanceof FileServiceError) throw error;
-        throw mapNodeError(error, resolved.virtualPath);
-      }
-    }
+    const resolved = options.noFollow === true
+      ? await this.#existingNoFollow(virtualPath)
+      : await this.#existing(virtualPath);
     const flags = OPEN_FLAGS | (options.noFollow === true && process.platform !== "win32" ? constants.O_NOFOLLOW : 0);
     let fh: FileHandle;
     try {
       fh = await open(resolved.realPath, flags);
     } catch (error) {
+      // The final component can be swapped for a link between the check and the open; the kernel's
+      // ELOOP is the same refusal, not a permission failure of the target.
+      if (options.noFollow === true && (error as { code?: string }).code === "ELOOP") {
+        throw new FileServiceError("invalid_request", `symbolic links are refused: ${resolved.virtualPath}`);
+      }
       throw mapNodeError(error, resolved.virtualPath);
     }
     try {

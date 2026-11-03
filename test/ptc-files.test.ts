@@ -144,10 +144,12 @@ test("symbolic links cannot reach outside a root", { skip: process.platform === 
   await expectCode(files.write("/workspace/secret-link", Buffer.from("x").toString("base64")), "permission_denied");
   await expectCode(files.write("/workspace/dangling", Buffer.from("x").toString("base64")), "not_found");
   await expectCode(files.open("session-a", "/workspace/secret-link", { noFollow: true }), "invalid_request");
+  await expectCode(files.open("session-a", "/workspace/escape/secret.txt", { noFollow: true }), "permission_denied");
 
   // A link whose target stays inside the root is followed, and writing keeps the link itself.
   await writeFile(join(workspace, "target.txt"), "old");
   await symlink(join(workspace, "target.txt"), join(workspace, "inside-link"));
+  await expectCode(files.open("session-a", "/workspace/inside-link", { noFollow: true }), "invalid_request");
   assert.equal(await files.canonical("/workspace/inside-link"), "/workspace/target.txt");
   const written = await files.write("/workspace/inside-link", Buffer.from("new").toString("base64"));
   assert.equal(written.info.path, "/workspace/target.txt", "the real target is reported");
