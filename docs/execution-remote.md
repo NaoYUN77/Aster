@@ -2,9 +2,11 @@
 
 本文是阶段 1 的运行说明：把 `bash` 等命令工具放到第二台 VPS 上执行，控制面只保留会话、记忆、投递与工具调用记录。设计取舍见 [ADR-0021](adr/0021-control-execution-split.md)。
 
-> 统一 RPC Execution Agent（Phase 0）是独立通道，尚未接入 app、broker 或普通工具；其部署与验收见 [远程 PTC spec](spec-20261102-remote-ptc-sandbox.md)。本文所述的 one-shot SSH 路径仍是当前生产行为。
+> 统一 RPC Execution Agent 的 Phase 1／2 已在仓库实现：控制面设置 `EXECUTION_REMOTE_TRANSPORT=rpc` 时，直接 `bash` 与 `read`／`write`／`edit` 走同一条 RPC direct session，详见 [远程 PTC spec](spec-20261102-remote-ptc-sandbox.md) 与 [Phase 2 验收记录](acceptance/20261103-remote-ptc-phase2.md)。本文所述的 one-shot SSH 路径仍可显式选择（默认 `EXECUTION_REMOTE_TRANSPORT=ssh`），作为迁移验收前的兼容路径。
+>
+> 生产容器形态由 `docker-compose.rpc.yml` 提供：app 容器只连宿主 Unix socket，宿主网络里的 `rpc-gateway` 持有 mTLS 身份；部署步骤见 [Runbook 5.4](runbook-remote-ptc-phase1-2.md#54-全线-rpcapp-容器--宿主-gateway)。
 
-阶段 1 只实现 **shell**。`read`／`write`／`edit` 等文件工具在远程模式下返回 `not_supported`，这是有意的失败关闭：避免模型在控制面读到与执行面不同的同名文件。文件工作请通过 `bash` 在执行主机上完成。
+SSH 传输只实现 **shell**。`read`／`write`／`edit` 等文件工具在该模式下返回 `not_supported`，这是有意的失败关闭：避免模型在控制面读到与执行面不同的同名文件。文件工作请通过 `bash` 在执行主机上完成；需要远程文件工具时改用 rpc 传输。
 
 ## 拓扑
 
@@ -122,7 +124,7 @@ docker compose -f docker-compose.yml -f docker-compose.execution.yml \
 | 启动时报 `Execution broker is unavailable: ...` | socket 未挂载、broker 未启动、权限不对，或 ping 超时 |
 | 命令返回超时错误 | 请求超时超过 `EXECUTION_MAX_TIMEOUT_SECONDS`，或远端 `timeout` 触发 |
 | 命令返回 aborted | 请求被取消（例如请求整体超时），broker 已中止 SSH 子进程组 |
-| `not_supported` | 调用了文件工具；阶段 1 只支持 shell |
+| `not_supported` | 在 ssh 传输下调用了文件工具；该传输只支持 shell |
 | `execution broker is busy` | 同时执行的命令达到上限；这是显式拒绝，不排队、不静默丢弃 |
 | 结果未知 | 连接中断或 broker 重启；按失败记录，不当作命令未执行 |
 
@@ -131,7 +133,7 @@ docker compose -f docker-compose.yml -f docker-compose.execution.yml \
 ## 边界与非目标
 
 - 不承诺跨主机恰好一次。恢复重放仍按 [ADR-0008](adr/0008-unsafe-tool-replay.md) 保守处理，声明可安全重放前必须确认重复执行没有副作用。
-- 切换 `EXECUTION_MODE` 前先让未完成任务收敛。durable 恢复会把未完成的工具调用重放到当前配置的执行环境；远程模式下文件工具调用会显式失败并记录为错误，不会被当作成功。
+- 切换 `EXECUTION_MODE` 或 `EXECUTION_REMOTE_TRANSPORT` 前先让未完成任务收敛。durable 恢复会把未完成的工具调用重放到当前配置的执行环境；在 ssh 传输下文件工具调用会显式失败并记录为错误，不会被当作成功。
 - 执行 VPS 上的工作目录与缓存是本地状态，不参与控制面的会话／记忆／投递恢复。
-- 不实现远程文件系统、文件监听或文件工具；不把执行 VPS 加入 MITM 网络；不发布 broker 端口。
+- 本文的 SSH 传输不实现远程文件系统、文件监听或文件工具；rpc 传输的文件原语与其边界见 [远程 PTC spec](spec-20261102-remote-ptc-sandbox.md)。两种传输都不把执行 VPS 加入 MITM 网络，也不发布 broker 端口。
 - 模型调用仍经 MITM，密钥仍由代理按占位符替换。阶段 2／3 的凭据签发与模型直连不在本文范围，见 [ADR-0021](adr/0021-control-execution-split.md#阶段顺序)。

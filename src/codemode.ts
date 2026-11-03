@@ -5,8 +5,10 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { CODEMODE_TOOL_NAME, createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
-import { CodemodeSandbox } from "@earendil-works/pi-codemode";
+import { CodemodeSandbox, type CodemodeSandboxBase } from "@earendil-works/pi-codemode";
 import type { CodemodeConfig } from "./config.js";
+import type { RpcExecutionClient } from "./execution/rpc-client.js";
+import { PtcGateway, SessionBoundCodemodeSandbox } from "./ptc-gateway.js";
 
 /**
  * The script's result is the only thing that enters the conversation, so cap it well below the
@@ -16,11 +18,15 @@ export const CODEMODE_OUTPUT_LIMITS = { maxBytes: 32 * 1024, maxLines: 1_000, re
 
 /** File tools are usable inside scripts only when the execution environment is local. */
 export const LOCAL_SCRIPT_TOOLS: ReadonlySet<string> = new Set(["read", "write", "edit", "bash"]);
-/** Remote execution phase 1 has no remote file API, so scripts may run commands only. */
-export const REMOTE_SCRIPT_TOOLS: ReadonlySet<string> = new Set(["bash"]);
+/** Remote execution exposes the same tools; file primitives run inside the PTC sandbox. */
+export const REMOTE_SCRIPT_TOOLS: ReadonlySet<string> = new Set(["read", "write", "edit", "bash"]);
 
 export type CodemodeHost = {
   readonly extension: Extension;
+  /** Prove the remote agent is usable before accepting work; a no-op in local mode. */
+  start(): Promise<void>;
+  /** Apply host tool wrappers; remote mode routes nested bash calls through the session's VM. */
+  wrapScriptTools(extension: Extension): Extension;
   close(): Promise<void>;
 };
 
@@ -83,24 +89,58 @@ export function serializeNestedCalls(tool: ToolRegistration): ToolRegistration {
  * The base's code mode tool plus its QuickJS WASM sandbox. Scripts see only `tools.*`,
  * `ALL_TOOLS`, `text`/`image`/`exit`, `console`, `store`/`load`, and the discovery globals; no
  * filesystem, network, timers, or modules are exposed to the VM.
+ *
+ * Remote execution uses `SessionBoundCodemodeSandbox`: the VM runs on the execution agent and every
+ * nested tool call is bridged back to the host through one PTC session per code mode call. `client`
+ * lets the agent share its already connected RPC client; the gateway then never closes it.
  */
-export function createCodemodeHost(config: CodemodeConfig): CodemodeHost {
-  const sandbox = new CodemodeSandbox({
-    timeoutMs: config.timeoutMs,
-    memoryLimitBytes: config.memoryLimitBytes,
-  });
+export function createCodemodeHost(config: CodemodeConfig, client?: RpcExecutionClient): CodemodeHost {
+  let sandbox: CodemodeSandboxBase;
+  let gateway: PtcGateway | undefined;
+  if (config.ptc === undefined) {
+    sandbox = new CodemodeSandbox({
+      timeoutMs: config.timeoutMs,
+      memoryLimitBytes: config.memoryLimitBytes,
+    });
+  } else {
+    const bound = new SessionBoundCodemodeSandbox({
+      timeoutMs: config.timeoutMs,
+      memoryLimitBytes: config.memoryLimitBytes,
+    });
+    sandbox = bound;
+    gateway = new PtcGateway({
+      rpc: config.ptc.rpc,
+      sandbox: bound,
+      defaultTimeoutSeconds: config.ptc.defaultTimeoutSeconds,
+      maxTimeoutSeconds: config.ptc.maxTimeoutSeconds,
+      ...(client === undefined ? {} : { client }),
+    });
+  }
   const base = createCodemodeExtension({ sandbox, models: false });
   const extension = defineExtension({
     ...base,
-    tools: (base.tools ?? []).map((tool) => tool.name === CODEMODE_TOOL_NAME
-      ? serializeNestedCalls({ ...tool, outputLimits: CODEMODE_OUTPUT_LIMITS })
-      : tool),
+    tools: (base.tools ?? []).map((tool) => {
+      if (tool.name !== CODEMODE_TOOL_NAME) return tool;
+      const serialized = serializeNestedCalls({ ...tool, outputLimits: CODEMODE_OUTPUT_LIMITS });
+      return gateway === undefined ? serialized : gateway.wrapCodemodeTool(serialized);
+    }),
   });
   let closing: Promise<void> | undefined;
   return {
     extension,
+    start: async () => {
+      await gateway?.start();
+    },
+    wrapScriptTools: (target) => gateway === undefined ? target : gateway.wrapScriptTools(target),
     close() {
-      closing ??= sandbox.close();
+      closing ??= (async () => {
+        const results = await Promise.allSettled([
+          sandbox.close(),
+          gateway === undefined ? Promise.resolve() : gateway.close(),
+        ]);
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+      })();
       return closing;
     },
   };

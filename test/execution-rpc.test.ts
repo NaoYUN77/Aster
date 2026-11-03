@@ -228,7 +228,55 @@ test("RPC parser rejects unknown fields, a wrong version, and an unknown method"
   assert.equal(parseRpcFrame({ ...base, extra: true }).ok, false);
   assert.equal(parseRpcFrame({ ...base, v: 2 }).ok, false);
   assert.equal(parseRpcFrame({ ...base, method: "unknown.method" }).ok, false);
-  assert.equal(parseRpcFrame({ ...base, payload: { extra: true } }).ok, false);
+  // A valid envelope with a bad payload stays a request: the dispatcher answers it and keeps the
+  // connection open. Only envelope failures close it.
+  const badPayload = parseRpcFrame({ ...base, payload: { extra: true } });
+  assert.equal(badPayload.ok, true);
+  if (badPayload.ok) {
+    const frame = badPayload.value as RpcRequestFrame;
+    assert.deepEqual(frame.payload, {});
+    assert.deepEqual(frame, {
+      ...base,
+      payload: {},
+      payloadError: { code: "invalid_request", message: "unknown payload field: extra" },
+    });
+  }
+});
+
+test("RPC request payloads classify traversal and syntax errors without failing the frame", () => {
+  const base = {
+    v: 1,
+    kind: "request",
+    id: "parse-2",
+    method: "file.readText",
+    deadlineMs: 1_000,
+  };
+  const traversal = parseRpcFrame({ ...base, payload: { path: "/shared/../etc/passwd" } });
+  assert.equal(traversal.ok, true);
+  if (traversal.ok) assert.equal((traversal.value as RpcRequestFrame).payloadError?.code, "permission_denied");
+  for (const path of ["/shared/a\0b", "shared/a.txt", "/shared/a\\b"]) {
+    const malformed = parseRpcFrame({ ...base, payload: { path } });
+    assert.equal(malformed.ok, true);
+    if (malformed.ok) assert.equal((malformed.value as RpcRequestFrame).payloadError?.code, "invalid_request");
+  }
+  const wrongCwd = parseRpcFrame({
+    ...base,
+    method: "tool.call",
+    payload: {
+      tool: "bash",
+      callId: 1,
+      args: {
+        command: "id",
+        cwd: "/etc",
+        env: {},
+        inheritEnv: false,
+        timeoutMs: 1_000,
+        window: { maxBytes: 1_024, maxLines: 10, minIntervalMs: 0, bytesPerSecond: 0 },
+      },
+    },
+  });
+  assert.equal(wrongCwd.ok, true);
+  if (wrongCwd.ok) assert.equal((wrongCwd.value as RpcRequestFrame).payloadError?.code, "invalid_request");
 });
 
 test("Unix socket transport carries health, session, and a test execution", {
@@ -436,13 +484,34 @@ test("Phase 0 only exposes the test executor and deduplicates request ids per co
     const opened = responseFrame(await frames.waitFor((frame) => frame.kind === "response" && frame.id === "open-1"));
     assert.equal(opened.status, "ok");
 
-    connection.send(request("bash-1", "execute", { executor: "bash", command: "id" }, "sess-raw"));
+    // Well-formed for the protocol boundary even though this agent runs Phase 0: the frame is
+    // parsed (and so must be valid) before the dispatcher can answer `not_implemented`.
+    connection.send(request("bash-1", "execute", {
+      executor: "bash",
+      command: "id",
+      cwd: "/shared",
+      env: {},
+      inheritEnv: false,
+      timeoutMs: 1_000,
+      window: { maxBytes: 1_024, maxLines: 10, minIntervalMs: 0, bytesPerSecond: 0 },
+    }, "sess-raw"));
     assertErrorResponse(
       await frames.waitFor((frame) => frame.kind === "response" && frame.id === "bash-1"),
       "not_implemented",
     );
 
-    connection.send(request("tool-1", "tool.call", { tool: "bash", args: { command: "id" } }, "sess-raw"));
+    connection.send(request("tool-1", "tool.call", {
+      tool: "bash",
+      callId: 1,
+      args: {
+        command: "id",
+        cwd: "/workspace",
+        env: {},
+        inheritEnv: false,
+        timeoutMs: 1_000,
+        window: { maxBytes: 1_024, maxLines: 10, minIntervalMs: 0, bytesPerSecond: 0 },
+      },
+    }, "sess-raw"));
     assertErrorResponse(
       await frames.waitFor((frame) => frame.kind === "response" && frame.id === "tool-1"),
       "not_implemented",

@@ -58,28 +58,47 @@ test("remote execution config is opt-in and validated before startup", () => {
   assert.equal(readExecutionConfig({}), undefined);
   assert.equal(readExecutionConfig({ EXECUTION_MODE: "local" }), undefined);
   assert.throws(() => readExecutionConfig({ EXECUTION_MODE: "sideways" }), ConfigurationError);
+  assert.throws(() => readExecutionConfig({
+    EXECUTION_MODE: "remote", EXECUTION_REMOTE_TRANSPORT: "carrier-pigeon", EXECUTION_REMOTE_CWD: "/srv/work",
+  }), (error) => error instanceof ConfigurationError && /EXECUTION_REMOTE_TRANSPORT/.test(error.message));
 
+  // The cwd is shared by both transports, so it is required before either one's own settings.
   assert.throws(() => readExecutionConfig({ EXECUTION_MODE: "remote" }), (error) =>
-    error instanceof ConfigurationError && /EXECUTION_BROKER_SOCKET/.test(error.message));
+    error instanceof ConfigurationError && /EXECUTION_REMOTE_CWD/.test(error.message));
   assert.throws(() => readExecutionConfig({
-    EXECUTION_MODE: "remote", EXECUTION_BROKER_SOCKET: "/run/execution/broker.sock",
-  }), (error) => error instanceof ConfigurationError && /EXECUTION_REMOTE_CWD/.test(error.message));
+    EXECUTION_MODE: "remote", EXECUTION_REMOTE_CWD: "/srv/work",
+  }), (error) => error instanceof ConfigurationError && /EXECUTION_BROKER_SOCKET/.test(error.message));
   assert.throws(() => readExecutionConfig({
-    EXECUTION_MODE: "remote", EXECUTION_BROKER_SOCKET: "run/broker.sock", EXECUTION_REMOTE_CWD: "/srv/work",
+    EXECUTION_MODE: "remote", EXECUTION_REMOTE_CWD: "srv/work", EXECUTION_BROKER_SOCKET: "/run/broker.sock",
   }), ConfigurationError);
   assert.throws(() => readExecutionConfig({
-    EXECUTION_MODE: "remote", EXECUTION_BROKER_SOCKET: "/run/broker.sock", EXECUTION_REMOTE_CWD: "/srv/work\nx",
+    EXECUTION_MODE: "remote", EXECUTION_REMOTE_CWD: "/srv/work\nx", EXECUTION_BROKER_SOCKET: "/run/broker.sock",
   }), ConfigurationError);
   assert.throws(() => readExecutionConfig({
-    EXECUTION_MODE: "remote", EXECUTION_BROKER_SOCKET: "/run/broker.sock", EXECUTION_REMOTE_CWD: "/srv/work",
+    EXECUTION_MODE: "remote", EXECUTION_REMOTE_CWD: "/srv/work",
+    EXECUTION_BROKER_SOCKET: "run/broker.sock",
+  }), ConfigurationError);
+  assert.throws(() => readExecutionConfig({
+    EXECUTION_MODE: "remote", EXECUTION_REMOTE_CWD: "/srv/work",
+    EXECUTION_BROKER_SOCKET: "/run/broker.sock",
     EXECUTION_DEFAULT_TIMEOUT_SECONDS: "120", EXECUTION_MAX_TIMEOUT_SECONDS: "60",
   }), (error) => error instanceof ConfigurationError && /DEFAULT_TIMEOUT/.test(error.message));
+
+  // The rpc transport only exposes `/shared`, so its cwd must live there.
+  assert.throws(() => readExecutionConfig({
+    EXECUTION_MODE: "remote",
+    EXECUTION_REMOTE_TRANSPORT: "rpc",
+    EXECUTION_REMOTE_CWD: "/srv/work",
+    EXECUTION_RPC_TRANSPORT: "unix",
+    EXECUTION_RPC_SOCKET: "/run/aster/agent.sock",
+  }), (error) => error instanceof ConfigurationError && /\/shared/.test(error.message));
 
   assert.deepEqual(readExecutionConfig({
     EXECUTION_MODE: "remote",
     EXECUTION_BROKER_SOCKET: "/run/execution/broker.sock",
     EXECUTION_REMOTE_CWD: "/srv/work",
   }), {
+    transport: "ssh",
     brokerSocket: "/run/execution/broker.sock",
     remoteCwd: "/srv/work",
     connectTimeoutMs: 5000,
@@ -94,12 +113,44 @@ test("remote execution config is opt-in and validated before startup", () => {
     EXECUTION_DEFAULT_TIMEOUT_SECONDS: "10",
     EXECUTION_MAX_TIMEOUT_SECONDS: "20",
   }), {
+    transport: "ssh",
     brokerSocket: "/run/execution/broker.sock",
     remoteCwd: "/srv/work",
     connectTimeoutMs: 1000,
     defaultTimeoutSeconds: 10,
     maxTimeoutSeconds: 20,
   });
+  assert.deepEqual(readExecutionConfig({
+    EXECUTION_MODE: "remote",
+    EXECUTION_REMOTE_TRANSPORT: "rpc",
+    EXECUTION_REMOTE_CWD: "/shared/project",
+    EXECUTION_RPC_TRANSPORT: "unix",
+    EXECUTION_RPC_SOCKET: "/run/aster/agent.sock",
+  }), {
+    transport: "rpc",
+    remoteCwd: "/shared/project",
+    rpc: {
+      transport: "unix",
+      socketPath: "/run/aster/agent.sock",
+      connectTimeoutMs: 5_000,
+      requestTimeoutMs: 30_000,
+      maxFrameBytes: 4 * 1024 * 1024,
+      maxBufferedBytes: 1024 * 1024,
+    },
+    defaultTimeoutSeconds: 300,
+    maxTimeoutSeconds: 3600,
+  });
+  // Selecting rpc never leaves the broker settings in effect.
+  const rpcOnly = readExecutionConfig({
+    EXECUTION_MODE: "remote",
+    EXECUTION_REMOTE_TRANSPORT: "rpc",
+    EXECUTION_REMOTE_CWD: "/shared",
+    EXECUTION_RPC_TRANSPORT: "unix",
+    EXECUTION_RPC_SOCKET: "/run/aster/agent.sock",
+    EXECUTION_BROKER_SOCKET: "/run/execution/broker.sock",
+  });
+  assert.equal(rpcOnly?.transport, "rpc");
+  assert.equal(Object.hasOwn(rpcOnly ?? {}, "brokerSocket"), false);
 });
 
 test("remote env forwards command, cwd, env and timeout to the broker", async () => {

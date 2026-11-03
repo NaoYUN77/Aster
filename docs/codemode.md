@@ -53,14 +53,14 @@ MCP、记忆、`web_search`／`web_fetch` 和 `tool_search` 不进入 v1 脚本�
 
 ## 远程执行
 
-远程执行阶段 1 只有 `bash`，脚本面因此只有 `bash`。大输出不能依赖 codemode 的自动完整输出落盘：该路径需要控制面的文件环境，而模型的文件工具在执行主机上。正确做法是让脚本把大输出写到执行主机文件，再用后续 `bash` 读取：
+远程 codemode 的脚本面提供 `bash`、`read`、`write` 和 `edit`。它们都在执行主机的 PTC sandbox 内运行：`bash` 经 `tool.call` 进入 runner，文件工具经 `file.*` 请求访问 `/workspace`、`/tmp` 和显式启用的 `/shared`；控制面不打开这些文件。脚本里的大输出应写到执行主机文件，再用 `read` 或 `bash` 分块处理，而不是尝试整块返回：
 
 ```js
-await tools.bash({ command: "some-command > /home/<execution-user>/workspace/out.txt" });
-return "written to out.txt";
+await tools.bash({ command: "some-command > /workspace/out.txt" });
+return await tools.read({ path: "/workspace/out.txt", limit: 200 });
 ```
 
-结果被截断时会附带说明；这只是提示，不代表控制面保存了完整内容。
+结果被截断时会附带说明；这只是提示，不代表控制面保存了完整内容。传输选择与文件边界见 [远程 PTC spec](spec-20261102-remote-ptc-sandbox.md)。
 
 ## 失败语义
 
@@ -82,7 +82,7 @@ codemode 的脚本启动数据、调用日志和输出目录是底座文档，�
 ## 安全边界
 
 - QuickJS 限制的是脚本运行时的能力，不是操作系统安全沙箱。
-- `bash` 与模型直接调用 `bash` 具有相同的宿主权限；生产环境仍应使用独立低权限用户或容器。
+- 本地 codemode 的 `bash` 与模型直接调用 `bash` 具有相同的宿主权限；远程 codemode 的 `bash` 和文件工具在 PTC sandbox 内运行。生产环境仍应使用独立低权限用户或容器。
 - 脚本由模型生成，属于不可信输入；不能把凭据、宿主路径或服务客户端放进脚本参数。
 - 脚本源码和命令会进入 durable 会话记录；敏感值不应出现在其中。
 
@@ -90,5 +90,5 @@ codemode 的脚本启动数据、调用日志和输出目录是底座文档，�
 
 - 脚本内 MCP／Web／记忆工具。
 - 并行嵌套调用、脚本递归。
-- 远程文件 API 或控制面读取远程文件。
+- 控制面读取远程文件；远程文件 API 只在执行 sandbox 内可见。
 - 用 codemode 替代 OS 级隔离或命令审计。

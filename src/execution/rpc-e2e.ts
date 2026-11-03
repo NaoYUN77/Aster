@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { RpcClientError, RpcExecutionClient } from "./rpc-client.js";
-import { readRpcClientConfig, readTlsMaterial } from "./rpc-config.js";
-import { tlsRpcTransport, unixRpcTransport, type RpcClientTransport } from "./rpc-transport.js";
+import { RpcClientError } from "./rpc-client.js";
+import { readRpcClientConfig } from "./rpc-config.js";
+import { connectRpcClient } from "./rpc-connect.js";
 
 const USAGE = `Usage: node dist/src/execution/rpc-e2e.js
 
@@ -10,43 +10,12 @@ test execution, cancellation of a sleeping execution, and session.close. Reads E
 Only the restricted test executor is used; this command cannot run a shell command.
 `;
 
-async function connectClient(): Promise<RpcExecutionClient> {
-  const config = readRpcClientConfig();
-  let transport: RpcClientTransport;
-  if (config.transport === "unix") {
-    transport = unixRpcTransport(config.socketPath, {
-      connectTimeoutMs: config.connectTimeoutMs,
-      maxFrameBytes: config.maxFrameBytes,
-      maxBufferedBytes: config.maxBufferedBytes,
-    });
-  } else {
-    const material = await readTlsMaterial(config);
-    transport = tlsRpcTransport({
-      host: config.host,
-      port: config.port,
-      ...(config.servername === undefined ? {} : { servername: config.servername }),
-      ca: material.ca,
-      cert: material.cert,
-      key: material.key,
-      connectTimeoutMs: config.connectTimeoutMs,
-      maxFrameBytes: config.maxFrameBytes,
-      maxBufferedBytes: config.maxBufferedBytes,
-    });
-  }
-  const client = new RpcExecutionClient({
-    transport,
-    requestTimeoutMs: config.requestTimeoutMs,
-  });
-  await client.connect();
-  return client;
-}
-
 async function main(): Promise<void> {
   if (process.argv.includes("--help")) {
     process.stdout.write(USAGE);
     return;
   }
-  const client = await connectClient();
+  const client = await connectRpcClient(readRpcClientConfig());
   const sessionId = `e2e-${randomUUID().slice(0, 8)}`;
   try {
     const health = await client.health();

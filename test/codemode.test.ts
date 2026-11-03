@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
@@ -23,9 +24,12 @@ import {
   serializeNestedCalls,
 } from "../src/codemode.js";
 import { ConfigurationError, readCodemodeConfig, readConfig, readMemoryConfig } from "../src/config.js";
-import { startBrokerServer } from "../src/execution/broker.js";
-import type { ExecRequest } from "../src/execution/protocol.js";
+import { PtcHostError, type DirectHost } from "../src/execution/ptc-host.js";
+import { startRpcAgent } from "../src/execution/rpc-server.js";
+import { listenTlsRpc } from "../src/execution/rpc-transport.js";
+import type { RpcBashExecutePayload, RpcSkippedOutput } from "../src/execution/rpc-protocol.js";
 import type { TextRequest } from "../src/messages.js";
+import { TestPtcHost } from "./ptc-test-host.js";
 
 const request: TextRequest = {
   requestId: "telegram:test:codemode",
@@ -88,10 +92,27 @@ test("code mode is opt-in and its sandbox bounds are validated before startup", 
 test("script tools are limited without hiding them from the model", () => {
   const restricted = restrictScriptTools(CodingTools, REMOTE_SCRIPT_TOOLS);
   const tools = new Map((restricted.tools ?? []).map((tool) => [tool.name, tool]));
-  assert.equal(tools.get("bash")?.callers, undefined, "the allowed tool is unchanged");
-  assert.deepEqual(tools.get("read")?.callers, ["model"]);
-  assert.deepEqual(tools.get("write")?.callers, ["model"]);
-  assert.deepEqual(tools.get("edit")?.callers, ["model"]);
+  // Remote scripts may now call the file tools too: they run inside the execution sandbox.
+  for (const name of ["bash", "read", "write", "edit"]) {
+    assert.equal(tools.get(name)?.callers, undefined, `${name} stays available to scripts`);
+  }
+
+  const modelOnly = defineTool({
+    name: "model_only",
+    description: "Only the model may call this.",
+    parameters: Type.Object({}),
+    callers: ["model"],
+    execute: async () => ({ output: [] }),
+  });
+  const ordinary = defineTool({
+    name: "ordinary",
+    description: "Callable by both by default.",
+    parameters: Type.Object({}),
+    execute: async () => ({ output: [] }),
+  });
+  const narrowed = restrictScriptTools(defineExtension({ name: "extra", tools: [modelOnly, ordinary] }), new Set());
+  assert.deepEqual(narrowed.tools?.[0]?.callers, ["model"], "a model-only tool keeps its model caller");
+  assert.deepEqual(narrowed.tools?.[1]?.callers, ["model"], "a default tool loses its script caller");
 
   const toolsOnly = defineTool({
     name: "tools_only",
@@ -197,23 +218,75 @@ test("code mode runs one script whose nested calls stay out of the transcript", 
   }
 });
 
-test("code mode in remote execution exposes only bash to scripts", { skip: process.platform === "win32", timeout: 30_000 }, async () => {
+/** A direct host that records nothing it should be asked to do; nested calls must take the PTC path. */
+class SilentDirectHost implements DirectHost {
+  readonly enabled = true;
+  readonly sharedMode = "rw" as const;
+  readonly executions: RpcBashExecutePayload[] = [];
+
+  async preflight(): Promise<Record<string, boolean | null>> {
+    return { direct: true, sharedWorkspace: true, directTmpRoot: true };
+  }
+
+  async openSession(): Promise<{ sharedMode: "ro" | "rw"; tmpPath: string }> {
+    return { sharedMode: "rw", tmpPath: "/tmp/aster-direct" };
+  }
+
+  async closeSession(): Promise<void> {}
+
+  async execute(input: {
+    sessionId: string;
+    payload: RpcBashExecutePayload;
+    signal: AbortSignal;
+    emit: (seq: number, stream: "stdout" | "stderr", text: string, skipped?: RpcSkippedOutput) => void;
+  }): Promise<{ exitCode: number; durationMs: number }> {
+    this.executions.push(input.payload);
+    return { exitCode: 0, durationMs: 0 };
+  }
+
+  async fileRequest(): Promise<unknown> {
+    throw new PtcHostError("not_found", "the direct file host is not used by this test", "not_started");
+  }
+}
+
+// The direct-session transport keeps the whole path in process, so the test runs on every platform;
+// the PTC bridge still crosses real TLS RPC framing, session state and the vm.reply cycle.
+test("code mode in remote execution exposes the sandbox tools to scripts", {
+  timeout: 30_000,
+}, async () => {
   const directory = await mkdtemp(join(tmpdir(), "personal-agent-codemode-remote-"));
-  const socketPath = join(directory, "broker.sock");
   const executionId = "0000000000000002";
-  const requests: ExecRequest[] = [];
-  const server = await startBrokerServer({
-    socketPath,
+  const fixtureDirectory = fileURLToPath(new URL("./fixtures/rpc-tls", import.meta.url));
+  const [ca, serverCert, serverKey, clientCert, clientKey] = await Promise.all([
+    readFile(join(fixtureDirectory, "ca.crt")),
+    readFile(join(fixtureDirectory, "server.crt")),
+    readFile(join(fixtureDirectory, "server.key")),
+    readFile(join(fixtureDirectory, "client.crt")),
+    readFile(join(fixtureDirectory, "client.key")),
+  ]);
+  const ptc = new TestPtcHost();
+  const direct = new SilentDirectHost();
+  const rpcServer = await listenTlsRpc({
+    host: "127.0.0.1",
+    port: 0,
+    cert: serverCert,
+    key: serverKey,
+    ca,
+    requireClientCert: true,
+    allowedClientNames: ["aster-test-gateway"],
+    maxFrameBytes: 4 * 1024 * 1024,
+  });
+  const address = rpcServer.address();
+  assert.ok(!("path" in address));
+  const agent = startRpcAgent({
+    server: rpcServer,
     executionId,
-    runner: async (message, sink) => {
-      requests.push(message);
-      sink.stdout("remote\n");
-      return { exitCode: 0 };
-    },
-    maxConcurrent: 4,
-    maxOutputBytes: 4096,
-    maxOutputLines: 100,
-    requestTimeoutMs: 2000,
+    transport: "tls",
+    heartbeatMs: 60_000,
+    sessionTtlMs: 60_000,
+    testExecutorEnabled: true,
+    ptc,
+    direct,
   });
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
@@ -223,7 +296,9 @@ test("code mode in remote execution exposes only bash to scripts", { skip: proce
         const section = systemSection(transcript.messages, "codemode");
         assert.ok(section);
         assert.match(section, /bash/);
-        assert.doesNotMatch(section, /`read`/);
+        assert.match(section, /`read`/);
+        assert.match(section, /`write`/);
+        assert.match(section, /`edit`/);
         return fauxAssistantMessage(fauxToolCall("codemode", {
           code: `
             const first = await tools.bash({ command: "printf remote-first" });
@@ -234,24 +309,36 @@ test("code mode in remote execution exposes only bash to scripts", { skip: proce
       },
       (transcript) => {
         const result = transcript.messages.find((message) => message.role === "toolResult");
-        assert.ok(result?.role === "toolResult" && !result.isError);
+        assert.ok(result?.role === "toolResult", "the codemode call must settle a result");
         const text = result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
-        assert.match(text, /remote/);
+        assert.equal(result.isError, false, `the codemode call failed: ${text}`);
+        assert.match(text, /out-1out-2/);
         return fauxAssistantMessage("remote done");
       },
     ]);
     app = await openAgent(appConfig(directory, {
       CODEMODE_ENABLED: "1",
       EXECUTION_MODE: "remote",
-      EXECUTION_BROKER_SOCKET: socketPath,
-      EXECUTION_REMOTE_CWD: "/srv/work",
+      EXECUTION_REMOTE_TRANSPORT: "rpc",
+      EXECUTION_REMOTE_CWD: "/shared/work",
+      EXECUTION_RPC_ADDRESS: `127.0.0.1:${address.port}`,
+      EXECUTION_RPC_SERVER_NAME: "localhost",
+      EXECUTION_RPC_CA_PATH: join(fixtureDirectory, "ca.crt"),
+      EXECUTION_RPC_CERT_PATH: join(fixtureDirectory, "client.crt"),
+      EXECUTION_RPC_KEY_PATH: join(fixtureDirectory, "client.key"),
     }), fixture.models);
     assert.equal(await app.reply(request, running), "remote done");
-    assert.equal(requests.length, 2, "two nested calls reached the execution broker");
-    assert.deepEqual(requests.map(({ command }) => command), ["printf remote-first", "printf remote-second"]);
+    assert.equal(ptc.calls.length, 2, "two nested calls reached the PTC sandbox");
+    assert.deepEqual(
+      ptc.calls.map(({ args }) => args.command),
+      ["printf remote-first", "printf remote-second"],
+    );
+    assert.deepEqual(ptc.calls.map(({ callId }) => callId), [1, 2], "call ids come from the VM, not the model");
+    assert.equal(direct.executions.length, 0, "nested calls never fall back to the direct session");
   } finally {
     try { await app?.close(); } finally {
-      await server.close();
+      await agent.close();
+      await rpcServer.close();
       await rm(directory, { recursive: true, force: true });
     }
   }
