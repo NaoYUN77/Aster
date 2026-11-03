@@ -24,10 +24,10 @@ import {
   serializeNestedCalls,
 } from "../src/codemode.js";
 import { ConfigurationError, readCodemodeConfig, readConfig, readMemoryConfig } from "../src/config.js";
-import { startBrokerServer } from "../src/execution/broker.js";
+import { PtcHostError, type DirectHost } from "../src/execution/ptc-host.js";
 import { startRpcAgent } from "../src/execution/rpc-server.js";
 import { listenTlsRpc } from "../src/execution/rpc-transport.js";
-import type { ExecRequest } from "../src/execution/protocol.js";
+import type { RpcBashExecutePayload, RpcSkippedOutput } from "../src/execution/rpc-protocol.js";
 import type { TextRequest } from "../src/messages.js";
 import { TestPtcHost } from "./ptc-test-host.js";
 
@@ -218,14 +218,43 @@ test("code mode runs one script whose nested calls stay out of the transcript", 
   }
 });
 
-// The PTC transport is TLS, but the direct execution path still opens the broker's state directory
-// and the broker socket is a Unix domain socket, which Windows does not provide.
+/** A direct host that records nothing it should be asked to do; nested calls must take the PTC path. */
+class SilentDirectHost implements DirectHost {
+  readonly enabled = true;
+  readonly sharedMode = "rw" as const;
+  readonly executions: RpcBashExecutePayload[] = [];
+
+  async preflight(): Promise<Record<string, boolean | null>> {
+    return { direct: true, sharedWorkspace: true, directTmpRoot: true };
+  }
+
+  async openSession(): Promise<{ sharedMode: "ro" | "rw"; tmpPath: string }> {
+    return { sharedMode: "rw", tmpPath: "/tmp/aster-direct" };
+  }
+
+  async closeSession(): Promise<void> {}
+
+  async execute(input: {
+    sessionId: string;
+    payload: RpcBashExecutePayload;
+    signal: AbortSignal;
+    emit: (seq: number, stream: "stdout" | "stderr", text: string, skipped?: RpcSkippedOutput) => void;
+  }): Promise<{ exitCode: number; durationMs: number }> {
+    this.executions.push(input.payload);
+    return { exitCode: 0, durationMs: 0 };
+  }
+
+  async fileRequest(): Promise<unknown> {
+    throw new PtcHostError("not_found", "the direct file host is not used by this test", "not_started");
+  }
+}
+
+// The direct-session transport keeps the whole path in process, so the test runs on every platform;
+// the PTC bridge still crosses real TLS RPC framing, session state and the vm.reply cycle.
 test("code mode in remote execution exposes the sandbox tools to scripts", {
-  skip: process.platform === "win32" ? "the execution broker requires a Unix domain socket" : false,
   timeout: 30_000,
 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "personal-agent-codemode-remote-"));
-  const brokerSocket = join(directory, "broker.sock");
   const executionId = "0000000000000002";
   const fixtureDirectory = fileURLToPath(new URL("./fixtures/rpc-tls", import.meta.url));
   const [ca, serverCert, serverKey, clientCert, clientKey] = await Promise.all([
@@ -235,21 +264,8 @@ test("code mode in remote execution exposes the sandbox tools to scripts", {
     readFile(join(fixtureDirectory, "client.crt")),
     readFile(join(fixtureDirectory, "client.key")),
   ]);
-  const brokerRequests: ExecRequest[] = [];
-  const server = await startBrokerServer({
-    socketPath: brokerSocket,
-    executionId,
-    runner: async (message, sink) => {
-      brokerRequests.push(message);
-      sink.stdout("remote\n");
-      return { exitCode: 0 };
-    },
-    maxConcurrent: 4,
-    maxOutputBytes: 4096,
-    maxOutputLines: 100,
-    requestTimeoutMs: 2000,
-  });
   const ptc = new TestPtcHost();
+  const direct = new SilentDirectHost();
   const rpcServer = await listenTlsRpc({
     host: "127.0.0.1",
     port: 0,
@@ -270,6 +286,7 @@ test("code mode in remote execution exposes the sandbox tools to scripts", {
     sessionTtlMs: 60_000,
     testExecutorEnabled: true,
     ptc,
+    direct,
   });
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
@@ -302,8 +319,8 @@ test("code mode in remote execution exposes the sandbox tools to scripts", {
     app = await openAgent(appConfig(directory, {
       CODEMODE_ENABLED: "1",
       EXECUTION_MODE: "remote",
-      EXECUTION_BROKER_SOCKET: brokerSocket,
-      EXECUTION_REMOTE_CWD: "/srv/work",
+      EXECUTION_REMOTE_TRANSPORT: "rpc",
+      EXECUTION_REMOTE_CWD: "/shared/work",
       EXECUTION_RPC_ADDRESS: `127.0.0.1:${address.port}`,
       EXECUTION_RPC_SERVER_NAME: "localhost",
       EXECUTION_RPC_CA_PATH: join(fixtureDirectory, "ca.crt"),
@@ -317,11 +334,11 @@ test("code mode in remote execution exposes the sandbox tools to scripts", {
       ["printf remote-first", "printf remote-second"],
     );
     assert.deepEqual(ptc.calls.map(({ callId }) => callId), [1, 2], "call ids come from the VM, not the model");
-    assert.equal(brokerRequests.length, 0, "nested calls never fall back to the direct broker");
+    assert.equal(direct.executions.length, 0, "nested calls never fall back to the direct session");
   } finally {
     try { await app?.close(); } finally {
       await agent.close();
-      await server.close();
+      await rpcServer.close();
       await rm(directory, { recursive: true, force: true });
     }
   }

@@ -138,7 +138,13 @@ class RpcCodemodeRemote implements CodemodeRemote {
       },
     };
 
-    let chain: Promise<void> = Promise.resolve();
+    // Deliver each batch as it arrives instead of chaining the exchanges. An exchange for a call
+    // stays pending until that call's tool settles, and the VM's next message is often the idle
+    // acknowledgment that admits that call; awaiting the previous exchange here would keep the
+    // acknowledgment from reaching the host, and the call could never start. Delivery order is
+    // still the arrival order because `exchange` hands its messages to the host synchronously.
+    let replyChain: Promise<void> = Promise.resolve();
+    const deliveries = new Set<Promise<void>>();
     let batchFailure: unknown;
     let rpcFailure: unknown;
     const handle = this.session.client.startVm(this.session.sessionId, payload, {
@@ -146,7 +152,7 @@ class RpcCodemodeRemote implements CodemodeRemote {
       onVmMessage: (event) => {
         const messages = event.messages as unknown as CodemodeRemoteMessage[];
         const callId = event.callId;
-        chain = chain.then(async () => {
+        const delivery = (async () => {
           if (batchFailure !== undefined || rpcFailure !== undefined) return;
           let reply: CodemodeRemoteReply;
           try {
@@ -163,16 +169,29 @@ class RpcCodemodeRemote implements CodemodeRemote {
           }
           // A missing reply would leave the VM waiting forever; stop is the honest terminal answer.
           const answer = reply ?? { type: "stop" as const };
-          try {
-            await this.session.client.replyVm(this.session.sessionId, { callId, reply: answer });
-          } catch (error) {
-            batchFailure = error;
-          }
-        });
-        // Observe the batch promise here; `execute` awaits the tail and reports the first failure.
-        chain = chain.catch((error: unknown) => {
-          batchFailure ??= error;
-        });
+          // Replies leave in arrival order, so a VM call that settles late cannot overtake one that
+          // settled earlier and change what the script observes.
+          const sent = replyChain.then(async () => {
+            if (batchFailure !== undefined || rpcFailure !== undefined) return;
+            try {
+              await this.session.client.replyVm(this.session.sessionId, { callId, reply: answer });
+            } catch (error) {
+              batchFailure = error;
+            }
+          });
+          replyChain = sent.catch((error: unknown) => {
+            batchFailure ??= error;
+          });
+          await sent;
+        })();
+        deliveries.add(delivery);
+        void delivery.then(
+          () => deliveries.delete(delivery),
+          (error: unknown) => {
+            batchFailure ??= error;
+            deliveries.delete(delivery);
+          },
+        );
       },
     });
     this.session.registerVm(() => {
@@ -183,7 +202,10 @@ class RpcCodemodeRemote implements CodemodeRemote {
     } catch (error) {
       rpcFailure = error;
     }
-    await chain;
+    // The VM stopped, so no batch will arrive again; wait for the deliveries it produced before
+    // attributing a failure and closing the session.
+    while (deliveries.size > 0) await Promise.allSettled([...deliveries]);
+    await replyChain;
     this.session.registerVm(undefined);
     const failure = rpcFailure ?? batchFailure;
     if (failure !== undefined) {
