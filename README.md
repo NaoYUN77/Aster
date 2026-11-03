@@ -48,13 +48,13 @@ flowchart TB
 
   subgraph external["外部服务：由服务商提供"]
     telegram["Telegram"]
-    llm["模型 API：理解任务、决定工具调用、组织回复"]
+    llm["模型 API<br/>理解任务 · 决定工具调用 · 组织回复"]
     services["Web / 远程 MCP：可选"]
   end
 
   subgraph control["服务器 1：控制服务器"]
     subgraph application["容器：personal-agent"]
-      app["接收消息 · 会话与记忆 · 工具校验 · 保存回复"]
+      app["接收消息 · 保存回复<br/>会话与记忆 · 工具校验"]
       state[("SQLite 数据库与记忆文件")]
       app <--> state
     end
@@ -75,13 +75,13 @@ flowchart TB
   end
 
   user <--> telegram
-  app <-->|"拉取消息 / 投递回复 / 调用模型与外部服务"| proxy
+  app <-->|"外部请求与回复"| proxy
   proxy <--> telegram
   proxy <--> llm
   proxy <--> services
   proxy -->|"按允许的目标读取密钥"| vault
-  app <-->|"Unix socket：本机通信"| gateway
-  gateway <-->|"私网 RPC · mTLS 双向证书认证"| rpc
+  app <-->|"Unix socket"| gateway
+  gateway <-->|"私网 RPC · mTLS"| rpc
 ```
 
 图里有两条主要通道：
