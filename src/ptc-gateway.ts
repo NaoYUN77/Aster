@@ -55,7 +55,6 @@ import {
   ensurePtcJobInTx,
   initialPtcJob,
   markPtcWorkspaceReady,
-  PtcOutputRefSchema,
   type PtcOutputRef,
 } from "./ptc-docs.js";
 import { PtcExecutionEnv } from "./ptc-env.js";
@@ -75,12 +74,19 @@ export function derivePtcJobId(conversationId: ConversationId, taskId: TaskId): 
   return `ptc-${digest.slice(0, 32)}`;
 }
 
-const PTC_BASH_STRUCTURED_OUTPUT_SCHEMA = Type.Object(
+export const PTC_BASH_STRUCTURED_OUTPUT_SCHEMA = Type.Object(
   {
     output: Type.String({ description: "Combined stdout and stderr: the retained tail" }),
     truncated: Type.Boolean({ description: "Whether earlier output was dropped" }),
     exitCode: Type.Number(),
-    outputRef: Type.Optional(PtcOutputRefSchema),
+    // The model only needs the spill path. The host still validates every persisted OutputRef
+    // against the full PtcOutputRefSchema before it reaches durable storage.
+    outputRef: Type.Optional(
+      Type.Object(
+        { path: Type.String({ description: "Sandbox path of the complete output" }) },
+        { additionalProperties: true, description: "Spill file for truncated output: read outputRef.path" },
+      ),
+    ),
     spillTruncated: Type.Boolean(),
   },
   { additionalProperties: false },

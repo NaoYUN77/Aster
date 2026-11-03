@@ -192,9 +192,9 @@ export async function openAgent(
     : (extension: Extension) => codemode.wrapScriptTools(scriptPolicy(extension));
   const codemodeNote = codemode === undefined
     ? ""
-    : " When one task needs several tool calls whose intermediate results you do not need to read, use the codemode tool to run them in one script and return only the summary. Nested tool calls run one at a time.";
+    : " Use codemode for two or more calls whose intermediate results you do not need, or to filter a large result; do not use it for a single call, or when you must see each step's result to choose the next. Nested calls run one at a time. tools.bash resolves to an object: read result.output; a nonzero exit is in result.exitCode, not a rejection.";
   const codemodeRemoteNote = codemode !== undefined && execution !== undefined
-    ? " In codemode, nested tool calls (including read, write and edit) run inside the execution sandbox; the control plane cannot open those files."
+    ? " Nested calls, including read, write and edit, run in the execution sandbox; the control plane cannot open those files."
     : "";
 
   const instructions = `You are a personal assistant. Respond directly in the user's language. Do not simulate emotions or a personal relationship.
