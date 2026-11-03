@@ -94,15 +94,10 @@ try {
 report("ok");
 // The sandbox must not inherit the report channel; closing it also ends the parent's stream.
 try { closeSync(3); } catch {}
-try {
-  // execve takes the array verbatim as argv: without this, the sandbox would lose argv[0] and see
-  // its first flag as its program name.
-  process.execve(file, [file, ...args], process.env);
-} catch (error) {
-  const message = error && typeof error.message === "string" ? error.message : String(error);
-  console.error("aster: cannot start " + file + ": " + message);
-  process.exit(125);
-}
+// execve takes the array verbatim as argv: without the leading entry the sandbox would lose argv[0]
+// and see its first flag as its program name. It never returns: the image is replaced, and Node
+// aborts the process (after printing the reason to stderr) if the sandbox cannot be started.
+process.execve(file, [file, ...args], process.env);
 `.trim();
 
 export type AccountedProcess = {

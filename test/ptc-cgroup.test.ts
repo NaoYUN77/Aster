@@ -23,13 +23,13 @@ async function fakeCgroup(t: { after(fn: () => Promise<void>): void }): Promise<
   return root;
 }
 
-function collected(child: ChildProcess): Promise<{ code: number | null; text: string; stderr: string }> {
+function collected(child: ChildProcess): Promise<{ code: number | null; signal: string | null; text: string; stderr: string }> {
   return new Promise((resolve) => {
     let text = "";
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => { text += chunk.toString("utf8"); });
     child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
-    child.once("close", (code) => resolve({ code, text, stderr }));
+    child.once("close", (code, signal) => resolve({ code, signal, text, stderr }));
   });
 }
 
@@ -47,22 +47,23 @@ test("the sandbox enters its cgroup before it runs and keeps its pid across the 
 
   assert.deepEqual(
     await result,
-    { code: 0, text: `${child.pid}\n`, stderr: "" },
+    { code: 0, signal: null, text: `${child.pid}\n`, stderr: "" },
     "execve preserves the accounted pid and the helper is silent",
   );
 });
 
-test("an exec failure is reported as a command failure, not as a missing cgroup", { skip, timeout }, async (t) => {
+test("a failed exec is the sandbox failing, after the pid was accounted for", { skip, timeout }, async (t) => {
   const root = await fakeCgroup(t);
   const { child, ready } = spawnInCgroup(root, "/nonexistent/aster-sandbox", [], {
     env: { PATH: "/usr/bin:/bin" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const result = collected(child);
-  // The move succeeded, so accounting is confirmed; the failed exec is the sandbox starting and
-  // exiting, not an unaccounted process.
+  // The move succeeded, so this is not an accounting failure: the sandbox itself cannot start.
   await ready;
-  assert.equal((await result).code, 125);
+  const outcome = await result;
+  assert.notEqual(outcome.code, 0);
+  assert.match(outcome.stderr, /execve|ENOENT/);
 });
 
 test("a refused migration rejects before anything runs", { skip, timeout }, async (t) => {
