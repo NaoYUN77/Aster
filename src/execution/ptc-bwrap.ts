@@ -62,6 +62,10 @@ function readOnlyRootArgs(config: PtcConfig, includeApp: boolean): string[] {
  * read-only bind, and no network. The workspace is the only writable persistent mount; `/tmp` is
  * a private tmpfs, so it can never hold state that a replay would miss. `/shared` follows the
  * agent's configured mode and is read-only unless the operator chose `rw`.
+ *
+ * There is no `--no-new-privs` flag: bubblewrap is not even started without `PR_SET_NO_NEW_PRIVS`
+ * (its `main` calls `prctl` before parsing arguments), and older releases reject the unknown option
+ * outright — 0.11.1 exits before the sandbox starts.
  */
 export function buildBwrapArgv(config: PtcConfig, hostWorkspace: string): string[] {
   const argv = [
@@ -75,7 +79,6 @@ export function buildBwrapArgv(config: PtcConfig, hostWorkspace: string): string
     "--die-with-parent",
     "--new-session",
     "--cap-drop", "ALL",
-    "--no-new-privs",
     "--proc", "/proc",
     "--dev", "/dev",
     "--tmpfs", "/tmp",
@@ -131,7 +134,6 @@ export function buildDirectBwrapArgv(
     "--die-with-parent",
     "--new-session",
     "--cap-drop", "ALL",
-    "--no-new-privs",
     "--proc", "/proc",
     "--dev", "/dev",
   ];
