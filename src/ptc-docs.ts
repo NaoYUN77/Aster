@@ -159,7 +159,9 @@ export async function ensurePtcJobInTx(tx: Tx, conversationId: ConversationId, j
   const stored = await tx.doc(PtcJobDoc, conversationId, job.jobId, seed);
   const current = assertValue<PtcJobState>(PtcJobStateSchema, stored, "corrupt-state", "Stored PTC job is invalid");
   assertJobIdentity(job.jobId, current);
-  return current;
+  // `stored` is an overlay proxy: reading it after the caller's commit settles throws. The caller
+  // uses this value to decide `workspaceReady`, so return a detached snapshot.
+  return { ...current };
 }
 
 /** Mark the workspace as mounted. The flag is durable before `vm.start`, so a restart reuses it. */

@@ -47,6 +47,6 @@
 ## 未覆盖与下一步
 
 1. 在 POSIX 执行主机运行 `npm test`，使符号链接与 Unix socket 用例实际执行。
-2. 按 16.2 执行 bwrap／cgroup／无网络／强杀验收，并记录 `cgroup="none"` 等降级实况。
-3. 按 16.3 在真实双 VPS 上验证 direct `bash`、`/shared` 读写一致性、断线后的未知结果记录与重放不重复执行。
+2. 按 [Phase 1／2 Runbook](../runbook-remote-ptc-phase1-2.md) 的 16.2 检查执行 bwrap／cgroup／无网络／强杀验收，并记录 `cgroup="none"` 等降级实况。
+3. 按同一 Runbook 的 16.3 检查在真实双 VPS 上验证 direct `bash`、`/shared` 读写一致性、断线后的未知结果记录与重放不重复执行。
 4. 迁移验收通过前，生产可继续使用 `EXECUTION_REMOTE_TRANSPORT=ssh`；该模式不提供远程文件工具。

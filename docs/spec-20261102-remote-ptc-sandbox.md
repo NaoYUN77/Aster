@@ -864,7 +864,7 @@ npm run execution:rpc-e2e
 
 ### 16.2 Phase 1
 
-状态：自动化部分（loopback RPC、网关、嵌套调用、输出窗口）于 2026-11-03 通过；bwrap／cgroup／无网络／进程清理／真实跨 VPS 部分待 POSIX 与双 VPS 执行。
+状态：自动化部分（loopback RPC、网关、嵌套调用、输出窗口）于 2026-11-03 通过；bwrap／cgroup／无网络／进程清理／真实跨 VPS 部分待 POSIX 与双 VPS 执行，步骤见 [Phase 1／2 Runbook](runbook-remote-ptc-phase1-2.md)。
 
 - 脚本 `tools.bash({ command: "hostname" })` 返回执行 VPS 主机名；控制面主机名不同。
 - 一个脚本内连续 10 次 bash 只使用一条 RPC 连接；嵌套调用经过 registry、`NestedCallDoc`；transcript 中只有一个 codemode `toolResult`。
@@ -878,7 +878,7 @@ npm run execution:rpc-e2e
 
 ### 16.3 Phase 2
 
-状态：自动化部分于 2026-11-03 通过（`test/direct-rpc.test.ts`、`test/ptc-files.test.ts`、`test/execution-rpc.test.ts`、`test/execution-remote-env.test.ts`）；`/shared` 只读绑定、bwrap 下的真实路径与符号链接行为、跨主机重放需按部署环境复验。Windows 上依赖 POSIX 符号链接与 Unix socket 的用例被跳过，需在 POSIX 执行。
+状态：自动化部分于 2026-11-03 通过（`test/direct-rpc.test.ts`、`test/ptc-files.test.ts`、`test/execution-rpc.test.ts`、`test/execution-remote-env.test.ts`）；`/shared` 只读绑定、bwrap 下的真实路径与符号链接行为、跨主机重放需按部署环境复验，步骤见 [Phase 1／2 Runbook](runbook-remote-ptc-phase1-2.md)。Windows 上依赖 POSIX 符号链接与 Unix socket 的用例被跳过，需在 POSIX 执行。
 
 - 直接 `bash` 可通过 RPC 执行，旧 SSH 路径仍可显式启用；切换模式不静默降级。
 - 远程 `read`／`write`／`edit` 在 `/workspace`、`/shared`、`/tmp` 边界内工作；越界、符号链接逃逸、NUL 被拒绝。

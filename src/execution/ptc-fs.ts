@@ -591,7 +591,9 @@ export class PtcFileService {
     await this.#syncDirectory(realParent);
     try {
       const stats = await lstat(target);
-      return { info: infoFor(resolved.root, resolved.virtualPath, stats) };
+      // Report the file the bytes landed in. Writing through a link replaces its target and keeps
+      // the link, so naming the link here would claim a path whose content did not change.
+      return { info: infoFor(resolved.root, toVirtual(resolved.root, target), stats) };
     } catch (error) {
       throw mapNodeError(error, resolved.virtualPath);
     }
