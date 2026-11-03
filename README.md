@@ -1,112 +1,223 @@
 # Aster
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![Telegram](https://img.shields.io/badge/Telegram-grammY_1.46.0-26A5E4?logo=telegram&logoColor=white)](https://grammy.dev/) [![SQLite](https://img.shields.io/badge/SQLite-node:sqlite-003B57?logo=sqlite&logoColor=white)](https://nodejs.org/api/sqlite.html) [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/) [![MCP](https://img.shields.io/badge/MCP-pi--mcp_1.3.0-111111)](docs/mcp.md) [![pi-durable](https://img.shields.io/badge/pi--durable-1.3.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
+[![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](.node-version) [![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](package.json) [![pi-durable](https://img.shields.io/badge/pi--durable-1.3.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
 
-个人 AI agent，当前从单 owner 的 Telegram 私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。它有长期记忆、能接入 MCP 工具，面向小规格云服务器长期运行；可选把命令与文件工具放到第二台执行 VPS。
+Aster 是一个通过 Telegram 私聊使用的个人 AI 助手。你发消息，它调用模型理解任务，按需读写文件、执行命令、搜索网页或使用外部工具，再把结果发回 Telegram。它会保存会话、执行进度和记忆，支持进程重启后的恢复。
 
-功能开发按 `docs/spec-YYYYMMDD-<feature-name>.md` 临时规格推进，日期取本次开发开始当天。一个功能可有多个 spec，均引用同一份长期保留的功能 ADR；ADR 按时间记录各部分的取舍、缺陷与 spec 名称。功能开发完成后删除临时 spec，见 [按功能的临时规格](docs/README.md#按功能的临时规格)。下面描述当前可用能力。
+目前面向**一个所有者、一个会话**，按顺序处理请求。模型通过外部 API 提供，本项目负责把消息、记忆、工具和回复接起来。
 
-基于 `@earendil-works/pi-durable`（1.3.0）构建。现已部署在腾讯云服务器上并持续运行：真实服务器上的 Telegram 往返、记忆落盘和容器重启恢复都在这次运行里。日期、镜像 digest 等脱敏细节还没写进仓库，可以补在 [部署指南](docs/deployment-test-guide.md#9-上线判定与验证边界)。
+**本项目当前完整部署使用两台云服务器：一台负责聊天和保存状态，一台负责执行命令与 PTC 脚本。** 第一次体验也可以只用自己的电脑，不必先购买云服务器。
 
-## 架构
+- [先看懂：需要几台服务器](#需要几台服务器)
+- [看架构图：组件分别在哪里](#架构示意图)
+- [看流程：一条消息怎样得到回复](#一条消息怎样得到回复)
+- [让 agent 带你从零开始](#从零开始让-agent-带你跑起来)
+- [部署两台服务器](#部署完整的双服务器版本)
+- [数据、排障与验证状态](#数据存在哪里)
+- [进一步阅读与开发](#给开发者和维护-agent)
 
-一条消息的路径：Telegram 长轮询 → 渠道层收件箱落盘 → 运行时恢复或推进会话 → 记忆层组装上下文 → 模型层调用提供商 → 工具层执行 → 回复落盘后分段发送。
+## 需要几台服务器
+
+这里的“服务器”指一台独立的云主机（VPS）。Docker 容器是在服务器上运行的程序环境，一台服务器可以运行多个容器。
+
+| 使用方式 | 需要你准备的机器 | 程序在哪里运行 | 适合什么时候用 |
+| --- | --- | --- | --- |
+| 本机体验 | 1 台自己的电脑，0 台云服务器 | Aster 和本地工具在电脑上，模型调用外部 API | 第一次启动、理解配置 |
+| 单服务器部署 | 1 台云服务器 | 应用和本地工具在同一台服务器；可加同机出站代理与密钥服务 | 熟悉基本部署后使用 |
+| 完整 RPC 部署 | **2 台云服务器** | 控制服务器保存状态、连接模型；执行服务器运行远程命令与 PTC | 本项目当前采用的部署形态 |
+
+完整部署的分工如下：
+
+| 位置 | 运行什么 | 用通俗的话说 |
+| --- | --- | --- |
+| 服务器 1：控制服务器 | `personal-agent`、`rpc-gateway`、`aster-mitm`、`aster-openbao`，共 4 个常驻容器 | 接消息、问模型、检查工具调用、保存记忆、发回复；保管 API 密钥并代理外部请求 |
+| 服务器 2：执行服务器 | `aster-rpc-agent` 系统服务，以及按任务启动的隔离进程 | 接受控制服务器的执行请求，运行命令、访问任务文件和执行 PTC 脚本 |
+| 外部服务 | Telegram、所选模型 API；按需连接 Web 服务和远程 MCP 服务 | 由对应服务商提供，不需要为它们另买一台 Aster 服务器 |
+
+OpenBao 和出站代理与应用部署在同一台控制服务器上。RPC gateway 也是这台服务器上的容器。PTC 沙箱是执行服务器上的任务进程；这些都已经包含在上面的两台服务器里。
+
+项目的应用部署基线为 4 核 CPU、4 GB 内存；执行服务器的资源还要按命令负载和并发数安排。模型推理由服务商承担，不需要为 Aster 自建 GPU 推理服务器。
+
+## 架构示意图
+
+下图展示完整的双服务器 RPC + 出站代理部署。实线双向箭头表示请求与结果的往返；每个大框都标出了所属位置。
 
 ```mermaid
-flowchart LR
-  tg["Telegram 长轮询"] --> inbox["收件箱 inbox.sqlite"]
-  inbox --> runtime["运行时 Session"]
-  runtime --> memory["记忆：规则 / 快照 / 近期原文"]
-  memory --> model["模型提供商"]
-  runtime --> tools["常驻工具与 MCP"]
-  tools --> exec["执行层：本地或远程执行"]
-  exec --> tools
-  tools --> runtime
-  model --> runtime
-  runtime --> saved["回复先落盘"]
-  saved --> send["分段发送"]
+flowchart TB
+  user["你：Telegram 私聊"]
+
+  subgraph external["外部服务：由服务商提供"]
+    telegram["Telegram"]
+    llm["模型 API：理解任务、决定工具调用、组织回复"]
+    services["Web / 远程 MCP：可选"]
+  end
+
+  subgraph control["服务器 1：控制服务器"]
+    subgraph application["容器：personal-agent"]
+      app["接收消息 · 会话与记忆 · 工具校验 · 保存回复"]
+      state[("SQLite 数据库与记忆文件")]
+      app <--> state
+    end
+    proxy["容器：aster-mitm<br/>外部请求的出站代理"]
+    vault["容器：aster-openbao<br/>保管外部 API 密钥"]
+    gateway["容器：rpc-gateway<br/>转发 RPC · 持有客户端证书"]
+  end
+
+  subgraph execution["服务器 2：执行服务器"]
+    rpc["Execution Agent<br/>私网监听 TCP 9443"]
+    direct["直接工具<br/>bash 隔离进程 / 受限文件服务"]
+    ptc["PTC 沙箱<br/>QuickJS 脚本 + 嵌套工具"]
+    files[("执行文件<br/>共享目录 / 任务工作目录")]
+    rpc <--> direct
+    rpc <--> ptc
+    direct <--> files
+    ptc <--> files
+  end
+
+  user <--> telegram
+  app <-->|"拉取消息 / 投递回复 / 调用模型与外部服务"| proxy
+  proxy <--> telegram
+  proxy <--> llm
+  proxy <--> services
+  proxy -->|"按允许的目标读取密钥"| vault
+  app <-->|"Unix socket：本机通信"| gateway
+  gateway <-->|"私网 RPC · mTLS 双向证书认证"| rpc
 ```
 
-| 层 | 职责 | 主要文件 |
+图里有两条主要通道：
+
+- **外部服务通道**：应用 → 出站代理 → Telegram、模型和已配置的外部服务。代理仅对允许的目标，把应用发送的密钥占位符替换成真实 API 密钥；真实密钥保存在 OpenBao。
+- **远程执行通道**：应用 → 本机 Unix socket → RPC gateway → 私网 → 执行服务器。这条通道不经过出站代理。mTLS 表示连接双方用证书确认身份；执行 Agent 还会检查客户端证书名称。
+
+应用容器没有到执行服务器的直接网络路由，也不持有执行通道的客户端私钥。工具调用的参数检查、权限判断和执行记录由控制服务器上的应用负责；RPC gateway 只转发字节。
+
+以上服务器数量和部署方式依据 2026-11-03 的 [#59 部署与链路记录](https://github.com/NaoYUN77/Aster/pull/59)及仓库配置。实际运行状态会随运维改变；“部署过、跑通过消息”与“所有验收项通过”各有对应的证据，见[验证状态](#验证状态与当前限制)。
+
+## 一条消息怎样得到回复
+
+以“检查几个任务文件，只告诉我汇总结果”为例。下面是流程说明，不是一段伪造的运行记录。
+
+1. **你在 Telegram 发消息。** 应用主动向 Telegram 拉取新消息，这叫“长轮询”，因此聊天入口不需要暴露一个接收消息的公网端口。应用只接受已配置所有者的私聊。
+2. **先保存收到的请求。** 控制服务器把请求写入收件箱，再推进会话。系统提示、记忆和近期对话一起组成给模型的上下文。
+3. **模型决定下一步。** 简单问题可以直接回复；需要操作时，模型提出工具调用。如果适合用一段脚本串起多次操作，可以调用 `codemode`。
+4. **PTC 执行模型编写的 JavaScript。** 控制服务器通过 RPC 把脚本送到执行服务器。脚本在 QuickJS 中运行，只能通过允许的 `tools.*` 接口请求工具；每次嵌套调用都回到控制服务器，经过校验和授权，再通过 RPC 到执行服务器实际执行。
+5. **结果返回脚本，再返回模型。** 脚本可以读取中间结果、筛选和计算，只返回需要的汇总。模型获得 `codemode` 的输出后组织最终回复；有必要时也可以继续调用工具。
+6. **先保存回复，再发到 Telegram。** 应用先把回复写入数据库，然后分段投递并记录发送状态。投递失败时重投已保存的回复，不重新执行整项任务。
+
+<details>
+<summary>展开查看 PTC 一次调用的往返顺序</summary>
+
+```mermaid
+sequenceDiagram
+  participant U as 你
+  participant T as Telegram
+  participant A as 控制服务器上的 Aster
+  participant L as 外部模型 API
+  participant E as 执行服务器上的 PTC
+
+  U->>T: 发送任务
+  A->>T: 长轮询拉取消息
+  T-->>A: 新消息
+  A->>A: 请求落盘，组装上下文
+  A->>L: 用户任务 + 记忆 + 工具说明
+  L-->>A: 调用 codemode，附 JavaScript
+  A->>E: 经 gateway 和私网 RPC 启动脚本
+  E->>A: 脚本请求 tools.bash 等工具
+  A->>A: 检查参数、权限并记录调用
+  A->>E: 在绑定的执行会话中执行工具
+  E-->>A: 工具结果
+  A->>E: 将结果交回 JavaScript
+  E->>E: 脚本处理结果并 return 汇总
+  E-->>A: codemode 输出
+  A->>L: 提交工具输出
+  L-->>A: 最终回复文本
+  A->>A: 回复落盘
+  A->>T: 分段发送并记录投递状态
+  T-->>U: 显示回复
+```
+
+模型和 Telegram 请求经出站代理；图中省略了代理，以便看清业务顺序。执行通道中的脚本工具请求和结果均经 gateway 往返。
+
+</details>
+
+### PTC 是什么，和普通工具调用有什么区别
+
+PTC（Programmatic Tool Calling）就是让模型写代码来调用工具。在本项目里，模型看到的入口工具名是 **`codemode`**。
+
+普通调用时，模型发起一次工具调用、读结果，再决定下一次。PTC 则允许 JavaScript 在一次 `codemode` 调用中串起多次工具操作，并把中间数据留在脚本里处理。它适合批量收集、筛选和汇总，能减少模型往返以及进入对话的中间结果；实际节省取决于任务。
+
+脚本目前只能调用 `read`、`write`、`edit`、`bash` 四项工具，嵌套调用依次执行。MCP、记忆、Web 工具仍由模型直接调用。单次操作可以直接调工具；要让模型逐步判断的任务，也可以分多次调用。
+
+完整 RPC 部署中的执行位置：
+
+| 调用方式 | 实际在哪里执行 | 文件和隔离边界 |
 | --- | --- | --- |
-| 入口与部署 | 组合接线、部署渲染、环境预检、发布清单 | `src/main.ts`、`src/deployment-*.ts`、`src/release-*.ts` |
-| 渠道 | Telegram 长轮询与所有者过滤；持久化收件箱（offset 检查点、分段投递与对账） | `src/telegram.ts`、`src/inbox.ts` |
-| 运行时 | 基于 pi-durable 的 Session：durable 执行、checkpoint、replay 恢复 | `src/agent.ts` |
-| 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具 | `src/memory/` |
-| 工具 | 工具注册表（常驻 + deferred）、MCP 接入与 OAuth 凭据保管 | `src/tools.ts`、`src/mcp*.ts` |
-| 执行 | 本地执行；可选 SSH broker 或统一 RPC 的远程执行；远程 PTC sandbox、文件原语与 codemode | `src/execution/`、`src/ptc-*.ts`、`src/codemode.ts` |
-| 模型 | 提供商注册表与模型解析、启动前目录校验 | `src/providers.ts` |
-| 配置 | `.env` 解析与严格校验（缺项/错项启动前失败） | `src/config.ts` |
-| 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`inbox.sqlite` |
+| 模型直接调 `bash` | 执行服务器上的隔离进程，经过 bwrap + cgroup | 默认工作目录 `/shared/aster`；进程无外部网络 |
+| 模型直接调 `read` / `write` / `edit` | 执行服务器上的受限文件服务 | 只映射允许的共享目录和会话临时目录；不启动 QuickJS 或 bwrap 命令进程 |
+| 模型调 `codemode`，脚本再调工具 | 执行服务器上的 PTC 沙箱；QuickJS 与嵌套工具在同一个 PTC 会话中协作 | 私有工作目录 `/workspace`；可用显式挂载的 `/shared` 和私有 `/tmp`；bwrap 隔离进程与网络，cgroup 限制资源 |
 
-数据目录：
+`/workspace` 是每项 PTC 任务自己的目录，`/shared/aster` 是直接工具常用的共享任务目录。需要两种方式访问同一批文件时，使用已配置的 `/shared` 路径。控制服务器不会打开执行服务器上的这些文件。
 
-| 路径 | 内容 |
-| --- | --- |
-| `agent.sqlite`（及 WAL） | 底座会话与执行恢复状态；记忆系统的 working 状态、周期快照投影、归档进度与轮数计数 |
-| `inbox.sqlite`（及 WAL） | 请求消费位置、身份绑定与投递状态 |
-| `workspace/` | agent 的任务文件 |
-| `memory/daily/YYYY-MM-DD.md` | 每日事件记忆：归档任务从已确认的会话范围增量提取 |
-| `mcp.json`（可选） | MCP server 配置 |
-| `mcp-oauth/<server>.json`（可选） | 远程 MCP server 的 OAuth token，仅属主可读 |
+QuickJS 约束 JavaScript 能使用的接口；bwrap 和 cgroup 提供远程进程隔离与资源限制。在本地模式中，工具拥有应用用户或容器的权限，QuickJS 不会额外隔离它调用的本地命令。详细说明见[代码调用工具](docs/codemode.md)。
 
-约束：同一数据目录只允许一个应用进程（镜像入口以 `flock` 互斥）。数据目录绑定 bot 与 owner，不能换身份续用。当前为单会话、串行请求、顺序工具执行，单个请求等待上限 5 分钟，超时向底座请求取消（外部副作用不保证可撤销）。接入每次最多取 10 条 update，处理完本地待办再轮询。
+## 从零开始：让 agent 带你跑起来
 
-## 已验证与尚未验证
+这里的“维护 agent”指帮你安装、修改和部署项目的编程助手。它与部署完成后在 Telegram 中回复你的 Aster 是两个角色。下面这段可以直接交给维护 agent：
 
-生产状态以所有者确认为准。下面的测试和 CI 数字以仓库里的记录为准。
+> 我没有编程或服务器基础，请带我运行这个仓库。先读 README.md、CLAUDE.md、.env.example 和相关部署文档，检查我的操作系统、运行环境，以及 Telegram 和模型 API 的连通性。先在一台电脑或一台服务器上跑通文字聊天，再按需要增加 PTC、Web、MCP 和双服务器 RPC。每一步请说明在哪台机器执行、目的是什么、成功时应该看到什么；缺少信息时向我确认，不要猜配置。请让我在本机配置文件中填写真实凭据，不在聊天或日志中回显。已有部署时先确认 bot、Compose 项目和数据卷，保留数据，避免两个实例同时使用同一个 bot。最后给出实际验证结果和未完成项。
 
-**已有记录**
+### 1. 准备三样东西
 
-- 类型检查、离线测试和构建。2026-11-03 的 main 运行 [41654885450](https://github.com/NaoYUN77/Aster/actions/runs/41654885450)（合并提交 `0ea4da5`）中，Node job 为 382 项、374 过、0 失败、8 跳过；跳过的 8 项是部署文件权限类用例。同一运行的镜像 job 另跑了卷预检 9 项（8 过 1 跳过）、只读 WAL 1/1，以及最终 Compose 拓扑 6 项检查。Windows 本地同一套件为 382 项、363 过、0 失败、19 跳过；POSIX 符号链接、Unix socket 与 cgroup 用例只在 Linux 上实际执行，跳过不算通过。
-- 最终镜像与单服务拓扑 6 项：Compose 边界、缺 provider key 时不回显凭据、同卷 `flock`、离线卷预检与整卷备份还原、容器日志不含合成凭据。脚本写明不覆盖真实 Telegram／模型链路，见 [CI 运行入口](docs/ci-entrypoint.md)。
-- 记忆机制的离线验收，以及一次 DeepSeek 真实模型补测（28 次调用里 27 次前缀缓存命中，约 87%）。腾讯云 4 核、7680 MB 的机器在同一份记录里跑过验收测试和资源测量（峰值 RSS 约 136 MiB）。那是测试补测，不是部署验收。见 [记忆系统验收](docs/memory-verification.md)。
-- 启动配置在联网前拒绝未知提供商和未知模型 id；进程日志只打印本应用的配置／状态错误或错误码（`src/config.ts`、`src/main.ts`）。这是代码和测试里的行为，不是一份生产日志审计。
-- 生产环境已部署在腾讯云服务器上并持续运行，包括真实服务器上的 Telegram 往返、记忆落盘和容器重启恢复。仓库里还没有日期或镜像 digest，见部署指南第 9 节的可选记录。
+| 要准备的东西 | 怎么得到 | 用在哪里 |
+| --- | --- | --- |
+| Telegram bot token | 在 Telegram 中通过官方 BotFather 创建 bot | `TELEGRAM_BOT_TOKEN` |
+| 自己的 Telegram 数字用户 ID | 请维护 agent 协助确认；不是 `@用户名`、群组 ID 或 bot ID | `TELEGRAM_OWNER_ID`，限定谁能使用助手 |
+| 一个模型服务的 API key | 到所选模型服务商的控制台创建；需有可用额度 | 对应的 `*_API_KEY`，按服务商计费 |
 
-**仓库记录尚未覆盖**
+模型需要 API 接入。聊天网站的会员订阅与 API key 是不同的接入方式，本项目使用后者。密钥请直接填入本机配置文件，不要提交 Git。
 
-- CI 里的 Telegram → 模型 → 投递业务链。当前拓扑日志写的是 NOT COVERED。
-- 镜像发布、签名和手动生产更新。没有 `release.yml` / `deploy.yml`；离线发布预检成功时仍标注 `productionAdmission: "not-evaluated"`。
-- DeepSeek 以外的提供商的真实摘要与归档质量。
-- 远程 PTC Phase 1／2 的真实双 VPS 验收。自动化基线已通过，但 2026-11-03 的两轮实机记录均为 FAIL（cgroup 入组顺序／位置与 bwrap 参数），修复后尚未复验；Phase 0 已于 2026-11-02 通过双 VPS 验收。全线 RPC 的 app 容器 + 宿主 gateway 形态也还没有独立的实机验收记录。见 [Phase 2 验收记录](docs/acceptance/20261103-remote-ptc-phase2.md)。
+### 2. 首次运行选本机模式
 
-**已知限制**
-
-- 回复已持久化但请求收尾未执行时进程被杀，该轮的轮数计数会永久滞后一轮（回复与状态一致，压缩评估点后移）。见 issue #26。
-- 单会话串行。长期繁忙时消息留在 Telegram 侧。
-- 本地模式的 `bash` 等工具不是 OS 沙箱，具有应用进程的宿主权限；远程 PTC 的 `bash` 与文件工具受执行主机上的 bwrap + cgroup 约束。
-
-## 对话示例
-
-> **TODO（维护者填写）**
->
-> 放一段脱敏后的真实 Telegram 往返。不要编造对话。建议包含一条普通请求、一次工具调用、一次「记住这件事」，以及进程重启后的追问。删掉 token、用户 ID、文件路径和任何密钥。
->
-> 在补上之前，本节不是能力证据。
-
-## 快速开始
-
-需要 Node.js 24.19.0+，以及可访问 Telegram 与所选模型服务的网络。
+本机源码运行需要 Git 和 **Node.js 24.19.0（24.x，低于 25）**；这与仓库的 [.node-version](.node-version) 和 [package.json](package.json) 一致。电脑还需要能访问 Telegram 和所选模型服务。先让维护 agent 检查这些条件，再执行：
 
 ```sh
+git clone https://github.com/NaoYUN77/Aster.git
+cd Aster
 npm ci
 cp .env.example .env
-# 填写 .env（见下）
+```
+
+上述复制命令适用于 Linux、macOS 和 Git Bash；Windows PowerShell 使用 `Copy-Item .env.example .env`。已有 `.env` 时保留并核对，不要覆盖。
+
+打开 `.env`，下面是使用 DeepSeek 的本机配置示例；把尖括号里的说明替换成自己的值：
+
+```dotenv
+TELEGRAM_BOT_TOKEN=<BotFather 给你的真实 token>
+TELEGRAM_OWNER_ID=<你自己的 Telegram 数字用户 ID>
+MODEL_PROVIDER=deepseek
+MODEL_ID=deepseek-flash
+DEEPSEEK_API_KEY=<你的真实模型 API key>
+DATA_DIR=./data
+```
+
+**`.env.example` 中的 `__vault_...__` 是代理模式使用的占位符。** 本机直连运行时，要把 bot token 和当前模型 key 的占位符改成真实值；只有部署好 OpenBao + 出站代理后才使用占位符。`MODEL_ID` 必须是当前依赖支持的精确名称，不能填写模型网站上的任意展示名。
+
+然后执行：
+
+```sh
 npm run check
 npm test
 npm run build
+node --env-file=.env dist/src/check-config.js
 npm start
 ```
 
-开发运行用 `npm run dev`。测试全部离线（faux 模型 + 本地 SQLite），不调用收费模型或 Telegram。
+配置检查应输出 `Configuration OK: ...`；启动应出现 `Personal agent starting; single-owner private Telegram messages enabled.`。在 Telegram 中用所有者账号私聊 bot，发送“现在几点？”，确认收到回复。终端里的进程要保持运行；长期部署使用下一节的 Docker 方式。
 
-`.env` 必填项：
+这里的测试是离线测试，不调用收费模型或 Telegram。**真正私聊 bot 会调用已配置的模型 API。** Windows 上部分 Linux 专用测试会跳过，跳过不代表已验证。若 bot 已使用 webhook，应用会拒绝启动；先核对旧部署并停用 webhook，避免抢占同一个 bot。
 
-- `TELEGRAM_BOT_TOKEN`：BotFather 创建的 bot token。
-- `TELEGRAM_OWNER_ID`：允许使用 bot 的个人 Telegram 数字用户 ID。
-- `MODEL_PROVIDER` / `MODEL_ID`：注册表内的提供商 id 与该提供商在 pi-ai 1.3.0 模型目录中的 id。写错时启动前报错并列出示例，不自动替换。
-- 所选提供商对应的 API key（见下表；只要求当前所选的那个，其余留空不算缺项）。
+<details>
+<summary>换用其他模型服务时，应该填哪个 key 变量？</summary>
 
 | `MODEL_PROVIDER` | API key 变量 |
 | --- | --- |
@@ -122,93 +233,119 @@ npm start
 | `zai` | `ZAI_API_KEY` |
 | `openrouter` | `OPENROUTER_API_KEY` |
 
-注册表定义在 `src/providers.ts`，是支持范围的唯一来源。本应用只支持显式 API key 的提供商：不含 OAuth／订阅登录、云厂商环境凭据（Bedrock、Vertex），暂不支持自定义 base URL 的 OpenAI 兼容端点。
+只填当前服务商需要的 key。支持范围以 [src/providers.ts](src/providers.ts) 为准；模型 ID 来自已安装 pi-ai 的模型目录，填错时离线配置检查会提示候选。本项目不接受自定义模型 base URL 或云厂商环境凭据。
 
-常用可选项（均有默认值，注释里的数字与 `src/memory/contracts.ts`、`src/config.ts` 一致，完整清单见 `.env.example`）：
+</details>
 
-- `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。
-- `TELEGRAM_API_ROOT`：Telegram Bot API 的根地址覆盖。服务器无法直连 `api.telegram.org` 时，可指向自建 https 反向代理。仓库没有记录这项是否在某台机器上使用。
-- `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭。其余 `MEMORY_*` 为预算、时区与归档超时。
-- `CODEMODE_ENABLED`：PTC／code mode 总开关，默认关；设 `1` 启用 `codemode` 工具。`CODEMODE_TIMEOUT_MS` 与 `CODEMODE_MEMORY_LIMIT_BYTES` 约束脚本期限和 QuickJS 内存。
-- `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
-- `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
+### 3. 按需开启能力
 
-私聊 bot 后直接发送文字即可。bot 若已配置 webhook，应用会拒绝启动，需先在原部署中停用 webhook。
+先跑通聊天，再让维护 agent 帮你开启需要的功能。修改配置后需重启。
 
-## 记忆系统
+| 能力 | 怎么开启 | 注意什么 |
+| --- | --- | --- |
+| 记忆 | 默认开启；`MEMORY_ENABLED=0` 可关闭 | 明确要求记住、纠正或忘记时使用记忆工具；不自动建立偏好画像，不保存凭据 |
+| PTC / codemode | 本机设置 `CODEMODE_ENABLED=1`；RPC Compose 默认启用 | 本机 PTC 仍使用本机工具；启用此项本身不会部署第二台服务器 |
+| 网页搜索和抓取 | 配置独立的 `DEEPSEEK_WEB_API_KEY` | 注册 `web_search`、`web_fetch`；与模型 key 分开，远端调用可能计费 |
+| Notion 等 MCP 工具 | 按 [MCP 文档](docs/mcp.md) 配置 `DATA_DIR/mcp.json`，完成相应授权 | MCP 是让助手接入外部工具的协议；默认不连接，工具通过 `tool_search` 按需加载 |
+| GitHub 只读工具 | 按 [GitHub 接入文档](docs/github-access.md) 配置凭据、代理与独立审批基线 | 默认关闭；12 项只读工具，缺少审批或工具声明变化时停用 |
 
-每次请求的上下文分三区：A 区为稳定规则（系统提示与工具声明，保持不变以利用提供商前缀缓存）；B 区为周期快照（连续性摘要与 working 基线，只在压缩或重置正式生效时切换）；C 区为实时尾巴（近期原文、工具结果与本轮检索结果）。
+## 部署完整的双服务器版本
 
-| 工具 | 用途 |
-| --- | --- |
-| `working_read` / `working_update` | 读取 / 按预期版本更新当前任务状态 |
-| `memory_search` | 按关键词与日期范围检索每日事件记忆 |
-| `memory_read` | 按日期 + 段落 id 精确读取一条每日事件 |
+Docker 用来把应用及依赖打包成镜像；Docker Compose 文件说明要运行哪些容器、如何连接，以及数据放在哪里。`docker compose up` 启动容器，持久化数据保存在单独的数据卷中。
 
-已确认的会话范围由后台归档任务增量提取为 `memory/daily/*.md`。归档失败只记录状态，不影响聊天。检索超限返回明确错误，不静默截断。早期的 `workspace/MEMORY.md` 已退役，见 [ADR-0004](docs/adr/0004-retire-workspace-memory-md.md)。
+单服务器长期运行可以先按[Docker 部署指南](docs/deployment-test-guide.md)部署一个 `personal-agent` 服务。下面是升级到图中双服务器拓扑的顺序，适合让维护 agent 按对应手册逐项执行。
 
-设计见 [Memory 与 Context 实施方案](docs/memory-and-context-design.md)，验收记录见 [记忆系统验收](docs/memory-verification.md)。
-
-## 工具
-
-常驻工具包括底座的 `bash`、`read`、`write`、`edit`，以及 `current_time`、上表中的记忆工具和配置 Web key 后启用的 `web_search`、`web_fetch`。内置工具使用底座 `defineTool` 注册；名称冲突在注册时直接拒绝。本地工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。MCP 的配置字段、pin、授权、OAuth 和检查命令见 [工具与 MCP](docs/mcp.md)，通用工具契约见 [契约与生命周期](docs/contracts-and-lifecycle.md)。GitHub 只读接入默认关闭，需要独立审批基线和代理链路；12 个工具全部 deferred，审批缺失或声明漂移时整体停用，见 [GitHub 只读接入](docs/github-access.md)。
-
-### 代码调用工具（PTC，可选）
-
-设置 `CODEMODE_ENABLED=1` 并重启后，模型获得 `codemode` 工具：它写一段 JavaScript，在 QuickJS WASM sandbox 中调用白名单工具，只有脚本结果回到对话。本地脚本可调用 `read`／`write`／`edit`／`bash`；远程执行模式的脚本同样可调用这四项，嵌套 `bash` 与文件访问都在执行主机的 PTC sandbox 内完成，控制面不打开这些文件。嵌套调用仍经过工具注册表和授权复核，并在宿主侧串行执行；模型可见结果上限 32 KiB／1000 行。QuickJS 只限制脚本运行时能力，不是 OS 沙箱；本地 `bash` 具有宿主权限，远程 PTC `bash` 受 bwrap + cgroup 约束。配置、失败语义、恢复边界和远程大输出处理见 [代码调用工具](docs/codemode.md)，取舍见 [ADR-0019](docs/adr/codemode-ptc/0019-codemode-ptc.md)。
-
-## 部署与运维
-
-默认生产形态是单个 Docker 服务；远程执行使用可选 overlay，基础拓扑不变。镜像构建、Compose、卷备份和上线清单见 [部署指南](docs/deployment-test-guide.md)。同机 test／production 的环境描述见 [部署环境](docs/deployment-environments.md)。结果未知的 Telegram 发送如何核查和补发见 [投递核查与补发](docs/deliveries.md)。
-
-凭据只经部署环境提供。应用只做存在性与形状校验，不把秘密写入工具参数或 durable 状态。
-
-可选的 MITM 占位符模式（密钥留在 OpenBao，应用只见 `__vault_<NAME>__`）见 [OpenBao + MITM 部署](deploy/openbao-mitm/README.md)，应用侧 overlay 为 `docker-compose.mitm.yml`。代理只在客户端显式发送占位符、且目标 Host 精确命中 [`allowlist.json`](deploy/openbao-mitm/addon/allowlist.json) 时才填充；不按目标自动补 `Authorization`，不替换请求体，无映射返回 `403`。
-
-### 远程工具执行（可选）
-
-远程执行把命令与文件工具放到第二台 VPS，控制面只保留会话、记忆、投递与调用记录。应用启动时连接执行面并做 health 检查；不可达或能力不满足时启动失败，不回退本地执行。两种传输互斥，切换前先让未完成任务收敛。
-
-| 传输 | 选择 | 模型工具 | 路径 |
+| 顺序 | 在哪里做 | 做什么、完成后检查什么 | 操作手册 |
 | --- | --- | --- | --- |
-| RPC（Phase 1／2） | `EXECUTION_REMOTE_TRANSPORT=rpc` | 直接 `bash`／`read`／`write`／`edit`；codemode 同为这四项 | 经 mTLS 连接执行 VPS 的 RPC agent；命令与文件访问在 PTC sandbox（bwrap + cgroup）内 |
-| SSH（阶段 1，兼容路径） | `EXECUTION_REMOTE_TRANSPORT=ssh`（默认） | 仅 `bash`；文件工具显式返回 `not_supported` | 应用容器 → 宿主 Unix socket → `execution-broker` → SSH |
+| 1 | 两台服务器 | 确认 Linux 环境、私网可达、证书名称和数据目录；执行面具备 bwrap、cgroup v2 等隔离条件 | [RPC Runbook](docs/runbook-remote-ptc-phase1-2.md) |
+| 2 | 执行服务器 | 部署 `aster-rpc-agent` 系统服务；只绑定私网，强制 mTLS、检查客户端 CN；先做预检与隔离检查 | 同上 |
+| 3 | 控制服务器 | 部署 OpenBao 与 MITM 出站代理，配置密钥、允许的目标和应用使用的占位符 | [OpenBao + MITM](deploy/openbao-mitm/README.md) |
+| 4 | 控制服务器 | 准备应用镜像、环境文件、持久化卷、gateway 证书和 Unix socket 目录 | [Docker 部署指南](docs/deployment-test-guide.md)、[Runbook §5.4](docs/runbook-remote-ptc-phase1-2.md#54-全线-rpcapp-容器--宿主-gateway) |
+| 5 | 控制服务器发起，执行服务器配合 | 验证 Telegram 往返、直接 bash 与文件工具、codemode、大输出、取消与恢复；分别记录结果 | [Runbook](docs/runbook-remote-ptc-phase1-2.md)、[验收记录](docs/acceptance/20261103-remote-ptc-phase2.md) |
 
-RPC 的生产形态由 `docker-compose.rpc.yml` 提供：app 容器保持 MITM-only 网络，只连宿主 Unix socket；宿主网络里的 `rpc-gateway` 持有 `aster-gateway` 客户端证书，经私网 TCP 9443 以 mTLS 连接执行 agent，逐字节转发帧，不解释、不重放、不授权。两种形态都不给 app 容器增加执行 VPS 路由，也不发布端口；执行 agent 只绑定私网／loopback，校验证书 CN，隔离不可用时拒绝监听。
+第 4 步应用侧使用的文件组合是：
 
-主要变量为 `EXECUTION_MODE=remote`、`EXECUTION_REMOTE_TRANSPORT`、`EXECUTION_REMOTE_CWD`；RPC 另有 `EXECUTION_RPC_ADDRESS`、`EXECUTION_RPC_SERVER_NAME`，以及 gateway 形态的 `EXECUTION_RPC_CERT_DIR` 或宿主直连形态的 `EXECUTION_RPC_*_PATH`。完整配置、cgroup／bwrap 前提、验收与回滚见 [Remote PTC Runbook](docs/runbook-remote-ptc-phase1-2.md)；SSH broker 的 socket 权限、密钥与失败语义见 [远程工具执行](docs/execution-remote.md)；设计取舍见 [ADR-0021](docs/adr/0021-control-execution-split.md)，验收条件见 [远程 PTC spec](docs/spec-20261102-remote-ptc-sandbox.md)。实机验收状态见上文的「已验证与尚未验证」。
+```text
+docker-compose.yml          基础应用和持久化数据卷
++ docker-compose.mitm.yml    应用通过出站代理连接外部服务
++ docker-compose.rpc.yml     应用通过 gateway 连接远程执行服务器
+```
 
-### 内置 Web 工具
+OpenBao 与 MITM 自身由 `deploy/openbao-mitm/compose.yml` 管理。三个应用侧 Compose 文件叠加，并不会自动部署第二台服务器或创建证书；必须先完成表中的准备步骤。`aster:local` 是本地镜像标签，项目目前没有可直接拉取的公共生产镜像，需按部署指南构建或分发。
 
-`web_search` 与 `web_fetch` 直接通过 Aster 的工具注册表执行，不需要 `mcp.json` 或额外进程。设置独立的 `DEEPSEEK_WEB_API_KEY` 并重启后，两项工具同时注册；未设置时均不向模型声明。Search 返回来源与摘要，Fetch 返回规范化标题和 Markdown 正文。
+RPC 方案统一承载直接工具与远程 PTC。仓库还保留 `docker-compose.execution.yml` 的 SSH broker 兼容路径：直接工具只支持 `bash`，直接文件工具返回 `not_supported`。完整 RPC 部署使用 `docker-compose.rpc.yml`，不同时叠加 SSH execution 文件。切换执行方式前先让未完成任务收敛；远程不可用时会明确失败，不自动回退到控制服务器执行。
 
-两项工具按只读权限治理，但远端调用可能计费，因此不可自动重放。它们共享最多 2 个正在执行的请求，单次等待上限 20 秒；Search／Fetch 上游响应分别限 256／512 KiB，模型可见结果限 24 KiB。Fetch 会拒绝凭据 URL、IP literal、localhost／常见内部域名和自定义端口；这些本地检查不构成对供应商远端 DNS、重定向或 SSRF 行为的保证。供应商契约、价格、详细边界及待完成的真实 key 验证见 [Web 提供商调研](docs/web-search-provider-research.md)。
+## 数据存在哪里
 
-## 开发
+**控制服务器保存会话和投递状态；执行服务器保存实际任务文件。** 两边都要纳入备份计划。
+
+| 位置 | 内容 | 为什么要保留 |
+| --- | --- | --- |
+| 控制面 `agent.sqlite` 及 SQLite 相关文件 | 会话、执行恢复记录、工作记忆与上下文快照 | 重启后继续会话、核对工具执行状态 |
+| 控制面 `inbox.sqlite` 及 SQLite 相关文件 | 收件记录、bot / owner 绑定、回复与分段投递状态 | 判断消息收到没有、回复发送到哪一段 |
+| 控制面 `memory/daily/` | 从已确认会话中归档的每日事件记忆 | 检索过去的事实 |
+| 控制面 `mcp.json`、`mcp-oauth/`（可选） | 外部工具配置及授权状态 | 连接已授权的服务 |
+| 执行面共享目录和 job 工作目录 | `/shared`、PTC `/workspace` 对应的宿主目录，以及大输出文件 | 保留工具产生的实际内容；控制面数据库只保存有界结果和引用 |
+| 本地模式 `DATA_DIR/workspace/` | 本机工具的任务文件 | 本地运行时文件保存在应用数据目录 |
+
+源码运行的 `DATA_DIR` 默认是 `./data`。Docker 中应用数据目录固定为 `/data`，基础卷名为 `personal-agent-data`。同一数据目录只允许一个应用进程使用，并绑定 bot 与 owner；不能随意换一个 bot 接着使用原卷，也不要让两个实例争用同一 bot。
+
+按[部署指南的整卷备份步骤](docs/deployment-test-guide.md#6-备份与还原整个卷)操作，先停止应用再备份。普通更新保留数据卷；`docker compose down -v` 会删除卷，不能拿它代替普通重启。只备份控制面卷不会备份执行服务器上的任务文件，也不会备份独立部署的 OpenBao 密钥服务。
+
+记忆通过 `working_read` / `working_update` 管理当前状态，通过 `memory_search` / `memory_read` 检索过去事件。对话很长时，系统把稳定规则、周期摘要和近期原文分开组织；“记得过去的事实”和“恢复未完成工具调用”是不同机制。细节见[记忆与上下文设计](docs/memory-and-context-design.md)。
+
+## 遇到问题先看什么
+
+| 现象 | 先让维护 agent 检查 |
+| --- | --- |
+| 启动提示缺配置或模型不存在 | `.env` 的必填项、提供商 key 变量名、精确 `MODEL_ID`；先跑离线配置检查 |
+| 程序启动了，但 Telegram 不回复 | 是否用所有者账号私聊、数字 ID 是否正确、有没有旧实例或 webhook，以及 Telegram / 模型连通性 |
+| 把 `.env.example` 原样复制后认证失败 | 当前是否使用代理；本机直连时不能用 `__vault_...__` 代替真实凭据 |
+| 找不到 `codemode` | `CODEMODE_ENABLED` 和实际启动的 Compose 文件；改配置后是否重启 |
+| SSH 模式下文件工具返回 `not_supported` | 直接文件工具需要统一 RPC；按 Runbook 完成切换 |
+| 远程工具启动或执行失败 | Unix socket、gateway、执行 Agent、私网证书，以及隔离预检；保留真实错误，不改成本地执行 |
+| 控制面文件工具找不到 PTC 任务文件 | 分清本机数据目录、执行面共享目录和每个 job 的 `/workspace`；使用远程工具和正确路径 |
+| 命令可能执行了，但没收到回复 | 先核对执行记录和投递状态；按[投递核查与补发](docs/deliveries.md)处理，避免直接重跑有副作用的任务 |
+
+## 验证状态与当前限制
+
+仓库里的自动化测试、真实聊天和完整双服务器验收分别说明不同范围的结果：
+
+- **自动化基线**：2026-11-03，`main` 提交 `0ea4da5` 的 [CI 41654885450](https://github.com/NaoYUN77/Aster/actions/runs/41654885450) 成功。Node job 共 382 项，374 通过、0 失败、8 跳过；镜像 job 还覆盖卷预检、只读 WAL 和 Compose 拓扑。此记录对应该提交，不代表之后的所有版本。
+- **部署与消息链路记录**：2026-11-03 的 [#59 部署记录](https://github.com/NaoYUN77/Aster/pull/59)包含双服务器全线 RPC、gateway 健康检查、应用直连隔离，以及模拟消息经过模型、远程 PTC 和 Telegram 投递的证据。本 README 更新没有再次执行生产环境检查，也未新增完整验收报告。
+- **完整 Phase 1／2 验收仍需核对**：[仓库验收记录](docs/acceptance/20261103-remote-ptc-phase2.md)保留了两轮实机失败及修复后的待复验项，不能据聊天跑通或 CI 成功把它们改成全部通过。隔离、强杀清理、取消、恢复和未知结果等项目仍按 Runbook 留证。
+- **模型质量与发布范围**：[记忆系统验收](docs/memory-verification.md)包含一次 DeepSeek 真实模型补测；其他提供商的记忆提取质量需单独验证。CI 未覆盖真实 Telegram 到模型再投递的业务链，镜像发布与生产更新也需操作者执行。
+
+当前单会话、串行处理，单次请求等待上限 5 分钟。重启后系统依据保存的状态恢复；对中断时结果未知的命令，不会把它当作“没执行过”并随意重跑。Telegram 发送与外部写操作不保证恰好一次，可能需要人工核对。另有[已知轮数计数边界 #26](https://github.com/NaoYUN77/Aster/issues/26)：回复已保存但收尾前崩溃时，压缩评估计数可能滞后一轮。
+
+## 给开发者和维护 agent
+
+应用基于 pi-durable 1.3.0，复用其模型循环、工具执行和持久化机制。Node.js、TypeScript 及直接依赖版本由版本文件和 lockfile 固定。首次修改前阅读 [CLAUDE.md](CLAUDE.md)。
+
+| 想看哪部分 | 从哪里开始 |
+| --- | --- |
+| 程序入口和配置 | [src/main.ts](src/main.ts)、[src/config.ts](src/config.ts) |
+| 消息接收、落盘和投递 | [src/telegram.ts](src/telegram.ts)、[src/inbox.ts](src/inbox.ts) |
+| 会话、上下文与记忆 | [src/agent.ts](src/agent.ts)、[src/memory/](src/memory/) |
+| 工具注册、MCP 和模型提供商 | [src/tools.ts](src/tools.ts)、[src/mcp.ts](src/mcp.ts)、[src/providers.ts](src/providers.ts) |
+| PTC 与远程执行 | [src/codemode.ts](src/codemode.ts)、[src/ptc-gateway.ts](src/ptc-gateway.ts)、[src/execution/](src/execution/) |
 
 ```sh
 npm run check   # 类型检查
-npm run build   # 构建
-npm test        # 全量离线测试
+npm run build   # 编译
+npm test        # 离线测试；Linux 专用行为需在 Linux 验证
 ```
 
-## 文档索引
+按问题查文档：
 
-- [文档分类索引与临时 spec 约定](docs/README.md)：按功能推进开发，区分当前契约、运行手册、任务记录和历史材料
-- [部署指南](docs/deployment-test-guide.md)：镜像交付、备份恢复、维护命令、上线清单
-- [投递核查与补发](docs/deliveries.md)
-- [工具与 MCP](docs/mcp.md)
-- [代码调用工具（PTC）](docs/codemode.md)
-- [GitHub 只读接入](docs/github-access.md)
-- [部署环境描述](docs/deployment-environments.md)
-- [远程工具执行](docs/execution-remote.md)：SSH broker 的宿主 socket、密钥、配置与失败语义
-- [Remote PTC 部署与验收 Runbook](docs/runbook-remote-ptc-phase1-2.md)：Phase 1／2 双 VPS 部署、cgroup／bwrap 前提与全线 RPC gateway
-- [Phase 0 Runbook](docs/runbook-execution-rpc-phase0.md)：mTLS 通道、证书与负向检查
-- [远程 PTC 与统一 RPC 执行通道 spec](docs/spec-20261102-remote-ptc-sandbox.md) / [Phase 2 验收记录](docs/acceptance/20261103-remote-ptc-phase2.md)
-- [契约与生命周期](docs/contracts-and-lifecycle.md)
-- [ADR](docs/adr/)：决策记录
-- [Memory 与 Context 实施方案](docs/memory-and-context-design.md) / [记忆系统验收](docs/memory-verification.md)
-- [CI 运行入口](docs/ci-entrypoint.md) / [主机备份与演练](docs/host-backup.md)
-- [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)
-- [历史 Docker 验证记录](docs/docker-verification.md)：对应当日拓扑，不代表当前部署状态
-- 仓库级约束见 [CLAUDE.md](CLAUDE.md)
+| 需要做什么 | 文档 |
+| --- | --- |
+| 部署应用、升级、备份与还原 | [Docker 部署指南](docs/deployment-test-guide.md)、[部署环境](docs/deployment-environments.md) |
+| 部署密钥服务与出站代理 | [OpenBao + MITM](deploy/openbao-mitm/README.md) |
+| 部署双服务器 RPC、验收与回滚 | [远程 PTC Runbook](docs/runbook-remote-ptc-phase1-2.md)、[验收记录](docs/acceptance/20261103-remote-ptc-phase2.md) |
+| 理解 SSH 兼容路径或 Phase 0 | [远程工具执行](docs/execution-remote.md)、[Phase 0 Runbook](docs/runbook-execution-rpc-phase0.md) |
+| 配置外部工具、PTC 或 GitHub | [MCP](docs/mcp.md)、[codemode](docs/codemode.md)、[GitHub 只读接入](docs/github-access.md) |
+| 理解记忆与模型上下文 | [设计](docs/memory-and-context-design.md)、[验收](docs/memory-verification.md) |
+| 处理投递、恢复和工具错误 | [投递核查与补发](docs/deliveries.md)、[契约与生命周期](docs/contracts-and-lifecycle.md) |
+| 查 CI 与运维边界 | [CI 入口](docs/ci-entrypoint.md)、[主机备份](docs/host-backup.md) |
+| 查架构取舍与文档约定 | [ADR 索引](docs/adr/)、[文档索引与临时 spec 约定](docs/README.md) |
