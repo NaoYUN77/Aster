@@ -9,6 +9,7 @@
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `CODEMODE_ENABLED` | `0` | `1` 启用；其他非空值启动失败 |
+| `CODEMODE_SCRIPT_FIRST` | 跟随 `CODEMODE_ENABLED` | `1`／`true` 隐藏模型的直接文件与命令工具；`0`／`false` 回滚，空值跟随启用状态 |
 | `CODEMODE_TIMEOUT_MS` | `240000` | 单次脚本期限，含嵌套工具时间；范围 1000–300000 |
 | `CODEMODE_MEMORY_LIMIT_BYTES` | `134217728` | QuickJS 内存上限；范围 16 MiB–512 MiB |
 
@@ -37,11 +38,23 @@ return files.output;
 | 执行模式 | 脚本可调用 |
 | --- | --- |
 | 本地（默认） | `read`、`write`、`edit`、`bash` |
-| 远程（`EXECUTION_MODE=remote`） | 仅 `bash` |
+| 远程（`EXECUTION_MODE=remote`） | `read`、`write`、`edit`、`bash` |
 
-限制通过工具注册的 `callers` 实现。模型仍能看到全部工具；白名单只决定哪些工具进入 `agent.callable`，也就是脚本的 `tools.*` 和 codemode section。每次嵌套调用仍经过注册表的名称、状态、authz 和参数校验。
+限制通过工具注册的 `callers` 实现。白名单只决定哪些工具进入 `agent.callable`，也就是脚本的 `tools.*` 和 codemode section；每次嵌套调用仍经过注册表的名称、状态、authz 和参数校验。模型面的可见性另由下面的 script-first 策略决定。
 
 MCP、记忆、`web_search`／`web_fetch` 和 `tool_search` 不进入 v1 脚本面，继续由模型直接调用。脚本不能用 `codemode` 调用自身。
+
+## Script-first 曝光
+
+`CODEMODE_ENABLED=1` 时默认启用 script-first：`read`、`write`、`edit`、`bash` 不再出现在模型的工具声明中，`codemode` 成为文件读写和命令执行的唯一入口，单步操作也一样。脚本仍可调用这四个工具；隐藏只收窄模型面，不会改变脚本白名单，也不会给任何工具新增脚本调用方。
+
+模型侧的提示要求脚本使用纯 JavaScript（不要 TypeScript 类型标注），在脚本内过滤并汇总，用 `text()` 返回结论。工具结果的 `[Full output: path (read with offset/limit)]` 提示应在 codemode 内用 `tools.read({ path, offset, limit })` 分块读取，而不是让整段输出回到上下文。
+
+`CODEMODE_SCRIPT_FIRST=0`（或 `false`）恢复旧行为：模型直接看到并调用这四个工具，codemode 仅用于多步或需要过滤的任务。回滚只影响模型曝光，不改变已有会话记录或脚本白名单。
+
+如果模型仍调用被隐藏的工具（例如旧会话中的调用或模型幻觉），注册表记录一条 `tool_review` 事件（`code=TOOL_NOT_EXPOSED`，`decision=deny`），随后由底座按 `tool_unavailable` 结算；不会执行该工具。
+
+恢复兼容：进程启动时若存在未完成的、由模型发起的 `read`／`write`／`edit`／`bash` 调用，本次进程保留旧工具面，避免把“可能已部分执行”的调用误判为工具不存在；同时只要还有任何 live task，就推迟替换工具扩展，防止改变其注册身份。记录 `TOOL_EXPOSURE_RECOVERY` 后，在任务结束后的下一次空闲重启才应用隐藏。升级时因此可能出现一次额外重启，这是有意的保守行为。
 
 ## 输出与资源
 

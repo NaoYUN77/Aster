@@ -278,6 +278,8 @@ export function readExecutionConfig(env: NodeJS.ProcessEnv = process.env): Execu
 /** PTC / code mode (ADR-0019). Disabled unless explicitly enabled. */
 export type CodemodeConfig = {
   readonly enabled: boolean;
+  /** When enabled, model-visible file and command tools are hidden behind codemode. */
+  readonly scriptFirst: boolean;
   /** Per-script deadline, including time spent in nested tool calls. */
   readonly timeoutMs: number;
   /** Maximum heap the QuickJS instance may allocate. */
@@ -303,8 +305,25 @@ export function readCodemodeConfig(env: NodeJS.ProcessEnv = process.env): Codemo
   if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
     throw new ConfigurationError("CODEMODE_ENABLED must be 0 or 1");
   }
+  const enabled = enabledRaw === "1";
+  const scriptFirstRaw = env.CODEMODE_SCRIPT_FIRST?.trim().toLowerCase();
+  if (
+    scriptFirstRaw !== undefined &&
+    scriptFirstRaw !== "" &&
+    scriptFirstRaw !== "0" &&
+    scriptFirstRaw !== "1" &&
+    scriptFirstRaw !== "false" &&
+    scriptFirstRaw !== "true"
+  ) {
+    throw new ConfigurationError("CODEMODE_SCRIPT_FIRST must be 0, 1, false, or true");
+  }
   return {
-    enabled: enabledRaw === "1",
+    enabled,
+    // Code mode replaces the model-visible file and command tools by default; an explicit
+    // 0/false keeps the previous exposure and remains a one-switch rollback.
+    scriptFirst: scriptFirstRaw === undefined || scriptFirstRaw === ""
+      ? enabled
+      : scriptFirstRaw === "1" || scriptFirstRaw === "true",
     // Keep headroom under the 300 s request wait so the script reports its own timeout first.
     timeoutMs: boundedInteger(env, "CODEMODE_TIMEOUT_MS", 240_000, 1_000, 300_000),
     memoryLimitBytes: boundedInteger(
