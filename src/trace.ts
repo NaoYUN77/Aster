@@ -174,8 +174,8 @@ export class TraceSpan {
     this.#emit(name, fields);
   }
 
-  child(name: string, fields: TraceFields = {}, kind: TraceSpanKind = "span"): TraceSpan {
-    return TraceSpan.start({
+  child(name: string, fields: TraceFields = {}, kind: TraceSpanKind = "span"): TraceSpan | undefined {
+    return startSpan({
       name,
       kind,
       fields,
@@ -232,6 +232,16 @@ export class TraceSpan {
 
 const spanStorage = new AsyncLocalStorage<TraceSpan>();
 
+/** Span creation is diagnostics too: an SDK failure must not break the operation it observes. */
+function startSpan(options: Parameters<typeof TraceSpan.start>[0]): TraceSpan | undefined {
+  try {
+    return TraceSpan.start(options);
+  } catch (error) {
+    (options.log ?? console.error)(`Langfuse trace span failed: ${errorLabel(error)}`);
+    return undefined;
+  }
+}
+
 export function currentSpan(): TraceSpan | undefined {
   return spanStorage.getStore();
 }
@@ -287,7 +297,7 @@ export class TraceRuntime {
       previous.end("unknown", { abandoned: true, reason: "superseded" });
     }
     evict(this.#requests);
-    const span = TraceSpan.start({
+    const span = startSpan({
       name: "agent.request",
       kind: "agent",
       sessionId: key,
@@ -298,6 +308,7 @@ export class TraceRuntime {
       },
       log: this.#log,
     });
+    if (span === undefined) return undefined;
     this.#requests.set(key, span);
     return span;
   }
@@ -310,13 +321,14 @@ export class TraceRuntime {
     if (this.#closing) return undefined;
     const parent = this.requestFor(options.conversationId);
     evict(this.#codemode);
-    const span = TraceSpan.start({
+    const span = startSpan({
       name: options.name,
       kind: options.kind ?? "tool",
       fields: options.fields ?? {},
       ...(parent === undefined ? {} : { parent: parent.spanContext }),
       log: this.#log,
     });
+    if (span === undefined) return undefined;
     this.#codemode.set(`${String(options.conversationId)}\u0000${options.callId ?? ""}`, span);
     return span;
   }

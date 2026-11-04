@@ -60,7 +60,7 @@ import {
 } from "./ptc-docs.js";
 import { PtcExecutionEnv } from "./ptc-env.js";
 import { parseNestedCallKey, type PtcRpcClient, type PtcSession } from "./ptc-session.js";
-import { stringBytes, traceChild, type TraceFields, type TraceOutcome } from "./trace.js";
+import { currentSpan, stringBytes, traceChild, type TraceFields, type TraceOutcome } from "./trace.js";
 
 /** Slack over the script deadline for the runner to report its own stop. */
 const VM_DEADLINE_SLACK_MS = 60_000;
@@ -158,6 +158,7 @@ class RpcCodemodeRemote implements CodemodeRemote {
     let runnerFailure: string | undefined;
     // The VM span is created before the RPC request so runner messages and rpc.vm.start share one
     // parent. The callback runs outside the ALS context, so it closes over this span.
+    const codemodeSpan = currentSpan();
     const span = traceChild("runner.vm", {
       sessionId: this.session.sessionId,
       jobId: this.session.jobId,
@@ -179,7 +180,11 @@ class RpcCodemodeRemote implements CodemodeRemote {
         if (batchFailure !== undefined || rpcFailure !== undefined) return;
         let reply: CodemodeRemoteReply;
         try {
-          reply = await exchange(messages);
+          // VM callbacks arrive on the socket, outside the code mode ALS context. Re-enter the
+          // codemode span so nested calls, and the RPC spans they issue, keep their parent.
+          reply = codemodeSpan === undefined
+            ? await exchange(messages)
+            : await codemodeSpan.run(() => exchange(messages));
         } catch (error) {
           batchFailure = error;
           return;
