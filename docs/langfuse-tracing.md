@@ -12,6 +12,7 @@
 agent.request                 agent  （根 span，session = 会话 id）
 ├── llm.generation            generation（每次模型响应一条）
 ├── codemode                  tool（一次 codemode 工具调用）
+│   ├── codemode.prepared     span（真正交给 QuickJS 的脚本；内容采集开启时含 input）
 │   ├── tool.<name>           tool（脚本内的嵌套工具调用，如 tool.read、tool.write）
 │   │   └── rpc.<method>      span（远程执行 RPC；本地模式没有）
 │   ├── runner.vm             span（远程 QuickJS VM；本地模式没有）
@@ -22,10 +23,12 @@ agent.request                 agent  （根 span，session = 会话 id）
 
 - `agent.request` 以 durable 会话 id（`root.id`）为 `session.id`，以 `requestId` 区分同一会话的不同请求。
 - `codemode` 在工具授权之前创建，因此被拒绝的调用同样可见。
-- `tool.<name>` 的观测类型是 `tool`，名称来自实际执行的嵌套工具名；参数和结果只保留字节数、条目数和错误码。授权事实仍由 `registry.decision` event 单独记录。
+- `codemode` 的 Input 是模型原始提交的 `code` 参数；`codemode.prepared` 的 Input 是预处理后真正交给 QuickJS 的脚本，两者不会混淆。Output 是实际返回给模型的 Tool Result。
+- `tool.<name>` 的观测类型是 `tool`，名称来自实际执行的嵌套工具名；Input 为工具名和实际参数，Output 为工具返回给脚本的结果。授权事实仍由 `registry.decision` event 单独记录。
+- 上述 Input/Output 只在 `LANGFUSE_CAPTURE_CONTENT` 开启时上传；默认只记录字节数、条目数和错误码。
 - `rpc.cancel` 对已结束目标的 `not_found` 是幂等清理，span 以 `ok` + `cancelOutcome=not_active` 结束；真正的取消异常仍为 `error`。
 - `rpc.file.canonical` 在新建文件前的 `not_found` 探针以 `ok` + `probe=missing` 结束；权限、传输等非预期错误仍为 `error`。
-- `llm.generation` 关联提供商、模型、stop reason 和 token 用量。
+- `llm.generation` 关联提供商、模型、stop reason 和 token 用量；模型 Prompt 与回复原文不在采集范围内。
 - 远端 RPC 请求帧携带 `<traceId>.<spanId>` 形式的 `correlationId`（49 字节），供执行端未来接入同一 Trace；第一阶段所有 span 都由控制面创建。
 - 第一阶段只覆盖 codemode 路径；非 codemode 的直连工具目前只有授权 event，没有独立执行 span。
 
@@ -41,6 +44,7 @@ agent.request                 agent  （根 span，session = 会话 id）
 | `LANGFUSE_SECRET_KEY` | 启用时必填 | Langfuse 项目密钥。 |
 | `LANGFUSE_BASE_URL` | 否 | Langfuse 地址，默认 `https://cloud.langfuse.com`。兼容旧别名 `LANGFUSE_HOST`；两者都设置时以 `LANGFUSE_BASE_URL` 为准。自建或 US 区域时填写实际地址。 |
 | `LANGFUSE_TRACING_ENABLED` | 否 | `1`/`true` 强制请求启用；`0`/`false` 在保留密钥的情况下关闭。其他值启动失败。 |
+| `LANGFUSE_CAPTURE_CONTENT` | 否 | `1`/`true` 上传 codemode 与嵌套工具的 Input/Output；默认关闭。只建议在个人开发环境开启。其他值启动失败。 |
 | `LANGFUSE_TRACING_ENVIRONMENT` | 否 | SDK 透传的环境标签（如 `production`、`test`）。 |
 
 启用规则：
@@ -52,21 +56,69 @@ agent.request                 agent  （根 span，session = 会话 id）
 
 SDK 还会自行读取 `LANGFUSE_FLUSH_AT`、`LANGFUSE_FLUSH_INTERVAL`、`LANGFUSE_TIMEOUT`、`LANGFUSE_OTEL_COMPRESSION` 等批量与超时变量，默认值即可用于当前单机规模。
 
+### 内容采集模式（仅个人开发环境）
+
+需要检查模型实际生成的 JavaScript 和 QuickJS 真实执行结果时，在部署目录的 `.env` 增加：
+
+```dotenv
+LANGFUSE_CAPTURE_CONTENT=1
+```
+
+重建应用容器后，一次 `codemode → write → read → text()` 会产生：
+
+- `codemode`：Input 是模型提交的原始 `{ code }`，Output 是最终返回给模型的 Tool Result；
+- `codemode.prepared`：Input 是经过 TypeScript 剥离、`textOnly` 包装等预处理后真正交给 QuickJS 的 `{ code }`；metadata 的 `scriptChanged` 表明两者是否不同；
+- `tool.write` / `tool.read` / `tool.bash`：Input 是 `{ tool, arguments }`，Output 是 `{ isError, structuredOutput }`；
+- `registry.decision` 仍是独立的 event，用于证明授权决定，不与执行结果混用；
+- `rpc.*`、`runner.vm` 继续存在，用于证明脚本确实在 QuickJS/执行面运行。
+
+不会因为开启采集而改变 `text()` 的输出契约，也不会把 Langfuse 中的中间结果重新注入 LLM Context。采集默认关闭；生产环境保持关闭，只有个人开发调试时临时开启。
+
+在 Langfuse 中的检查步骤：
+
+1. 打开 Tracing，选择最近一次 `agent.request`。
+2. 展开 `codemode`，在 Input 中查看模型原始 `code`，在 Output 中查看返回给模型的 Tool Result。
+3. 展开 `codemode.prepared`，在 Input 中查看真正执行的脚本；与上一步不同即表示预处理发生了改写。
+4. 依次展开 `tool.write`、`tool.read`、`tool.bash`，核对 Input 中的参数与 Output 中的返回结果。
+5. 对照 `registry.decision` event 与对应 `tool.*` observation：前者是授权决定，后者是真实执行。
+6. 确认没有任何 `Authorization`、token、secret 或 API key 原文；超长内容应显示截断标记。
+
 ## 隐私边界
 
-默认不上传：
+默认（`LANGFUSE_CAPTURE_CONTENT` 未开启）不上传：
 
 - 用户消息、模型回复、thinking、工具参数、脚本体、命令、文件内容、路径字符串、错误消息原文；
 - 任何凭据或认证头。
 
-只上传宿主已知的边界信息：
+默认只上传宿主已知的边界信息：
 
 - 会话 id、请求 id、task/call/session/job id；
 - 字节长度（`textBytes`、`scriptBytes`、`argsBytes`、`contentBytes` 等）、条目数、token 用量、耗时；
 - 工具名、模型/provider 名称、stop reason、错误码、授权决定；
 - span 结果（`ok`/`error`/`aborted`/`halted`/`unknown`）。
 
-实现上不设置 `input`/`output` 字段，媒体上传显式关闭（`mediaUploadEnabled: false`）；metadata 只从固定字段构造，不序列化消息或参数对象。
+开启 `LANGFUSE_CAPTURE_CONTENT=1` 后，额外上传：
+
+- `codemode` 的 Input：模型原始 `code` 参数；Output：实际返回给模型的 Tool Result；
+- `codemode.prepared` 的 Input：预处理后真正交给 QuickJS 的脚本；
+- `tool.<name>` 的 Input：工具名与实际参数；Output：工具返回给脚本的结果（文本内容或结构化值）。
+
+即使用内容采集，也不会上传：
+
+- 用户消息、模型回复、thinking；
+- 图片二进制（只保留 `type`）；
+- `Authorization`、`Cookie`、token、secret、password、API key 等凭据键及常见凭据形态；
+- 超过上限的内容。
+
+限制：
+
+- 单个字符串字段最多 32 KiB，超出部分以 `…[truncated N bytes]` 标记；
+- 单条 observation 的 Input 或 Output 序列化后最多 64 KiB，超出时保存 `truncated`、`originalBytes` 和 `preview`；
+- 对象最多保留 100 个键或数组项，嵌套深度最多 6 层。
+
+采集只读取现有参数和结果用于导出，不改变 PTC 的 `text()` 契约、工具返回值或 LLM Context。Langfuse 中的中间结果不会重新进入对话。
+
+实现上不设置模型消息的 `input`/`output`，媒体上传显式关闭（`mediaUploadEnabled: false`）；metadata 只从固定字段构造，不序列化消息对象。
 
 ## 失败隔离
 
@@ -176,7 +228,9 @@ LANGFUSE_SECRET_KEY=__vault_LANGFUSE_SECRET_KEY__
 
 5. **核对隐私**
 
-   打开根 span 和 `codemode` span 的 Input/Output：应为空。Metadata 中只应看到 id、长度、计数、工具名、模型名、错误码等边界字段；不应出现消息原文、脚本体、命令或文件内容。
+   默认配置下，打开根 span 和 `codemode` span 的 Input/Output：应为空。Metadata 中只应看到 id、长度、计数、工具名、模型名、错误码等边界字段；不应出现消息原文、脚本体、命令或文件内容。
+
+   开启 `LANGFUSE_CAPTURE_CONTENT=1` 时，`codemode` 与 `tool.*` 的 Input/Output 会显示脚本、参数和工具结果；此时仍需确认根 span 没有消息原文，且凭据已替换为 `[REDACTED]`、超长内容带截断标记。
 
 6. **核对失败隔离**
 

@@ -185,7 +185,11 @@ export function createToolRegistry(
       execute: async (args, api, context) => {
         context.abortSignal?.throwIfAborted();
         // The root trace starts before authorization so a denied codemode call is still observable.
-        // The script source never enters the trace; only its byte length does.
+        // The model's raw `code` argument is captured only when content capture is enabled; the script
+        // actually handed to QuickJS is recorded separately under `codemode.prepared`.
+        const script = args !== null && typeof args === "object"
+          ? (args as { code?: unknown }).code
+          : undefined;
         const root = tool.name === CODEMODE_TOOL_NAME
           ? beginTrace({
               conversationId: api.conversationId,
@@ -193,6 +197,7 @@ export function createToolRegistry(
               callId: api.callId,
               name: "codemode",
               fields: { scriptBytes: argumentBytes(args) },
+              ...(typeof script === "string" ? { input: { code: script } } : {}),
             })
           : undefined;
         const run = async () => {

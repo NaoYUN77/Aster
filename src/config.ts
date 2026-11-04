@@ -186,6 +186,11 @@ export type TraceConfig = {
   readonly publicKey?: string;
   readonly secretKey?: string;
   readonly baseUrl?: string;
+  /**
+   * Upload model-visible content (script, nested tool arguments and results) as observation
+   * input/output. Off by default: traces then keep only sizes, counts and error codes.
+   */
+  readonly captureContent?: boolean;
 };
 
 /** Env var names belong to the Langfuse SDK; `LANGFUSE_HOST` is the common self-hosted alias. */
@@ -194,6 +199,10 @@ export function readTraceConfig(env: NodeJS.ProcessEnv = process.env): TraceConf
   if (raw !== undefined && raw !== "" && !["0", "1", "false", "true"].includes(raw)) {
     throw new ConfigurationError("LANGFUSE_TRACING_ENABLED must be 0, 1, false, or true");
   }
+  const captureRaw = env.LANGFUSE_CAPTURE_CONTENT?.trim().toLowerCase();
+  if (captureRaw !== undefined && captureRaw !== "" && !["0", "1", "false", "true"].includes(captureRaw)) {
+    throw new ConfigurationError("LANGFUSE_CAPTURE_CONTENT must be 0, 1, false, or true");
+  }
   const publicKey = env.LANGFUSE_PUBLIC_KEY?.trim();
   const secretKey = env.LANGFUSE_SECRET_KEY?.trim();
   const baseUrl = env.LANGFUSE_BASE_URL?.trim() || env.LANGFUSE_HOST?.trim();
@@ -201,11 +210,13 @@ export function readTraceConfig(env: NodeJS.ProcessEnv = process.env): TraceConf
   const enabled = (keysConfigured || raw === "1" || raw === "true")
     && raw !== "0"
     && raw !== "false";
+  const captureContent = captureRaw === "1" || captureRaw === "true";
   return {
     enabled,
     ...(publicKey ? { publicKey } : {}),
     ...(secretKey ? { secretKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
+    ...(captureContent ? { captureContent: true } : {}),
   };
 }
 

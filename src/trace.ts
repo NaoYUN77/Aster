@@ -11,8 +11,10 @@
 //   TraceRuntime.close()                  end abandoned observations, flush, release Langfuse
 //
 // Inputs: host-observed identifiers (conversation, request, task, call, session, job) and lengths,
-// counts and error codes only. Prompt text, script source, tool arguments, file contents, paths,
-// output text, credentials and provider error messages never enter the trace.
+// counts and error codes. With LANGFUSE_CAPTURE_CONTENT enabled, the code mode script, nested tool
+// arguments and tool results are also attached as observation input/output after credential
+// redaction and size limits. Credentials, authorization headers and provider error messages never
+// enter the trace.
 //
 // Errors: tracing is diagnostics. A construction or export failure disables tracing and is logged
 // once; it never propagates into a tool call, RPC request, hook or shutdown path.
@@ -35,6 +37,7 @@ import type {
   ConversationId,
   Extension,
   HookApi,
+  NestedToolExecutionResult,
   TaskId,
   ToolExecutionResult,
   ToolHookCall,
@@ -47,6 +50,30 @@ const ACTIVE_LIMIT = 256;
 /** One codemode trace may not grow without bound through runner messages. */
 const MAX_EVENTS_PER_SPAN = 256;
 const FLUSH_TIMEOUT_MS = 5_000;
+/** One captured string field may not exceed this; longer values are cut with a marker. */
+const MAX_CONTENT_STRING_BYTES = 32 * 1024;
+/** One observation's serialized input or output is capped as a whole. */
+const MAX_CONTENT_BYTES = 64 * 1024;
+const MAX_CONTENT_DEPTH = 6;
+const MAX_CONTENT_ITEMS = 100;
+const REDACTED = "[REDACTED]";
+
+/** Host-side keys whose values are credentials, never captured even in content mode. */
+const SENSITIVE_KEY = /authorization|cookie|token|secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential/i;
+
+/** Credential shapes that survive inside otherwise ordinary text (commands, files, outputs). */
+const SECRET_PATTERNS: readonly { readonly pattern: RegExp; readonly replace: string }[] = [
+  { pattern: /\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, replace: `$1 ${REDACTED}` },
+  { pattern: /\b(Basic)\s+[A-Za-z0-9+/=]{8,}/gi, replace: `$1 ${REDACTED}` },
+  { pattern: /\bsk-[A-Za-z0-9_-]{8,}/g, replace: REDACTED },
+  { pattern: /\bgh[pousr]_[A-Za-z0-9]{16,}/g, replace: REDACTED },
+  { pattern: /\bxox[baprs]-[A-Za-z0-9-]{8,}/g, replace: REDACTED },
+  { pattern: /\bAKIA[0-9A-Z]{16}\b/g, replace: REDACTED },
+  {
+    pattern: /\b(api[_-]?key|access[_-]?key|secret|token|password|passwd)\s*[:=]\s*(["']?)([^\s"',;]{6,})\2/gi,
+    replace: `$1=$2${REDACTED}$2`,
+  },
+];
 
 export type TraceFields = Readonly<Record<string, string | number | boolean | undefined>>;
 export type TraceOutcome = "ok" | "error" | "aborted" | "unknown" | "halted";
@@ -88,6 +115,92 @@ export function argumentBytes(value: unknown): number | undefined {
   return found ? total : undefined;
 }
 
+/** Keep whole UTF-8 characters while cutting a string to its byte budget. */
+function truncateContentText(value: string, maxBytes: number): string {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes <= maxBytes) return value;
+  let kept = "";
+  let used = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (used + size > maxBytes) break;
+    kept += character;
+    used += size;
+  }
+  return `${kept}\n…[truncated ${bytes - used} bytes]`;
+}
+
+function redactContentText(value: string): string {
+  let text = value;
+  for (const { pattern, replace } of SECRET_PATTERNS) text = text.replace(pattern, replace);
+  return truncateContentText(text, MAX_CONTENT_STRING_BYTES);
+}
+
+function sanitizeContent(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return redactContentText(value);
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "function" || typeof value === "symbol") return String(value);
+  if (typeof value !== "object") return undefined;
+  if (depth >= MAX_CONTENT_DEPTH) return "[depth limit]";
+  if (Array.isArray(value)) {
+    const kept = value.slice(0, MAX_CONTENT_ITEMS).map((item) => sanitizeContent(item, depth + 1));
+    if (value.length > MAX_CONTENT_ITEMS) kept.push(`[${value.length - MAX_CONTENT_ITEMS} more items]`);
+    return kept;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of entries.slice(0, MAX_CONTENT_ITEMS)) {
+    result[truncateContentText(key, 128)] = SENSITIVE_KEY.test(key) ? REDACTED : sanitizeContent(item, depth + 1);
+  }
+  if (entries.length > MAX_CONTENT_ITEMS) {
+    result["…"] = `[${entries.length - MAX_CONTENT_ITEMS} more keys]`;
+  }
+  return result;
+}
+
+/**
+ * Content capture is opt-in. Redact credential-shaped keys and values first, then bound each string
+ * and the whole payload; a value over the total cap keeps a JSON preview plus its original size.
+ * The caller's object is never modified.
+ */
+export function traceContent(value: unknown): unknown {
+  const sanitized = sanitizeContent(value);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(sanitized) ?? "null";
+  } catch {
+    return "[unserializable]";
+  }
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes <= MAX_CONTENT_BYTES) return sanitized;
+  return {
+    truncated: true,
+    originalBytes: bytes,
+    preview: truncateContentText(serialized, MAX_CONTENT_BYTES),
+  };
+}
+
+/** The model-visible part of a tool result; image bytes never leave the process. */
+export function toolResultContent(result: ToolExecutionResult): unknown {
+  return {
+    isError: result.isError === true,
+    output: (result.output ?? []).map((item) =>
+      item.type === "text" ? { type: "text", text: item.text } : { type: item.type }),
+  };
+}
+
+/**
+ * A nested call returns its program-visible value (text/content for tools without a structured
+ * schema, the validated value with one), not the model tool message. Capture that value only.
+ */
+export function nestedToolResultContent(result: NestedToolExecutionResult): unknown {
+  return {
+    isError: result.isError,
+    ...(result.structuredOutput === undefined ? {} : { structuredOutput: result.structuredOutput }),
+  };
+}
+
 function levelFor(outcome: TraceOutcome): "DEFAULT" | "WARNING" | "ERROR" {
   if (outcome === "ok") return "DEFAULT";
   if (outcome === "aborted" || outcome === "halted") return "WARNING";
@@ -102,6 +215,7 @@ function errorLabel(error: unknown): string {
 export class TraceSpan {
   readonly #observation: LangfuseSpan;
   readonly #log: (line: string) => void;
+  readonly #captureContent: boolean;
   readonly traceId: string;
   readonly spanId: string;
   readonly spanContext: SpanContext;
@@ -111,9 +225,10 @@ export class TraceSpan {
   #events = 0;
   #truncated = false;
 
-  private constructor(observation: LangfuseSpan, log: (line: string) => void) {
+  private constructor(observation: LangfuseSpan, log: (line: string) => void, captureContent: boolean) {
     this.#observation = observation;
     this.#log = log;
+    this.#captureContent = captureContent;
     this.spanContext = observation.otelSpan.spanContext();
     this.traceId = this.spanContext.traceId;
     this.spanId = this.spanContext.spanId;
@@ -123,12 +238,18 @@ export class TraceSpan {
     readonly name: string;
     readonly kind?: TraceSpanKind;
     readonly fields?: TraceFields;
+    readonly input?: unknown;
+    readonly captureContent?: boolean;
     readonly parent?: SpanContext;
     readonly sessionId?: string;
     readonly log?: (line: string) => void;
   }): TraceSpan {
     const name = options.name.slice(0, 128);
-    const attributes = { metadata: compact(options.fields ?? {}) };
+    const captureContent = options.captureContent === true;
+    const attributes = {
+      metadata: compact(options.fields ?? {}),
+      ...(captureContent && options.input !== undefined ? { input: traceContent(options.input) } : {}),
+    };
     const parent = options.parent === undefined ? {} : { parentSpanContext: options.parent };
     let observation: LangfuseSpan;
     switch (options.kind ?? "span") {
@@ -147,7 +268,7 @@ export class TraceSpan {
     if (options.parent === undefined) {
       observation.otelSpan.setAttribute(LangfuseOtelSpanAttributes.TRACE_NAME, name);
     }
-    return new TraceSpan(observation, options.log ?? console.error);
+    return new TraceSpan(observation, options.log ?? console.error, captureContent);
   }
 
   get haltedCode(): string | undefined {
@@ -175,11 +296,18 @@ export class TraceSpan {
     this.#emit(name, fields);
   }
 
-  child(name: string, fields: TraceFields = {}, kind: TraceSpanKind = "span"): TraceSpan | undefined {
+  child(
+    name: string,
+    fields: TraceFields = {},
+    kind: TraceSpanKind = "span",
+    input?: unknown,
+  ): TraceSpan | undefined {
     return startSpan({
       name,
       kind,
       fields,
+      captureContent: this.#captureContent,
+      ...(input === undefined ? {} : { input }),
       parent: this.spanContext,
       log: this.#log,
     });
@@ -189,7 +317,7 @@ export class TraceSpan {
     return spanStorage.run(this, fn);
   }
 
-  end(outcome: TraceOutcome, fields: TraceFields = {}): void {
+  end(outcome: TraceOutcome, fields: TraceFields = {}, output?: unknown): void {
     if (this.#ended) return;
     this.#ended = true;
     const finalOutcome = this.#haltCode !== undefined && outcome !== "unknown" && outcome !== "aborted"
@@ -202,6 +330,7 @@ export class TraceSpan {
       this.#observation.update({
         level: levelFor(finalOutcome),
         ...(statusCode === undefined ? {} : { statusMessage: statusCode.slice(0, 128) }),
+        ...(this.#captureContent && output !== undefined ? { output: traceContent(output) } : {}),
         metadata: {
           ...compact(fields),
           ...(errorCode === undefined ? {} : { errorCode: errorCode.slice(0, 128) }),
@@ -251,14 +380,17 @@ export function traceChild(
   name: string,
   fields: TraceFields = {},
   kind: TraceSpanKind = "span",
+  input?: unknown,
 ): TraceSpan | undefined {
-  return currentSpan()?.child(name, fields, kind);
+  return currentSpan()?.child(name, fields, kind, input);
 }
 
 export type BeginTraceOptions = Identity & {
   readonly name: string;
   readonly kind?: TraceSpanKind;
   readonly fields?: TraceFields;
+  /** Captured as the observation input when content capture is enabled. */
+  readonly input?: unknown;
 };
 
 export type TraceDependencies = {
@@ -270,15 +402,17 @@ export class TraceRuntime {
   readonly extension: Extension;
   readonly #provider: TracerProvider;
   readonly #ownsProvider: boolean;
+  readonly #captureContent: boolean;
   readonly #log: (line: string) => void;
   readonly #requests = new Map<string, TraceSpan>();
   readonly #codemode = new Map<string, TraceSpan>();
   #closing = false;
 
-  constructor(provider: TracerProvider, log: (line: string) => void, ownsProvider: boolean) {
+  constructor(provider: TracerProvider, log: (line: string) => void, ownsProvider: boolean, captureContent = false) {
     this.#provider = provider;
     this.#log = log;
     this.#ownsProvider = ownsProvider;
+    this.#captureContent = captureContent;
     this.extension = defineExtension({
       name: "langfuse-trace",
       hooks: [hook(ToolTask, { afterTool: (call, result, api) => this.#afterTool(call, result, api) })],
@@ -302,6 +436,7 @@ export class TraceRuntime {
       name: "agent.request",
       kind: "agent",
       sessionId: key,
+      captureContent: this.#captureContent,
       fields: {
         conversationId: key,
         ...(options.requestId === undefined ? {} : { requestId: options.requestId.slice(0, 200) }),
@@ -325,6 +460,8 @@ export class TraceRuntime {
     const span = startSpan({
       name: options.name,
       kind: options.kind ?? "tool",
+      captureContent: this.#captureContent,
+      ...(options.input === undefined ? {} : { input: options.input }),
       fields: options.fields ?? {},
       ...(parent === undefined ? {} : { parent: parent.spanContext }),
       log: this.#log,
@@ -421,7 +558,7 @@ export class TraceRuntime {
       imageItems,
       textBytes,
       ...(errorCode === undefined ? {} : { errorCode }),
-    });
+    }, toolResultContent(result));
     return undefined;
   }
 
@@ -586,7 +723,7 @@ export function startTrace(
     }
   }
   setLangfuseTracerProvider(provider);
-  const runtime = new TraceRuntime(provider, log, ownsProvider);
+  const runtime = new TraceRuntime(provider, log, ownsProvider, config.captureContent === true);
   activeRuntime = runtime;
   return runtime;
 }

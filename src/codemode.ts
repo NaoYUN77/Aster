@@ -13,7 +13,7 @@ import type { CodemodeConfig } from "./config.js";
 import type { RpcExecutionClient } from "./execution/rpc-client.js";
 import { loopSignature } from "./loop-guard.js";
 import { PtcGateway, SessionBoundCodemodeSandbox } from "./ptc-gateway.js";
-import { argumentBytes, stringBytes, traceChild } from "./trace.js";
+import { argumentBytes, nestedToolResultContent, stringBytes, traceChild } from "./trace.js";
 
 /**
  * The script's result is the only thing that enters the conversation, so cap it well below the
@@ -200,6 +200,21 @@ export function serializeNestedCalls(
       let identicalCount = 0;
       try {
         const prepared = prepareArgs(tool, args, textOnly) as typeof args;
+        // The codemode observation's input is the model's raw argument. Record what preprocessing
+        // actually handed to QuickJS as a separate child so the two scripts are never conflated.
+        if (tool.name === CODEMODE_TOOL_NAME && args !== null && typeof args === "object") {
+          const raw = (args as { code?: unknown }).code;
+          const executed = prepared !== null && typeof prepared === "object"
+            ? (prepared as { code?: unknown }).code
+            : undefined;
+          if (typeof raw === "string" && typeof executed === "string") {
+            const scriptSpan = traceChild("codemode.prepared", {
+              scriptBytes: stringBytes(executed),
+              scriptChanged: executed !== raw,
+            }, "span", { code: executed });
+            scriptSpan?.end("ok");
+          }
+        }
         const result = await execute(prepared, {
           ...api,
           executeTool: (name, nestedArgs, nestedContext, options) => {
@@ -209,14 +224,17 @@ export function serializeNestedCalls(
               lastSignature = signature;
               identicalCount = 1;
             }
-            // The trace observes the call boundary only: tool name, approximate argument size,
-            // item count and error code. Arguments and results never enter it.
+            // The trace observes the call boundary: name, argument size, item count and error code.
+            // With content capture enabled it also carries the arguments and result, after redaction.
             const span = traceChild(nestedToolObservationName(name), {
               tool: name.slice(0, 128),
               argsBytes: argumentBytes(nestedArgs),
-            }, "tool");
+            }, "tool", { tool: name, arguments: nestedArgs });
             if (identicalCount >= NESTED_LOOP_LIMIT) {
-              span?.end("error", { errorCode: "NESTED_LOOP_DETECTED" });
+              span?.end("error", { errorCode: "NESTED_LOOP_DETECTED" }, {
+                isError: true,
+                code: "NESTED_LOOP_DETECTED",
+              });
               return Promise.reject(new Error(
                 `Nested tool loop detected: tool "${name}" called ${NESTED_LOOP_LIMIT} times consecutively with identical arguments`,
               ));
@@ -236,11 +254,12 @@ export function serializeNestedCalls(
                   structuredBytes: stringBytes(result.structuredOutput),
                   diagnosticCount: result.diagnostics.length,
                   ...(errorCode === undefined ? {} : { errorCode }),
-                });
+                }, nestedToolResultContent(result));
                 return result;
               },
               (error: unknown) => {
-                span?.end("error", { errorCode: nestedErrorCode(error) });
+                const errorCode = nestedErrorCode(error);
+                span?.end("error", { errorCode }, { isError: true, code: errorCode });
                 throw error;
               },
             );

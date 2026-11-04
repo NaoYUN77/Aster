@@ -71,6 +71,14 @@ function assistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantM
 
 test("trace config reads Langfuse keys and keeps tracing optional", () => {
   assert.deepEqual(readTraceConfig({}), { enabled: false });
+  assert.equal(readTraceConfig({}).captureContent, undefined, "content capture is off by default");
+  assert.equal(readTraceConfig({ LANGFUSE_CAPTURE_CONTENT: "1" }).captureContent, true);
+  assert.equal(readTraceConfig({ LANGFUSE_CAPTURE_CONTENT: "true" }).captureContent, true);
+  assert.equal(readTraceConfig({ LANGFUSE_CAPTURE_CONTENT: "0" }).captureContent, undefined);
+  assert.throws(
+    () => readTraceConfig({ LANGFUSE_CAPTURE_CONTENT: "yes" }),
+    (error: unknown) => error instanceof ConfigurationError,
+  );
 
   const configured = readTraceConfig({
     LANGFUSE_PUBLIC_KEY: "pk-test",

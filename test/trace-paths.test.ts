@@ -15,7 +15,7 @@ import { defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { InMemorySpanExporter, SimpleSpanProcessor, type ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { openAgent } from "../src/agent.js";
-import { serializeNestedCalls } from "../src/codemode.js";
+import { prepareCodemodeScript, serializeNestedCalls } from "../src/codemode.js";
 import { readConfig, readMemoryConfig } from "../src/config.js";
 import type { DirectHost } from "../src/execution/ptc-host.js";
 import type { RpcClientTransport, RpcConnection } from "../src/execution/rpc-transport.js";
@@ -57,13 +57,17 @@ function modelFixture() {
   return { faux, models };
 }
 
-function traceSetup(): {
+function traceSetup(options: { readonly captureContent?: boolean } = {}): {
   readonly exporter: InMemorySpanExporter;
   readonly runtime: TraceRuntime;
 } {
   const exporter = new InMemorySpanExporter();
   const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
-  const runtime = startTrace({ enabled: true }, () => {}, { tracerProvider: provider });
+  const runtime = startTrace(
+    { enabled: true, ...(options.captureContent === true ? { captureContent: true } : {}) },
+    () => {},
+    { tracerProvider: provider },
+  );
   assert.ok(runtime);
   return { exporter, runtime };
 }
@@ -77,6 +81,16 @@ function spanByName(spans: readonly ReadableSpan[], name: string): ReadableSpan 
 function metadata(span: ReadableSpan, key: string): unknown {
   const raw = span.attributes[`langfuse.observation.metadata.${key}`];
   return raw === undefined ? undefined : JSON.parse(String(raw));
+}
+
+function captured(span: ReadableSpan, field: "input" | "output"): unknown {
+  const raw = span.attributes[`langfuse.observation.${field}`];
+  return raw === undefined ? undefined : JSON.parse(String(raw));
+}
+
+function capturedText(value: unknown): string {
+  const output = (value as { output?: readonly { type?: string; text?: string }[] } | undefined)?.output ?? [];
+  return output.flatMap((item) => item.type === "text" && typeof item.text === "string" ? [item.text] : []).join("");
 }
 
 function observationType(span: ReadableSpan): string | undefined {
@@ -166,6 +180,10 @@ test("real codemode write and read produce tool.write and tool.read observations
   assert.equal(observationType(codemode), "tool");
   const write = spanByName(spans, "tool.write");
   const read = spanByName(spans, "tool.read");
+  assert.equal(captured(codemode, "input"), undefined, "content capture is off by default");
+  assert.equal(captured(codemode, "output"), undefined, "content capture is off by default");
+  assert.equal(captured(write, "input"), undefined, "tool arguments stay out by default");
+  assert.equal(captured(read, "output"), undefined, "tool results stay out by default");
   for (const [span, tool] of [[write, "write"], [read, "read"]] as const) {
     assert.equal(observationType(span), "tool", `${tool} is a tool observation`);
     assert.equal(span.parentSpanContext?.spanId, codemode.spanContext().spanId);
@@ -177,6 +195,107 @@ test("real codemode write and read produce tool.write and tool.read observations
   const results = transcript?.messages.filter((message) => message.role === "toolResult") ?? [];
   assert.equal(results.length, 1, "only the codemode result enters the transcript");
   assert.match(toolResultText(transcript!, "script"), /trace-body/);
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("content capture records the raw script, the executed script, and nested tool calls", { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-trace-capture-"));
+  const { exporter, runtime } = traceSetup({ captureContent: true });
+  const fixture = modelFixture();
+  const code = [
+    "const w = await tools.write({ path: 'capture.txt', content: 'capture-body' });",
+    "const r = await tools.read({ path: 'capture.txt' });",
+    "text(r);",
+  ].join("\n");
+  let transcript: { messages: readonly Message[] } | undefined;
+  fixture.faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("codemode", { code }, { id: "script" }), { stopReason: "toolUse" }),
+    (seen) => {
+      transcript = seen;
+      return fauxAssistantMessage("done");
+    },
+  ]);
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    app = await openAgent(appConfig(directory, { CODEMODE_ENABLED: "1" }), fixture.models);
+    assert.equal(await app.reply(request, running), "done");
+  } finally {
+    await app?.close();
+    await runtime.close();
+  }
+  const spans = exporter.getFinishedSpans();
+  const codemode = spanByName(spans, "codemode");
+  assert.deepEqual(captured(codemode, "input"), { code }, "the model's raw code is the codemode input");
+  const output = capturedText(captured(codemode, "output"));
+  assert.equal(output, toolResultText(transcript!, "script"), "the codemode output is the model-visible tool result");
+
+  const prepared = spanByName(spans, "codemode.prepared");
+  assert.equal(prepared.parentSpanContext?.spanId, codemode.spanContext().spanId);
+  assert.deepEqual(
+    captured(prepared, "input"),
+    { code: prepareCodemodeScript(code, true) },
+    "the prepared observation holds the script QuickJS actually received",
+  );
+  assert.equal(metadata(prepared, "scriptChanged"), true);
+
+  const write = spanByName(spans, "tool.write");
+  const read = spanByName(spans, "tool.read");
+  assert.deepEqual(captured(write, "input"), {
+    tool: "write",
+    arguments: { path: "capture.txt", content: "capture-body" },
+  });
+  assert.deepEqual(captured(read, "input"), {
+    tool: "read",
+    arguments: { path: "capture.txt" },
+  });
+  assert.match(JSON.stringify(captured(read, "output")), /capture-body/);
+  assert.equal((captured(write, "output") as { isError?: boolean }).isError, false);
+  assert.equal(
+    transcript?.messages.filter((message) => message.role === "toolResult").length,
+    1,
+    "captured content never becomes an extra tool result",
+  );
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("captured content redacts credentials and bounds oversized values", { timeout: 90_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-trace-capture-redact-"));
+  const { exporter, runtime } = traceSetup({ captureContent: true });
+  const fixture = modelFixture();
+  const secret = "SUPERSECRETTOKEN1234567890";
+  const apiKey = "sk-abcdefgh12345678";
+  const code = [
+    `const body = "Authorization: Bearer ${secret}\\napi_key=${apiKey}\\n" + "x".repeat(70000);`,
+    "await tools.write({ path: 'large.txt', content: body });",
+    "const r = await tools.read({ path: 'large.txt' });",
+    "text(r);",
+  ].join("\n");
+  fixture.faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("codemode", { code }, { id: "script" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage("done"),
+  ]);
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    app = await openAgent(appConfig(directory, { CODEMODE_ENABLED: "1" }), fixture.models);
+    assert.equal(await app.reply(request, running), "done");
+  } finally {
+    await app?.close();
+    await runtime.close();
+  }
+  const spans = exporter.getFinishedSpans();
+  const write = spanByName(spans, "tool.write");
+  const input = captured(write, "input") as { arguments: { content: string } };
+  assert.match(input.arguments.content, /\[REDACTED\]/);
+  assert.equal(input.arguments.content.includes(secret), false);
+  assert.equal(input.arguments.content.includes(apiKey), false);
+  assert.match(input.arguments.content, /\[truncated \d+ bytes\]/);
+  const exported = JSON.stringify(spans.map((span) => span.attributes));
+  assert.equal(exported.includes(secret), false, "the bearer token never reaches the trace");
+  assert.equal(exported.includes(apiKey), false, "the API key never reaches the trace");
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(write.attributes), "utf8") < 80 * 1024,
+    "one observation's captured content stays bounded",
+  );
   await rm(directory, { recursive: true, force: true });
 });
 
