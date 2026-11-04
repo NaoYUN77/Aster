@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import test from "node:test";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
@@ -248,6 +250,57 @@ test("the real Langfuse processor exports only the observations we create", asyn
   assert.equal(spans[0]!.attributes["langfuse.observation.type"], "agent");
 
   await runtime.close();
+});
+
+test("Langfuse export crosses the configured proxy so MITM can substitute credentials", async () => {
+  const seen: { url?: string; authorization?: string; publicKey?: string } = {};
+  const proxy = createServer((request, response) => {
+    seen.url = request.url;
+    const authorization = request.headers.authorization;
+    seen.authorization = Array.isArray(authorization) ? authorization[0] : authorization;
+    const publicKey = request.headers["x-langfuse-public-key"];
+    seen.publicKey = Array.isArray(publicKey) ? publicKey[0] : publicKey;
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const { port } = proxy.address() as AddressInfo;
+  const proxyKeys = ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] as const;
+  const saved = Object.fromEntries(proxyKeys.map((key) => [key, process.env[key]]));
+  // Windows environment names are case-insensitive, so clear both spellings before assigning.
+  for (const key of proxyKeys) delete process.env[key];
+  process.env.HTTP_PROXY = `http://127.0.0.1:${port}`;
+  try {
+    const runtime = startTrace({
+      enabled: true,
+      publicKey: "__vault_LANGFUSE_PUBLIC_KEY__",
+      secretKey: "__vault_LANGFUSE_SECRET_KEY__",
+      baseUrl: "http://langfuse.invalid",
+    });
+    assert.ok(runtime);
+    const request = beginRequest({ conversationId: 8 });
+    assert.ok(request);
+    request.end("ok", { replyBytes: 1 });
+    await runtime.close();
+  } finally {
+    for (const key of proxyKeys) delete process.env[key];
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+  }
+
+  assert.equal(seen.url, "http://langfuse.invalid/api/public/otel/v1/traces");
+  assert.equal(
+    seen.authorization,
+    `Basic ${Buffer.from("__vault_LANGFUSE_PUBLIC_KEY__:__vault_LANGFUSE_SECRET_KEY__", "utf8").toString("base64")}`,
+    "credentials stay encoded so the MITM proxy can decode and substitute them",
+  );
+  assert.equal(seen.publicKey, "__vault_LANGFUSE_PUBLIC_KEY__");
 });
 
 test("an exporter failure never escapes the tracing boundary", async () => {

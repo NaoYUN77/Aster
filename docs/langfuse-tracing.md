@@ -79,7 +79,7 @@ SDK 还会自行读取 `LANGFUSE_FLUSH_AT`、`LANGFUSE_FLUSH_INTERVAL`、`LANGFU
 在部署目录的 `.env` 增加：
 
 ```sh
-LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_PUBLIC_KEY=<langfuse-public-key>
 LANGFUSE_SECRET_KEY=<langfuse-secret-key>
 # 可选
 # LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
@@ -95,17 +95,43 @@ docker compose logs --tail=50 personal-agent
 
 ### MITM（OpenBao 占位符）模式
 
-Langfuse 处理器在发出 OTLP 请求前把公钥和密钥编码后放入 `Authorization` 请求头，MITM 代理只能替换请求头/路径里的明文占位符，无法识别编码后的值。因此：
+生产部署的 `.env` 只保留占位符，真实密钥由 OpenBao 提供。Langfuse SDK 在发出 OTLP 请求前把 `publicKey:secretKey` 编码进 `Authorization: Basic`；`aster-mitm` 的占位符策略会先解码 Basic 凭据，按 allowlist 替换其中的占位符，再重新编码后转发。因此 Langfuse 密钥与其他密钥一样走 OpenBao，不需要明文写入 `.env`。
 
-- `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` 必须直接写真实值，不能使用 `__vault_<NAME>__` 占位符，也不要加入 `allowlist.json`（加了也不会命中）。
-- 应用容器仍需能经代理访问 Langfuse 主机（默认 `cloud.langfuse.com`，HTTPS 443）；代理的客户端白名单和出站策略要放行该主机。
-- 无法接受 Langfuse 密钥明文出现在 `.env` 时，保持 tracing 关闭（不设置这两个变量），或改为自行托管 Langfuse 并把密钥限制在自建网络内。
+OTLP 导出使用自建的 keep-alive agent，不会自动继承 Node 的全局代理配置。`src/trace.ts` 在检测到 `HTTP(S)_PROXY` 时用同一组 Langfuse 地址和认证头构造支持 `proxyEnv` 的导出器，使 Langfuse 请求和其他出站请求一样经过 `aster-mitm`；`NO_PROXY` 仍按 Node 的规则生效。
+
+`.env`：
+
+```dotenv
+# 公钥不是秘密，可明文保留；要统一由 OpenBao 管理也可写成 __vault_LANGFUSE_PUBLIC_KEY__
+LANGFUSE_PUBLIC_KEY=<langfuse-public-key>
+LANGFUSE_SECRET_KEY=__vault_LANGFUSE_SECRET_KEY__
+```
+
+部署顺序：
+
+1. 更新并重启 MITM，使 Basic 解码生效（`vault_placeholders.py` 已包含该逻辑）：
+   ```bash
+   cd ~/Aster/deploy/openbao-mitm
+   docker compose up -d --force-recreate mitm
+   ```
+2. 把真实 secret key 写入 OpenBao；已有条目会保持不变，可重复执行：
+   ```bash
+   ASTER_OPENBAO_SECRETS=$HOME/Aster/secrets/openbao ./bootstrap.sh LANGFUSE_SECRET_KEY
+   ```
+3. 按 MITM 迁移步骤把 `.env` 改为上面的占位符，再重建应用容器。
+
+边界：
+
+- `allowlist.json` 已为 `LANGFUSE_PUBLIC_KEY` 与 `LANGFUSE_SECRET_KEY` 列出 `cloud.langfuse.com` 和 `us.cloud.langfuse.com`。使用自建 Langfuse 或其他区域时，加入实际 host 的精确匹配；不做后缀或通配匹配。
+- 只有当解码后的凭据里出现占位符时才改写 `Authorization`；普通 Basic 凭据原样转发。
+- 未知占位符或 host 不匹配仍使整条请求返回 403，且不会部分替换。
+- MITM 只解码 `Basic`；其他认证方案中的编码值不会尝试识别。
 
 ### 关闭与轮换
 
 - 临时关闭：设置 `LANGFUSE_TRACING_ENABLED=0` 并重启。
 - 彻底关闭：删除两个密钥变量并重启。
-- 轮换：在 Langfuse 控制台创建新密钥，更新 `.env` 后重启；旧密钥可立即吊销。轮换期间丢失的 trace 不影响业务。
+- 轮换：在 Langfuse 控制台创建新密钥，更新 `.env`（MITM 模式则更新 OpenBao 条目）后重启；旧密钥可立即吊销。轮换期间丢失的 trace 不影响业务。
 
 数据写入 Langfuse Cloud，不进入 `DATA_DIR`，备份与恢复流程不涉及 Trace。
 

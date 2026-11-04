@@ -21,6 +21,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { SpanContext, TracerProvider } from "@opentelemetry/api";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { LangfuseSpanProcessor } from "@langfuse/otel";
 import {
@@ -39,7 +40,7 @@ import type {
   ToolHookCall,
 } from "@earendil-works/pi-durable";
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
-import type { TraceConfig } from "./config.js";
+import { hasProxyEnv, type TraceConfig } from "./config.js";
 
 /** Active requests and active codemode runs are bounded; the oldest is ended as unknown. */
 const ACTIVE_LIMIT = 256;
@@ -519,6 +520,30 @@ function resultErrorCode(result: ToolExecutionResult): string | undefined {
 let activeRuntime: TraceRuntime | undefined;
 
 /**
+ * The Langfuse SDK's default exporter builds its own keep-alive agent, which bypasses Node's global
+ * proxy configuration. In MITM deployments that means OTLP traffic never reaches the proxy and the
+ * vault placeholders inside Authorization are never substituted. Build the same OTLP request with a
+ * proxy-aware agent instead. Authentication headers match the SDK's request; configureEnvProxy() has
+ * already put the proxy credentials into process.env.
+ */
+function proxyAwareExporter(keys: {
+  readonly publicKey: string;
+  readonly secretKey: string;
+  readonly baseUrl?: string;
+}): OTLPTraceExporter {
+  const baseUrl = (keys.baseUrl ?? "https://cloud.langfuse.com").replace(/\/+$/, "");
+  return new OTLPTraceExporter({
+    url: `${baseUrl}/api/public/otel/v1/traces`,
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${keys.publicKey}:${keys.secretKey}`, "utf8").toString("base64")}`,
+      "x-langfuse-public-key": keys.publicKey,
+      "x-langfuse-ingestion-version": "4",
+    },
+    httpAgentOptions: { keepAlive: true, proxyEnv: process.env },
+  });
+}
+
+/**
  * Replace the process-wide runtime. Disabled or incomplete configuration closes the previous one
  * and leaves every tracing call a no-op.
  */
@@ -538,13 +563,18 @@ export function startTrace(
       log("Langfuse tracing disabled: LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are both required");
       return undefined;
     }
+    const publicKey = config.publicKey;
+    const secretKey = config.secretKey;
     try {
       const processor = new LangfuseSpanProcessor({
-        publicKey: config.publicKey,
-        secretKey: config.secretKey,
+        publicKey,
+        secretKey,
         ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
         // The trace never carries media; disabling upload avoids any attempt to fetch it.
         mediaUploadEnabled: false,
+        ...(hasProxyEnv(process.env)
+          ? { exporter: proxyAwareExporter({ publicKey, secretKey, baseUrl: config.baseUrl }) }
+          : {}),
       });
       provider = new NodeTracerProvider({ spanProcessors: [processor] });
       ownsProvider = true;

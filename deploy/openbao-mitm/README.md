@@ -8,7 +8,7 @@ Aster 应用的模型、Web 工具与 Telegram 请求经 MITM 代理出站；代
 
 MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的值，不做其它凭据注入。
 
-- **触发条件**：请求头或 URL 路径（`?` 之前）出现占位符，且目标 Host 与该 `<NAME>` 在 [`addon/allowlist.json`](addon/allowlist.json) 中的条目精确匹配（不做后缀或通配匹配）。
+- **触发条件**：请求头或 URL 路径（`?` 之前）出现占位符，且目标 Host 与该 `<NAME>` 在 [`addon/allowlist.json`](addon/allowlist.json) 中的条目精确匹配（不做后缀或通配匹配）。请求头中的 `Authorization: Basic` 会先解码，再匹配其中的占位符并重新编码；普通 Basic 凭据原样转发。
 - **不自动塞 `Authorization`**：代理不按目标主机推断凭据；客户端没发占位符，请求原样转发。
 - **body 不替换**：请求体一律不动，避免 `web_fetch` 把模型提供的 URL 当作外带通道。
 - **无映射即 403**：占位符名不在 allowlist、Host 不匹配或 OpenBao 读取失败，整条请求返回 `403`，不做部分替换；日志只记占位符名与主机。
@@ -23,7 +23,7 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 | --- | --- |
 | `compose.yml` | `aster-openbao` 与 `aster-mitm` 两个服务，项目名 `aster`；三个专用网络（`aster_vault`、`aster_mitm_clients`、`aster_egress`），不发布端口 |
 | `openbao/config.hcl` | 单节点 OpenBao 配置：`0.0.0.0:8200` 为 TLS + mTLS 内网监听，`127.0.0.1:8201` 为容器内明文 loopback（健康检查与 CLI） |
-| `addon/aster_vault_addon.py` | mitmproxy 插件：按主机白名单将请求头和 URL 路径中的 `__vault_<NAME>__` 替换为 OpenBao KV 值，越权或未知占位符返回 403；源地址不在白名单返回 403；代理 token 无效返回 407；经 TLS 客户端证书读 OpenBao |
+| `addon/aster_vault_addon.py` | mitmproxy 插件：按主机白名单将请求头（含解码后的 Basic 凭据）和 URL 路径中的 `__vault_<NAME>__` 替换为 OpenBao KV 值，越权或未知占位符返回 403；源地址不在白名单返回 403；代理 token 无效返回 407；经 TLS 客户端证书读 OpenBao |
 | `addon/vault_placeholders.py` | 占位符替换纯函数策略（无 mitmproxy 依赖，可独立单测） |
 | `addon/allowlist.json` | 占位符名 → 允许的目标主机列表（精确匹配） |
 | `addon/client_allowlist.py` | 代理客户端源地址白名单（默认只允许 Aster 应用容器 `10.89.143.3/32`） |
@@ -51,7 +51,8 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 | 其他提供商 `*_API_KEY` | 是（按需） | `__vault_<NAME>__` | `secret/aster/<NAME>` | 见 `addon/allowlist.json` |
 | `TELEGRAM_OWNER_ID` | 否 | 数值用户 ID（进程内比对，不出站） | — | — |
 | `MODEL_PROVIDER` / `MODEL_ID` / `DATA_DIR` / `MEMORY_*` | 否 | 普通配置值 | — | — |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | 否（Trace 关闭时不需要） | **不得使用占位符**：SDK 在发出前把两者编码进 `Authorization` 头，代理无法识别；直接填真实值或关闭 tracing | — | 见 [Langfuse Tracing](../../docs/langfuse-tracing.md) |
+| `LANGFUSE_SECRET_KEY` | 是（启用 Langfuse Trace 时） | `__vault_LANGFUSE_SECRET_KEY__` | `secret/aster/LANGFUSE_SECRET_KEY` | `cloud.langfuse.com`、`us.cloud.langfuse.com` |
+| `LANGFUSE_PUBLIC_KEY` | 否（公开值） | 明文即可；要统一管理也可用 `__vault_LANGFUSE_PUBLIC_KEY__` | `secret/aster/LANGFUSE_PUBLIC_KEY`（可选） | `cloud.langfuse.com`、`us.cloud.langfuse.com` |
 
 代理 token 不是 `.env` 变量：宿主机文件 `~/Aster/secrets/openbao/mitm-proxy-token` 由 `bootstrap.sh` 生成，同时只读挂入 `aster-mitm` 与应用容器；应用通过 `ASTER_MITM_TOKEN_FILE` 读取，并在启动时注入代理 URL 的 userinfo（`aster:<token>`）。`secret/aster/MITM_PROXY_TOKEN` 保存同一值的副本，供运维核对。
 
@@ -123,7 +124,7 @@ docker exec -it aster-openbao bao operator unseal      # 按提示重复足够�
 docker exec -it aster-openbao bao status               # 期望 Sealed false
 
 # 3) 写入 KV、只读 token 与代理 token（隐藏输入根 token 与各密钥值）
-ASTER_OPENBAO_SECRETS=$HOME/Aster/secrets/openbao ./bootstrap.sh DEEPSEEK_API_KEY DEEPSEEK_WEB_API_KEY TELEGRAM_BOT_TOKEN
+ASTER_OPENBAO_SECRETS=$HOME/Aster/secrets/openbao ./bootstrap.sh DEEPSEEK_API_KEY DEEPSEEK_WEB_API_KEY TELEGRAM_BOT_TOKEN LANGFUSE_SECRET_KEY
 
 # 4) 启动 mitm；首次启动生成 mitmproxy CA 后再跑一次（不传密钥名）导出公共 CA
 docker compose up -d mitm
@@ -152,6 +153,7 @@ ASTER_OPENBAO_SECRETS=$HOME/Aster/secrets/openbao ./bootstrap.sh
    TELEGRAM_BOT_TOKEN=__vault_TELEGRAM_BOT_TOKEN__
    DEEPSEEK_API_KEY=__vault_DEEPSEEK_API_KEY__
    DEEPSEEK_WEB_API_KEY=__vault_DEEPSEEK_WEB_API_KEY__
+   LANGFUSE_SECRET_KEY=__vault_LANGFUSE_SECRET_KEY__
    ```
 4. **叠加 `docker-compose.mitm.yml` 启动应用**（项目名保持 `aster-production`，不要用 `aster`，以免与 OpenBao/MITM 栈争夺网络名）：
    ```bash
