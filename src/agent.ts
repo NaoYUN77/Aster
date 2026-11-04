@@ -19,6 +19,7 @@ import { RemoteRpcExecutionEnv } from "./execution/remote-rpc-env.js";
 import { connectMcp, type McpHost } from "./mcp.js";
 import { readMcpConfig } from "./mcp-config.js";
 import type { TextRequest } from "./messages.js";
+import { createLoopGuard } from "./loop-guard.js";
 import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
@@ -29,7 +30,7 @@ import { installMcpTools, orderedMcpExtensions } from "./tool-pins.js";
 
 const context = BACKGROUND_CONTEXT;
 // Failures the request can recover from in-process; anything else thrown by the durable calls means the Session is unusable.
-const requestFailureCodes = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY"]);
+const requestFailureCodes = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY", "AGENT_LOOP_DETECTED"]);
 
 function sessionFailure(cause: unknown): Error {
   // The first storage error surfaces raw, before the Session latches; every later call throws SessionFailed.
@@ -211,6 +212,10 @@ The working directory is ${workingDirectory}.${executionNote} Keep task files he
 Your final response will be delivered to Telegram as plain text: do not use Markdown markup (no bold, headings, or code fences); use short plain lines for lists. Do not claim an action succeeded unless the tool result confirms it.`;
 
   const registry = createToolRegistry([codingExtension, scriptPolicy(personalTools)], { authority: options.toolAuthority, log: options.toolReviewLog });
+  // The loop guard observes every model-issued tool call in this run and faults the generation at
+  // its bound; the next user request starts a fresh run with cleared counters.
+  const loopGuard = createLoopGuard(options.toolReviewLog ?? console.error);
+  registry.install(loopGuard.extension);
   if (config.webApiKey !== undefined) registry.install(scriptPolicy(createWebExtension({ apiKey: config.webApiKey })));
   // Memory wiring (MEM-07) goes through the one composition entry; with MEMORY_ENABLED=0 the
   // application keeps exactly its previous registry, settings and request path. The memory
@@ -292,6 +297,13 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
 
   try {
     const root = await harness.root(context);
+    // A halt is decided inside a tool hook, which must return promptly; cancel the run outside it.
+    // The next user request starts a new run, so this conversation-wide stop is not a Session failure.
+    loopGuard.setHaltHandler(() => {
+      void root.abort(context).catch((error: unknown) => {
+        console.error(`Loop guard could not stop the run: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    });
     const checkGithubRecovery = async () => {
       if (!githubRecovery.changed) return;
       const inspection = await harness.inspect(context);
@@ -364,6 +376,8 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
       // This signal stops the host's wait during shutdown; close() preserves recovery.
       async reply(request: TextRequest, signal: AbortSignal): Promise<string> {
         signal.throwIfAborted();
+        // A new user request is a new bounded run: earlier repeats or errors must not halt it.
+        loopGuard.reset();
         try {
           // Recovery starts only while a caller is waiting, so the timeout below bounds every resumed task.
           const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(300_000)]);
@@ -384,6 +398,15 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
             throw error;
           }
           if (settled.status === "unanswered") {
+            // The guard faults the generation after committing the offending tool result; report that
+            // business failure instead of a generic unanswered run.
+            const halted = loopGuard.takeHalt();
+            if (halted !== undefined) {
+              // The hook requested cancellation; wait for the run to be terminal so the caller's next
+              // request is admitted as a fresh run instead of being withdrawn by this abort.
+              await root.abort(context).catch(() => undefined);
+              throw halted;
+            }
             throw Object.assign(new Error(`Agent request unanswered: ${settled.reason}`, { cause: settled.detail }), { code: "AGENT_UNANSWERED" });
           }
           if (settled.type !== "input") throw Object.assign(new Error("Agent returned an unexpected submission type"), { code: "AGENT_UNANSWERED" });
