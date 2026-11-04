@@ -97,7 +97,7 @@ docker compose logs --tail=50 personal-agent
 
 生产部署的 `.env` 只保留占位符，真实密钥由 OpenBao 提供。Langfuse SDK 在发出 OTLP 请求前把 `publicKey:secretKey` 编码进 `Authorization: Basic`；`aster-mitm` 的占位符策略会先解码 Basic 凭据，按 allowlist 替换其中的占位符，再重新编码后转发。因此 Langfuse 密钥与其他密钥一样走 OpenBao，不需要明文写入 `.env`。
 
-OTLP 导出使用自建的 keep-alive agent，不会自动继承 Node 的全局代理配置。`src/trace.ts` 在检测到 `HTTP(S)_PROXY` 时用同一组 Langfuse 地址和认证头构造支持 `proxyEnv` 的导出器，使 Langfuse 请求和其他出站请求一样经过 `aster-mitm`；`NO_PROXY` 仍按 Node 的规则生效。
+OTLP 导出器默认自建 keep-alive agent，不会继承 Node 的全局代理配置。`src/trace.ts` 在检测到 `HTTP(S)_PROXY` 时用同一组 Langfuse 地址和认证头构造支持 `proxyEnv` 的导出器，使 Langfuse 请求和其他出站请求一样经过 `aster-mitm`；`NO_PROXY` 仍按 Node 的规则生效。
 
 `.env`：
 
