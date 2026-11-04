@@ -23,7 +23,7 @@ import { createLoopGuard } from "./loop-guard.js";
 import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
-import { beginRequest, type TraceOutcome } from "./trace.js";
+import { beginRequest, traceExtension, type TraceOutcome } from "./trace.js";
 import { hasUnfinishedModelToolCalls, hideFromModel, SCRIPT_ONLY_TOOLS } from "./tool-exposure.js";
 import { createWebExtension } from "./web-tools.js";
 import { inspectGithubToolRecovery, readResidentTools, withToolLedger } from "./tool-ledger.js";
@@ -226,6 +226,10 @@ The working directory is ${workingDirectory}.${executionNote} Keep task files he
 Your final response will be delivered to Telegram as plain text: do not use Markdown markup (no bold, headings, or code fences); use short plain lines for lists. Do not claim an action succeeded unless the tool result confirms it.`;
 
   const registry = createToolRegistry([codingExtension, scriptPolicy(personalTools)], { authority: options.toolAuthority, log: options.toolReviewLog });
+  // Tracing observes the raw tool result; registering it first keeps Loop Guard's warning out of
+  // the measured output counts. Disabled tracing installs nothing.
+  const tracing = traceExtension();
+  if (tracing !== undefined) registry.install(tracing);
   // The loop guard observes every model-issued tool call in this run and faults the generation at
   // its bound; the next user request starts a fresh run with cleared counters.
   const loopGuard = createLoopGuard(options.toolReviewLog ?? console.error);

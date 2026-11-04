@@ -555,6 +555,14 @@ export function beginRequest(options: {
   return activeRuntime?.beginRequest(options);
 }
 
+/**
+ * The active runtime's hook extension. The composition root installs it in the tool registry, so a
+ * codemode span closes with its tool result instead of waiting for process shutdown.
+ */
+export function traceExtension(): Extension | undefined {
+  return activeRuntime?.extension;
+}
+
 /** Start a codemode observation when tracing is enabled; a no-op (undefined) otherwise. */
 export function beginTrace(options: BeginTraceOptions): TraceSpan | undefined {
   return activeRuntime?.begin(options);

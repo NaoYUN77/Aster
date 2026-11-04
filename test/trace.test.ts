@@ -16,6 +16,7 @@ import {
   recordRegistryDecision,
   startTrace,
   traceChild,
+  traceExtension,
   type TraceRuntime,
 } from "../src/trace.js";
 
@@ -100,6 +101,7 @@ test("request, codemode, nested tool and RPC spans share one trace and nest", ()
   let logs = 0;
   const runtime = startTrace({ enabled: true }, () => { logs += 1; }, { tracerProvider: provider });
   assert.ok(runtime);
+  assert.equal(traceExtension(), runtime.extension, "the composition root installs this hook carrier");
 
   const request = beginRequest({
     conversationId: 1,
@@ -287,6 +289,7 @@ test("an exporter failure never escapes the tracing boundary", async () => {
 
 test("disabled tracing is a no-op and a requested but keyless runtime logs once", async () => {
   assert.equal(startTrace({ enabled: false }), undefined);
+  assert.equal(traceExtension(), undefined);
   assert.equal(beginRequest({ conversationId: 5 }), undefined);
   assert.doesNotThrow(() => recordGeneration(assistantMessage(), {
     conversationId: 5 as ConversationId,
