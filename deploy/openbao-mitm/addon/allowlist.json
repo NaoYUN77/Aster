@@ -11,5 +11,7 @@
   "MINIMAX_API_KEY": ["api.minimax.io"],
   "ZAI_API_KEY": ["api.z.ai"],
   "OPENROUTER_API_KEY": ["openrouter.ai"],
+  "LANGFUSE_PUBLIC_KEY": ["cloud.langfuse.com", "us.cloud.langfuse.com"],
+  "LANGFUSE_SECRET_KEY": ["cloud.langfuse.com", "us.cloud.langfuse.com"],
   "TELEGRAM_BOT_TOKEN": ["api.telegram.org"]
 }

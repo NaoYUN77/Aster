@@ -956,6 +956,6 @@ test("08-H: dependency review — pure Context, Harness-free Daily, state-only W
 
   const pkg = JSON.parse(await read("package.json")) as { dependencies: Record<string, string> };
   const dependencyNames = Object.keys(pkg.dependencies).sort();
-  assert.deepEqual(dependencyNames, ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-codemode", "@earendil-works/pi-durable", "@earendil-works/pi-mcp", "abort-controller", "grammy", "typebox"],
-    "the runtime dependency set is exactly the reviewed one (pi-codemode backs PTC; no event bus, database service or plugin framework)");
+  assert.deepEqual(dependencyNames, ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-codemode", "@earendil-works/pi-durable", "@earendil-works/pi-mcp", "@langfuse/otel", "@langfuse/tracing", "@opentelemetry/api", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/sdk-trace-node", "abort-controller", "grammy", "typebox"],
+    "the runtime dependency set is exactly the reviewed one (pi-codemode backs PTC, the two Langfuse packages plus their OTel API/exporter/provider back tracing; no event bus, database service or plugin framework)");
 });

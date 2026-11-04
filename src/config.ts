@@ -127,6 +127,7 @@ export function resolveMcpConfigPaths(env: NodeJS.ProcessEnv = process.env) {
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   validateProxyEnv(env);
+  const paths = resolveMcpConfigPaths(env);
   const telegramApiRoot = readTelegramApiRoot(env);
   const required = (key: string) => {
     const value = env[key]?.trim();
@@ -170,7 +171,52 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     ...(webApiKey ? { webApiKey } : {}),
     ...(execution === undefined ? {} : { execution }),
     ...(codemodeConfig === undefined ? {} : { codemode: codemodeConfig }),
-    ...resolveMcpConfigPaths(env),
+    ...paths,
+    trace: readTraceConfig(env),
+  };
+}
+
+/**
+ * Langfuse Cloud tracing. Off unless both API keys are configured; `LANGFUSE_TRACING_ENABLED=0`
+ * switches it off while keeping the keys in place. Tracing is diagnostics: an absent or incomplete
+ * configuration disables it instead of failing startup.
+ */
+export type TraceConfig = {
+  readonly enabled: boolean;
+  readonly publicKey?: string;
+  readonly secretKey?: string;
+  readonly baseUrl?: string;
+  /**
+   * Upload model-visible content (script, nested tool arguments and results) as observation
+   * input/output. Off by default: traces then keep only sizes, counts and error codes.
+   */
+  readonly captureContent?: boolean;
+};
+
+/** Env var names belong to the Langfuse SDK; `LANGFUSE_HOST` is the common self-hosted alias. */
+export function readTraceConfig(env: NodeJS.ProcessEnv = process.env): TraceConfig {
+  const raw = env.LANGFUSE_TRACING_ENABLED?.trim().toLowerCase();
+  if (raw !== undefined && raw !== "" && !["0", "1", "false", "true"].includes(raw)) {
+    throw new ConfigurationError("LANGFUSE_TRACING_ENABLED must be 0, 1, false, or true");
+  }
+  const captureRaw = env.LANGFUSE_CAPTURE_CONTENT?.trim().toLowerCase();
+  if (captureRaw !== undefined && captureRaw !== "" && !["0", "1", "false", "true"].includes(captureRaw)) {
+    throw new ConfigurationError("LANGFUSE_CAPTURE_CONTENT must be 0, 1, false, or true");
+  }
+  const publicKey = env.LANGFUSE_PUBLIC_KEY?.trim();
+  const secretKey = env.LANGFUSE_SECRET_KEY?.trim();
+  const baseUrl = env.LANGFUSE_BASE_URL?.trim() || env.LANGFUSE_HOST?.trim();
+  const keysConfigured = Boolean(publicKey && secretKey);
+  const enabled = (keysConfigured || raw === "1" || raw === "true")
+    && raw !== "0"
+    && raw !== "false";
+  const captureContent = captureRaw === "1" || captureRaw === "true";
+  return {
+    enabled,
+    ...(publicKey ? { publicKey } : {}),
+    ...(secretKey ? { secretKey } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(captureContent ? { captureContent: true } : {}),
   };
 }
 

@@ -13,6 +13,7 @@ import type { CodemodeConfig } from "./config.js";
 import type { RpcExecutionClient } from "./execution/rpc-client.js";
 import { loopSignature } from "./loop-guard.js";
 import { PtcGateway, SessionBoundCodemodeSandbox } from "./ptc-gateway.js";
+import { argumentBytes, nestedToolResultContent, stringBytes, traceChild } from "./trace.js";
 
 /**
  * The script's result is the only thing that enters the conversation, so cap it well below the
@@ -31,6 +32,27 @@ export const NESTED_LOOP_LIMIT = 6;
 /** Returned when a successful script never produced model-visible output. */
 export const NO_TEXT_OUTPUT =
   "[Script finished with no text() output. In script-first mode, return values and raw console logs are not sent to context—call text(summary) explicitly to output your filtered result.]";
+
+/** A rejected nested call is classified by its host code, never by its message text. */
+function nestedErrorCode(error: unknown): string {
+  if (error !== null && typeof error === "object") {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") return code.slice(0, 128);
+  }
+  return error instanceof Error && error.name === "AbortError" ? "ABORTED" : "TOOL_ERROR";
+}
+
+function nestedResultCode(result: { readonly details?: unknown; readonly diagnostics: readonly { readonly code?: string }[] }): string {
+  const details = result.details;
+  if (details !== null && typeof details === "object") {
+    const code = (details as { code?: unknown }).code;
+    if (typeof code === "string") return code.slice(0, 128);
+  }
+  for (const diagnostic of result.diagnostics) {
+    if (typeof diagnostic.code === "string") return diagnostic.code.slice(0, 128);
+  }
+  return "TOOL_ERROR";
+}
 
 /** Wrapper markers used only to let Node parse a script that starts with top-level `return`. */
 const TYPES_PREFIX = "async function __aster_types__() {\n";
@@ -143,6 +165,15 @@ function prepareArgs(tool: ToolRegistration, args: unknown, textOnly: boolean): 
 }
 
 /**
+ * The trace name for one nested tool call. Tool names are already registry identifiers; replacing
+ * anything else keeps an unexpected script-supplied name from becoming free-form span text.
+ */
+export function nestedToolObservationName(tool: string): string {
+  const label = tool.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 64);
+  return `tool.${label.length === 0 ? "unknown" : label}`;
+}
+
+/**
  * Nested calls are tools, and ADR-0009 keeps tools in one round sequential. The QuickJS sandbox
  * starts every call as soon as the script makes it, so this wrapper queues them; `Promise.all`
  * still works, but the calls run one after another. The sandbox's own timeout ends the script
@@ -169,6 +200,21 @@ export function serializeNestedCalls(
       let identicalCount = 0;
       try {
         const prepared = prepareArgs(tool, args, textOnly) as typeof args;
+        // The codemode observation's input is the model's raw argument. Record what preprocessing
+        // actually handed to QuickJS as a separate child so the two scripts are never conflated.
+        if (tool.name === CODEMODE_TOOL_NAME && args !== null && typeof args === "object") {
+          const raw = (args as { code?: unknown }).code;
+          const executed = prepared !== null && typeof prepared === "object"
+            ? (prepared as { code?: unknown }).code
+            : undefined;
+          if (typeof raw === "string" && typeof executed === "string") {
+            const scriptSpan = traceChild("codemode.prepared", {
+              scriptBytes: stringBytes(executed),
+              scriptChanged: executed !== raw,
+            }, "span", { code: executed });
+            scriptSpan?.end("ok");
+          }
+        }
         const result = await execute(prepared, {
           ...api,
           executeTool: (name, nestedArgs, nestedContext, options) => {
@@ -178,7 +224,17 @@ export function serializeNestedCalls(
               lastSignature = signature;
               identicalCount = 1;
             }
+            // The trace observes the call boundary: name, argument size, item count and error code.
+            // With content capture enabled it also carries the arguments and result, after redaction.
+            const span = traceChild(nestedToolObservationName(name), {
+              tool: name.slice(0, 128),
+              argsBytes: argumentBytes(nestedArgs),
+            }, "tool", { tool: name, arguments: nestedArgs });
             if (identicalCount >= NESTED_LOOP_LIMIT) {
+              span?.end("error", { errorCode: "NESTED_LOOP_DETECTED" }, {
+                isError: true,
+                code: "NESTED_LOOP_DETECTED",
+              });
               return Promise.reject(new Error(
                 `Nested tool loop detected: tool "${name}" called ${NESTED_LOOP_LIMIT} times consecutively with identical arguments`,
               ));
@@ -186,15 +242,29 @@ export function serializeNestedCalls(
             const start = queue.then(() => {
               nestedContext.abortSignal?.throwIfAborted();
               script.signal.throwIfAborted();
-              return api.executeTool(
-                name,
-                nestedArgs,
-                withAbortSignal(script.signal, nestedContext),
-                options,
-              );
+              return span === undefined
+                ? api.executeTool(name, nestedArgs, withAbortSignal(script.signal, nestedContext), options)
+                : span.run(() => api.executeTool(name, nestedArgs, withAbortSignal(script.signal, nestedContext), options));
             });
-            queue = start.then(() => undefined, () => undefined);
-            return start;
+            const observed = start.then(
+              (result) => {
+                const errorCode = result.isError ? nestedResultCode(result) : undefined;
+                span?.end(result.isError ? "error" : "ok", {
+                  isError: result.isError,
+                  structuredBytes: stringBytes(result.structuredOutput),
+                  diagnosticCount: result.diagnostics.length,
+                  ...(errorCode === undefined ? {} : { errorCode }),
+                }, nestedToolResultContent(result));
+                return result;
+              },
+              (error: unknown) => {
+                const errorCode = nestedErrorCode(error);
+                span?.end("error", { errorCode }, { isError: true, code: errorCode });
+                throw error;
+              },
+            );
+            queue = observed.then(() => undefined, () => undefined);
+            return observed;
           },
         }, context);
         return textOnly && tool.name === CODEMODE_TOOL_NAME ? applyTextOnlyContract(result) : result;

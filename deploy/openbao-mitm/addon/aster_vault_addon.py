@@ -25,7 +25,7 @@ from mitmproxy import ctx, http
 
 from client_allowlist import DEFAULT_ALLOW, ClientAllowlist
 from proxy_token import ProxyTokenGate
-from vault_placeholders import PLACEHOLDER, PlaceholderError, substitute
+from vault_placeholders import PlaceholderError, has_placeholder, substitute, substitute_header
 
 CACHE_SECONDS = 300
 ADDON_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -128,13 +128,13 @@ class AsterVault:
         host = flow.request.pretty_host
         path, separator, query = flow.request.path.partition("?")
         headers = flow.request.headers.fields
-        touched = PLACEHOLDER.search(path) or any(PLACEHOLDER.search(value.decode("latin-1")) for _, value in headers)
+        touched = has_placeholder(path) or any(has_placeholder(value.decode("latin-1")) for _, value in headers)
         if not touched:
             return
         try:
             new_path = substitute(path, host, self.allowlist, self.resolve)
             new_headers = [
-                (key, substitute(value.decode("latin-1"), host, self.allowlist, self.resolve).encode("latin-1"))
+                (key, substitute_header(value.decode("latin-1"), host, self.allowlist, self.resolve).encode("latin-1"))
                 for key, value in headers
             ]
         except PlaceholderError as error:
