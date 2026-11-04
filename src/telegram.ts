@@ -124,7 +124,9 @@ export async function serveTelegram(
             ? `${partial}\n\n（回复因长度限制被截断，内容不完整。请拆分请求后重试。）`
             : errorCode === "AGENT_TIMEOUT"
               ? "本次处理超时，已请求停止执行。已执行的操作可能仍然生效，请先核对结果。"
-              : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
+              : errorCode === "AGENT_LOOP_DETECTED"
+                ? "检测到重复调用循环，已停止本次处理。已执行的操作可能仍然生效，请调整请求后重试。"
+                : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
         }
         inbox.saveReply(job.requestId, text, errorCode);
       }

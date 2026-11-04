@@ -560,8 +560,9 @@ test("07-C: per-result and per-request retrieval budgets are enforced cumulative
     const searches: Extract<Message, { role: "toolResult" }>[] = [];
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("memory_search", { text: "zebra" }, { id: "b1" }), { stopReason: "toolUse" }),
-      ...Array.from({ length: 7 }, (_, index) =>
-        fauxAssistantMessage(fauxToolCall("memory_search", { text: "small" }, { id: `b${index + 2}` }), { stopReason: "toolUse" })),
+      // Distinct queries all hit the same fact: the budget, not the loop guard, must end the run.
+      ...["small", "fact", "project", "small fact", "about", "the project", "fact about"].map((text, index) =>
+        fauxAssistantMessage(fauxToolCall("memory_search", { text }, { id: `b${index + 2}` }), { stopReason: "toolUse" })),
       (transcript) => {
         searches.push(...toolResults(transcript.messages, "memory_search"));
         return fauxAssistantMessage("budget checked");

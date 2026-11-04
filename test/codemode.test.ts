@@ -19,9 +19,12 @@ import { openAgent } from "../src/agent.js";
 import {
   CODEMODE_OUTPUT_LIMITS,
   createCodemodeHost,
+  NO_TEXT_OUTPUT,
+  prepareCodemodeScript,
   REMOTE_SCRIPT_TOOLS,
   restrictScriptTools,
   serializeNestedCalls,
+  stripCodemodeTypes,
 } from "../src/codemode.js";
 import { ConfigurationError, readCodemodeConfig, readConfig, readMemoryConfig } from "../src/config.js";
 import { PtcHostError, type DirectHost } from "../src/execution/ptc-host.js";
@@ -67,6 +70,43 @@ function systemSection(messages: readonly Message[], key: string): string | unde
     if (typeof value === "string") return value;
   }
   return undefined;
+}
+
+
+function toolResultText(transcript: { messages: readonly Message[] }, id: string): string {
+  const result = transcript.messages.find((message) =>
+    message.role === "toolResult" && message.toolCallId === id);
+  assert.ok(result?.role === "toolResult", `missing tool result ${id}`);
+  return result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+}
+
+async function runScript(
+  directory: string,
+  code: string,
+  env: NodeJS.ProcessEnv = {},
+): Promise<{ text: string; isError: boolean }> {
+  const fixture = modelFixture();
+  let captured: { text: string; isError: boolean } | undefined;
+  fixture.faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("codemode", { code }, { id: "script" }), { stopReason: "toolUse" }),
+    (transcript) => {
+      const result = transcript.messages.find((message) => message.role === "toolResult");
+      assert.ok(result?.role === "toolResult", "the codemode call settles a result");
+      captured = {
+        text: toolResultText(transcript, "script"),
+        isError: result.isError === true,
+      };
+      return fauxAssistantMessage("done");
+    },
+  ]);
+  const app = await openAgent(appConfig(directory, { CODEMODE_ENABLED: "1", ...env }), fixture.models);
+  try {
+    assert.equal(await app.reply(request, running), "done");
+  } finally {
+    await app.close();
+  }
+  assert.ok(captured);
+  return captured;
 }
 
 test("code mode is opt-in and its sandbox bounds are validated before startup", () => {
@@ -198,7 +238,7 @@ test("code mode runs one script whose nested calls stay out of the transcript", 
           code: `
             const first = await tools.bash({ command: "printf first >> nested.log" });
             const second = await tools.bash({ command: "printf second >> nested.log" });
-            return "nested calls done";
+            text("nested calls done");
           `,
         }), { stopReason: "toolUse" });
       },
@@ -309,7 +349,7 @@ test("code mode in remote execution exposes the sandbox tools to scripts", {
           code: `
             const first = await tools.bash({ command: "printf remote-first" });
             const second = await tools.bash({ command: "printf remote-second" });
-            return first.output + second.output;
+            text(first.output + second.output);
           `,
         }), { stopReason: "toolUse" });
       },
@@ -347,5 +387,98 @@ test("code mode in remote execution exposes the sandbox tools to scripts", {
       await rpcServer.close();
       await rm(directory, { recursive: true, force: true });
     }
+  }
+});
+
+test("script preparation strips TypeScript annotations and keeps the options line", () => {
+  const code = `// @options: {"timeout_ms": 5000}
+interface Item { name: string }
+const item: Item = { name: "typed" } as Item;
+text(item.name);`;
+  const prepared = prepareCodemodeScript(code, true);
+  assert.ok(prepared.startsWith('// @options: {"timeout_ms": 5000}' + String.fromCharCode(10)));
+  assert.doesNotMatch(prepared, /interface Item/);
+  assert.doesNotMatch(prepared, /: string/);
+  assert.match(prepared, /text\(item\.name\)/);
+  assert.match(prepared, /await \(async \(\) => \{/, "the top-level return is discarded");
+  const moduleSyntax = 'import x from "x";' + String.fromCharCode(10) + 'const a: number = 1;';
+  assert.equal(
+    stripCodemodeTypes(moduleSyntax),
+    moduleSyntax,
+    "module syntax falls back to QuickJS instead of being rewritten",
+  );
+});
+
+test("script-first does not leak an implicit return value or console logs", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-codemode-notext-"));
+  try {
+    const result = await runScript(directory, `
+      console.log("raw-console-line");
+      return { secret: "raw-large-data" };
+    `);
+    assert.equal(result.isError, false);
+    assert.equal(result.text, NO_TEXT_OUTPUT);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("script-first sends only explicit text() output", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-codemode-text-"));
+  try {
+    const result = await runScript(directory, `
+      console.log("console-noise");
+      text("filtered summary");
+      return "return-noise";
+    `);
+    assert.equal(result.isError, false);
+    assert.match(result.text, /filtered summary/);
+    assert.doesNotMatch(result.text, /console-noise/);
+    assert.doesNotMatch(result.text, /return-noise/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failing script keeps staged text, console output and its error", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-codemode-fail-"));
+  try {
+    const result = await runScript(directory, `
+      text("staged-text");
+      console.log("staged-console");
+      throw new Error("boom");
+    `);
+    assert.equal(result.isError, true);
+    assert.match(result.text, /staged-text/);
+    assert.match(result.text, /staged-console/);
+    assert.match(result.text, /Script error:/);
+    assert.match(result.text, /boom/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a TypeScript-annotated script runs with its options line intact", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-codemode-types-"));
+  try {
+    const result = await runScript(directory, `// @options: {"timeout_ms": 5000}
+interface Item { name: string }
+const item: Item = { name: "typed" } as Item;
+text(item.name);`);
+    assert.equal(result.isError, false, result.text);
+    assert.match(result.text, /typed/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CODEMODE_SCRIPT_FIRST=0 keeps the implicit return value", { timeout: 30_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-codemode-legacy-"));
+  try {
+    const result = await runScript(directory, 'return "legacy-return";', { CODEMODE_SCRIPT_FIRST: "0" });
+    assert.equal(result.isError, false);
+    assert.match(result.text, /legacy-return/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
