@@ -72,13 +72,19 @@ function systemSection(messages: readonly Message[], key: string): string | unde
 test("code mode is opt-in and its sandbox bounds are validated before startup", () => {
   assert.deepEqual(readCodemodeConfig({}), {
     enabled: false,
+    scriptFirst: false,
     timeoutMs: 240_000,
     memoryLimitBytes: 128 * 1024 * 1024,
   });
   assert.equal(readCodemodeConfig({ CODEMODE_ENABLED: "1" }).enabled, true);
+  assert.equal(readCodemodeConfig({ CODEMODE_ENABLED: "1" }).scriptFirst, true,
+    "script-first defaults on with code mode");
+  assert.equal(readCodemodeConfig({ CODEMODE_ENABLED: "1", CODEMODE_SCRIPT_FIRST: "" }).scriptFirst, true);
   assert.equal(readCodemodeConfig({ CODEMODE_ENABLED: "" }).enabled, false);
   assert.throws(() => readCodemodeConfig({ CODEMODE_ENABLED: "yes" }), (error) =>
     error instanceof ConfigurationError && /CODEMODE_ENABLED/.test(error.message));
+  assert.throws(() => readCodemodeConfig({ CODEMODE_ENABLED: "1", CODEMODE_SCRIPT_FIRST: "yes" }), (error) =>
+    error instanceof ConfigurationError && /CODEMODE_SCRIPT_FIRST/.test(error.message));
   assert.throws(() => readCodemodeConfig({ CODEMODE_TIMEOUT_MS: "999" }), ConfigurationError);
   assert.throws(() => readCodemodeConfig({ CODEMODE_TIMEOUT_MS: "300001" }), ConfigurationError);
   assert.throws(() => readCodemodeConfig({ CODEMODE_MEMORY_LIMIT_BYTES: "16777215" }), ConfigurationError);

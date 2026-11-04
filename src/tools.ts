@@ -88,6 +88,10 @@ function registration(extension: Extension, tool: GovernedTool): ToolRecord {
   });
 }
 
+function exposesToModel(tool: ToolRegistration): boolean {
+  return tool.callers === undefined || tool.callers.includes("model");
+}
+
 export function createToolRegistry(
   extensions: readonly Extension[] = [CodingTools, personalTools],
   options: ToolRegistryOptions = {},
@@ -97,6 +101,8 @@ export function createToolRegistry(
   const log = options.log ?? console.error;
   let records = new Map<string, ToolRecord>();
   let registrations = new Map<string, object>();
+  // Whether the model surface currently declares the tool; a hidden tool stays registered for scripts.
+  let modelCallable = new Map<string, boolean>();
   const availability = new Map<string, ToolAvailability>();
   const disabled = new Set<string>();
   const listeners = new Set<() => void>();
@@ -148,8 +154,13 @@ export function createToolRegistry(
       observed.add(message);
       if (message.stopReason !== "toolUse") return;
       for (const call of message.content) {
-        if (call.type === "toolCall" && !records.has(call.name)) {
-          review(call.name, { conversationId: api.conversationId, taskId: api.taskId, callId: call.id });
+        if (call.type !== "toolCall") continue;
+        const identity = { conversationId: api.conversationId, taskId: api.taskId, callId: call.id };
+        if (!records.has(call.name)) review(call.name, identity);
+        else if (modelCallable.get(call.name) === false) {
+          // Registered but not declared to the model: leave the result to the base's
+          // `tool_unavailable` settlement and record why the call could not run.
+          audit(call.name, identity, "TOOL_NOT_EXPOSED", records.get(call.name));
         }
       }
     },
@@ -190,11 +201,13 @@ export function createToolRegistry(
       }
       const next = new Map<string, ToolRecord>();
       const nextRegistrations = new Map<string, object>();
+      const nextModelCallable = new Map<string, boolean>();
       for (const installed of registry.snapshot().installed()) {
         if (installed.name === extension.name) continue;
         for (const tool of installed.tools ?? []) {
           next.set(tool.name, records.get(tool.name)!);
           nextRegistrations.set(tool.name, registrations.get(tool.name)!);
+          nextModelCallable.set(tool.name, modelCallable.get(tool.name) ?? exposesToModel(tool));
         }
       }
       const installedTools: ToolRegistration[] = [];
@@ -207,11 +220,13 @@ export function createToolRegistry(
         next.set(tool.name, state === record.state ? record : Object.freeze({ ...record, state }));
         const identity = {};
         nextRegistrations.set(tool.name, identity);
+        nextModelCallable.set(tool.name, exposesToModel(tool));
         installedTools.push(executionTool(tool, identity));
       }
       registry.install({ ...extension, tools: installedTools, hooks: [...extension.hooks ?? [], observer] });
       records = next;
       registrations = nextRegistrations;
+      modelCallable = nextModelCallable;
       notify();
     },
     uninstall(extension) {
@@ -221,6 +236,7 @@ export function createToolRegistry(
       for (const tool of removed.tools ?? []) {
         records.delete(tool.name);
         registrations.delete(tool.name);
+        modelCallable.delete(tool.name);
       }
       notify();
     },
