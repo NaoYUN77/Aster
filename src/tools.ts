@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, GenerationTask, hook, type Extension, type Registry, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
+import { CODEMODE_TOOL_NAME } from "@earendil-works/pi-durable/codemode";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
+import { argumentBytes, beginTrace, recordGeneration, recordRegistryDecision } from "./trace.js";
 
 export const currentTime = defineTool({
   name: "current_time",
@@ -111,6 +113,16 @@ export function createToolRegistry(
   function audit(name: string, call: CallIdentity, code: string, record?: ToolRecord) {
     log(JSON.stringify({ event: "tool_review", ...call, tool: name.slice(0, 128), authority,
       authz: record?.authz, state: record?.state, decision: code === "TOOL_ALLOWED" ? "allow" : "deny", code }));
+    recordRegistryDecision({
+      tool: name,
+      decision: code === "TOOL_ALLOWED" ? "allow" : "deny",
+      code,
+      authority,
+      conversationId: call.conversationId,
+      taskId: call.taskId,
+      ...(record?.authz === undefined ? {} : { authz: record.authz }),
+      ...(record?.state === undefined ? {} : { state: record.state }),
+    });
   }
   function review(name: string, call: CallIdentity, registration?: object): ToolExecutionResult | undefined {
     const record = records.get(name);
@@ -152,6 +164,8 @@ export function createToolRegistry(
     afterResponse(message, api) {
       if (observed.has(message)) return;
       observed.add(message);
+      // One LLM generation per terminal provider message, attached to the active agent request.
+      recordGeneration(message, api);
       if (message.stopReason !== "toolUse") return;
       for (const call of message.content) {
         if (call.type !== "toolCall") continue;
@@ -170,22 +184,36 @@ export function createToolRegistry(
       ...tool,
       execute: async (args, api, context) => {
         context.abortSignal?.throwIfAborted();
-        const rejected = review(tool.name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId }, registration);
-        if (rejected !== undefined) return rejected;
-        return tool.execute(args, {
-          ...api,
-          executeTool: (name, args, context, options) => {
-            // Native resolution rejects missing nested names before hooks or an executor can run.
-            if (!records.has(name)) review(name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId });
-            return api.executeTool(name, args, context, options);
-          },
-          ...(tool.name === TOOL_SEARCH_TOOL_NAME ? {
-            agent: async (context: Parameters<ToolExecutionApi["agent"]>[0]) => {
-              const agent = await api.agent(context);
-              return { ...agent, deferred: agent.deferred.filter(({ name }) => records.get(name)?.state === "available") };
+        // The root trace starts before authorization so a denied codemode call is still observable.
+        // The script source never enters the trace; only its byte length does.
+        const root = tool.name === CODEMODE_TOOL_NAME
+          ? beginTrace({
+              conversationId: api.conversationId,
+              taskId: api.taskId,
+              callId: api.callId,
+              name: "codemode",
+              fields: { scriptBytes: argumentBytes(args) },
+            })
+          : undefined;
+        const run = async () => {
+          const rejected = review(tool.name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId }, registration);
+          if (rejected !== undefined) return rejected;
+          return tool.execute(args, {
+            ...api,
+            executeTool: (name, args, context, options) => {
+              // Native resolution rejects missing nested names before hooks or an executor can run.
+              if (!records.has(name)) review(name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId });
+              return api.executeTool(name, args, context, options);
             },
-          } : {}),
-        }, context);
+            ...(tool.name === TOOL_SEARCH_TOOL_NAME ? {
+              agent: async (context: Parameters<ToolExecutionApi["agent"]>[0]) => {
+                const agent = await api.agent(context);
+                return { ...agent, deferred: agent.deferred.filter(({ name }) => records.get(name)?.state === "available") };
+              },
+            } : {}),
+          }, context);
+        };
+        return root === undefined ? run() : root.run(run);
       },
     };
   }

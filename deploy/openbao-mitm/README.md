@@ -51,6 +51,7 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 | 其他提供商 `*_API_KEY` | 是（按需） | `__vault_<NAME>__` | `secret/aster/<NAME>` | 见 `addon/allowlist.json` |
 | `TELEGRAM_OWNER_ID` | 否 | 数值用户 ID（进程内比对，不出站） | — | — |
 | `MODEL_PROVIDER` / `MODEL_ID` / `DATA_DIR` / `MEMORY_*` | 否 | 普通配置值 | — | — |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | 否（Trace 关闭时不需要） | **不得使用占位符**：SDK 在发出前把两者编码进 `Authorization` 头，代理无法识别；直接填真实值或关闭 tracing | — | 见 [Langfuse Tracing](../../docs/langfuse-tracing.md) |
 
 代理 token 不是 `.env` 变量：宿主机文件 `~/Aster/secrets/openbao/mitm-proxy-token` 由 `bootstrap.sh` 生成，同时只读挂入 `aster-mitm` 与应用容器；应用通过 `ASTER_MITM_TOKEN_FILE` 读取，并在启动时注入代理 URL 的 userinfo（`aster:<token>`）。`secret/aster/MITM_PROXY_TOKEN` 保存同一值的副本，供运维核对。
 

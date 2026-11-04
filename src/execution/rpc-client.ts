@@ -27,6 +27,7 @@ import {
 } from "./rpc-protocol.js";
 import type { RpcClientTransport, RpcConnection } from "./rpc-transport.js";
 import type { TestExecutionResult } from "./rpc-test-executor.js";
+import { currentSpan, stringBytes } from "../trace.js";
 
 export class RpcClientError extends Error {
   override name = "RpcClientError";
@@ -209,6 +210,7 @@ export class RpcExecutionClient {
       ...(options.workspaceReady === undefined ? {} : { workspaceReady: options.workspaceReady }),
     }, {
       sessionId,
+      ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
       ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
@@ -282,10 +284,11 @@ export class RpcExecutionClient {
     sessionId: string,
     method: RpcFileMethod,
     payload: Record<string, unknown>,
-    options: { readonly deadlineMs?: number; readonly signal?: AbortSignal } = {},
+    options: { readonly deadlineMs?: number; readonly signal?: AbortSignal; readonly jobId?: string } = {},
   ): Promise<unknown> {
     const value = await this.request(method, payload, {
       sessionId,
+      ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
       ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
@@ -307,11 +310,13 @@ export class RpcExecutionClient {
       readonly signal?: AbortSignal;
       readonly onVmMessage?: (event: RpcVmMessageEvent) => void;
       readonly onToolOutput?: (event: RpcToolOutputEvent) => void;
+      readonly jobId?: string;
     } = {},
   ): RpcVmHandle {
     const request = this.beginRequest("vm.start", payload as unknown as Record<string, unknown>, {
       sessionId,
       deadlineMs: options.deadlineMs ?? 360_000,
+      ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.onVmMessage === undefined ? {} : { onVmMessage: options.onVmMessage }),
       ...(options.onToolOutput === undefined ? {} : { onToolOutput: options.onToolOutput }),
@@ -331,11 +336,13 @@ export class RpcExecutionClient {
       readonly deadlineMs?: number;
       readonly signal?: AbortSignal;
       readonly onToolOutput?: (event: RpcToolOutputEvent) => void;
+      readonly jobId?: string;
     } = {},
   ): RpcToolCallHandle {
     const request = this.beginRequest("tool.call", payload as unknown as Record<string, unknown>, {
       sessionId,
       deadlineMs: options.deadlineMs ?? Math.min(RPC_MAX_DEADLINE_MS, payload.args.timeoutMs + 60_000),
+      ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.onToolOutput === undefined ? {} : { onToolOutput: options.onToolOutput }),
     });
@@ -448,6 +455,14 @@ export class RpcExecutionClient {
       ...(options.onVmMessage === undefined ? {} : { onVmMessage: options.onVmMessage }),
       ...(options.onToolOutput === undefined ? {} : { onToolOutput: options.onToolOutput }),
     });
+    // Tracing observes every request that actually leaves the client. A request refused before
+    // this point (disconnected, aborted, duplicate id) never crosses a boundary, so it has no span.
+    const span = currentSpan()?.child(`rpc.${method}`, {
+      rpcId: id,
+      ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+      ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
+      ...rpcSpanFields(method, payload),
+    });
     const frame: RpcRequestFrame = {
       v: 1,
       kind: "request",
@@ -457,7 +472,17 @@ export class RpcExecutionClient {
       payload,
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
+      ...(span === undefined ? {} : { correlationId: span.correlationId }),
     };
+    if (span !== undefined) {
+      void promise.then(
+        () => span.end("ok"),
+        (error: unknown) => span.end(rpcSpanOutcome(error), {
+          errorCode: rpcErrorCode(error),
+          ...(rpcOutcome(error) === undefined ? {} : { rpcOutcome: rpcOutcome(error) }),
+        }),
+      ).catch(() => undefined);
+    }
     try {
       connection.send(frame);
     } catch (error) {
@@ -548,4 +573,67 @@ export class RpcExecutionClient {
         : new RpcClientError(error.code, error.message, { ...error.options, outcome: "failed" }));
     }
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** Boundary metadata only. Commands, script source, paths and file contents stay out of the trace. */
+function rpcSpanFields(
+  method: RpcRequestFrame["method"],
+  payload: Record<string, unknown>,
+): Record<string, string | number | boolean | undefined> {
+  if (method === "tool.call") {
+    const args = asRecord(payload.args);
+    return {
+      tool: typeof payload.tool === "string" ? payload.tool.slice(0, 64) : undefined,
+      vmCallId: typeof payload.callId === "number" ? payload.callId : undefined,
+      timeoutMs: typeof args?.timeoutMs === "number" ? args.timeoutMs : undefined,
+      commandBytes: stringBytes(args?.command),
+    };
+  }
+  if (method === "vm.start") {
+    const request = asRecord(payload.request);
+    const data = asRecord(request?.data);
+    return {
+      scriptBytes: stringBytes(data?.code),
+      toolCount: Array.isArray(data?.tools) ? data.tools.length : undefined,
+    };
+  }
+  if (method === "file.write") {
+    const content = payload.content;
+    return {
+      pathBytes: stringBytes(payload.path),
+      contentBytes: typeof content === "string" ? Math.ceil((content.length * 3) / 4) : undefined,
+    };
+  }
+  if (method.startsWith("file.")) {
+    return {
+      pathBytes: stringBytes(payload.path),
+      ...(typeof payload.offset === "number" ? { offset: payload.offset } : {}),
+      ...(typeof payload.limit === "number" ? { limit: payload.limit } : {}),
+      ...(typeof payload.length === "number" ? { length: payload.length } : {}),
+    };
+  }
+  if (method === "vm.reply") {
+    return { vmCallId: typeof payload.callId === "number" ? payload.callId : undefined };
+  }
+  return {};
+}
+
+function rpcSpanOutcome(error: unknown): "ok" | "error" | "aborted" | "unknown" {
+  if (!(error instanceof RpcClientError)) return "error";
+  if (error.code === "aborted") return "aborted";
+  return error.options.outcome === "unknown" ? "unknown" : "error";
+}
+
+function rpcErrorCode(error: unknown): string {
+  return error instanceof RpcClientError ? error.code : "internal";
+}
+
+function rpcOutcome(error: unknown): string | undefined {
+  return error instanceof RpcClientError ? error.options.outcome : undefined;
 }

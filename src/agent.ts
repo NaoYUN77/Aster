@@ -23,6 +23,7 @@ import { createLoopGuard } from "./loop-guard.js";
 import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { createProviderModels, requireModel } from "./providers.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
+import { beginRequest, type TraceOutcome } from "./trace.js";
 import { hasUnfinishedModelToolCalls, hideFromModel, SCRIPT_ONLY_TOOLS } from "./tool-exposure.js";
 import { createWebExtension } from "./web-tools.js";
 import { inspectGithubToolRecovery, readResidentTools, withToolLedger } from "./tool-ledger.js";
@@ -36,6 +37,19 @@ function sessionFailure(cause: unknown): Error {
   // The first storage error surfaces raw, before the Session latches; every later call throws SessionFailed.
   const failure = cause instanceof SessionFailed ? cause : new SessionFailed(cause);
   return Object.assign(new Error("Agent session failed; restart the process to recover", { cause: failure }), { code: "AGENT_SESSION_FAILED" });
+}
+
+/** Trace outcome for a failed request: a caller-side abort is not an agent error. */
+function requestOutcome(error: unknown, signal: AbortSignal): TraceOutcome {
+  if (signal.aborted || (error instanceof Error && error.name === "AbortError")) return "aborted";
+  return "error";
+}
+
+/** The application's error code when one exists; provider messages never enter the trace. */
+function requestErrorCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === "string") return code.slice(0, 128);
+  return error instanceof Error && error.name === "AbortError" ? "ABORTED" : "AGENT_REQUEST_FAILED";
 }
 
 /** Worker shutdown must not mask the harness error or stop the remaining cleanup. */
@@ -378,6 +392,12 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
         signal.throwIfAborted();
         // A new user request is a new bounded run: earlier repeats or errors must not halt it.
         loopGuard.reset();
+        // One Langfuse trace per user request. Only the prompt length is recorded, never its text.
+        const requestTrace = beginRequest({
+          conversationId: root.id,
+          requestId: request.requestId,
+          fields: { textBytes: Buffer.byteLength(request.text, "utf8") },
+        });
         try {
           // Recovery starts only while a caller is waiting, so the timeout below bounds every resumed task.
           const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(300_000)]);
@@ -421,8 +441,10 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
           if (messages.at(-1)?.stopReason === "length") {
             throw Object.assign(new Error("Agent reply was truncated by the model length limit"), { code: "AGENT_TRUNCATED", partialReply: text });
           }
+          requestTrace?.end("ok", { replyBytes: Buffer.byteLength(text, "utf8") });
           return text;
         } catch (error) {
+          requestTrace?.end(requestOutcome(error, signal), { errorCode: requestErrorCode(error) });
           // A host shutdown stops this wait without failing the Session; keep the original abort reason.
           if (signal.aborted) throw error;
           const code = (error as { code?: unknown } | null)?.code;

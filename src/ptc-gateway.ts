@@ -48,6 +48,7 @@ import {
   PTC_WORKSPACE_PATH,
   RPC_MAX_DEADLINE_MS,
   type PtcToolCallResult,
+  type RpcVmMessageEvent,
   type PtcVmStartPayload,
 } from "./execution/rpc-protocol.js";
 import {
@@ -59,6 +60,7 @@ import {
 } from "./ptc-docs.js";
 import { PtcExecutionEnv } from "./ptc-env.js";
 import { parseNestedCallKey, type PtcRpcClient, type PtcSession } from "./ptc-session.js";
+import { stringBytes, traceChild, type TraceFields, type TraceOutcome } from "./trace.js";
 
 /** Slack over the script deadline for the runner to report its own stop. */
 const VM_DEADLINE_SLACK_MS = 60_000;
@@ -153,53 +155,84 @@ class RpcCodemodeRemote implements CodemodeRemote {
     const deliveries = new Set<Promise<void>>();
     let batchFailure: unknown;
     let rpcFailure: unknown;
-    const handle = this.session.client.startVm(this.session.sessionId, payload, {
-      deadlineMs: this.deadlineMs,
-      onVmMessage: (event) => {
-        const messages = event.messages as unknown as CodemodeRemoteMessage[];
-        const callId = event.callId;
-        const delivery = (async () => {
+    let runnerFailure: string | undefined;
+    // The VM span is created before the RPC request so runner messages and rpc.vm.start share one
+    // parent. The callback runs outside the ALS context, so it closes over this span.
+    const span = traceChild("runner.vm", {
+      sessionId: this.session.sessionId,
+      jobId: this.session.jobId,
+      scriptBytes: stringBytes(data.code),
+      toolCount: data.tools.length,
+    });
+    const onVmMessage = (event: RpcVmMessageEvent): void => {
+      const messages = event.messages as unknown as CodemodeRemoteMessage[];
+      const callId = event.callId;
+      for (const message of messages) {
+        const fields = runnerMessageFields(message);
+        if (fields === undefined) continue;
+        span?.event("runner.message", fields);
+        if (message.type === "failure") runnerFailure = message.error.kind;
+        else if (message.type === "crash") runnerFailure = "sandbox";
+        else if (message.type === "done" && !message.ok) runnerFailure = "script";
+      }
+      const delivery = (async () => {
+        if (batchFailure !== undefined || rpcFailure !== undefined) return;
+        let reply: CodemodeRemoteReply;
+        try {
+          reply = await exchange(messages);
+        } catch (error) {
+          batchFailure = error;
+          return;
+        }
+        // A batch without a call is output only; the host's exchange answered null and the runner
+        // expects no reply. Anything else means the two sides disagree about the protocol.
+        if (callId === undefined) {
+          if (reply !== null) batchFailure = new Error("The code mode host answered a batch that carried no call");
+          return;
+        }
+        // A missing reply would leave the VM waiting forever; stop is the honest terminal answer.
+        const answer = reply ?? { type: "stop" as const };
+        // Replies leave in arrival order, so a VM call that settles late cannot overtake one that
+        // settled earlier and change what the script observes.
+        const sent = replyChain.then(async () => {
           if (batchFailure !== undefined || rpcFailure !== undefined) return;
-          let reply: CodemodeRemoteReply;
           try {
-            reply = await exchange(messages);
+            await this.session.client.replyVm(this.session.sessionId, { callId, reply: answer });
           } catch (error) {
             batchFailure = error;
-            return;
           }
-          // A batch without a call is output only; the host's exchange answered null and the runner
-          // expects no reply. Anything else means the two sides disagree about the protocol.
-          if (callId === undefined) {
-            if (reply !== null) batchFailure = new Error("The code mode host answered a batch that carried no call");
-            return;
-          }
-          // A missing reply would leave the VM waiting forever; stop is the honest terminal answer.
-          const answer = reply ?? { type: "stop" as const };
-          // Replies leave in arrival order, so a VM call that settles late cannot overtake one that
-          // settled earlier and change what the script observes.
-          const sent = replyChain.then(async () => {
-            if (batchFailure !== undefined || rpcFailure !== undefined) return;
-            try {
-              await this.session.client.replyVm(this.session.sessionId, { callId, reply: answer });
-            } catch (error) {
-              batchFailure = error;
-            }
-          });
-          replyChain = sent.catch((error: unknown) => {
-            batchFailure ??= error;
-          });
-          await sent;
-        })();
-        deliveries.add(delivery);
-        void delivery.then(
-          () => deliveries.delete(delivery),
-          (error: unknown) => {
-            batchFailure ??= error;
-            deliveries.delete(delivery);
-          },
-        );
-      },
-    });
+        });
+        replyChain = sent.catch((error: unknown) => {
+          batchFailure ??= error;
+        });
+        await sent;
+      })();
+      deliveries.add(delivery);
+      void delivery.then(
+        () => deliveries.delete(delivery),
+        (error: unknown) => {
+          batchFailure ??= error;
+          deliveries.delete(delivery);
+        },
+      );
+    };
+    let handle;
+    try {
+      handle = span === undefined
+        ? this.session.client.startVm(this.session.sessionId, payload, {
+            deadlineMs: this.deadlineMs,
+            jobId: this.session.jobId,
+            onVmMessage,
+          })
+        : span.run(() => this.session.client.startVm(this.session.sessionId, payload, {
+            deadlineMs: this.deadlineMs,
+            jobId: this.session.jobId,
+            onVmMessage,
+          }));
+    } catch (error) {
+      span?.end(failureOutcome(error), { errorCode: failureCode(error) });
+      throw error;
+    }
     this.session.registerVm(() => {
       void handle.cancel("the code mode call ended").catch(() => undefined);
     });
@@ -215,9 +248,49 @@ class RpcCodemodeRemote implements CodemodeRemote {
     this.session.registerVm(undefined);
     const failure = rpcFailure ?? batchFailure;
     if (failure !== undefined) {
+      span?.end(failureOutcome(failure), { errorCode: failureCode(failure) });
       await handle.cancel("the code mode execution failed").catch(() => undefined);
       throw failure;
     }
+    if (runnerFailure === undefined) span?.end("ok");
+    else span?.end("error", { errorCode: `RUNNER_${runnerFailure.toUpperCase()}`.slice(0, 128) });
+  }
+}
+
+/** Outcome and code for an RPC failure: cancellation is aborted, a lost connection is unknown. */
+function failureOutcome(error: unknown): TraceOutcome {
+  if (error instanceof RpcClientError && error.code === "aborted") return "aborted";
+  return error instanceof RpcClientError && error.options.outcome === "unknown" ? "unknown" : "error";
+}
+
+function failureCode(error: unknown): string {
+  if (error instanceof RpcClientError) return error.code.slice(0, 128);
+  if (error !== null && typeof error === "object") {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") return code.slice(0, 128);
+  }
+  return "TRACE_ERROR";
+}
+
+/** Summarize one runner message without retaining arguments, output text or error messages. */
+function runnerMessageFields(message: CodemodeRemoteMessage): TraceFields | undefined {
+  switch (message.type) {
+    case "call":
+      return { runnerEvent: "call", target: message.target, tool: message.name.slice(0, 128), argsBytes: stringBytes(message.args) };
+    case "output":
+      return { runnerEvent: "output", itemType: message.item.type };
+    case "done":
+      return message.ok
+        ? { runnerEvent: "done", ok: true, valueBytes: stringBytes(message.value) }
+        : { runnerEvent: "done", ok: false, errorBytes: stringBytes(message.error) };
+    case "crash":
+      return { runnerEvent: "crash", messageBytes: stringBytes(message.message) };
+    case "started":
+      return { runnerEvent: "started", fingerprint: message.fingerprint.slice(0, 64) };
+    case "idle":
+      return { runnerEvent: "idle", seq: message.seq, issued: message.issued };
+    case "failure":
+      return { runnerEvent: "failure", errorKind: message.error.kind };
   }
 }
 

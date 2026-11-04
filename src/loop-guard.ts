@@ -8,6 +8,7 @@ import {
   type ToolHookCall,
 } from "@earendil-works/pi-durable";
 import { CODEMODE_TOOL_NAME } from "@earendil-works/pi-durable/codemode";
+import { recordLoopGuard } from "./trace.js";
 
 /** The first repeated signature that earns an explicit warning in the tool result. */
 export const LOOP_GUARD_WARNING_AT = 3;
@@ -116,6 +117,14 @@ export function createLoopGuard(log: (line: string) => void = console.error): Lo
       ...(reason === undefined ? {} : { reason }),
       code,
     }));
+    recordLoopGuard({
+      conversationId: api.conversationId,
+      taskId: api.taskId,
+      callId: call.id,
+      tool: call.name,
+      count,
+      ...(reason === undefined ? {} : { reason }),
+    }, code);
   }
 
   function observe(call: ToolHookCall, result: ToolExecutionResult, api: HookApi): ToolExecutionResult | undefined {

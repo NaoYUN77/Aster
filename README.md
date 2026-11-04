@@ -128,6 +128,7 @@ npm start
 - `CODEMODE_ENABLED`：PTC／code mode 总开关，默认关；设 `1` 启用 `codemode` 工具。`CODEMODE_TIMEOUT_MS` 与 `CODEMODE_MEMORY_LIMIT_BYTES` 约束脚本期限和 QuickJS 内存。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
 - `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
+- `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`：可选；两个都设置时启用 Langfuse Cloud Trace，可用 `LANGFUSE_TRACING_ENABLED=0` 临时关闭。默认只上报 id、长度、计数、工具名和错误码，不上传消息、脚本、参数或文件内容。配置、隐私边界与验收步骤见 [Langfuse Tracing](docs/langfuse-tracing.md)。
 
 私聊 bot 后直接发送文字即可。bot 若已配置 webhook，应用会拒绝启动，需先在原部署中停用 webhook。
 
@@ -186,6 +187,7 @@ npm test        # 全量离线测试
 - [文档分类索引与临时 spec 约定](docs/README.md)：按功能推进开发，区分当前契约、运行手册、任务记录和历史材料
 - [部署指南](docs/deployment-test-guide.md)：镜像交付、备份恢复、维护命令、上线清单
 - [投递核查与补发](docs/deliveries.md)
+- [Langfuse Tracing](docs/langfuse-tracing.md)：可选 Trace 的配置、隐私边界、部署与首条验收
 - [工具与 MCP](docs/mcp.md)
 - [部署环境描述](docs/deployment-environments.md)
 - [远程工具执行](docs/execution-remote.md)：阶段 1 的宿主 broker、SSH 基线、配置与失败语义
