@@ -8,6 +8,7 @@ import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { LangfuseSpanProcessor } from "@langfuse/otel";
 import type { ConversationId, TaskId, ToolExecutionResult, ToolHookCall } from "@earendil-works/pi-durable";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { nestedToolObservationName } from "../src/codemode.js";
 import { ConfigurationError, readTraceConfig } from "../src/config.js";
 import {
   beginRequest,
@@ -129,7 +130,7 @@ test("request, codemode, nested tool and RPC spans share one trace and nest", ()
       conversationId: 1 as ConversationId,
       taskId: 1 as TaskId,
     });
-    return traceChild("nested.tool", { tool: "read", argsBytes: 9 }, "tool");
+    return traceChild(nestedToolObservationName("read"), { tool: "read", argsBytes: 9 }, "tool");
   });
   assert.ok(nested);
   const rpc = nested.run(() => currentSpan()?.child("rpc.file.readText", { pathBytes: 8 }));
@@ -146,7 +147,7 @@ test("request, codemode, nested tool and RPC spans share one trace and nest", ()
   const spans = exporter.getFinishedSpans();
   const requestSpan = spanByName(spans, "agent.request");
   const codemodeSpan = spanByName(spans, "codemode");
-  const nestedSpan = spanByName(spans, "nested.tool");
+  const nestedSpan = spanByName(spans, "tool.read");
   const rpcSpan = spanByName(spans, "rpc.file.readText");
   const decision = spanByName(spans, "registry.decision");
 

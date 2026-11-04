@@ -165,6 +165,15 @@ function prepareArgs(tool: ToolRegistration, args: unknown, textOnly: boolean): 
 }
 
 /**
+ * The trace name for one nested tool call. Tool names are already registry identifiers; replacing
+ * anything else keeps an unexpected script-supplied name from becoming free-form span text.
+ */
+export function nestedToolObservationName(tool: string): string {
+  const label = tool.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 64);
+  return `tool.${label.length === 0 ? "unknown" : label}`;
+}
+
+/**
  * Nested calls are tools, and ADR-0009 keeps tools in one round sequential. The QuickJS sandbox
  * starts every call as soon as the script makes it, so this wrapper queues them; `Promise.all`
  * still works, but the calls run one after another. The sandbox's own timeout ends the script
@@ -202,10 +211,10 @@ export function serializeNestedCalls(
             }
             // The trace observes the call boundary only: tool name, approximate argument size,
             // item count and error code. Arguments and results never enter it.
-            const span = traceChild("nested.tool", {
+            const span = traceChild(nestedToolObservationName(name), {
               tool: name.slice(0, 128),
               argsBytes: argumentBytes(nestedArgs),
-            });
+            }, "tool");
             if (identicalCount >= NESTED_LOOP_LIMIT) {
               span?.end("error", { errorCode: "NESTED_LOOP_DETECTED" });
               return Promise.reject(new Error(

@@ -12,7 +12,7 @@
 agent.request                 agent  （根 span，session = 会话 id）
 ├── llm.generation            generation（每次模型响应一条）
 ├── codemode                  tool（一次 codemode 工具调用）
-│   ├── nested.tool           tool（脚本内的嵌套工具调用）
+│   ├── tool.<name>           tool（脚本内的嵌套工具调用，如 tool.read、tool.write）
 │   │   └── rpc.<method>      span（远程执行 RPC；本地模式没有）
 │   ├── runner.vm             span（远程 QuickJS VM；本地模式没有）
 │   └── runner.message        event（有上限）
@@ -22,8 +22,12 @@ agent.request                 agent  （根 span，session = 会话 id）
 
 - `agent.request` 以 durable 会话 id（`root.id`）为 `session.id`，以 `requestId` 区分同一会话的不同请求。
 - `codemode` 在工具授权之前创建，因此被拒绝的调用同样可见。
+- `tool.<name>` 的观测类型是 `tool`，名称来自实际执行的嵌套工具名；参数和结果只保留字节数、条目数和错误码。授权事实仍由 `registry.decision` event 单独记录。
+- `rpc.cancel` 对已结束目标的 `not_found` 是幂等清理，span 以 `ok` + `cancelOutcome=not_active` 结束；真正的取消异常仍为 `error`。
+- `rpc.file.canonical` 在新建文件前的 `not_found` 探针以 `ok` + `probe=missing` 结束；权限、传输等非预期错误仍为 `error`。
 - `llm.generation` 关联提供商、模型、stop reason 和 token 用量。
 - 远端 RPC 请求帧携带 `<traceId>.<spanId>` 形式的 `correlationId`（49 字节），供执行端未来接入同一 Trace；第一阶段所有 span 都由控制面创建。
+- 第一阶段只覆盖 codemode 路径；非 codemode 的直连工具目前只有授权 event，没有独立执行 span。
 
 单个 trace 内的活跃请求和 codemode span 各限 256 个，单个 codemode span 的 event 限 256 条；超限时结束最旧 span（标记 `unknown`）或写一条 `events.truncated`，不静默丢弃。
 
@@ -165,7 +169,8 @@ LANGFUSE_SECRET_KEY=__vault_LANGFUSE_SECRET_KEY__
 4. **核对层级**
 
    - `agent.request` 下至少有 1 条 `llm.generation`；
-   - 触发 codemode 时存在 `codemode` 子 span，其下为 `nested.tool`；
+   - 触发 codemode 时存在 `codemode` 子 span，其下为 `tool.read`、`tool.write` 或 `tool.bash` 这类实际工具 observation；
+   - 每个工具 observation 都有正确的父 span、`outcome` 和 `durationMs`；
    - 远程执行模式下继续出现 `rpc.*` 和 `runner.vm`，且与调用方共用同一 `traceId`；
    - `registry.decision`、`loop_guard.*` 作为 event 出现在对应父 span 下。
 

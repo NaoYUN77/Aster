@@ -27,7 +27,7 @@ import {
 } from "./rpc-protocol.js";
 import type { RpcClientTransport, RpcConnection } from "./rpc-transport.js";
 import type { TestExecutionResult } from "./rpc-test-executor.js";
-import { currentSpan, stringBytes } from "../trace.js";
+import { currentSpan, stringBytes, type TraceFields } from "../trace.js";
 
 export class RpcClientError extends Error {
   override name = "RpcClientError";
@@ -59,6 +59,12 @@ export type RpcRequestOptions = {
   readonly onOutput?: (event: RpcOutputEvent) => void;
   readonly onVmMessage?: (event: RpcVmMessageEvent) => void;
   readonly onToolOutput?: (event: RpcToolOutputEvent) => void;
+  /**
+   * Error codes that describe an expected state for this call rather than a failed execution: an
+   * idempotent cancel of an already-settled target, or a canonical lookup of a not-yet-created
+   * file. The RPC result and error are unchanged; only the trace span ends as ok with these fields.
+   */
+  readonly expectedErrors?: Readonly<Record<string, TraceFields>>;
 };
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -291,6 +297,9 @@ export class RpcExecutionClient {
       ...(options.jobId === undefined ? {} : { jobId: options.jobId }),
       ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      // A canonical lookup of a path that does not exist yet is the normal probe before creating
+      // it. Other canonical failures (permission, unavailable transport) still end the span error.
+      ...(method === "file.canonical" ? { expectedErrors: { not_found: { probe: "missing" } } } : {}),
     });
     const parsed = parseFileResult(method, value);
     if (!parsed.ok) {
@@ -389,6 +398,9 @@ export class RpcExecutionClient {
       sessionId,
       deadlineMs: options.deadlineMs ?? 5_000,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      // A target that already settled has nothing left to cancel. The server still answers
+      // not_found, but that is a no-op here, not a failed execution.
+      expectedErrors: { not_found: { cancelOutcome: "not_active" } },
     });
   }
 
@@ -477,10 +489,15 @@ export class RpcExecutionClient {
     if (span !== undefined) {
       void promise.then(
         () => span.end("ok"),
-        (error: unknown) => span.end(rpcSpanOutcome(error), {
-          errorCode: rpcErrorCode(error),
-          ...(rpcOutcome(error) === undefined ? {} : { rpcOutcome: rpcOutcome(error) }),
-        }),
+        (error: unknown) => {
+          const code = rpcErrorCode(error);
+          const expected = options.expectedErrors?.[code];
+          span.end(expected === undefined ? rpcSpanOutcome(error) : "ok", {
+            ...(expected ?? {}),
+            errorCode: code,
+            ...(rpcOutcome(error) === undefined ? {} : { rpcOutcome: rpcOutcome(error) }),
+          });
+        },
       ).catch(() => undefined);
     }
     try {
