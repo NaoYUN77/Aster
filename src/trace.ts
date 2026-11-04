@@ -540,7 +540,7 @@ function proxyAwareExporter(keys: {
       "x-langfuse-ingestion-version": "4",
     },
     // Same env parsing as the Langfuse SDK's default exporter.
-    timeoutMillis: Number(process.env.LANGFUSE_TIMEOUT ?? 5) * 1_000,
+    timeoutMillis: Number(process.env.LANGFUSE_TIMEOUT || 5) * 1_000,
     httpAgentOptions: { keepAlive: true, proxyEnv: process.env },
   });
 }
