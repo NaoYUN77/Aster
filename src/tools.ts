@@ -63,7 +63,7 @@ export interface ToolRegistry extends Registry {
   setDisabled(name: string, disabled: boolean): void;
 }
 
-const READ_TOOLS = new Set(["read", "current_time", "working_read", "memory_search", "memory_read", "tool_search"]);
+const READ_TOOLS = new Set(["read", "current_time", "working_read", "memory_search", "memory_read", "tool_search", "reminder_list"]);
 
 function registration(extension: Extension, tool: GovernedTool): ToolRecord {
   const governance = tool.governance ?? {
