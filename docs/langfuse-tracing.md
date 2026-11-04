@@ -123,6 +123,7 @@ LANGFUSE_SECRET_KEY=__vault_LANGFUSE_SECRET_KEY__
 边界：
 
 - `allowlist.json` 已为 `LANGFUSE_PUBLIC_KEY` 与 `LANGFUSE_SECRET_KEY` 列出 `cloud.langfuse.com` 和 `us.cloud.langfuse.com`。使用自建 Langfuse 或其他区域时，加入实际 host 的精确匹配；不做后缀或通配匹配。
+- 代理模式使用自建 OTLP 导出器，`LANGFUSE_OTEL_COMPRESSION` 不再生效（请求默认不压缩）；批量条数、flush 间隔和 `LANGFUSE_TIMEOUT` 仍按 Langfuse SDK 的变量处理。
 - 只有当解码后的凭据里出现占位符时才改写 `Authorization`；普通 Basic 凭据原样转发。
 - 未知占位符或 host 不匹配仍使整条请求返回 403，且不会部分替换。
 - MITM 只解码 `Basic`；其他认证方案中的编码值不会尝试识别。
