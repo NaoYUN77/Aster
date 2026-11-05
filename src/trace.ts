@@ -453,6 +453,27 @@ export class TraceRuntime {
     return this.#requests.get(String(conversationId));
   }
 
+  /**
+   * A span for host work tied to a conversation but not to one tool task, such as a delivery
+   * handoff. It joins the conversation's request trace when that request is still known.
+   */
+  beginConversation(options: {
+    readonly conversationId: string | number;
+    readonly name: string;
+    readonly kind?: TraceSpanKind;
+    readonly fields?: TraceFields;
+  }): TraceSpan | undefined {
+    if (this.#closing) return undefined;
+    const parent = this.#requests.get(String(options.conversationId));
+    return startSpan({
+      name: options.name,
+      kind: options.kind ?? "span",
+      fields: options.fields ?? {},
+      ...(parent === undefined ? {} : { parent: parent.spanContext }),
+      log: this.#log,
+    });
+  }
+
   begin(options: BeginTraceOptions): TraceSpan | undefined {
     if (this.#closing) return undefined;
     const parent = this.requestFor(options.conversationId);
@@ -747,6 +768,16 @@ export function traceExtension(): Extension | undefined {
 /** Start a codemode observation when tracing is enabled; a no-op (undefined) otherwise. */
 export function beginTrace(options: BeginTraceOptions): TraceSpan | undefined {
   return activeRuntime?.begin(options);
+}
+
+/** Start a host span tied to a conversation but not to one tool task; no-op when tracing is off. */
+export function beginConversationTrace(options: {
+  readonly conversationId: string | number;
+  readonly name: string;
+  readonly kind?: TraceSpanKind;
+  readonly fields?: TraceFields;
+}): TraceSpan | undefined {
+  return activeRuntime?.beginConversation(options);
 }
 
 export function recordGeneration(

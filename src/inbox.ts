@@ -123,6 +123,56 @@ export class Inbox {
     });
   }
 
+  /**
+   * Host-origin delivery: a reply the application produced without an inbound request, such as a
+   * proactive notification. Idempotent by requestId; re-enqueueing the same body is a no-op, while a
+   * different body under the same ID is refused rather than silently replaced.
+   */
+  enqueue(request: TextRequest, reply: string): void {
+    if (!reply.trim()) throw new Error("Cannot deliver an empty reply");
+    this.transaction(() => {
+      const existing = this.db.prepare("SELECT * FROM inbox WHERE requestId = ?").get(request.requestId) as
+        | { text: string; conversationId: string; senderId: string; reply: string | null }
+        | undefined;
+      if (existing !== undefined) {
+        if (existing.text !== request.text || existing.conversationId !== request.conversationId
+          || existing.senderId !== request.senderId || existing.reply !== reply) {
+          throw new Error("Request ID reused with different content");
+        }
+        return;
+      }
+      this.db.prepare(`INSERT INTO inbox (requestId, conversationId, senderId, text, status, reply, receivedAt, repliedAt)
+        VALUES (?, ?, ?, ?, 'ready', ?, ?, ?)`).run(
+        request.requestId,
+        request.conversationId,
+        request.senderId,
+        request.text,
+        reply,
+        timestamp(),
+        timestamp(),
+      );
+      this.insertParts(request.requestId, reply);
+    });
+  }
+
+  /** Current delivery state of one request; `missing` after pruning or when it was never enqueued. */
+  deliveryStatus(requestId: string): "pending" | "ready" | "sent" | "failed" | "uncertain" | "missing" {
+    const value = this.db.prepare("SELECT status FROM inbox WHERE requestId = ?").get(requestId) as
+      | { status: string }
+      | undefined;
+    if (value === undefined) return "missing";
+    switch (value.status) {
+      case "pending":
+      case "ready":
+      case "sent":
+      case "failed":
+      case "uncertain":
+        return value.status;
+      default:
+        return "missing";
+    }
+  }
+
   nextPart(requestId: string): Delivery | undefined {
     return this.db.prepare("SELECT * FROM deliveries WHERE requestId = ? AND status = 'pending' ORDER BY part LIMIT 1").get(requestId) as Delivery | undefined;
   }

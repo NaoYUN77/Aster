@@ -22,6 +22,8 @@ import type { TextRequest } from "./messages.js";
 import { createLoopGuard } from "./loop-guard.js";
 import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { createProviderModels, requireModel } from "./providers.js";
+import { createProactiveGuard, ProactiveRunner } from "./proactive-runner.js";
+import type { ProactiveStore } from "./proactive.js";
 import { createReminderExtension, type ReminderStore } from "./reminders.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
 import { beginRequest, traceExtension, type TraceOutcome } from "./trace.js";
@@ -115,6 +117,16 @@ export type OpenAgentOptions = {
    * the target chat is the configured owner's private chat, never a model parameter.
    */
   readonly reminderStore?: ReminderStore;
+  /**
+   * Proactive Loop V1 state. When present, every run creates its own ownerless conversation and
+   * hands the host-validated decision back through `enqueue`.
+   */
+  readonly proactive?: {
+    readonly store: ProactiveStore;
+    readonly enqueue: (requestId: string, text: string) => void;
+  };
+  /** Test seam for Web tool HTTP calls; never a model parameter. */
+  readonly webFetch?: typeof fetch;
 };
 
 export async function openAgent(
@@ -192,6 +204,12 @@ export async function openAgent(
     : execution.transport === "rpc"
       ? " Commands and file tools run in the execution host's sandbox; paths are confined to /shared and /tmp."
       : " Commands run on the execution host through the host-side broker; file tools are unavailable in this mode, so use bash for file work.";
+  if (options.proactive !== undefined && config.proactive === undefined) {
+    throw new ConfigurationError("Proactive state was supplied while PROACTIVE_ENABLED is off");
+  }
+  if (options.proactive !== undefined && config.webApiKey === undefined) {
+    throw new ConfigurationError("Proactive runs require web tools (DEEPSEEK_WEB_API_KEY)");
+  }
 
   const codemode = config.codemode === undefined ? undefined : createCodemodeHost(config.codemode, rpcClient);
   try {
@@ -248,7 +266,14 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
   // its bound; the next user request starts a fresh run with cleared counters.
   const loopGuard = createLoopGuard(options.toolReviewLog ?? console.error);
   registry.install(loopGuard.extension);
-  if (config.webApiKey !== undefined) registry.install(scriptPolicy(createWebExtension({ apiKey: config.webApiKey })));
+  // Background runs get a narrowed tool surface and their own spend bound; the guard extension is
+  // installed here but stays inert until a proactive conversation arms it.
+  const proactiveGuard = options.proactive === undefined ? undefined : createProactiveGuard();
+  if (proactiveGuard !== undefined) registry.install(proactiveGuard.extension);
+  const webExtension = config.webApiKey === undefined
+    ? undefined
+    : scriptPolicy(createWebExtension({ apiKey: config.webApiKey, ...(options.webFetch === undefined ? {} : { fetch: options.webFetch }) }));
+  if (webExtension !== undefined) registry.install(webExtension);
   // Memory wiring (MEM-07) goes through the one composition entry; with MEMORY_ENABLED=0 the
   // application keeps exactly its previous registry, settings and request path. The memory
   // section is read from the same environment the rest of the config came from, unless the
@@ -331,8 +356,12 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
     const root = await harness.root(context);
     // A halt is decided inside a tool hook, which must return promptly; cancel the run outside it.
     // The next user request starts a new run, so this conversation-wide stop is not a Session failure.
-    loopGuard.setHaltHandler(() => {
-      void root.abort(context).catch((error: unknown) => {
+    // Each conversation has its own counters: a proactive loop must not stop the main chat.
+    loopGuard.setHaltHandler((_error, conversationId) => {
+      const target = conversationId === String(root.id)
+        ? Promise.resolve(root)
+        : harness.conversation(Number(conversationId) as typeof root.id, context);
+      void target.then((conversation) => conversation?.abort(context)).catch((error: unknown) => {
         console.error(`Loop guard could not stop the run: ${error instanceof Error ? error.message : String(error)}`);
       });
     });
@@ -362,6 +391,19 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
     await checkGithubRecovery();
     const priorPins = await readResidentTools(durableStorage, root.id, context);
     const inspection = await harness.inspect(context);
+    if (options.proactive === undefined) {
+      const conversations = new Set([
+        ...inspection.tasks.map(({ record }) => record.conversationId),
+        ...inspection.submissions.map(({ conversationId }) => conversationId),
+      ]);
+      for (const id of conversations) {
+        if (id === undefined) continue;
+        const agent = await harness.snapshot(AgentDoc, id, context);
+        if (Array.isArray(agent?.extensions) && agent.extensions.includes("proactive-guard")) {
+          throw new ConfigurationError("Unfinished proactive work requires PROACTIVE_ENABLED=1 and its state store; finish the saved runs before disabling proactive discovery");
+        }
+      }
+    }
     const hasPins = priorPins.length > 0 || Object.values(mcp.pins?.tools ?? {}).some(({ pin }) => pin);
     const recovering = inspection.tasks.length > 0 || inspection.submissions.length > 0
       || (memory !== undefined && hasPins && await hasUnsubmittedMemoryProjection(durableStorage, root.id, context));
@@ -402,14 +444,49 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
       cwd: workingDirectory,
       instructions,
     }, context);
+    const proactiveModelTools = registry.snapshot().tools()
+      .filter(({ tool }) => tool.name === "web_search" || tool.name === "web_fetch")
+      .map(({ tool }) => tool);
+    const proactiveRunner = options.proactive !== undefined
+      && config.proactive !== undefined
+      && proactiveGuard !== undefined
+      && webExtension !== undefined
+      ? new ProactiveRunner({
+          store: options.proactive.store,
+          harness,
+          rootConversationId: root.id,
+          dataDir: config.dataDir,
+          model: { provider: config.provider, modelId: config.model },
+          workingDirectory,
+          timezone: config.proactive.timezone,
+          config: config.proactive,
+          extensions: [
+            webExtension,
+            ...(tracing === undefined ? [] : [tracing]),
+            loopGuard.extension,
+            proactiveGuard.extension,
+          ],
+          modelTools: proactiveModelTools,
+          guard: proactiveGuard,
+          enqueue: options.proactive.enqueue,
+          takeHalt: (conversationId) => loopGuard.takeHalt(conversationId),
+        })
+      : undefined;
+    await proactiveRunner?.prepareRecovery();
     // Session skips empty writes, so flush storage-owned metadata after the final registration.
     await durableStorage.commit([], context);
     return {
+      ...(proactiveRunner === undefined ? {} : {
+        proactive: {
+          run: (runId: number, signal: AbortSignal) => proactiveRunner.run(runId, signal),
+          recover: (signal: AbortSignal) => proactiveRunner.recover(signal),
+        },
+      }),
       // This signal stops the host's wait during shutdown; close() preserves recovery.
       async reply(request: TextRequest, signal: AbortSignal): Promise<string> {
         signal.throwIfAborted();
         // A new user request is a new bounded run: earlier repeats or errors must not halt it.
-        loopGuard.reset();
+        loopGuard.reset(String(root.id));
         // One Langfuse trace per user request. Only the prompt length is recorded, never its text.
         const requestTrace = beginRequest({
           conversationId: root.id,
@@ -438,7 +515,7 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
           if (settled.status === "unanswered") {
             // The guard faults the generation after committing the offending tool result; report that
             // business failure instead of a generic unanswered run.
-            const halted = loopGuard.takeHalt();
+            const halted = loopGuard.takeHalt(String(root.id));
             if (halted !== undefined) {
               // The hook requested cancellation; wait for the run to be terminal so the caller's next
               // request is admitted as a fresh run instead of being withdrawn by this abort.
