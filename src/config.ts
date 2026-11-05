@@ -162,6 +162,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
         }),
       }
     : undefined;
+  const reminders = readReminderConfig(env);
   return {
     token,
     ownerId,
@@ -172,7 +173,33 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     ...(execution === undefined ? {} : { execution }),
     ...(codemodeConfig === undefined ? {} : { codemode: codemodeConfig }),
     ...paths,
+    ...(reminders.enabled ? { reminders } : {}),
     trace: readTraceConfig(env),
+  };
+}
+
+/** One-time reminders (REMINDERS_*). Enabled by default; limits bound each owner's stored rows. */
+export type ReminderConfig = {
+  readonly enabled: boolean;
+  readonly maxPending: number;
+  readonly maxPerHour: number;
+  readonly horizonDays: number;
+};
+
+/**
+ * Every reminder bound is validated even when reminders are disabled, so a malformed value cannot
+ * silently take effect after the switch is flipped. Time itself is always resolved by the host.
+ */
+export function readReminderConfig(env: NodeJS.ProcessEnv = process.env): ReminderConfig {
+  const enabledRaw = env.REMINDERS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("REMINDERS_ENABLED must be 0 or 1");
+  }
+  return {
+    enabled: enabledRaw !== "0",
+    maxPending: boundedInteger(env, "REMINDERS_MAX_PENDING", 100, 1, 1_000),
+    maxPerHour: boundedInteger(env, "REMINDERS_MAX_PER_HOUR", 20, 1, 1_000),
+    horizonDays: boundedInteger(env, "REMINDERS_MAX_HORIZON_DAYS", 366, 1, 3_650),
   };
 }
 

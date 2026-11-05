@@ -4,6 +4,7 @@ import { openAgent } from "./agent.js";
 import { ConfigurationError, configureEnvProxy, readConfig } from "./config.js";
 import { StateError } from "./errors.js";
 import { Inbox } from "./inbox.js";
+import { ReminderScheduler, ReminderStore } from "./reminders.js";
 import { failureCode, serveTelegram, TelegramClient } from "./telegram.js";
 import { startTrace, type TraceRuntime } from "./trace.js";
 
@@ -20,19 +21,40 @@ try {
   const client = new TelegramClient(config.token, config.telegramApiRoot);
   const botId = await client.identity(shutdown.signal);
   await mkdir(config.dataDir, { recursive: true });
-  const inbox = new Inbox(join(config.dataDir, "inbox.sqlite"));
+  let inbox: Inbox | undefined;
+  let reminders: ReminderStore | undefined;
   try {
+    // Reminder state is separate from the Inbox: its lifecycle is a due time, not a user request.
+    reminders = config.reminders === undefined
+      ? undefined
+      : new ReminderStore(join(config.dataDir, "reminders.sqlite"), { limits: config.reminders });
+    inbox = new Inbox(join(config.dataDir, "inbox.sqlite"));
     inbox.bindIdentity(botId, config.ownerId);
     inbox.recover();
-    const agent = await openAgent(config, undefined, undefined, { signal: shutdown.signal });
+    // A sending row may already have reached Telegram; recovery records it as uncertain instead of resending.
+    reminders?.recover();
+    const agent = await openAgent(config, undefined, undefined, {
+      signal: shutdown.signal,
+      ...(reminders === undefined ? {} : { reminderStore: reminders }),
+    });
+    const scheduler = reminders === undefined ? undefined : new ReminderScheduler({
+      store: reminders,
+      client,
+      signal: shutdown.signal,
+      log: (line) => console.error(line),
+    });
+    scheduler?.start();
     try {
       console.info("Personal agent starting; single-owner private Telegram messages enabled.");
       await serveTelegram(config, botId, inbox, agent.reply, shutdown.signal, client);
     } finally {
+      // Stop proactive sends before the agent and databases close; an in-flight send becomes uncertain.
+      await scheduler?.stop();
       await agent.close();
     }
   } finally {
-    inbox.close();
+    inbox?.close();
+    reminders?.close();
   }
 } catch (error) {
   if (!shutdown.signal.aborted) {

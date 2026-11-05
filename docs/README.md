@@ -38,6 +38,7 @@ ADR 持续记录该功能所有部分的取舍与缺陷，跨越各份 spec 的�
 - [Phase 0 RPC 验收记录](acceptance/20261102-execution-rpc-phase0.md)：2026-11-02 真实双 VPS 的 PASS 证据、负向结果与网络变更边界。
 - [Remote PTC Phase 1／2 Runbook](runbook-remote-ptc-phase1-2.md)：bwrap／cgroup 前提、direct／PTC 配置、实机正向与负向验收、证据与回滚。
 - [代码调用工具](codemode.md)：可选的 PTC／codemode 配置、脚本工具白名单、输出边界与恢复语义。
+- [一次性提醒](reminders.md)：`reminder_*` 工具、独立 SQLite 状态机、进程内调度、失败恢复与人工核查。
 - [Langfuse Tracing](langfuse-tracing.md)：可选 Trace 的环境变量、隐私边界、部署与第一条真实 Trace 验收。
 - [部署环境](deployment-environments.md)、[主机备份](host-backup.md)、[投递核查与补发](deliveries.md)：对应操作边界。
 - [CI 运行入口](ci-entrypoint.md)：现行检查入口与发布材料契约。
