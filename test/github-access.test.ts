@@ -17,8 +17,8 @@ function declarations(): McpToolInfo[] {
   const str = { type: "string" }; const num = { type: "integer" }; const repo = { owner: str, repo: str }; const paging = { perPage: num, page: num };
   const fields: Record<string, object> = {
     search_repositories: { query: str, ...paging }, get_file_contents: { ...repo, path: str }, search_code: { query: str, ...paging },
-    list_issues: { ...repo, perPage: num, after: str }, search_issues: { query: str, ...paging }, issue_read: { ...repo, ...paging, issue_number: num, method: str },
-    list_pull_requests: { ...repo, ...paging }, search_pull_requests: { query: str, ...paging }, pull_request_read: { ...repo, ...paging, pullNumber: num, method: str },
+    list_issues: { ...repo, state: str, perPage: num, after: str }, search_issues: { query: str, ...paging }, issue_read: { ...repo, ...paging, issue_number: num, method: str },
+    list_pull_requests: { ...repo, state: str, ...paging }, search_pull_requests: { query: str, ...paging }, pull_request_read: { ...repo, ...paging, pullNumber: num, method: str },
     actions_list: { ...repo, method: str, resource_id: str, perPage: num, page: num }, actions_get: { ...repo, method: str, resource_id: str },
     get_job_logs: { ...repo, job_id: num, run_id: num, return_content: { type: "boolean" }, failed_only: { type: "boolean" }, tail_lines: num },
   };
@@ -28,15 +28,20 @@ async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "aster-github-"));
   const policy = { approvalVersion: "fixture-v1", baselinePath: join(directory, "approved.json") };
   let current = declarations(); let calls = 0; let lists = 0;
+  const toolCalls: { name: string; args: Record<string, unknown> }[] = [];
   let changed: (() => void) | undefined;
   const connection: McpConnection = {
     serverName: "github", async listTools() { lists++; return current; },
-    async callTool() { calls++; return { content: [{ type: "text", text: "ok" }] }; }, async close() {},
+    async callTool(name, args) {
+      calls++;
+      toolCalls.push({ name, args });
+      return { content: [{ type: "text", text: `${name} ok` }] };
+    }, async close() {},
     subscribeAvailability(listener) { listener("available"); return () => {}; },
     subscribeDeclarationChanges(listener) { changed = listener; return () => {}; },
   };
   const server = { name: "github", transport: "http" as const, url: GITHUB_ENDPOINT, headers: { Authorization: "Bearer __vault_GITHUB_MCP_TOKEN__", "X-MCP-Readonly": "true", "X-MCP-Tools": GITHUB_TOOL_NAMES.join(",") }, githubPolicy: policy, timeoutMs: 60_000, connectTimeoutMs: 10_000 };
-  return { directory, policy, server, connection, get calls() { return calls; }, get lists() { return lists; }, setTools(tools: McpToolInfo[]) { current = tools; }, changed: () => changed?.(),
+  return { directory, policy, server, connection, toolCalls, get calls() { return calls; }, get lists() { return lists; }, setTools(tools: McpToolInfo[]) { current = tools; }, changed: () => changed?.(),
     approve: () => writeFile(policy.baselinePath, JSON.stringify(buildGithubApproval(policy, current))), close: () => rm(directory, { recursive: true, force: true }) };
 }
 
@@ -56,8 +61,33 @@ test("first discovery produces a candidate but never authorizes calls", async ()
   try {
     const host = await connectMcp({ servers: [f.server] }, { dataDir: f.directory, reserved: new Set(), connect: async () => f.connection, log() {} });
     assert.equal(host.extensions.length, 0); assert.equal(f.calls, 0);
+    assert.equal(host.github, undefined, "no reader without an approved baseline");
     const candidate = JSON.parse(await readFile(join(f.directory, "github-policy/candidate.json"), "utf8"));
     assert.equal(candidate.tools.length, 12);
+    await host.close();
+  } finally { await f.close(); }
+});
+
+test("approved host reads a fixed repository snapshot through the same gate", async () => {
+  const f = await fixture();
+  try {
+    await f.approve();
+    const host = await connectMcp({ servers: [f.server] }, { dataDir: f.directory, reserved: new Set(), connect: async () => f.connection, log() {} });
+    assert.ok(host.github, "the host exposes a reader only after approval");
+    const status = await host.github.readRepoStatus("octo", "repo");
+    assert.deepEqual(status, {
+      pullRequests: "list_pull_requests ok",
+      issues: "list_issues ok",
+      workflowRuns: "actions_list ok",
+    });
+    assert.deepEqual(f.toolCalls, [
+      { name: "list_pull_requests", args: { owner: "octo", repo: "repo", state: "open", perPage: 30, page: 1 } },
+      { name: "list_issues", args: { owner: "octo", repo: "repo", state: "OPEN", perPage: 30 } },
+      { name: "actions_list", args: { owner: "octo", repo: "repo", method: "list_workflow_runs", perPage: 30, page: 1 } },
+    ]);
+    f.setTools(declarations().map(tool => tool.name === "list_issues" ? { ...tool, description: "drifted" } : tool));
+    await assert.rejects(host.github.readRepoStatus("octo", "repo"), /GITHUB_RECONCILIATION_FAILED/);
+    assert.equal(f.calls, 3, "the drifted snapshot sends no further business call");
     await host.close();
   } finally { await f.close(); }
 });

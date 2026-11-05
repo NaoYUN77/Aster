@@ -33,6 +33,10 @@
 
 分页读取必须显式提供 `perPage`（1～30），只读一页；不自动翻页。搜索/游标最多 4096 UTF-8 字节，页号为正安全整数。PR `after` 仅用于 `get_review_comments`，此方法不传 `page`。`issue_read`、`pull_request_read`、`actions_list` 与 `actions_get` 只允许规格列出的 method。Actions 的 `resource_id` 按 method 解释；可选高级 filter 字段首期不发布。单 job 日志必须有 `job_id`、`return_content:true`、`failed_only:false` 和 1～200 的 `tail_lines`，拒绝 `run_id`。
 
+## 主对话聚合读取
+
+批准网关打开后，宿主额外注册 `github_repo_status`。它固定按 `list_pull_requests`（open）、`list_issues`（OPEN）和 `actions_list`（`list_workflow_runs`）各读一页 30 条，汇总为一份仓库快照。该工具由宿主内置、常驻模型工具面，参数只有 `owner`/`repo`，不接受 endpoint、凭据、分页或 method 覆盖；它显式限定 `callers: ["model"]`，不进入 codemode/PTC。每段独立限制 9 KiB，总输出最多 32 KiB；远端文本按不可信数据处理。三次业务调用仍逐次经过同一批准闸口与声明对账，任一失败都会停用 GitHub，并返回区分未发送、可能已发送与结果被拒绝的错误。未打开批准时该工具不注册。
+
 ## 批准与漂移
 
 批准文件与启动观察 catalog 分离，包含批准版本、endpoint、固定操作策略、原始身份/注册名、完整原始声明与收窄后的有效声明。比较排序对象键、保留数组顺序，描述、annotations、输出 schema 和其他返回字段均参与比较。工具集合必须恰好为 12 个，重复、额外、缺失、过滤、不支持 schema 或不完整分页都会停用整个接入。可选未知输入字段不进入有效声明；未知必填字段拒绝适配。
