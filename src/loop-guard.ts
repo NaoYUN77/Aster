@@ -78,16 +78,29 @@ export function loopSignature(name: string, args: unknown): string {
 
 export type LoopGuard = {
   readonly extension: Extension;
-  /** Clear counts and any recorded halt; the call-ID memory survives, so a replay cannot double count. */
-  reset(): void;
-  /** The halt recorded by the current run, if any. The run boundary consumes it. */
-  takeHalt(): AgentLoopDetectedError | undefined;
+  /**
+   * Clear counts and a recorded halt. With a conversation ID, only that conversation is cleared;
+   * without one, every conversation is. The call-ID memory survives, so a replay cannot double count.
+   */
+  reset(conversationId?: string): void;
+  /** The halt recorded by the current run of one conversation. The run boundary consumes it. */
+  takeHalt(conversationId?: string): AgentLoopDetectedError | undefined;
   /**
    * Install the host's run-level cancellation. Called once when a halt is recorded, from inside the
-   * hook, which must return promptly; the host stops the run outside the hook.
+   * hook, which must return promptly; the host stops that one conversation outside the hook.
    */
-  setHaltHandler(handler: (error: AgentLoopDetectedError) => void): void;
+  setHaltHandler(handler: (error: AgentLoopDetectedError, conversationId: string) => void): void;
 };
+
+type GuardState = {
+  lastSignature: string | undefined;
+  identicalCount: number;
+  errorCount: number;
+  halt: AgentLoopDetectedError | undefined;
+};
+
+/** One entry per conversation seen in this process; old entries are evicted, not grown forever. */
+const GUARD_STATES_LIMIT = 256;
 
 /**
  * Bounded autonomous loop detection for model-issued tool calls.
@@ -99,12 +112,21 @@ export type LoopGuard = {
  * `callId` is counted once, so a replay cannot inflate the counters.
  */
 export function createLoopGuard(log: (line: string) => void = console.error): LoopGuard {
-  let lastSignature: string | undefined;
-  let identicalCount = 0;
-  let errorCount = 0;
-  let halt: AgentLoopDetectedError | undefined;
-  let haltHandler: ((error: AgentLoopDetectedError) => void) | undefined;
+  const states = new Map<string, GuardState>();
+  let haltHandler: ((error: AgentLoopDetectedError, conversationId: string) => void) | undefined;
   const seen = new Set<string>();
+
+  function stateFor(conversationId: string): GuardState {
+    let state = states.get(conversationId);
+    if (state !== undefined) return state;
+    if (states.size >= GUARD_STATES_LIMIT) {
+      const oldest = states.keys().next();
+      if (!oldest.done) states.delete(oldest.value);
+    }
+    state = { lastSignature: undefined, identicalCount: 0, errorCount: 0, halt: undefined };
+    states.set(conversationId, state);
+    return state;
+  }
 
   function audit(code: "LOOP_GUARD_WARNING" | "LOOP_GUARD_HALT", call: ToolHookCall, api: HookApi, count: number, reason?: LoopGuardHaltReason): void {
     log(JSON.stringify({
@@ -137,48 +159,49 @@ export function createLoopGuard(log: (line: string) => void = console.error): Lo
       if (!oldest.done) seen.delete(oldest.value);
     }
     seen.add(key);
+    const state = stateFor(String(api.conversationId));
 
     const signature = loopSignature(call.name, call.arguments);
-    if (signature === lastSignature) identicalCount += 1;
+    if (signature === state.lastSignature) state.identicalCount += 1;
     else {
-      lastSignature = signature;
-      identicalCount = 1;
+      state.lastSignature = signature;
+      state.identicalCount = 1;
     }
-    errorCount = result.isError === true ? errorCount + 1 : 0;
+    state.errorCount = result.isError === true ? state.errorCount + 1 : 0;
 
-    if (identicalCount >= LOOP_GUARD_HALT_AT) {
-      if (halt === undefined) {
-        halt = new AgentLoopDetectedError("repeated_call", call.name, identicalCount);
-        audit("LOOP_GUARD_HALT", call, api, identicalCount, "repeated_call");
+    if (state.identicalCount >= LOOP_GUARD_HALT_AT) {
+      if (state.halt === undefined) {
+        state.halt = new AgentLoopDetectedError("repeated_call", call.name, state.identicalCount);
+        audit("LOOP_GUARD_HALT", call, api, state.identicalCount, "repeated_call");
         try {
-          haltHandler?.(halt);
+          haltHandler?.(state.halt, String(api.conversationId));
         } catch {
           // A host cancellation failure must not turn the tool result into an exception.
         }
       }
       return undefined;
     }
-    if (errorCount >= LOOP_GUARD_HALT_AT) {
-      if (halt === undefined) {
-        halt = new AgentLoopDetectedError("consecutive_errors", call.name, errorCount);
-        audit("LOOP_GUARD_HALT", call, api, errorCount, "consecutive_errors");
+    if (state.errorCount >= LOOP_GUARD_HALT_AT) {
+      if (state.halt === undefined) {
+        state.halt = new AgentLoopDetectedError("consecutive_errors", call.name, state.errorCount);
+        audit("LOOP_GUARD_HALT", call, api, state.errorCount, "consecutive_errors");
         try {
-          haltHandler?.(halt);
+          haltHandler?.(state.halt, String(api.conversationId));
         } catch {
           // A host cancellation failure must not turn the tool result into an exception.
         }
       }
       return undefined;
     }
-    if (identicalCount >= LOOP_GUARD_WARNING_AT) {
-      audit("LOOP_GUARD_WARNING", call, api, identicalCount);
+    if (state.identicalCount >= LOOP_GUARD_WARNING_AT) {
+      audit("LOOP_GUARD_WARNING", call, api, state.identicalCount);
       return {
         ...result,
         output: [
           ...(result.output ?? []),
           {
             type: "text",
-            text: `[Loop Guard Warning]: You have made the exact same tool call ${identicalCount} times consecutively. Do not repeat identical calls; inspect intermediate state or change your strategy.`,
+            text: `[Loop Guard Warning]: You have made the exact same tool call ${state.identicalCount} times consecutively. Do not repeat identical calls; inspect intermediate state or change your strategy.`,
           },
         ],
       };
@@ -197,13 +220,15 @@ export function createLoopGuard(log: (line: string) => void = console.error): Lo
 
   return {
     extension,
-    reset() {
-      lastSignature = undefined;
-      identicalCount = 0;
-      errorCount = 0;
-      halt = undefined;
+    reset(conversationId) {
+      if (conversationId === undefined) states.clear();
+      else states.delete(conversationId);
     },
-    takeHalt: () => halt,
+    takeHalt(conversationId) {
+      if (conversationId !== undefined) return states.get(conversationId)?.halt;
+      for (const state of states.values()) if (state.halt !== undefined) return state.halt;
+      return undefined;
+    },
     setHaltHandler(handler) {
       haltHandler = handler;
     },

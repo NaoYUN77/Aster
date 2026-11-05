@@ -5,6 +5,7 @@ import { ConfigurationError } from "./errors.js";
 import { isAbsoluteRemotePath } from "./execution/protocol.js";
 import { readRpcClientConfig, type RpcClientConfig } from "./execution/rpc-config.js";
 import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
+import type { ProactiveConfig } from "./proactive.js";
 import {
   assertSchema,
   eventDate,
@@ -163,6 +164,10 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
       }
     : undefined;
   const reminders = readReminderConfig(env);
+  const proactive = readProactiveConfig(env);
+  if (proactive.enabled && webApiKey === undefined) {
+    throw new ConfigurationError("PROACTIVE_ENABLED=1 requires DEEPSEEK_WEB_API_KEY; the proactive loop has no discovery channel without it");
+  }
   return {
     token,
     ownerId,
@@ -174,7 +179,43 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     ...(codemodeConfig === undefined ? {} : { codemode: codemodeConfig }),
     ...paths,
     ...(reminders.enabled ? { reminders } : {}),
+    ...(proactive.enabled ? { proactive } : {}),
     trace: readTraceConfig(env),
+  };
+}
+
+/** Proactive Loop V1 (PROACTIVE_*, ADR proactive-loop/0023). Disabled unless explicitly enabled. */
+export type ProactiveSettings = ProactiveConfig & { readonly enabled: boolean };
+
+/**
+ * Every proactive bound is validated even when disabled, so a malformed value cannot silently take
+ * effect after the switch is flipped. The daily time and zone are host settings; the model never
+ * supplies them.
+ */
+export function readProactiveConfig(env: NodeJS.ProcessEnv = process.env): ProactiveSettings {
+  const enabledRaw = env.PROACTIVE_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("PROACTIVE_ENABLED must be 0 or 1");
+  }
+  const dailyAt = env.PROACTIVE_DAILY_AT?.trim() || "09:00";
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(dailyAt);
+  if (match === null) throw new ConfigurationError("PROACTIVE_DAILY_AT must be HH:MM in 00:00..23:59");
+  const timezone = env.PROACTIVE_TIMEZONE?.trim() || env.MEMORY_TIMEZONE?.trim() || "UTC";
+  try {
+    eventDate(0, timezone);
+  } catch {
+    throw new ConfigurationError(`PROACTIVE_TIMEZONE is not a known time zone: ${timezone}`);
+  }
+  return {
+    enabled: enabledRaw === "1",
+    dailyAt,
+    timezone,
+    maxPerDay: boundedInteger(env, "PROACTIVE_MAX_PER_DAY", 1, 1, 10),
+    maxToolCalls: boundedInteger(env, "PROACTIVE_MAX_TOOL_CALLS", 20, 1, 100),
+    maxTokens: boundedInteger(env, "PROACTIVE_MAX_TOKENS", 60_000, 1_000, 500_000),
+    timeoutMs: boundedInteger(env, "PROACTIVE_TIMEOUT_MS", 180_000, 10_000, 600_000),
+    contextMaxChars: boundedInteger(env, "PROACTIVE_CONTEXT_MAX_CHARS", 12_000, 1_000, 50_000),
+    recentDays: boundedInteger(env, "PROACTIVE_RECENT_DAYS", 3, 0, 30),
   };
 }
 
