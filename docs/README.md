@@ -25,6 +25,7 @@ ADR 持续记录该功能所有部分的取舍与缺陷，跨越各份 spec 的�
 | 文档 | 用途与权威范围 |
 | --- | --- |
 | [契约与生命周期](contracts-and-lifecycle.md) | 工具、权限、请求、执行恢复与投递契约，以及当前实现限制 |
+| [提示词维护](prompts.md) | 宿主提示词清单、A 区与记忆摘要影响、变更流程与测试入口 |
 | [Memory 与 Context 设计](memory-and-context-design.md) | 记忆架构与数据归属；模块实施结论按章节保留，验收状态链接到验收记录 |
 | [工具与 MCP](mcp.md) | MCP 配置、工具发现、pin、授权与 OAuth 操作 |
 | [ADR 索引](adr/README.md) | 已接受的工程取舍；正文中的早期范围描述是决策上下文 |
