@@ -61,6 +61,9 @@ const MAX_OUTPUT_LINES = 1_000;
 // size. base64 is ASCII, so character count is a cheap upper bound on bytes.
 const MAX_IMAGE_CHARS = 4 * 1024 * 1024;
 const CLOSE_TIMEOUT_MS = 2_000;
+/** One fixed page per section; the composite tool is a snapshot, not a paginator. */
+const GITHUB_READ_PAGE_SIZE = 30;
+const GITHUB_READ_TIMEOUT_MS = 60_000;
 
 export type McpToolInfo = Pick<McpTool, "name" | "description" | "inputSchema"> & Record<string, unknown>;
 
@@ -91,9 +94,26 @@ export type McpConnectContext = {
 
 export type McpConnector = (server: McpServerConfig, context: McpConnectContext) => Promise<McpConnection>;
 
+/** Host-initiated reads over the approved GitHub connection, shared by the composite read tool. */
+export type GithubRepoStatus = {
+  readonly pullRequests: string;
+  readonly issues: string;
+  readonly workflowRuns: string;
+};
+
+export interface GithubReader {
+  readRepoStatus(
+    owner: string,
+    repo: string,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<GithubRepoStatus>;
+}
+
 export type McpHost = {
   readonly extensions: readonly Extension[];
   readonly pins?: ToolPinConfig;
+  /** Present only when the GitHub gate opened for a fully approved tool set. */
+  readonly github?: GithubReader;
   /** Replays every discovered server's state before returning. */
   subscribeAvailability(listener: (server: string, state: ToolAvailability) => void): () => void;
   close(): Promise<void>;
@@ -369,6 +389,7 @@ export async function connectMcp(
   const used = new Set(options.reserved);
   const extensions: Extension[] = [];
   const live: { connection: McpConnection; unsubscribe: () => void }[] = [];
+  let githubReader: GithubReader | undefined;
   const availability = new Map<string, ToolAvailability>();
   const listeners = new Set<(server: string, state: ToolAvailability) => void>();
   const update = (server: string, state: ToolAvailability) => {
@@ -415,6 +436,7 @@ export async function connectMcp(
       log("MCP server github unavailable (GITHUB_REGISTRATION_REJECTED)");
       continue;
     }
+    if (gate) githubReader = createGithubReader(gate, server.timeoutMs);
     if (registrations.length === 0) {
       await connection.close().catch(() => {});
       log(`MCP server ${server.name} provides no usable tools`);
@@ -453,6 +475,7 @@ export async function connectMcp(
   let closed = false;
   return {
     extensions,
+    ...(githubReader === undefined ? {} : { github: githubReader }),
     pins: { tools: config?.tools, residentToolBudgetTokens: config?.residentToolBudgetTokens },
     subscribeAvailability(listener) {
       listeners.add(listener);
@@ -554,6 +577,56 @@ export function buildMcpTool(
       };
     },
   }), { governance });
+}
+
+/**
+ * Host-initiated snapshot reads over the same gate and approval used by the model-facing MCP tools.
+ * Each call still performs its own declaration reconciliation; a failure disables GitHub exactly as
+ * a direct MCP call would. Calls are sequential because the gate admits one operation at a time.
+ */
+function createGithubReader(gate: GithubGate, timeoutMs: number): GithubReader {
+  const read = async (name: string, args: Record<string, unknown>, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    const result = await gate.call(name, args, signal, Math.min(timeoutMs, GITHUB_READ_TIMEOUT_MS));
+    const text = githubResultText(result);
+    if (result.isError === true) {
+      throw Object.assign(new Error(`GitHub ${name} reported an error`), {
+        code: "GITHUB_TOOL_ERROR", tool: name, reply: text,
+      });
+    }
+    return text;
+  };
+  return {
+    async readRepoStatus(owner, repo, options = {}) {
+      const signal = options.signal;
+      const pullRequests = await read("list_pull_requests", {
+        owner, repo, state: "open", perPage: GITHUB_READ_PAGE_SIZE, page: 1,
+      }, signal);
+      const issues = await read("list_issues", {
+        owner, repo, state: "OPEN", perPage: GITHUB_READ_PAGE_SIZE,
+      }, signal);
+      const workflowRuns = await read("actions_list", {
+        owner, repo, method: "list_workflow_runs", perPage: GITHUB_READ_PAGE_SIZE, page: 1,
+      }, signal);
+      return { pullRequests, issues, workflowRuns };
+    },
+  };
+}
+
+/** Only text is supported, and the whole result is bounded before it can enter a transcript. */
+function githubResultText(result: CallToolResult): string {
+  if (!Array.isArray(result.content)) throw coded("GitHub returned no content array", "GITHUB_RESULT_REJECTED");
+  let bytes = 0;
+  const parts: string[] = [];
+  for (const block of result.content) {
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") {
+      throw coded("GitHub returned unsupported content", "GITHUB_RESULT_REJECTED");
+    }
+    bytes += Buffer.byteLength(block.text);
+    if (bytes > MAX_MESSAGE_BYTES) throw coded("GitHub response exceeds the output budget", "GITHUB_RESULT_REJECTED");
+    parts.push(block.text);
+  }
+  return parts.join("\n");
 }
 
 /**

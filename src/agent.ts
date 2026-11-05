@@ -16,6 +16,7 @@ import { RemoteExecutionEnv } from "./execution/remote-env.js";
 import { connectRpcClient } from "./execution/rpc-connect.js";
 import { RpcClientError, type RpcExecutionClient } from "./execution/rpc-client.js";
 import { RemoteRpcExecutionEnv } from "./execution/remote-rpc-env.js";
+import { createGithubReadExtension } from "./github-read.js";
 import { connectMcp, type McpHost } from "./mcp.js";
 import { readMcpConfig } from "./mcp-config.js";
 import type { TextRequest } from "./messages.js";
@@ -272,6 +273,9 @@ Your final response will be delivered to Telegram as plain text: do not use Mark
   // Pin handling reinstalls these same extensions; they must already carry the script policy.
   const mcpExtensions = orderedMcpExtensions(mcp.extensions).map(scriptPolicy);
   for (const extension of mcpExtensions) registry.install(extension);
+  // Resident and model-only: the composition root does not pass it through scriptPolicy, so code
+  // mode cannot reach GitHub through this tool. It exists only while the GitHub gate is open.
+  if (mcp.github !== undefined) registry.install(createGithubReadExtension(mcp.github));
   if (codemode !== undefined) registry.install(codemode.extension);
 
   let harness: Awaited<ReturnType<typeof Harness.open>>;
