@@ -76,3 +76,15 @@ Aster 之前只在收到 Telegram 消息时运行。需要一种“用户没有�
 - **上下文硬上限**：初版未裁剪 blockers / nextStep，可能在清空 goal 后仍超限。改为省略完整条目或字段，在快照的 `omittedFields` 中明确记录；不生成空 goal，也不把 active task 改成 none；最终强制检查 JSON 字符长度。初始 20 条 recent 上限也记录为裁剪，Runner 不再提前静默丢弃片段。
 - **幂等与投递**：Trigger 重放查询补回关联元数据，保证与首次返回契约一致；新增真实 Inbox 分段确认、未知投递与幂等入队回归。禁用后的 CLI trigger 在打开数据库前拒绝，避免意外创建状态文件。
 - 验证：新增跨日积压与时区边界、旧库配额迁移、最大合法 task、条数裁剪、Trigger 重放、Submission 本地身份丢失、最终回复超预算、部分发送后未知结果的回归。`npm test` 为 437 pass / 19 skip / 0 fail；随后新增 CLI 进程测试 2 / 2 通过；最终 `npm run check`、`npm run build` 及 proactive / loop-guard / trace 相关回归 54 / 54 通过。真实模型、Telegram 与 Langfuse 部署验收仍待执行，不能用自动化替代。
+
+### 2026-11-05：生产部署与真实环境验收
+
+- 部署：镜像 `aster:pr66-3406db8`（提交 `3406db8`），Compose 项目 `aster-production`（基础 + MITM + RPC），数据卷 `personal-agent-data`。`.env` 设置 `PROACTIVE_ENABLED=1`、`PROACTIVE_TIMEZONE=Asia/Shanghai`（沿用 `MEMORY_TIMEZONE`），其余取默认；启动后 `proactive.sqlite` 出现 `proactive_triggers`、`proactive_runs`、`proactive_observed_urls`、`proactive_seen_urls`。
+- 触发与调度（步骤 2～3）：2026-11-05 12:41 CST 启动后补建 `daily:2026-11-05`；手工 `trigger` 返回 `created:true` / `queued`，约 10～40 秒进入 `running` 并写入 `conversationId`、`submissionId`、`memoryRevision=13` 与 `contextSummary`。
+- 真实决策与工具（步骤 5～6）：Run 1（daily）执行 2 次 `web_search` 后 `skip`；Run 4 执行 4 次工具调用后 `notify` 3 条，`quotaDate=2026-11-05`，URL 均来自本 Run 的 `proactive_observed_urls`；Inbox `requestId=proactive:4` 状态 `sent`、`messageId=580`，Run 状态 `delivered`。应用日志中观察到真实 `web_fetch` 调用；Telegram 侧由 Bot API 确认已发送，Owner 目视确认仍需本人补充。
+- 隔离（步骤 7）：Run 1～8 各自使用独立 ownerless 会话（`conversations.owner_conversation_id` 均为空），主会话 `id=1` 的最后一个 entry 始终是主动功能上线前的 `3257`，没有新增主动消息或伪造用户消息。
+- 每日接受配额（步骤 9）：Run 4 接受 `notify` 后，Run 5～8 的决策均被宿主转为 `skipped` / `daily-cap`，没有第二次投递。
+- 恢复（步骤 10 的已保存 Submission 分支）：Run 7、Run 8 在 `running` 且已保存 `submissionId` 时对容器执行 `SIGKILL`；重新启动后沿用相同 `conversationId` / `submissionId` 继续，最终正常收敛，token 预算按保存进度继续累计（Run 7 恢复后为 68,980）。`docker kill` 属于人工停止，Docker 不会按 `unless-stopped` 自动重启，运维需显式 `docker compose up -d`。
+- 失败与资源边界（步骤 11）：Run 2 输出非法 JSON，`failed` + `PROACTIVE_DECISION_INVALID_JSON`；Run 3 在默认 `PROACTIVE_MAX_TOKENS=60000` 下累计 64,696 token，`failed` + `PROACTIVE_BUDGET_TOKENS`。两次失败均未向 Telegram 发送消息；提高生产配置后 Run 4 正常完成。默认 60,000 对 `deepseek-flash` 偏紧，生产以 `PROACTIVE_MAX_TOKENS=120000` 运行；是否上调默认值待单独评估。
+- 关闭开关（步骤 14）：Run 8 尚未完成时把 `PROACTIVE_ENABLED` 改为 `0` 并启动，应用显式退出并打印 “Unfinished proactive work requires PROACTIVE_ENABLED=1 and its state store…”，不恢复未完成 Run；此时 CLI `trigger` 退出码 1 并拒绝执行。恢复为 `1` 后 Run 8 继续并收敛。
+- 未能在生产直接复现的项：`no-new-items` 去重（真实模型按提示避开了已投递 URL，宿主去重由回归覆盖）、`delivery_uncertain`（需要制造未知发送结果，已由 Inbox 分段发送回归覆盖）、Langfuse Span 顺序（生产 Langfuse 凭据为 OpenBao 占位符，部署侧无法直接查询，顺序由 trace 回归覆盖）、`memoryRevision` 变化（需 Owner 新建或更新偏好，Runner 回归已覆盖）、Owner 目视确认 Telegram 消息。
