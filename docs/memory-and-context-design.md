@@ -4,7 +4,7 @@
 
 状态：方案已确认。MEM-01 已完成契约冻结与底座时序验证（结论见第 12 节），MEM-02 已实现 Working 状态与版本化更新（结论见第 13 节），MEM-03 已实现纯 Context 规划与快照渲染（结论见第 14 节），MEM-04 已实现每日 Markdown 的发布与检索（结论见第 15 节），MEM-05 已实现可恢复的增量归档（结论见第 16 节），MEM-06 已实现原生压缩接入与周期快照切换（结论见第 17 节），MEM-07 已完成组合接入并注册到运行中的 agent（结论见第 18 节）；MEM-08 已执行验收与 DeepSeek 真实模型、目标服务器补测（结论与未解决项见第 19 节及 [验收记录](memory-verification.md)；其他提供商质量与真实窗口标定仍待验证）。编制日期：2026-10-25。本文完整替换此前的记忆设计计划，是本轮架构、数据归属和模块 Interface 的权威来源；实施拆分与完成条件见 [实施 issues](memory-implementation-issues.md)。
 
-本文保留记忆架构与各阶段实施结论。第 12～19 节中的测试数量、待办与验证结论按原阶段及后续补测解读，不构成其他功能的开发限制。新功能采用 [按功能的临时 spec](README.md#按功能的临时规格)，实际运行与生产证据见 [README](../README.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.3.0 为准。
+本文保留记忆架构与各阶段实施结论。第 12～19 节中的测试数量、待办与验证结论按原阶段及后续补测解读，不构成其他功能的开发限制。新功能采用 [按功能的临时 spec](README.md#按功能的临时规格)，实际运行与生产证据见 [README](../README.md)，请求、工具和投递契约见 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)。底座以已安装的 pi durable / pi-ai 1.5.0 为准。
 
 ## 1. 交付目标与范围
 

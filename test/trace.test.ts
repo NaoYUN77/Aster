@@ -6,21 +6,15 @@ import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { LangfuseSpanProcessor } from "@langfuse/otel";
-import type { ConversationId, TaskId, ToolExecutionResult, ToolHookCall } from "@earendil-works/pi-durable";
+import type { ConversationId, TaskId } from "@earendil-works/pi-durable";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { nestedToolObservationName } from "../src/codemode.js";
 import { ConfigurationError, readTraceConfig } from "../src/config.js";
 import {
   beginRequest,
-  beginTrace,
-  currentSpan,
   recordGeneration,
   recordLoopGuard,
   recordRegistryDecision,
   startTrace,
-  traceChild,
-  traceExtension,
-  type TraceRuntime,
 } from "../src/trace.js";
 
 function setup() {
@@ -33,18 +27,6 @@ function spanByName(spans: readonly ReadableSpan[], name: string): ReadableSpan 
   const span = spans.find((candidate) => candidate.name === name);
   assert.ok(span, `missing span ${name}; got ${spans.map(({ name }) => name).join(", ")}`);
   return span;
-}
-
-function afterToolHook(runtime: TraceRuntime) {
-  const registration = runtime.extension.hooks?.[0];
-  assert.ok(registration, "trace extension registers one hook");
-  return (registration.handlers as {
-    afterTool(
-      call: ToolHookCall,
-      result: ToolExecutionResult,
-      api: { conversationId: ConversationId; taskId: TaskId },
-    ): unknown;
-  }).afterTool;
 }
 
 function assistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
@@ -71,14 +53,6 @@ function assistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantM
 
 test("trace config reads Langfuse keys and keeps tracing optional", () => {
   assert.deepEqual(readTraceConfig({}), { enabled: false });
-  assert.equal(readTraceConfig({}).captureContent, undefined, "content capture is off by default");
-  assert.equal(readTraceConfig({ LANGFUSE_CAPTURE_CONTENT: "1" }).captureContent, true);
-  assert.equal(readTraceConfig({ LANGFUSE_CAPTURE_CONTENT: "true" }).captureContent, true);
-  assert.equal(readTraceConfig({ LANGFUSE_CAPTURE_CONTENT: "0" }).captureContent, undefined);
-  assert.throws(
-    () => readTraceConfig({ LANGFUSE_CAPTURE_CONTENT: "yes" }),
-    (error: unknown) => error instanceof ConfigurationError,
-  );
 
   const configured = readTraceConfig({
     LANGFUSE_PUBLIC_KEY: "pk-test",
@@ -107,12 +81,11 @@ test("trace config reads Langfuse keys and keeps tracing optional", () => {
   );
 });
 
-test("request, codemode, nested tool and RPC spans share one trace and nest", () => {
+test("a request and its registry decisions share one trace and nest", () => {
   const { exporter, provider } = setup();
   let logs = 0;
   const runtime = startTrace({ enabled: true }, () => { logs += 1; }, { tracerProvider: provider });
   assert.ok(runtime);
-  assert.equal(traceExtension(), runtime.extension, "the composition root installs this hook carrier");
 
   const request = beginRequest({
     conversationId: 1,
@@ -120,56 +93,26 @@ test("request, codemode, nested tool and RPC spans share one trace and nest", ()
     fields: { textBytes: 123 },
   });
   assert.ok(request);
-  const codemode = beginTrace({
+  recordRegistryDecision({
+    tool: "read",
+    decision: "allow",
+    code: "TOOL_ALLOWED",
+    authority: "owner",
     conversationId: 1 as ConversationId,
     taskId: 1 as TaskId,
-    callId: "call-1",
-    name: "codemode",
-    fields: { scriptBytes: 42 },
   });
-  assert.ok(codemode);
-
-  const nested = codemode.run(() => {
-    recordRegistryDecision({
-      tool: "read",
-      decision: "allow",
-      code: "TOOL_ALLOWED",
-      authority: "owner",
-      conversationId: 1 as ConversationId,
-      taskId: 1 as TaskId,
-    });
-    return traceChild(nestedToolObservationName("read"), { tool: "read", argsBytes: 9 }, "tool");
-  });
-  assert.ok(nested);
-  const rpc = nested.run(() => currentSpan()?.child("rpc.file.readText", { pathBytes: 8 }));
-  assert.ok(rpc);
-  rpc.end("ok");
-  nested.end("ok", { isError: false, outputItems: 1 });
-  afterToolHook(runtime)(
-    { type: "toolCall", id: "call-1", name: "codemode", arguments: {} },
-    { isError: false, output: [{ type: "text", text: "ok" }], diagnostics: [] },
-    { conversationId: 1 as ConversationId, taskId: 1 as TaskId },
-  );
   request.end("ok", { replyBytes: 2 });
 
   const spans = exporter.getFinishedSpans();
   const requestSpan = spanByName(spans, "agent.request");
-  const codemodeSpan = spanByName(spans, "codemode");
-  const nestedSpan = spanByName(spans, "tool.read");
-  const rpcSpan = spanByName(spans, "rpc.file.readText");
   const decision = spanByName(spans, "registry.decision");
 
-  for (const span of [requestSpan, codemodeSpan, nestedSpan, rpcSpan, decision]) {
-    assert.equal(span.spanContext().traceId, request.traceId, `${span.name} joins the request trace`);
-  }
-  assert.equal(codemodeSpan.parentSpanContext?.spanId, request.spanId);
-  assert.equal(nestedSpan.parentSpanContext?.spanId, codemode.spanId);
-  assert.equal(rpcSpan.parentSpanContext?.spanId, nested.spanId);
-  assert.equal(decision.parentSpanContext?.spanId, codemode.spanId);
-  assert.equal(requestSpan.attributes["langfuse.observation.metadata.scriptBytes"], undefined);
-  assert.equal(codemodeSpan.attributes["langfuse.observation.metadata.scriptBytes"], "42");
-  assert.equal(codemodeSpan.attributes["langfuse.observation.metadata.outcome"], "\"ok\"");
+  assert.equal(decision.spanContext().traceId, request.traceId, "the decision joins the request trace");
+  assert.equal(decision.parentSpanContext?.spanId, request.spanId);
+  assert.equal(requestSpan.attributes["langfuse.observation.metadata.textBytes"], "123");
+  assert.equal(requestSpan.attributes["langfuse.observation.metadata.outcome"], "\"ok\"");
   assert.equal(decision.attributes["langfuse.observation.metadata.decision"], "\"allow\"");
+  assert.equal(requestSpan.attributes["langfuse.observation.input"], undefined, "metadata only by default");
   assert.equal(logs, 0, "no tracing warnings during a healthy export");
 
   return runtime.close();
@@ -186,7 +129,7 @@ test("an LLM generation joins the request trace without uploading prompt or outp
     content: [
       { type: "thinking", thinking: "THINKING_SECRET" },
       { type: "text", text: "PROMPT_SECRET body" },
-      { type: "toolCall", id: "tool-1", name: "codemode", arguments: {} },
+      { type: "toolCall", id: "tool-1", name: "bash", arguments: {} },
     ],
     errorMessage: "PROVIDER_SECRET error text",
   }), { conversationId: 2 as ConversationId, taskId: 2 as TaskId });
@@ -351,7 +294,6 @@ test("an exporter failure never escapes the tracing boundary", async () => {
 
 test("disabled tracing is a no-op and a requested but keyless runtime logs once", async () => {
   assert.equal(startTrace({ enabled: false }), undefined);
-  assert.equal(traceExtension(), undefined);
   assert.equal(beginRequest({ conversationId: 5 }), undefined);
   assert.doesNotThrow(() => recordGeneration(assistantMessage(), {
     conversationId: 5 as ConversationId,

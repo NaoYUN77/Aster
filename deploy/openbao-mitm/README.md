@@ -15,6 +15,8 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 
 替换策略见 [`addon/vault_placeholders.py`](addon/vault_placeholders.py)，支持的主机映射以 `allowlist.json` 为唯一来源。
 
+- **主机匹配不含端口，明文 HTTP 也在替换范围内**：`MAGPIE_API_KEY` 这类自建网关是 `http://` 私网地址（模型目录与推理同一地址），代理照样接管（不限于 CONNECT／TLS）。匹配只看 `pretty_host`，端口不参与，所以同一台机器有几个入口就要在 allowlist 里列几个主机（例如 VPC 的 `10.1.4.9` 与 Tailscale 的 `100.66.135.123`）。
+
 > **历史背景**：[ADR-0005](../../docs/adr/0005-remove-agent-vault-single-service.md) 删除的是依赖 Infisical 云的旧 Agent Vault 子系统；本方案使用同机自建的 `aster-openbao` + `aster-mitm` 内网服务完成出站占位替换。
 
 ## 目录结构
@@ -45,12 +47,16 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 
 | 变量名（`.env`） | 是否占位 | 占位符值 | OpenBao KV 路径 | 允许出站主机 |
 | --- | --- | --- | --- | --- |
-| `TELEGRAM_BOT_TOKEN` | 是 | `__vault_TELEGRAM_BOT_TOKEN__` | `secret/aster/TELEGRAM_BOT_TOKEN` | `api.telegram.org` |
+| `TELEGRAM_BOT_TOKEN` | 是（`CHANNEL=telegram`，默认） | `__vault_TELEGRAM_BOT_TOKEN__` | `secret/aster/TELEGRAM_BOT_TOKEN` | `api.telegram.org` |
+| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | 是（`CHANNEL=slack` 时） | `__vault_SLACK_BOT_TOKEN__` / `__vault_SLACK_APP_TOKEN__` | `secret/aster/<NAME>` | `slack.com`（Socket Mode 的 `wss-primary.slack.com` 只在 URL 里带票据，不带凭据头，无需列出） |
 | `DEEPSEEK_API_KEY` | 是 | `__vault_DEEPSEEK_API_KEY__` | `secret/aster/DEEPSEEK_API_KEY` | `api.deepseek.com` |
 | `DEEPSEEK_WEB_API_KEY` | 是（可选） | `__vault_DEEPSEEK_WEB_API_KEY__` | `secret/aster/DEEPSEEK_WEB_API_KEY` | `api.deepseek.com` |
+| `EXA_API_KEY` | 是（可选） | `__vault_EXA_API_KEY__` | `secret/aster/EXA_API_KEY` | `api.exa.ai` |
 | 其他提供商 `*_API_KEY` | 是（按需） | `__vault_<NAME>__` | `secret/aster/<NAME>` | 见 `addon/allowlist.json` |
-| `TELEGRAM_OWNER_ID` | 否 | 数值用户 ID（进程内比对，不出站） | — | — |
-| `MODEL_PROVIDER` / `MODEL_ID` / `DATA_DIR` / `MEMORY_*` | 否 | 普通配置值 | — | — |
+| `MAGPIE_API_KEY` | 是（`MODEL_PROVIDER` 声明为 `magpie` 时） | `__vault_MAGPIE_API_KEY__` | `secret/aster/MAGPIE_API_KEY` | `10.1.4.9`、`100.66.135.123` |
+| `TELEGRAM_OWNER_ID` / `SLACK_OWNER_ID` | 否 | 数值用户 ID / Slack member ID（进程内比对，不出站） | — | — |
+| `CHANNEL` | 否 | `telegram`（默认）或 `slack` | — | — |
+| `MODEL_PROVIDER` / `MODEL_ID` / `DATA_DIR` / `MEMORY_*` / `PROVIDERS_CONFIG` | 否 | 普通配置值 | — | — |
 | `LANGFUSE_SECRET_KEY` | 是（启用 Langfuse Trace 时） | `__vault_LANGFUSE_SECRET_KEY__` | `secret/aster/LANGFUSE_SECRET_KEY` | `cloud.langfuse.com`、`us.cloud.langfuse.com` |
 | `LANGFUSE_PUBLIC_KEY` | 否（公开值） | 明文即可；要统一管理也可用 `__vault_LANGFUSE_PUBLIC_KEY__` | `secret/aster/LANGFUSE_PUBLIC_KEY`（可选） | `cloud.langfuse.com`、`us.cloud.langfuse.com` |
 
@@ -166,7 +172,7 @@ ASTER_OPENBAO_SECRETS=$HOME/Aster/secrets/openbao ./bootstrap.sh
 `docker-compose.mitm.yml` 为 `personal-agent` 注入的环境变量与挂载：
 - `HTTPS_PROXY=http://aster-mitm:14322`、`HTTP_PROXY=http://aster-mitm:14322`（本身不含凭据；`configureEnvProxy()` 启动时把 token 注入 URL userinfo）
 - `NO_PROXY=localhost,127.0.0.1,::1,aster-mitm`（只保留回环与代理自身；OpenBao 不在应用的任何可达网络上）
-- `NODE_USE_ENV_PROXY=1`（配合应用启动时的 `configureEnvProxy()` 与 `TelegramClient` 的 `HttpsAgent({ keepAlive: true, proxyEnv })`，使 LLM、`web_search`/`web_fetch`、MCP 与 grammY Telegram Bot API 全部走代理）
+- `NODE_USE_ENV_PROXY=1`（配合应用启动时的 `configureEnvProxy()` 与 `TelegramClient` 的 `HttpsAgent({ keepAlive: true, proxyEnv })`，使 LLM、`web_search`/`web_fetch`/`exa_search`、MCP 与 grammY Telegram Bot API 全部走代理）
 - `NODE_EXTRA_CA_CERTS=/run/aster/mitmproxy-ca.pem`（只读挂载 `${ASTER_MITM_CA_CERT:-~/Aster/secrets/openbao/mitmproxy-ca.pem}`）
 - `ASTER_MITM_TOKEN_FILE=/run/aster/mitm-proxy-token`（只读挂载 `${ASTER_MITM_PROXY_TOKEN:-~/Aster/secrets/openbao/mitm-proxy-token}`）
 - 只加入内部网络 `aster_mitm_clients`（固定地址 `10.89.143.3`）；没有默认网络，也没有直连公网的路由
@@ -219,6 +225,24 @@ docker exec aster-production-personal-agent-1 node -e '
     },
     body: JSON.stringify({ query: "example", max_results: 1 }),
   }).then((r) => console.log("web_search status:", r.status));
+'
+
+# 3b. 经 MITM 调用内置 exa_search（Exa Search 端点）；请求体与 src/exa-search.ts 一致
+docker exec aster-production-personal-agent-1 node -e '
+  const fs = require("node:fs");
+  const proxy = new URL(process.env.HTTPS_PROXY);
+  proxy.username = "aster";
+  proxy.password = fs.readFileSync("/run/aster/mitm-proxy-token", "utf8").trim();
+  process.env.HTTPS_PROXY = process.env.HTTP_PROXY = proxy.toString();
+  require("node:http").setGlobalProxyFromEnv(process.env);
+  fetch("https://api.exa.ai/search", {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer __vault_EXA_API_KEY__",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query: "example", type: "auto", numResults: 1, contents: { highlights: true } }),
+  }).then((r) => console.log("exa_search status:", r.status));
 '
 
 # 4. 越权主机拦截验证：把占位符发往非白名单主机必须返回 403

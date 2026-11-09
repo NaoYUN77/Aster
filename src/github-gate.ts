@@ -3,7 +3,7 @@ import { mkdir, open, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { McpAbortError } from "@earendil-works/pi-mcp";
 import { Compile } from "typebox/compile";
-import type { TSchema } from "@earendil-works/pi-ai";
+import type { TSchema } from "typebox";
 import { buildGithubApproval, githubCanonical, githubEffectiveTool, githubRegisteredName, githubValidateArguments, verifyGithubApproval, type GithubPolicyConfig } from "./github-policy.js";
 import type { McpConnection, McpToolInfo } from "./mcp.js";
 

@@ -45,10 +45,10 @@ test("inbox rejects identity and request-content conflicts without advancing off
   const directory = await mkdtemp(join(tmpdir(), "pa-inbox-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
   try {
-    inbox.bindIdentity("99", "42");
+    inbox.bindIdentity("telegram", "99", "42");
     // Operator-facing: the startup log prints this message instead of a generic failure code.
-    assert.throws(() => inbox.bindIdentity("100", "42"), StateError);
-    assert.throws(() => inbox.bindIdentity("99", "43"), StateError);
+    assert.throws(() => inbox.bindIdentity("telegram", "100", "42"), StateError);
+    assert.throws(() => inbox.bindIdentity("telegram", "99", "43"), StateError);
     inbox.accept(13, request);
     inbox.accept(13, request);
     assert.throws(() => inbox.accept(14, { ...request, text: "different" }));
@@ -96,13 +96,12 @@ test("restart preserves confirmed segments and quarantines only the interrupted 
 test("reconciling partial delivery sends stored remainder without rerunning agent", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-delivery-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory, mcpConfigPath: join(directory, "mcp.json"), mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } };
   let executions = 0;
   const firstShutdown = new AbortController();
   const sent: string[] = [];
   try {
     inbox.accept(13, request);
-    await serveTelegram(config, "99", inbox, async () => { executions++; return "a".repeat(4000) + "remaining"; }, firstShutdown.signal, {
+    await serveTelegram("42", "99", inbox, async () => { executions++; return "a".repeat(4000) + "remaining"; }, firstShutdown.signal, {
       send: async (_chat, text) => {
         if (sent.length === 1) throw new Error("lost response");
         sent.push(text);
@@ -114,7 +113,7 @@ test("reconciling partial delivery sends stored remainder without rerunning agen
     assert.equal(inbox.blocked()[0]?.part, 1);
     inbox.resolvePart(request.requestId, 1, "retry");
     const secondShutdown = new AbortController();
-    await serveTelegram(config, "99", inbox, async () => { throw new Error("must not rerun"); }, secondShutdown.signal, {
+    await serveTelegram("42", "99", inbox, async () => { throw new Error("must not rerun"); }, secondShutdown.signal, {
       send: async (_chat, text) => { sent.push(text); return "102"; },
       updates: async () => { secondShutdown.abort(); return []; },
     });
@@ -172,11 +171,11 @@ test("a registered provider requires only its own API key", () => {
     DEEPSEEK_API_KEY: "secret",
   });
   assert.equal(config.provider, "deepseek");
-  assert.equal(config.webApiKey, undefined);
+  assert.equal(config.deepseekWebApiKey, undefined);
   assert.equal(readConfig({
     TELEGRAM_BOT_TOKEN: "token", TELEGRAM_OWNER_ID: "42", MODEL_PROVIDER: "deepseek",
     MODEL_ID: "deepseek-flash", DEEPSEEK_API_KEY: "secret", DEEPSEEK_WEB_API_KEY: " web-secret ",
-  }).webApiKey, "web-secret");
+  }).deepseekWebApiKey, "web-secret");
   assert.throws(() => readConfig({
     TELEGRAM_BOT_TOKEN: "token", TELEGRAM_OWNER_ID: "42", MODEL_PROVIDER: "deepseek", MODEL_ID: "deepseek-flash",
   }), /Missing configuration: DEEPSEEK_API_KEY/);
@@ -192,13 +191,12 @@ test("an unknown model id is rejected with provider examples", () => {
 test("oversized input is refused explicitly instead of being silently dropped", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-input-limit-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory, mcpConfigPath: join(directory, "mcp.json"), mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } };
   try {
     inbox.accept(1, { ...request, text: "x".repeat(16_001) });
     const shutdown = new AbortController();
     const sent: string[] = [];
     let executions = 0;
-    await serveTelegram(config, "99", inbox, async () => { executions++; return "must not run"; }, shutdown.signal, {
+    await serveTelegram("42", "99", inbox, async () => { executions++; return "must not run"; }, shutdown.signal, {
       send: async (_chat, text) => { sent.push(text); return "1"; },
       updates: async () => { shutdown.abort(); return []; },
     });
@@ -363,7 +361,6 @@ test("prune retains the newest 100 sent requests and every unfinished request", 
 test("Telegram rejection is failed while a transport failure is uncertain, and neither resends", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-send-errors-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory, mcpConfigPath: join(directory, "mcp.json"), mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } };
   try {
     inbox.accept(1, { ...request, requestId: "telegram:99:1" });
     inbox.accept(2, { ...request, requestId: "telegram:99:2" });
@@ -371,7 +368,7 @@ test("Telegram rejection is failed while a transport failure is uncertain, and n
     const shutdown = new AbortController();
     let executions = 0;
     let sends = 0;
-    await serveTelegram(config, "99", inbox, async (job) => {
+    await serveTelegram("42", "99", inbox, async (job) => {
       executions++;
       return `reply ${job.requestId}`;
     }, shutdown.signal, {
@@ -399,12 +396,11 @@ test("Telegram rejection is failed while a transport failure is uncertain, and n
 test("a truncated agent answer is delivered with an explicit incompleteness notice", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-truncated-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory, mcpConfigPath: join(directory, "mcp.json"), mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } };
   try {
     inbox.accept(1, { ...request, requestId: "telegram:99:1" });
     const sent: string[] = [];
     const shutdown = new AbortController();
-    await serveTelegram(config, "99", inbox, async () => {
+    await serveTelegram("42", "99", inbox, async () => {
       throw Object.assign(new Error("Agent reply was truncated"), { code: "AGENT_TRUNCATED", partialReply: "partial answer" });
     }, shutdown.signal, {
       updates: async () => { shutdown.abort(); return []; },
@@ -443,12 +439,11 @@ test("malformed Telegram updates are rejected at the boundary", () => {
 test("invalid updates are skipped without writing an unusable checkpoint", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-invalid-update-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory, mcpConfigPath: join(directory, "mcp.json"), mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } };
   try {
     const sent: string[] = [];
     const shutdown = new AbortController();
     let polls = 0;
-    await serveTelegram(config, "99", inbox, async () => "answer", shutdown.signal, {
+    await serveTelegram("42", "99", inbox, async () => "answer", shutdown.signal, {
       updates: async () => {
         polls++;
         if (polls > 1) {
@@ -472,7 +467,7 @@ test("invalid updates are skipped without writing an unusable checkpoint", async
     try {
       let polls = 0;
       const stop = new AbortController();
-      await serveTelegram(config, "99", empty, async () => "unused", stop.signal, {
+      await serveTelegram("42", "99", empty, async () => "unused", stop.signal, {
         updates: async () => {
           polls++;
           if (polls === 1) return [{ message: update.message } as unknown as Update];
@@ -496,7 +491,6 @@ test("invalid updates are skipped without writing an unusable checkpoint", async
 test("a failed agent session stops polling and leaves the request pending", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-session-failure-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory, mcpConfigPath: join(directory, "mcp.json"), mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } };
   try {
     inbox.accept(1, { ...request, requestId: "telegram:99:1" });
     const fatal = Object.assign(
@@ -505,7 +499,7 @@ test("a failed agent session stops polling and leaves the request pending", asyn
     );
     let sends = 0;
     await assert.rejects(
-      serveTelegram(config, "99", inbox, async () => { throw fatal; }, new AbortController().signal, {
+      serveTelegram("42", "99", inbox, async () => { throw fatal; }, new AbortController().signal, {
         updates: async () => { throw new Error("must not keep polling after a fatal error"); },
         send: async () => { sends++; return "1"; },
       }),
@@ -532,9 +526,8 @@ test("a local storage failure while saving a reply is fatal", async () => {
     next: () => ({ ...request, requestId: "telegram:99:1", status: "pending", reply: null }),
     saveReply: () => { throw new Error("database is locked"); },
   } as unknown as Inbox;
-  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: "unused", mcpConfigPath: "unused/mcp.json", mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } };
   await assert.rejects(
-    serveTelegram(config, "99", inbox, async () => "reply", new AbortController().signal, {
+    serveTelegram("42", "99", inbox, async () => "reply", new AbortController().signal, {
       updates: async () => [],
       send: async () => "1",
     }),
@@ -545,13 +538,12 @@ test("a local storage failure while saving a reply is fatal", async () => {
 test("a model failure is delivered as a notice and later requests still run", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-model-failure-"));
   const inbox = new Inbox(join(directory, "inbox.sqlite"));
-  const config: ReturnType<typeof readConfig> = { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory, mcpConfigPath: join(directory, "mcp.json"), mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } };
   try {
     inbox.accept(1, { ...request, requestId: "telegram:99:1" });
     inbox.accept(2, { ...request, requestId: "telegram:99:2" });
     const sent: string[] = [];
     const shutdown = new AbortController();
-    await serveTelegram(config, "99", inbox, async (job) => {
+    await serveTelegram("42", "99", inbox, async (job) => {
       if (job.requestId === "telegram:99:1") throw Object.assign(new Error("model failed"), { code: "AGENT_UNANSWERED" });
       return "second answer";
     }, shutdown.signal, {

@@ -1,6 +1,6 @@
 # 一次性提醒
 
-提醒是宿主自己保存、到点直接发送到 Owner 私有 Telegram 会话的一条文本消息。它不经过模型、PTC 脚本或 agent session，也不承诺 Telegram 恰好收到一次。取舍见 [ADR-0022](adr/reminders/0022-reminders-in-process-scheduler.md)。
+提醒是宿主自己保存、到点直接发送到 Owner 私有会话的一条文本消息。它不经过模型或 agent session，也不承诺恰好收到一次。会话由当前渠道决定（Telegram 或 Slack，见 [Slack 通道](slack.md)），提醒逻辑与渠道无关。取舍见 [ADR-0022](adr/reminders/0022-reminders-in-process-scheduler.md)。
 
 ## 范围与模块边界
 
@@ -18,13 +18,13 @@
 ## 调用链
 
 ```text
-Telegram 消息 -> Inbox -> agent loop -> reminder_create
+当前渠道的消息 -> Inbox -> agent loop -> reminder_create
                                          -> ReminderStore.create() -> reminders.sqlite (pending)
 
-ReminderScheduler 循环（与长轮询并行）
+ReminderScheduler 循环（与收件循环并行）
   -> claimDue()            pending -> queued（同一条 SQL 条件更新，只领取一次）
-  -> beginSend()           queued  -> sending（只有成功者调用 Telegram）
-  -> TelegramClient.send() 固定发送到 config.ownerId 的私有会话
+  -> beginSend()           queued  -> sending（只有成功者调用渠道）
+  -> DeliveryChannel.send() 固定发送到 config.channel.ownerId 的私有会话
   -> markSent() / markFailure()  -> sent / failed / uncertain
 ```
 
@@ -54,7 +54,7 @@ CREATE TABLE reminders (
 
 ```text
 pending --claimDue--> queued --beginSend--> sending --成功--> sent
-   |                    |                       |--Telegram 4xx--> failed
+   |                    |                       |--渠道明确拒绝--> failed
    |                    |                       |--超时/断线/关停/崩溃--> uncertain
    |                    |--cancel--> cancelled
    |--cancel--> cancelled
@@ -66,14 +66,14 @@ pending --claimDue--> queued --beginSend--> sending --成功--> sent
 
 | 情形 | 记录 | 是否自动重发 |
 | --- | --- | --- |
-| Telegram 返回 4xx | `failed` + `TELEGRAM_<code>` | 否 |
+| 渠道明确拒绝（如 Telegram 4xx、Slack `channel_not_found`） | `failed` + `TELEGRAM_<code>` / `SLACK_<CODE>` | 否 |
 | 超时、断线、发送中被取消 | `uncertain` + `TIMEOUT` / `EXECUTION_ERROR` | 否 |
 | 进程在发送前崩溃（`queued`） | 启动时回到 `pending` | 是，下次扫描发送 |
 | 进程在发送中崩溃（`sending`） | 启动时记 `uncertain` + `PROCESS_INTERRUPTED` | 否 |
 | 进程在发送后崩溃（已写 `sent`） | 保持 `sent` | 否 |
 | 取消与领取竞争 | 取消先成功则 `cancelled`；发送已开始则返回 `REMINDER_NOT_CANCELLABLE` | — |
 
-“结果未知”一律记为 `uncertain`，不当作未执行。核对 Telegram 后由 Owner 人工收敛：
+“结果未知”一律记为 `uncertain`，不当作未执行。核对当前渠道实际收到的内容后由 Owner 人工收敛：
 
 ```sh
 npm run reminders -- list
@@ -85,12 +85,12 @@ CLI 不调用 `recover()`，避免与运行中的进程抢状态；`retry` 后�
 
 ## 安全与资源边界
 
-- 只能由已认证 Owner 的私有会话触发；目标 chat 来自宿主配置 `TELEGRAM_OWNER_ID`，模型参数中没有 chat id，无法指定其他会话。
+- 只能由已认证 Owner 的私有会话触发；目标会话来自宿主配置（`TELEGRAM_OWNER_ID` 或 `SLACK_OWNER_ID`），模型参数中没有 chat id，无法指定其他会话。
 - 提醒内容是数据，不进入 agent 指令或工具描述；发送文本固定为 `提醒：<content>`。
 - 内容最多 2000 字符 / 8000 字节，时区最多 64 字符；触发时刻必须显式带偏移或 `Z`，无偏移的本地时间按“歧义”拒绝，过去时间与超出上限的远期时间也拒绝。
 - 每个会话最多 `REMINDERS_MAX_PENDING` 条活跃提醒，每小时最多创建 `REMINDERS_MAX_PER_HOUR` 条。
-- 调度器每次扫描最多处理 20 条，所有异常都在调度器内捕获并只记录错误码；Telegram 或存储故障不会终止长轮询和 agent 会话。
-- 日志只包含提醒 id、状态和错误码，不记录内容与凭据。默认 Langfuse Trace 不采集内容；开发环境开启 `LANGFUSE_CAPTURE_CONTENT=1` 时，提醒工具的参数和结果会像其他工具一样出现在 Trace 中，因此该开关只用于个人开发环境。
+- 调度器每次扫描最多处理 20 条，所有异常都在调度器内捕获并只记录错误码；渠道或存储故障不会终止收件循环和 agent 会话。
+- 日志只包含提醒 id、状态和错误码，不记录内容与凭据。Langfuse Trace 只上传边界信息（id、长度、计数、错误码），提醒内容与工具参数都不进入 Trace。
 
 ## 配置
 
@@ -106,9 +106,9 @@ CLI 不调用 `recover()`，避免与运行中的进程抢状态；`retry` 后�
 ## 真实部署验收
 
 1. 构建并上线包含本功能的镜像，确认容器内 `dist/src/reminders.js` 存在、`REMINDERS_ENABLED` 未设为 `0`，且 `DATA_DIR` 指向持久化卷。
-2. 在 Telegram 私聊发送“1 分钟后提醒我喝水”。确认模型调用 `reminder_create`，回复中的 id 来自工具结果；`npm run reminders -- list` 能看到 `pending` 行，时间与 `dueAt`（UTC）一致。
-3. 等待到点，确认同一私聊收到 `提醒：喝水`；`list` 中该行为 `sent`，带 Telegram `messageId` 和 `sentAt`。
+2. 在 bot 的私有会话里（Telegram 私聊或 Slack DM）发送“1 分钟后提醒我喝水”。确认模型调用 `reminder_create`，回复中的 id 来自工具结果；`npm run reminders -- list` 能看到 `pending` 行，时间与 `dueAt`（UTC）一致。
+3. 等待到点，确认同一私聊收到 `提醒：喝水`；`list` 中该行为 `sent`，带渠道的 `messageId` 和 `sentAt`。
 4. 创建一条 3 分钟后的提醒，重启容器（`docker compose ... restart`）。确认重启后仍是 `pending`，到点正常发送；重启不产生第二次发送。
 5. 创建一条 5 分钟后的提醒并立即取消。确认到点没有消息，状态为 `cancelled`。
-6. 模拟发送失败（例如临时把 `TELEGRAM_API_ROOT` 指向不可达地址）后恢复。确认失败行不会被自动重发；检查 Telegram 后按上面的 CLI 收敛 `uncertain`。
-7. 确认普通对话、Inbox 投递、Durable Replay 与 codemode 均不受影响：提醒发送期间继续发消息，回复正常；重启后未完成的普通请求仍按原契约恢复。
+6. 模拟发送失败（Telegram 可临时把 `TELEGRAM_API_ROOT` 指向不可达地址；Slack 可临时切断出站）后恢复。确认失败行不会被自动重发；核对实际收到的内容后按上面的 CLI 收敛 `uncertain`。
+7. 确认普通对话、Inbox 投递与 Durable Replay 均不受影响：提醒发送期间继续发消息，回复正常；重启后未完成的普通请求仍按原契约恢复。

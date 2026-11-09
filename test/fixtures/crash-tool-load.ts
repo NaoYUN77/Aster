@@ -1,9 +1,9 @@
 // Exit around the one backend commit containing both native modelTools and its ledger.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { Harness, defineTool, type StorageWrite } from "@earendil-works/pi-durable";
+import { Harness, defineTool, type Storage, type StorageWrite } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { withToolLedger } from "../../src/tool-ledger.js";
@@ -21,12 +21,16 @@ registry.install(createToolSearchExtension());
 const raw = await openNodeSqliteStorage(database);
 const storage = new Proxy(raw, {
   get(target, property) {
-    if (property === "commit") return async (writes: readonly StorageWrite[], callContext: typeof context) => {
-      const append = writes.some((write) => write.type === "document.change" && write.content.kind === "base" && write.content.value.sequence === 1);
+    if (property === "commit") return async (
+      writes: Parameters<Storage["commit"]>[0],
+      receive: Parameters<Storage["commit"]>[1],
+      callContext: typeof context,
+    ) => {
+      const append = writes.flat().some((write) => write.type === "document.change" && write.content.kind === "base" && write.content.value.sequence === 1);
       if (append && window === "before") process.exit(23);
-      const seq = await target.commit(writes, callContext);
+      const result = await target.commit(writes, receive, callContext);
       if (append && window === "after") process.exit(23);
-      return seq;
+      return result;
     };
     const member = Reflect.get(target, property, target);
     return typeof member === "function" ? member.bind(target) : member;

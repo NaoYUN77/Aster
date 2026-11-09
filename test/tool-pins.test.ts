@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
@@ -124,11 +124,15 @@ test("pin changes preserve a committed memory projection whose input was not adm
     const backend = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
     storage = new Proxy(backend, {
       get(target, property) {
-        if (property === "commit") return async (writes: readonly StorageWrite[], callContext: typeof context) => {
-          if (writes.some((write) => write.type === "submission" && write.value.type === "input" && write.value.requestId === request.requestId)) {
+        if (property === "commit") return async (
+          writes: Parameters<Storage["commit"]>[0],
+          receive: Parameters<Storage["commit"]>[1],
+          callContext: typeof context,
+        ) => {
+          if (writes.flat().some((write) => write.type === "submission" && write.value.type === "input" && write.value.requestId === request.requestId)) {
             throw new Error("stop before input admission");
           }
-          return target.commit(writes, callContext);
+          return target.commit(writes, receive, callContext);
         };
         const member = Reflect.get(target, property, target);
         return typeof member === "function" ? member.bind(target) : member;
@@ -235,11 +239,15 @@ test("startup reconciles a published compaction before considering a pin boundar
     const backend = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
     storage = new Proxy(backend, {
       get(target, property) {
-        if (property === "commit") return async (writes: readonly StorageWrite[], callContext: typeof context) => {
-          const seq = await target.commit(writes, callContext);
-          if (writes.some((write) => write.type === "task" && write.value.kind === "pi.compaction"
+        if (property === "commit") return async (
+          writes: Parameters<Storage["commit"]>[0],
+          receive: Parameters<Storage["commit"]>[1],
+          callContext: typeof context,
+        ) => {
+          const result = await target.commit(writes, receive, callContext);
+          if (writes.flat().some((write) => write.type === "task" && write.value.kind === "pi.compaction"
             && write.value.state.status === "terminal" && write.value.state.outcome?.status === "completed")) published.resolve();
-          return seq;
+          return result;
         };
         const member = Reflect.get(target, property, target);
         return typeof member === "function" ? member.bind(target) : member;

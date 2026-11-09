@@ -6,7 +6,7 @@
 
 工具直接使用 pi durable 的原生定义，不另建插件协议。每个工具定义包含名称、用途、参数 schema、执行函数、结果与中断重放策略。
 
-参数 schema 使用底座支持的 TypeBox，推导静态参数类型并在执行前验证。明确必填项、可选项、单位、范围与未知字段策略。schema 验证后，执行器仍需检查权限、资源是否存在和其他业务条件。
+参数 schema 使用底座的 `@earendil-works/pi-schema` 构造器（`obj`／`opt`／`str`／`int`／`lit`／`union`／`arr`），推导静态参数类型并在执行前验证。明确必填项、可选项、单位、范围与未知字段策略。schema 验证后，执行器仍需检查权限、资源是否存在和其他业务条件。
 
 凭据、已认证用户、工作目录和服务客户端属于宿主上下文，不能由模型参数指定。工具负责将外部 API 格式转换为内部概念，并按底座原生结果契约返回。
 
@@ -24,7 +24,7 @@
 | replay | 原生工具策略，未声明时为 unsafe；不从 authz 推断重放安全性。 |
 | authz | read 或 write。内置查询与搜索工具为 read，其余保守标记 write；MCP 默认 write，仅宿主配置可逐个覆盖，不采信外部 annotations。执行时与宿主权限复核。GitHub 条目由宿主策略强制 read，且拒绝 `authz: "write"`。 |
 | githubApproval | 仅 GitHub 工具记录：来自独立批准基线的规范化指纹，包含批准版本。启动目录比较、加载账本快照与恢复闸口使用该指纹；缺省表示非 GitHub 工具或旧记录。 |
-| schemaHash | 参数 schema 的 SHA-256，小写十六进制。对象键递归排序、数组顺序保留，不含 TypeBox symbol；只记录，不处理版本漂移。 |
+| schemaHash | 参数 schema 的 SHA-256，小写十六进制。对象键递归排序、数组顺序保留，不含 schema 标记 symbol；只记录，不处理版本漂移。 |
 | state | available、unavailable 或 disabled。MCP 连接状态按 server 批量更新；内置工具安装后为 available。宿主 `setDisabled(name, boolean)` 只在当前进程禁用工具，优先于健康状态；解除禁用后恢复当前连接状态，不因健康恢复自动启用。 |
 
 加载账本与注册目录使用同一个 `agent.sqlite` 的底座 document 存储，不新增数据库表或文件。`withToolLedger()` 在 `Harness.open` 前迁移存量会话，保存当前注册目录；运行时在底座 `Storage.commit` 边界，把 `pi.agent` 的变更与附属账本一次提交。工具搜索及其 `control.addTools` 仍由底座执行。
@@ -124,18 +124,6 @@ OAuth token 归宿主，保存于 `DATA_DIR/mcp-oauth/<server>.json`（`0600`、
 `invalid_grant`（例如授权服务器规定的绝对或闲置期限已到）是终态：清除已存 token，把工具调用报为 `MCP_AUTH_REQUIRED`，由操作者重新授权；不重试同一 refresh token，避免被当作令牌重放而撤销整个授权。
 
 边界：MCP server 与应用同 uid，不构成安全边界；模型可通过 bash 读取进程环境与数据目录。真正的隔离需要独立用户、容器或远端 server。
-
-### 代码调用工具（PTC／codemode）
-
-`CODEMODE_ENABLED=1` 时安装底座的 `codemode` 工具。模型写一段 JavaScript，由 QuickJS WASM sandbox 执行；只有脚本结果进入模型上下文，嵌套工具结果不进入 transcript。设计取舍见 [ADR-0019](adr/codemode-ptc/0019-codemode-ptc.md)，配置与运行说明见 [代码调用工具](codemode.md)。
-
-- `codemode` 的 `callers` 为 `["model"]`，脚本不能再次调用 codemode；`replay` 为 `safe`。
-- 脚本工具面由 `callers` 白名单决定：本地为 `read`／`write`／`edit`／`bash`，远程执行阶段 1 只有 `bash`。模型仍能看到全部工具；每次嵌套调用仍经过 `createToolRegistry()` 的名称、state、authz、参数校验和恢复策略复核。
-- 模型可见结果上限为 32 KiB／1000 行、保留尾部。脚本首行的 `max_output_tokens`／`timeout_ms` 只能进一步收紧，仍受宿主上限和请求等待约束。
-- 嵌套调用在宿主侧串行执行（ADR-0009）；codemode 调用结束（完成、失败或超时）或被取消时，正在运行的嵌套调用被取消，尚未启动的排队调用不再启动。
-- 默认脚本期限 240 秒、QuickJS 内存上限 128 MiB；配置范围见 `src/config.ts`。应用关闭时 Harness 先取消工具上下文，再关闭 sandbox。
-- 远程模式下没有远程文件 API；codemode 的自动完整输出落盘不可用，大输出应由脚本用 `bash` 写到执行主机文件，再由后续 `bash` 读取。
-- QuickJS 只限制脚本运行时能力，不是 OS 沙箱；`bash` 与模型直接调用具有相同宿主权限。脚本源码和命令参数会进入 durable 会话记录，不得写入凭据。
 
 ## 请求生命周期
 

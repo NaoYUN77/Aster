@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
@@ -74,10 +74,11 @@ type Fixture = {
 
 async function openFixture(name: string, options: {
   readonly compaction?: typeof COMPACTION;
+  readonly contextWindow?: number;
   readonly extensions?: (registry: ReturnType<typeof createRegistry>) => void;
 } = {}): Promise<Fixture> {
   const directory = await mkdtemp(join(tmpdir(), name));
-  const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 1200, maxTokens: 512 }] });
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: options.contextWindow ?? 1200, maxTokens: 512 }] });
   const models = createModels();
   models.setProvider(faux.provider);
   const registry = createRegistry();
@@ -222,6 +223,7 @@ test("01-A: first, tool-follow-up and post-compaction requests carry the system 
 test("01-B: working state is anchored per commit and readable at the cut boundary", { timeout: 60_000 }, async () => {
   const cuts: number[] = [];
   const fixture = await openFixture("memory-01b-", {
+    contextWindow: 900,
     extensions: (registry) => registry.install(defineExtension({
       name: "probe",
       hooks: [hook(CompactionTask, {
@@ -310,6 +312,7 @@ test("01-C: publication, stale and restart re-scan drive the cycle switch", { ti
   const gate = Promise.withResolvers<void>();
   const fixture = await openFixture("memory-01c-", {
     compaction: BACKGROUND_COMPACTION,
+    contextWindow: 980,
     extensions: (registry) => registry.install(defineExtension({
       name: "probe",
       tools: [gatedTool(gate.promise)],
@@ -457,7 +460,7 @@ test("01-D: display-only writes bypass the busy queue, model writes queue", { ti
 test("01-E: custom summary usage is attributed, retried, and cancellable", { timeout: 90_000 }, async () => {
   const summaryFaux = fauxProvider({ provider: "summary", models: [{ id: "summary-1" }] });
   const models = createModels();
-  const fixtureFaux = fauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 1200, maxTokens: 512 }] });
+  const fixtureFaux = fauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 900, maxTokens: 512 }] });
   models.setProvider(fixtureFaux.provider);
   models.setProvider(summaryFaux.provider);
   const directory = await mkdtemp(join(tmpdir(), "memory-01e-"));

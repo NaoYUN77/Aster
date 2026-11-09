@@ -3,14 +3,19 @@
 # __vault_<NAME>__ placeholders in .env, layer docker-compose.mitm.yml:
 #   docker compose -f docker-compose.yml -f docker-compose.mitm.yml --env-file .env up -d
 # Rollback: drop `-f docker-compose.mitm.yml` and restore plaintext values in .env.
+# To give the agent a browser, layer docker-compose.browser.yml as well: it mounts the
+# agent-browser CLI into this container and points it at a browser running on another host
+# (docs/browser-automation.md). The two layers are independent.
 services:
   personal-agent:
     image: ${ASTER_IMAGE:-aster:local}
     restart: unless-stopped
     # In MITM mode, secret variables in .env use __vault_<NAME>__ placeholders (for example
     # TELEGRAM_BOT_TOKEN=__vault_TELEGRAM_BOT_TOKEN__, DEEPSEEK_API_KEY=__vault_DEEPSEEK_API_KEY__,
-    # DEEPSEEK_WEB_API_KEY=__vault_DEEPSEEK_WEB_API_KEY__); non-secret settings (TELEGRAM_OWNER_ID,
-    # MODEL_PROVIDER, MODEL_ID, DATA_DIR, MEMORY_*) keep their normal values.
+    # DEEPSEEK_WEB_API_KEY=__vault_DEEPSEEK_WEB_API_KEY__, EXA_API_KEY=__vault_EXA_API_KEY__;
+    # CHANNEL=slack uses SLACK_BOT_TOKEN / SLACK_APP_TOKEN instead of the Telegram pair);
+    # non-secret settings (TELEGRAM_OWNER_ID, MODEL_PROVIDER, MODEL_ID, DATA_DIR, MEMORY_*)
+    # keep their normal values.
     env_file:
       - .env
     environment:

@@ -3,6 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { classifySendFailure, failureCode } from "../src/telegram.js";
+
+/** The scheduler only needs a channel; these are the Telegram classifications it would use live. */
+const telegram = { label: "Telegram", classifyFailure: classifySendFailure, failureCode };
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -177,7 +181,7 @@ test("restart recovery returns unsent rows to pending and marks interrupted send
     assert.equal(unknown?.failureCode, "PROCESS_INTERRUPTED");
 
     const sends: string[] = [];
-    const scheduler = new ReminderScheduler({ store: second, client: { send: async (_chat, text) => { sends.push(text); return "1"; } }, now });
+    const scheduler = new ReminderScheduler({ store: second, client: { ...telegram, send: async (_chat, text) => { sends.push(text); return "1"; } }, now });
     await scheduler.runDue();
     assert.deepEqual(sends, ["提醒：unsent"], "an uncertain reminder is never resent automatically");
     assert.equal(second.resolve(interrupted.id, "sent").status, "sent");
@@ -199,7 +203,7 @@ test("scheduler sends due reminders in order and records Telegram outcomes", asy
       store,
       now,
       log: () => {},
-      client: { send: async (chatId, text) => { sent.push({ chatId, text }); return String(7 + sent.length); } },
+      client: { ...telegram, send: async (chatId, text) => { sent.push({ chatId, text }); return String(7 + sent.length); } },
     });
     assert.equal(await scheduler.runDue(), 2);
     assert.deepEqual(sent, [
@@ -218,7 +222,7 @@ test("cancelled reminders never reach Telegram", async () => {
     store.cancel("42", reminder.id);
     clock.time = new Date(now().getTime() + 60_000);
     let sends = 0;
-    const scheduler = new ReminderScheduler({ store, now, log: () => {}, client: { send: async () => { sends++; return "1"; } } });
+    const scheduler = new ReminderScheduler({ store, now, log: () => {}, client: { ...telegram, send: async () => { sends++; return "1"; } } });
     await scheduler.runDue();
     assert.equal(sends, 0);
   }, { now });
@@ -236,6 +240,7 @@ test("explicit Telegram rejection is failed while transport failure is uncertain
       now,
       log: () => {},
       client: {
+        ...telegram,
         send: async () => {
           calls += 1;
           if (calls === 1) throw new GrammyError("rejected", { ok: false, error_code: 400, description: "Bad Request" }, "sendMessage", {});

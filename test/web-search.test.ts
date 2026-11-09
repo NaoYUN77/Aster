@@ -293,7 +293,7 @@ test("oversized upstream responses and normalized outputs fail explicitly", asyn
 test("built-in web search registers with read governance and host-only credentials", async () => {
   let authorization: string | null = null;
   const registry = createToolRegistry([createWebExtension({
-    apiKey: "host-secret",
+    deepseekApiKey: "host-secret",
     fetch: async (_input, init) => {
       authorization = new Headers(init?.headers).get("authorization");
       return jsonResponse({ results: [] });

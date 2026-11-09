@@ -7,7 +7,6 @@ import {
   type ToolExecutionResult,
   type ToolHookCall,
 } from "@earendil-works/pi-durable";
-import { CODEMODE_TOOL_NAME } from "@earendil-works/pi-durable/codemode";
 import { recordLoopGuard } from "./trace.js";
 
 /** The first repeated signature that earns an explicit warning in the tool result. */
@@ -57,23 +56,12 @@ export function canonicalJSON(value: unknown): string {
   return JSON.stringify(canonicalValue(value)) ?? "undefined";
 }
 
-function normalizeScript(code: string): string {
-  return code.trim().replace(/\s+/g, " ");
-}
-
 /**
- * `(toolName, canonical arguments)`. Only the code mode script gets its source whitespace normalized,
- * because reformatting the same script is the same call; other arguments are compared as given.
+ * `(toolName, canonical arguments)`; JSON formatting whitespace never affects the result, so the
+ * same call with the same arguments always has the same signature.
  */
 export function loopSignature(name: string, args: unknown): string {
-  const normalized = name === CODEMODE_TOOL_NAME
-    && args !== null
-    && typeof args === "object"
-    && !Array.isArray(args)
-    && typeof (args as { code?: unknown }).code === "string"
-    ? { ...(args as Record<string, unknown>), code: normalizeScript((args as { code: string }).code) }
-    : args;
-  return `${name}\u0000${canonicalJSON(normalized)}`;
+  return `${name}\u0000${canonicalJSON(args)}`;
 }
 
 export type LoopGuard = {

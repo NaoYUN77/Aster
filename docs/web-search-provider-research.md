@@ -1,6 +1,6 @@
 # 内置 Web 工具提供商调研与接入依据
 
-状态：调研与实施依据。核对日期：2026-10-29。范围：Aster 内置 `web_search` 与 `web_fetch`。本文核对公开官方文档／规范，未使用 API key 发起真实搜索或抓取，也未验证生产服务器的网络、检索质量与正文提取质量；在线文档可能继续变化。实现与实际配置以代码、schema 和 README 为准。
+状态：调研与实施依据。核对日期：2026-10-29（§1–§6），2026-11-09（§7 Exa）。范围：Aster 内置 `web_search`、`web_fetch` 与 `exa_search`。本文核对公开官方文档／规范，未使用任何 API key 发起真实搜索或抓取，也未验证生产服务器的网络、检索质量与正文提取质量；在线文档可能继续变化。实现与实际配置以代码、schema 和 README 为准。
 
 ## 1. 建议
 
@@ -9,6 +9,8 @@
 这是基于接口和运维成本的选择，并非检索质量排名：DeepSeek 的公开价格为 **$0.75／1,000 次成功且非空搜索**；Tavily PAYGO 的 basic 搜索折算为 **$8／1,000 次**（1 credit／次，$0.008／credit），另有每月 1,000 免费 credits；TinyFish 免费额度更大，但其价格页与 API 文档当前不一致，超额收费单价未在所查 Search 参考中给出。[D2][T1][T2][F1][F3]
 
 关键限制：DeepSeek `query` 最多 **128 个 Unicode 字符**，需要明确拒绝过长输入，不能静默截断。若后续确需专用域名列表、较多参数化过滤或更长查询，应重新评估 Tavily；本期不做多提供商切换或自动降级。[D1][T1] 部署地并未提供，不能以“中国／海外提供商”推断可达性或性能；生产容器验证通过后才启用。
+
+**2026-11-09 增补**：在保留 DeepSeek 工具的前提下，新增可选第二搜索提供商 Exa（内置工具 `exa_search`，契约见 §7）。驱动因素是它的免费层每月 $10 credits、另有一次 $10 开户奖励且不要求绑卡，个人助手的搜索量可以落在免费额度内，同时它返回结构化来源并自带索引侧 highlights。两者不是切换或自动降级关系：按宿主设置的凭据各自独立注册，同时配置时模型会看到两个搜索工具。取舍、代价与未验证项见 [ADR-0023](adr/exa-search/0023-exa-search-provider.md)。
 
 ## 2. 官方能力与线缆契约
 
@@ -197,7 +199,60 @@ Fetch 使用 20 秒本地总 deadline、512 KiB 解压后上游响应预算和 2
 
 官方资料**尚不能确认**：8192 的精确长度计数及未知字段处理；请求 body／正文大小上限和正文是否可能截断；具体超时秒数；单域名 QPS 数值与归并／共享规则及重试 headers；目标重定向、完整 SSRF／DNS／IP／端口规则；源站请求方法／headers、JS 与受保护页面能力、支持的 MIME 类型清单、缓存／新鲜度／出口位置；币种适用规则；取消后的远端执行与收费状态。应保留为待确认项，不能根据 SDK 惯例、Search 参数或错误示例补齐。[Fetch Reference](https://api-docs.deepseek.com/api/fetch/)、[Fetch 指南](https://api-docs.deepseek.com/guides/search/#fetch-api)、[错误](https://api-docs.deepseek.com/guides/search/#errors)、[计费](https://api-docs.deepseek.com/guides/search/#billing)、[限速](https://api-docs.deepseek.com/guides/search/#rate-limits)
 
-## 7. 一手来源
+## 7. Exa Search：内置 exa_search 的契约调研
+
+本节截至 **2026-11-09**，依据 Exa 公开的 API 参考（同页嵌入 `exa-spec.yaml` 的 `POST /search` OpenAPI 片段）、价格页与面向 agent 的官方索引，**未使用 API key 发起真实搜索**。厂商契约与 Aster 项目策略分开描述；`exa_search` 不继承 DeepSeek 工具的输入或错误语义。[E1][E2][E3]
+
+### 厂商已公开的契约
+
+| 项目 | 核对结论与来源 |
+| --- | --- |
+| 端点与用途 | `POST https://api.exa.ai/search`，用 Exa 自建索引搜索网页，并可在同一响应里返回每个结果的内容（text／highlights／summary）。相同路径也接受 `text/event-stream`。[E1] |
+| 认证与编码 | `Authorization: Bearer <EXA_API_KEY>` 或 `x-api-key: <EXA_API_KEY>`；key 由用户在 Exa dashboard 创建，官方建议优先用官方 SDK（`exa-js`／`exa-py`），本工具直接调 REST。[E1] |
+| 请求字段 | 必填 `query:string`（`minLength:1`）。常用可选：`type`（默认 `auto`，另有 `lite`、`deep-lite`、`deep` 及 legacy `instant`／`fast`／`deep-reasoning`）、`numResults`（整数 1–100，默认 10）、`contents`（text／highlights／summary 等内容选项）、`includeDomains`／`excludeDomains`（各最多 1200 项，支持主机名、路径前缀与 `*.` 通配）、`startPublishedDate`／`endPublishedDate`（ISO 8601）、`moderation`、`additionalQueries`（仅 deep 类可用）。**`lite` 只接受其文档列出的子集，设置其他参数会被拒绝**；文档未给出 `query` 的长度上限。[E1] |
+| 成功响应 schema | HTTP 200、`application/json`。结果列表形态的响应为 `SearchResultsResponse`：必填 `results[]`，另有 `requestId`、`costDollars`、`searchTime`、`warnings`、`notices` 以及已标记 deprecated 的 `resolvedSearchType`、`context`；顶层 `additionalProperties:false`。每个结果必填 `title:string`、`url:string`，可选 `publishedDate`（ISO 8601 UTC，精确到日的值写作 `00:00:00.000Z`）、`author`（string/null）、`highlights:string[]`、`text`、`summary`、`id`、`image`、`favicon`、`subpages`、`entities`、`extras`；结果对象 `additionalProperties:false`。合成类搜索返回另一种 `oneOf` 分支（散文式 `content`），不含 `results`。[E1] |
+| warnings 与 notices 的语义 | 规范把两者用途写反：`warnings[]` 面向维护请求构造代码的人（例：`IGNORED_FIELD` 表示某字段被接受但无效果），**明确要求不要交给模型**；`notices[]`（例：`RESTRICTIONS_RELAXED`，表示 query 里的 `site:`／精确短语过滤没有命中，结果来自去掉这些限制后的搜索，而请求体里的过滤仍生效）**明确要求随结果一起交给模型**。两者的 code 都是开放集合，规范要求把不认识的 code 当作对应状态码的通用情况处理。[E1] |
+| 价格 | 按请求计费，基础价含最多 10 条结果：Lite **$4**／Auto **$7**／Deep **$12**（每 1,000 次请求）；超过 10 条的结果每多 1 条再 **$1**／1,000 次请求。`/contents` **$1**／1,000 页（每种内容类型）、AI 页面摘要 **$1**／1,000 页、Monitors **$2**／1,000 次、Answer **$5**／1,000 次；Agent 按 effort 分档 **$0.012–$1.00**／次。另有 Zero Data Retention（$12,000 年度承诺）等企业项，不影响本工具。[E2] |
+| 免费额度 | 免费 Starter 层：**每月 $10 credits，另有一次 $10 开户奖励**（完成 onboarding 即得），**不需要绑卡**，可用全部端点，**10 Search QPS**、50 Agent 并发；价格页概览写作「每年 $120 以上 credits」。Startup／Education 另有最多 **$1,000** credits 的补助。按 Auto $7／1,000 次折算，每月免费额度约合 1,400 次 Auto 搜索（Lite 约 2,500 次，Deep 约 830 次）；首月叠加开户奖励翻倍。折算只用于量级判断，不是厂商承诺。[E2][E3] |
+| Rate limits | 免费层 10 Search QPS；Developer 层最高 25 Search QPS；Enterprise 自定义。规范未给出窗口、突发或按 key／团队／网络区分的算法，429 的说明只写「某一层限速被超过」。[E2] |
+| 官方 hosted MCP | `https://mcp.exa.ai/mcp` 支持不带 API key 的受限试用；Aster 不采用该路径，内置工具直接调 REST。[E1][E3] |
+
+### 错误契约
+
+失败响应是统一 envelope `{requestId, error, tag}`；`tag` 为机器可读标签且**集合开放**，规范要求把不认识的 tag 当作该 HTTP 状态的通用错误处理，不按错误文本分支。[E1]
+
+| HTTP 状态 | 官方含义 |
+| --- | --- |
+| 400 | 请求 body 或查询参数校验失败。 |
+| 401 | API key 缺失或无效。 |
+| 402 | 团队 credits 用尽或超出花费预算（带 API key 的请求收到标准错误 envelope）。 |
+| 403 | 团队不允许使用该端点（`TEAM_BLOCKED`），或该功能未对其启用（`FEATURE_DISABLED`）。 |
+| 429 | API key、团队或网络层某个限速被超过。 |
+| 500 | 处理请求时发生意外错误。 |
+| 503 | Exa 临时过载或不可用；请求未被处理，规范要求指数退避重试。 |
+
+### 项目策略与待确认项
+
+`exa_search` 的本项目契约（以下均为 Aster 策略，不是厂商承诺）：
+
+- 工具名 `exa_search`，与 `web_search`／`web_fetch` 同属 `web-tools` extension，`authz:"read"`、`trust:"trusted"`、`replay:"unsafe"`；只在宿主设置 `EXA_API_KEY` 时注册，未设置时不向模型声明。模型参数只有 `query`（1–128 Unicode code point，拒绝全空白与孤立 surrogate）与 `maxResults`（1–10，省略时按 5 执行）。决策与代价见 [ADR-0023](adr/exa-search/0023-exa-search-provider.md)。
+- 一次调用只发一个请求：`{"query":<原文>,"type":"auto","numResults":<n>,"contents":{"highlights":true}}`。固定 `auto`（厂商推荐的平衡档）与 highlights；不发域名过滤、日期过滤、`moderation`、`additionalQueries`，不发完整对话或用户 IP。固定 HTTPS 端点且不跟随重定向，避免把 Authorization 转发到别处。
+- **`maxResults` 上限 10 是价格约束**：基础价只含 10 条结果，更多结果的单价另计，工具不暴露该选项。
+- 适配边界只校验实际消费的字段：`title` 与 `url` 是唯一必需字段（缺失、类型错误或非法 URL 即 `UPSTREAM_PROTOCOL_ERROR`）；snippet 取 `highlights`，多个按顺序用 `" … "` 连接；`publishedDate` 缺失、`null` 或空字符串归一为 `null`，类型错误或非法日期整批失败，不用默认值编造时间。未消费字段（`author`、`text`、`summary`、`id`、`image`、`favicon`、`subpages`、`entities`、`extras`）与未知新增字段忽略；空 title、空 highlights 是合法结果，不使整批失败（同类原则见 [WEB-01](web-tools-known-issues.md#web-01search-合法结果被判为上游协议错误)）。不设 schema 未声明的单字段长度上限，资源由上游响应与模型输出总预算承担。
+- `notices` 归一为 `{code,message}[]` 并进入模型可见结果（含 `RESTRICTIONS_RELAXED`，模型必须知道结果可能没有遵守 query 里的站点／短语限制）；缺省或为空的 `code`／`message` 归一为 `""`，不使整批失败（类型错误仍失败），因为一条只带 code 的 notice 仍然有信息量；`warnings` 明确不进入模型结果——它的读者是维护请求构造代码的人，本工具构造的请求字段固定，出现 warning 只意味着厂商语义变化。
+- 错误码沿用内置 Web 工具的既有集合：400／413→`UPSTREAM_REQUEST_REJECTED`、401→`PROVIDER_AUTH_FAILED`、402→`PROVIDER_BALANCE_REQUIRED`、429→`RATE_LIMITED`（可重试）、408／5xx（含 503）→`PROVIDER_UNAVAILABLE`（可重试）、403→`UPSTREAM_HTTP_ERROR`（厂商语义为团队被禁或功能未启用，模型无法自行修复）。失败文案为本地固定文本，不透传响应 body、headers、URL 查询串或 key。
+- 三项内置 Web 工具共享最多 2 路并发、20 秒本地总 deadline、256 KiB 上游响应预算与 24 KiB 模型输出预算；不排队、不自动重试、不缓存、不分页追取。
+
+官方资料**尚不能确认**（需在获得授权后用真实 key 做脱敏验证）：
+
+- 在 `/search` 内联请求 `contents.highlights` 时如何计费。价格页把 Contents 与 AI 页面摘要列为独立行目，但**未说明内联请求是否按这些行目另外计费**，因此「每月 $10 约等于多少次搜索」的上界不能写死。
+- `costDollars` 的内容与对账口径；`auto` 是否会在部分查询下解析为更高价档（`resolvedSearchType` 已 deprecated，规范明确要求不要据它分支）。
+- 免费层 10 Search QPS 与本工具 2 路本地并发在真实负载下的交互。
+- `query` 长度上限、未知字段是被忽略还是拒绝（`lite` 明确会拒绝，`auto` 未说明）。
+- 是否会对本工具构造的请求返回 `text/event-stream`；若返回，本工具按协议错误处理。
+- 取消连接或本地 20 秒超时后，远端是否仍完成搜索并计费。
+
+## 8. 一手来源
 
 - [D1] DeepSeek [Search API Reference](https://api-docs.deepseek.com/api/search/)：端点、认证示例、完整输入／结果 schema。
 - [D2] DeepSeek [Search & Fetch guide](https://api-docs.deepseek.com/guides/search/)：搜索能力、操作符、空结果、错误、收费条件、限流与 2026-11-01 计费说明。
@@ -211,6 +266,9 @@ Fetch 使用 20 秒本地总 deadline、512 KiB 解压后上游响应预算和 2
 - [T1] Tavily [Search API Reference](https://docs.tavily.com/documentation/api-reference/endpoint/search)，[同页原始 OpenAPI](https://docs.tavily.com/documentation/api-reference/endpoint/search.md)：端点、认证、参数、结果、状态码与 schema 差异。
 - [T2] Tavily [Credits & Pricing](https://docs.tavily.com/documentation/api-credits)：免费 credits、套餐和 PAYGO 单价。
 - [T3] Tavily [Rate Limits](https://docs.tavily.com/documentation/rate-limits)：开发／生产 key、429／Retry-After、434。
+- [E1] Exa [Search API Reference](https://exa.ai/docs/reference/search.md)：`/search` 端点、认证、完整请求／响应 schema、错误状态与 envelope、warnings／notices 语义；同页嵌入 `exa-spec.yaml` 的 `POST /search` OpenAPI 片段，完整规范声明见 <https://exa.ai/docs/exa-spec.yaml>（本次未单独下载该文件）。
+- [E2] Exa [Pricing](https://exa.ai/pricing)：免费 Starter 层额度、各搜索档与内容／摘要／Monitors／Answer 单价、QPS 与 Agent 并发、企业项。
+- [E3] Exa [llms.txt](https://exa.ai/llms.txt)：面向 agent 的免费额度说明（每月 $10 加一次性 $10、不绑卡、可用全部端点）、hosted MCP 与端点索引。
 - [R1] 仓库 [CLAUDE.md](../CLAUDE.md)：技术基线、数据／凭据／副作用与资源边界。
 - [R2] 仓库 [contracts-and-lifecycle.md](contracts-and-lifecycle.md)：工具注册、宿主授权、输出与重放契约。
 - [R5] 仓库 [deployment-test-guide.md](deployment-test-guide.md)：Docker 镜像、网络与部署验收要求。

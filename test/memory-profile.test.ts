@@ -342,6 +342,7 @@ const LegacyWorkingDoc = defineDoc({
   scope: "conversation",
   history: "rewindable",
   fork: "asOf",
+  checkpointWhen: () => false,
   initial: () => ({
     version: MEMORY_SCHEMA_VERSION,
     revision: 3,

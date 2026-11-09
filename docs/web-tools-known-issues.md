@@ -1,6 +1,6 @@
 # 内置 Web 工具已知问题
 
-状态：WEB-01 已修复（离线），待真实 smoke test；WEB-02 开放。首次记录：2026-10-29。本文记录 `web_search` 与 `web_fetch` 在线使用中已经复现的问题、证据边界和后续验收条件；提供商契约和接入依据仍以 [内置 Web 工具提供商调研](web-search-provider-research.md) 为准。
+状态：WEB-01 已修复（离线），待真实 smoke test；WEB-02 开放。首次记录：2026-10-29。本文记录 `web_search` 与 `web_fetch` 在线使用中已经复现的问题、证据边界和后续验收条件；`exa_search`（2026-11-09 接入）尚无在线使用记录，它的契约与未验证项记在调研 §7 与 [ADR-0023](adr/exa-search/0023-exa-search-provider.md)。提供商契约和接入依据仍以 [内置 Web 工具提供商调研](web-search-provider-research.md) 为准。
 
 本文不包含 API key、Authorization header、原始提供商正文或 Telegram 对话全文。
 

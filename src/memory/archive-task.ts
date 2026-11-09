@@ -53,6 +53,7 @@ export type ArchiveState = Static<typeof ArchiveStateSchema>;
 
 export const ArchiveDoc = defineDoc({
   kind: "personal.archive", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  checkpointWhen: () => false,
   initial: (): ArchiveState => ({ version: 1, initialized: false, timezone: "UTC", archivedThrough: null,
     target: null, scanAfter: null, activeTask: null, pending: null, failure: null }),
 });
@@ -325,8 +326,7 @@ export function createArchiveTask(options: ArchiveTaskOptions) {
         if (options.profile !== false) await boundary("profile", runtime);
       },
       retry: async (task, runtime, context) => {
-        await runtime.sleep(task.state.checkpoint.until, context);
-        await runtime.commit(() => ({ status: "running", checkpoint: { phase: "run", step: 0 } }), context);
+        await runtime.sleepUntil(task.state.checkpoint.until, { phase: "run", step: 0 }, context);
       },
     },
     abort: async (_task, runtime, context) => {

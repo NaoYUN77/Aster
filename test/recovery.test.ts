@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, defineExtension, defineTool, Harness, ToolResultEntry } from "@earendil-works/pi-durable";
@@ -150,7 +150,7 @@ test("a crash while a segment is sending quarantines it and later sends only sto
       const shutdown = new AbortController();
       let executions = 0;
       await serveTelegram(
-        { token: "fake", ownerId: "42", provider: "openai", model: "fake", dataDir: directory, mcpConfigPath: join(directory, "mcp.json"), mcpConfigExplicit: false, telegramApiRoot: undefined, trace: { enabled: false } } satisfies ReturnType<typeof readConfig>,
+        "42",
         "99",
         inbox,
         async () => { executions++; throw new Error("must not rerun the agent"); },

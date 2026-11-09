@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
@@ -525,7 +525,7 @@ test("06-D: background publication, failure accounting and restart re-scan", { t
   // (the faux usage counts the full request), which would cross the BLOCKING threshold at the
   // gated run's preparation instead of the background one. The working state is still written
   // through the module directly, so the boundary anchor exists exactly as with the tools.
-  const fixture = await openFixture("memory-06d-", { compaction: BACKGROUND_COMPACTION, withWorkingTools: false });
+  const fixture = await openFixture("memory-06d-", { compaction: BACKGROUND_COMPACTION, contextWindow: 980, withWorkingTools: false });
   try {
     // Install the gated tool alongside the adapter (the fixture's registry stays live).
     fixture.registry.install(defineExtension({ name: "gate-tool", tools: [gatedTool(gate.promise)] }));

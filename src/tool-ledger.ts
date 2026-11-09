@@ -183,11 +183,16 @@ export async function withToolLedger(storage: Storage, registry: ToolRegistry, c
       : { type: "document.change", id: existing.record.id, content }];
   }
 
-  async function commit(writes: readonly StorageWrite[], context: Context) {
+  async function commit(
+    batches: Parameters<Storage["commit"]>[0],
+    receive: Parameters<Storage["commit"]>[1],
+    context: Context,
+  ) {
     const atRevision = revision;
-    const result = [...writes];
+    const writes = batches.flat();
+    const sidecars: StorageWrite[] = [];
     const syncCatalog = options.catalogSync?.() ?? true;
-    if (syncCatalog && persistedRevision !== atRevision) result.push(...await catalogWrites(context));
+    if (syncCatalog && persistedRevision !== atRevision) sidecars.push(...await catalogWrites(context));
     const changes = new Map<ConversationId, { ledger: Ledger; existing: StoredDocument | undefined }>();
     const copiedLedgers = new Map<ConversationId, Extract<StorageWrite, { type: "document.copy" }>>();
     for (const write of writes) {
@@ -279,21 +284,31 @@ export async function withToolLedger(storage: Storage, registry: ToolRegistry, c
       }
       changes.set(conversationId, { ledger, existing });
     }
+    const augmented = batches.map((batch) => [...batch]);
     for (const [conversationId, { ledger, existing }] of changes) {
       const copied = copiedLedgers.get(conversationId);
       if (copied === undefined) {
-        result.push(await ledgerWrite(storage, conversationId, ledger, existing, context));
+        sidecars.push(await ledgerWrite(storage, conversationId, ledger, existing, context));
       } else {
         // Preserve the historical high water mark and identity staged by the native fork.
-        result.splice(result.indexOf(copied), 1, {
+        const replacement: StorageWrite = {
           type: "document.create", record: copied.record,
           content: { version: VERSION, kind: "base", value: ledger as unknown as JsonObject },
-        });
+        };
+        const owner = augmented.find((batch) => batch.includes(copied));
+        if (owner === undefined) sidecars.push(replacement);
+        else owner[owner.indexOf(copied)] = replacement;
       }
     }
-    const seq = await storage.commit(result, context);
+    // Sidecars ride in the last batch, keeping the common single-batch commit atomic as before.
+    if (sidecars.length > 0) {
+      const last = augmented.at(-1);
+      if (last === undefined) augmented.push(sidecars);
+      else last.push(...sidecars);
+    }
+    const commitResult = await storage.commit(augmented, receive, context);
     if (syncCatalog) persistedRevision = atRevision;
-    return seq;
+    return commitResult;
   }
 
   try {
@@ -317,12 +332,12 @@ export async function withToolLedger(storage: Storage, registry: ToolRegistry, c
       }
       cursor = page.next;
       // Keep migration writes bounded on a host with a long conversation history.
-      if (initial.length > 0) await storage.commit(initial.splice(0), context);
+      if (initial.length > 0) await storage.commit([initial.splice(0)], () => {}, context);
     } while (cursor !== undefined);
     if (options.catalogSync?.() ?? true) {
       const atRevision = revision;
       const catalog = await catalogWrites(context);
-      if (catalog.length > 0) await storage.commit(catalog, context);
+      if (catalog.length > 0) await storage.commit([catalog], () => {}, context);
       persistedRevision = atRevision;
     }
   } catch (error) {

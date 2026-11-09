@@ -9,18 +9,20 @@
 | 组件 | 版本 | 职责 |
 | --- | --- | --- |
 | Node.js | 24.19.0，见 .node-version | 开发与部署运行时，含内置 SQLite |
-| @earendil-works/pi-durable / pi-ai / chord | 1.3.0 | agent 底座、模型适配与执行上下文 |
-| @earendil-works/pi-codemode | 1.3.0 | PTC 脚本沙箱（QuickJS WASM worker） |
-| @earendil-works/pi-mcp | 1.3.0 | MCP 客户端、传输与 OAuth |
+| @earendil-works/pi-durable / pi-ai / chord | 1.5.0 | agent 底座、模型适配与执行上下文 |
+| @earendil-works/pi-mcp | 1.5.0 | MCP 客户端、传输与 OAuth |
+| @earendil-works/pi-schema | 1.5.0 | 内置工具的参数 schema 与静态参数类型推导 |
 | @langfuse/otel / @langfuse/tracing | 6.1.1 | 可选 Langfuse Cloud Trace 的 span 处理器与观测 API |
 | @opentelemetry/api / sdk-trace-node / exporter-trace-otlp-http | 1.9.0 / 2.12.0 / 0.223.0 | Trace 的 OpenTelemetry 运行时、provider 与 OTLP 导出（MITM 模式使用支持代理的 agent） |
 | Telegram 客户端 grammY | 1.46.0 | Telegram 协议适配 |
-| TypeBox | 1.3.27 | 工具参数 schema，与底座版本对齐 |
+| TypeBox | 1.3.27 | 记忆、文档、部署配置与 MCP 远端 schema 的校验，与底座版本对齐 |
 | TypeScript / tsx | 7.0.2 / 4.23.15 | 类型检查、构建与开发执行 |
 
 直接依赖使用精确版本，传递依赖由提交的 lockfile 固定；运行时版本写入对应版本文件。升级时同步依赖清单、lockfile、版本文件及本表。
 
-模型提供商以 `src/providers.ts` 注册表为唯一来源，仅支持单个显式 API key 配置，不包含 OAuth／订阅登录、云厂商环境凭据或额外端点参数，见 [ADR-0006](docs/adr/0006-explicit-api-key-providers.md)。
+模型提供商以 `src/providers.ts` 注册表为编译期内置名单，只支持单个显式 API key 配置，不包含 OAuth／订阅登录、云厂商环境凭据或额外端点参数，见 [ADR-0006](docs/adr/0006-explicit-api-key-providers.md)。自建 OpenAI 兼容网关由 `DATA_DIR/providers.json` 声明，底层直接用 pi-ai 的 `createProvider()`／`envApiKeyAuth()` 与四个协议实现，凭据仍只经部署环境注入，见 [ADR-0024](docs/adr/custom-providers/0024-custom-provider-declarations.md)。
+
+消息渠道二选一，由 `CHANNEL` 决定（默认 `telegram`），同一进程只服务一个渠道；投递契约在 `src/channel.ts`，两个适配层 `src/telegram.ts`（长轮询）与 `src/slack.ts`（Socket Mode）各自实现，见 [ADR-0025](docs/adr/slack-channel/0025-slack-channel.md) 与 [Slack 通道](docs/slack.md)。Slack 侧不新增依赖：只用 Node 内置的 `fetch` 与 `WebSocket`。
 
 ## 安全审计边界
 

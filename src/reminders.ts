@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { Type } from "@earendil-works/pi-ai";
+import { bool, int, obj, opt, str } from "@earendil-works/pi-schema";
 import { defineExtension, defineTool, type Extension, type ToolExecutionResult } from "@earendil-works/pi-durable";
-import { GrammyError } from "grammy";
-import { failureCode, type TelegramClient } from "./telegram.js";
+import type { DeliveryChannel } from "./channel.js";
+import { errorCode } from "./errors.js";
 
-/** Model-visible limits. A reminder is one plain-text Telegram message. */
+/** Model-visible limits. A reminder is one plain-text message on the active channel. */
 export const REMINDER_CONTENT_MAX_CHARS = 2_000;
 export const REMINDER_CONTENT_MAX_BYTES = 8_000;
 export const REMINDER_TIMEZONE_MAX_CHARS = 64;
@@ -379,14 +379,10 @@ export function reminderText(reminder: Pick<Reminder, "content">): string {
   return `提醒：${reminder.content}`;
 }
 
-/** Telegram 4xx is a definite refusal; anything else may have been accepted. */
-export function classifySendFailure(error: unknown): "failed" | "uncertain" {
-  return error instanceof GrammyError && error.error_code >= 400 && error.error_code < 500 ? "failed" : "uncertain";
-}
-
 export type ReminderSchedulerOptions = {
   readonly store: ReminderStore;
-  readonly client: Pick<TelegramClient, "send">;
+  /** The active channel. It classifies its own refusals, so the scheduler stays transport-agnostic. */
+  readonly client: DeliveryChannel;
   /** Shutdown signal; a send aborted by it becomes uncertain, never failed. */
   readonly signal?: AbortSignal;
   readonly log?: (line: string) => void;
@@ -395,12 +391,12 @@ export type ReminderSchedulerOptions = {
 
 /**
  * In-process scheduler. It holds no reminder state: each pass reads SQLite, claims due rows and
- * sends them one at a time. Every failure is caught and logged, so a broken Telegram call cannot
- * affect the agent session or the polling loop.
+ * sends them one at a time. Every failure is caught and logged, so a broken channel call cannot
+ * affect the agent session or the receiving loop.
  */
 export class ReminderScheduler {
   readonly #store: ReminderStore;
-  readonly #client: Pick<TelegramClient, "send">;
+  readonly #client: DeliveryChannel;
   readonly #signal?: AbortSignal;
   readonly #log: (line: string) => void;
   readonly #now: () => Date;
@@ -427,7 +423,7 @@ export class ReminderScheduler {
     this.#started = true;
     this.#unsubscribe = this.#store.subscribe(() => this.#wake?.());
     this.#loop = this.loop(this.signal()).catch((error: unknown) => {
-      this.#log(`Reminder scheduler stopped (${failureCode(error)})`);
+      this.#log(`Reminder scheduler stopped (${errorCode(error)})`);
     });
   }
 
@@ -455,14 +451,14 @@ export class ReminderScheduler {
         this.#store.markSent(reminder.id, messageId);
         sent += 1;
       } catch (error) {
-        const status = classifySendFailure(error);
+        const status = this.#client.classifyFailure(error);
         try {
-          this.#store.markFailure(reminder.id, status, failureCode(error));
+          this.#store.markFailure(reminder.id, status, this.#client.failureCode(error));
         } catch (recordError) {
           // Leaving the row in `sending` is safe: the next startup records it as uncertain.
-          this.#log(`Reminder ${reminder.id} outcome could not be recorded (${failureCode(recordError)})`);
+          this.#log(`Reminder ${reminder.id} outcome could not be recorded (${errorCode(recordError)})`);
         }
-        this.#log(`Reminder delivery ${status}: ${reminder.id} (${failureCode(error)})`);
+        this.#log(`Reminder delivery ${status}: ${reminder.id} (${this.#client.failureCode(error)})`);
       }
     }
     return sent;
@@ -473,7 +469,7 @@ export class ReminderScheduler {
       try {
         await this.runDue(signal);
       } catch (error) {
-        this.#log(`Reminder scheduler pass failed (${failureCode(error)})`);
+        this.#log(`Reminder scheduler pass failed (${errorCode(error)})`);
       }
       if (signal.aborted) break;
       const next = this.#store.nextDueAt();
@@ -529,11 +525,11 @@ export function createReminderExtension(store: ReminderStore, options: { readonl
   const create = defineTool({
     name: "reminder_create",
     description: "Create a one-time reminder that the host will deliver to this Telegram conversation. trigger_at must be an ISO 8601 instant with an explicit offset or Z; timezone is an IANA name such as Asia/Shanghai. The host rejects past or out-of-range times.",
-    parameters: Type.Object({
-      content: Type.String({ minLength: 1, maxLength: 2_000 }),
-      trigger_at: Type.String({ description: "ISO 8601 instant with an explicit offset or Z, e.g. 2026-11-05T09:00:00+08:00" }),
-      timezone: Type.String({ maxLength: 64, description: "IANA time zone name, e.g. Asia/Shanghai" }),
-    }, { additionalProperties: false }),
+    parameters: obj({
+      content: str({ minLength: 1, maxLength: 2_000 }),
+      trigger_at: str({ description: "ISO 8601 instant with an explicit offset or Z, e.g. 2026-11-05T09:00:00+08:00" }),
+      timezone: str({ maxLength: 64, description: "IANA time zone name, e.g. Asia/Shanghai" }),
+    }),
     replay: "unsafe",
     execute: async (args, api) => {
       try {
@@ -558,9 +554,9 @@ export function createReminderExtension(store: ReminderStore, options: { readonl
   const list = defineTool({
     name: "reminder_list",
     description: "List this conversation's active reminders in due order. Set include_finished=true to append recent sent, failed, uncertain and cancelled reminders.",
-    parameters: Type.Object({
-      include_finished: Type.Optional(Type.Boolean()),
-    }, { additionalProperties: false }),
+    parameters: obj({
+      include_finished: opt(bool()),
+    }),
     replay: "safe",
     execute: async (args) => {
       try {
@@ -575,9 +571,9 @@ export function createReminderExtension(store: ReminderStore, options: { readonl
   const cancel = defineTool({
     name: "reminder_cancel",
     description: "Cancel a pending reminder by its numeric ID. A reminder already being sent or finished cannot be cancelled.",
-    parameters: Type.Object({
-      id: Type.Integer({ minimum: 1 }),
-    }, { additionalProperties: false }),
+    parameters: obj({
+      id: int({ minimum: 1 }),
+    }),
     replay: "unsafe",
     execute: async (args) => {
       try {

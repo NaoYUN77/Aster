@@ -10,22 +10,29 @@ const base = {
   DEEPSEEK_API_KEY: "key",
 };
 
+/** The Telegram channel's own address, or undefined when the official root is used. */
+function apiRoot(env: Record<string, string>): string | undefined {
+  const channel = readConfig(env).channel;
+  assert.equal(channel.kind, "telegram");
+  return channel.kind === "telegram" ? channel.apiRoot : undefined;
+}
+
 test("TELEGRAM_API_ROOT defaults to undefined (the api.telegram.org root)", () => {
-  assert.equal(readConfig(base).telegramApiRoot, undefined);
-  assert.equal(readConfig({ ...base, TELEGRAM_API_ROOT: "  " }).telegramApiRoot, undefined);
+  assert.equal(apiRoot(base), undefined);
+  assert.equal(apiRoot({ ...base, TELEGRAM_API_ROOT: "  " }), undefined);
 });
 
 test("TELEGRAM_API_ROOT accepts an https prefix and drops trailing slashes", () => {
   assert.equal(
-    readConfig({ ...base, TELEGRAM_API_ROOT: "https://tg.example.com/tg-abc" }).telegramApiRoot,
+    apiRoot({ ...base, TELEGRAM_API_ROOT: "https://tg.example.com/tg-abc" }),
     "https://tg.example.com/tg-abc",
   );
   assert.equal(
-    readConfig({ ...base, TELEGRAM_API_ROOT: "https://tg.example.com/tg-abc/" }).telegramApiRoot,
+    apiRoot({ ...base, TELEGRAM_API_ROOT: "https://tg.example.com/tg-abc/" }),
     "https://tg.example.com/tg-abc",
   );
   assert.equal(
-    readConfig({ ...base, TELEGRAM_API_ROOT: "https://example.com/" }).telegramApiRoot,
+    apiRoot({ ...base, TELEGRAM_API_ROOT: "https://example.com/" }),
     "https://example.com",
   );
 });

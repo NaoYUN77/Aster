@@ -5,3 +5,5 @@ data/
 mcp.json
 github-approval.json
 *.log
+__pycache__/
+*.pyc

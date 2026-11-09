@@ -1,15 +1,14 @@
 import { createHash } from "node:crypto";
-import { Type } from "@earendil-works/pi-ai";
+import { obj } from "@earendil-works/pi-schema";
 import { createRegistry, defineExtension, defineTool, GenerationTask, hook, type Extension, type Registry, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
-import { CODEMODE_TOOL_NAME } from "@earendil-works/pi-durable/codemode";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
-import { argumentBytes, beginTrace, recordGeneration, recordRegistryDecision } from "./trace.js";
+import { recordGeneration, recordRegistryDecision } from "./trace.js";
 
 export const currentTime = defineTool({
   name: "current_time",
   description: "Return the current time as an ISO 8601 UTC timestamp.",
-  parameters: Type.Object({}, { additionalProperties: false }),
+  parameters: obj({}),
   replay: "safe",
   execute: async () => ({
     output: [{ type: "text", text: new Date().toISOString() }],
@@ -71,7 +70,7 @@ function registration(extension: Extension, tool: GovernedTool): ToolRecord {
     trust: "trusted" as const,
     authz: READ_TOOLS.has(tool.name) ? "read" as const : "write" as const,
   };
-  // Object key order is not a schema change; array order is retained. TypeBox symbols are
+  // Object key order is not a schema change; array order is retained. Schema marker symbols are
   // deliberately excluded, just as they are from the JSON schema sent to the provider.
   const schema = JSON.stringify(tool.parameters, (_key, value: unknown) => {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
@@ -184,41 +183,22 @@ export function createToolRegistry(
       ...tool,
       execute: async (args, api, context) => {
         context.abortSignal?.throwIfAborted();
-        // The root trace starts before authorization so a denied codemode call is still observable.
-        // The model's raw `code` argument is captured only when content capture is enabled; the script
-        // actually handed to QuickJS is recorded separately under `codemode.prepared`.
-        const script = args !== null && typeof args === "object"
-          ? (args as { code?: unknown }).code
-          : undefined;
-        const root = tool.name === CODEMODE_TOOL_NAME
-          ? beginTrace({
-              conversationId: api.conversationId,
-              taskId: api.taskId,
-              callId: api.callId,
-              name: "codemode",
-              fields: { scriptBytes: argumentBytes(args) },
-              ...(typeof script === "string" ? { input: { code: script } } : {}),
-            })
-          : undefined;
-        const run = async () => {
-          const rejected = review(tool.name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId }, registration);
-          if (rejected !== undefined) return rejected;
-          return tool.execute(args, {
-            ...api,
-            executeTool: (name, args, context, options) => {
-              // Native resolution rejects missing nested names before hooks or an executor can run.
-              if (!records.has(name)) review(name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId });
-              return api.executeTool(name, args, context, options);
+        const rejected = review(tool.name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId }, registration);
+        if (rejected !== undefined) return rejected;
+        return tool.execute(args, {
+          ...api,
+          executeTool: (name, args, context, options) => {
+            // Native resolution rejects missing nested names before hooks or an executor can run.
+            if (!records.has(name)) review(name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId });
+            return api.executeTool(name, args, context, options);
+          },
+          ...(tool.name === TOOL_SEARCH_TOOL_NAME ? {
+            agent: async (context: Parameters<ToolExecutionApi["agent"]>[0]) => {
+              const agent = await api.agent(context);
+              return { ...agent, deferred: agent.deferred.filter(({ name }) => records.get(name)?.state === "available") };
             },
-            ...(tool.name === TOOL_SEARCH_TOOL_NAME ? {
-              agent: async (context: Parameters<ToolExecutionApi["agent"]>[0]) => {
-                const agent = await api.agent(context);
-                return { ...agent, deferred: agent.deferred.filter(({ name }) => records.get(name)?.state === "available") };
-              },
-            } : {}),
-          }, context);
-        };
-        return root === undefined ? run() : root.run(run);
+          } : {}),
+        }, context);
       },
     };
   }

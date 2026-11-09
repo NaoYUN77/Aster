@@ -152,7 +152,7 @@ test("oversized upstream Fetch responses fail before parsing", async () => {
 test("built-in cancellation rejects the tool attempt instead of committing an error result", async () => {
   const controller = new AbortController();
   const registry = createToolRegistry([createWebExtension({
-    apiKey: "key",
+    deepseekApiKey: "key",
     fetch: async (_input, init) => await new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
     }),
@@ -169,7 +169,7 @@ test("built-in web extension exposes both read-only tools with shared bounded co
   let release: (() => void) | undefined;
   const held = new Promise<void>((resolve) => { release = resolve; });
   const registry = createToolRegistry([createWebExtension({
-    apiKey: "host-secret",
+    deepseekApiKey: "host-secret",
     fetch: async (input, init) => {
       await held;
       return String(input).endsWith("/fetch")

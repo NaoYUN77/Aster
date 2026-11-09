@@ -14,9 +14,7 @@ ENV NODE_ENV=production \
     DATA_DIR=/data \
     HOME=/data \
     NPM_CONFIG_CACHE=/data/.npm
-# Agent tools and operator commands use Bash; all mutable state belongs under /data. The
-# execution broker container reuses this image and needs the OpenSSH client for its baseline
-# transport; the application container keeps no SSH keys and has no route to the execution host.
+# Agent tools and operator commands use Bash; all mutable state belongs under /data.
 RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates openssh-client util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data && chown node:node /data

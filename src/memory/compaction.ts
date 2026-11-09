@@ -189,6 +189,7 @@ export const CompactionSummaryDoc = defineDocFamily({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: (seed: CompactionSummaryRecord): CompactionSummaryRecord => seed,
 });
 
@@ -277,6 +278,7 @@ export const CompactionTurnDoc = defineDocFamily({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: (seed: CompactionTurnReceipt): CompactionTurnReceipt => seed,
 });
 
@@ -292,6 +294,7 @@ export const CompactionTurnCounterDoc = defineDoc({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: (): CompactionTurnCounter => ({ version: MEMORY_SCHEMA_VERSION, count: 0 }),
 });
 

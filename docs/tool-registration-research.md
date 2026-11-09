@@ -110,7 +110,7 @@ DATA_DIR/tools/
 
 ### 阶段 3：接入 MCP client（已实现）
 
-接入现成的 GitHub、日历、Notion 等 server 时，使用与底座同版本的 `@earendil-works/pi-mcp` 1.3.0 做协议客户端，不自建 JSON-RPC 和插件协议：
+接入现成的 GitHub、日历、Notion 等 server 时，使用与底座同版本的 `@earendil-works/pi-mcp` 1.5.0 做协议客户端，不自建 JSON-RPC 和插件协议：
 
 - 支持本地 stdio 与远程 Streamable HTTP；stdio server 负责执行和凭据，agent 只做协议客户端；
 - 远程 server 走 OAuth，token 由宿主保存在数据目录，不交给模型；交互授权在独立 CLI 进程中完成；

@@ -2,9 +2,8 @@ import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
-import { isAbsoluteRemotePath } from "./execution/protocol.js";
-import { readRpcClientConfig, type RpcClientConfig } from "./execution/rpc-config.js";
-import { isProviderId, PROVIDER_IDS, PROVIDERS } from "./providers.js";
+import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
+import type { CustomProviderDeclaration } from "./provider-config.js";
 import {
   assertSchema,
   eventDate,
@@ -125,57 +124,88 @@ export function resolveMcpConfigPaths(env: NodeJS.ProcessEnv = process.env) {
   };
 }
 
-export function readConfig(env: NodeJS.ProcessEnv = process.env) {
+/**
+ * Paths for the optional provider declaration file. Resolved from the environment alone, so the
+ * provider list is known before MODEL_PROVIDER is validated. A missing default file means only the
+ * compiled-in providers exist; an explicitly configured path must exist.
+ */
+export function resolveProviderConfigPath(env: NodeJS.ProcessEnv = process.env) {
+  const dataDir = resolve(env.DATA_DIR || "data");
+  const configured = env.PROVIDERS_CONFIG?.trim();
+  return {
+    providerConfigPath: configured ? resolve(configured) : join(dataDir, "providers.json"),
+    providerConfigExplicit: Boolean(configured),
+  };
+}
+
+export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders: readonly CustomProviderDeclaration[] = []) {
   validateProxyEnv(env);
   const paths = resolveMcpConfigPaths(env);
-  const telegramApiRoot = readTelegramApiRoot(env);
   const required = (key: string) => {
     const value = env[key]?.trim();
     if (!value) throw new ConfigurationError(`Missing configuration: ${key}`);
     return value;
   };
-  const ownerId = readOwnerId(env);
+  // The channel comes first: which variables exist, including the owner id, depends on it.
+  const channelKind = readChannelKind(env);
+  const ownerId = channelKind === "slack" ? readSlackOwnerId(env, required) : readOwnerId(env);
   const provider = required("MODEL_PROVIDER");
-  if (!isProviderId(provider)) {
-    throw new ConfigurationError(`MODEL_PROVIDER must be one of: ${PROVIDER_IDS.join(", ")}`);
+  // A declared provider carries its own credential variable name; either kind resolves to exactly
+  // one environment variable holding one explicit key.
+  const providerKeyEnv = providerApiKeyEnv(provider, customProviders);
+  if (providerKeyEnv === undefined) {
+    const detail = isProviderId(provider) ? "" : "; declared providers come from the provider config file";
+    throw new ConfigurationError(`MODEL_PROVIDER must be one of: ${PROVIDER_IDS.join(", ")}${detail}`);
   }
-  const providerKeyEnv = PROVIDERS[provider].apiKeyEnv;
   const providerKey = required(providerKeyEnv);
   assertValidCredentialShape(providerKeyEnv, providerKey);
-  const token = required("TELEGRAM_BOT_TOKEN");
-  assertValidCredentialShape("TELEGRAM_BOT_TOKEN", token);
-  const webApiKey = env.DEEPSEEK_WEB_API_KEY?.trim();
-  if (webApiKey) assertValidCredentialShape("DEEPSEEK_WEB_API_KEY", webApiKey);
-  const execution = readExecutionConfig(env);
-  const codemode = readCodemodeConfig(env);
-  // Remote code mode runs its VM on the execution agent, so the gateway must be configured and
-  // reachable. A local deployment keeps the previous codemode shape unchanged.
-  const codemodeConfig: CodemodeConfig | undefined = codemode.enabled
-    ? {
-        ...codemode,
-        ...(execution === undefined ? {} : {
-          ptc: {
-            rpc: readRpcClientConfig(env),
-            defaultTimeoutSeconds: execution.defaultTimeoutSeconds,
-            maxTimeoutSeconds: execution.maxTimeoutSeconds,
-          },
-        }),
-      }
-    : undefined;
+  const deepseekWebApiKey = env.DEEPSEEK_WEB_API_KEY?.trim();
+  if (deepseekWebApiKey) assertValidCredentialShape("DEEPSEEK_WEB_API_KEY", deepseekWebApiKey);
+  const exaApiKey = env.EXA_API_KEY?.trim();
+  if (exaApiKey) assertValidCredentialShape("EXA_API_KEY", exaApiKey);
   const reminders = readReminderConfig(env);
+  const browser = readBrowserConfig(env);
   return {
-    token,
-    ownerId,
+    channel: readChannelCredentials(env, channelKind, ownerId, required),
     provider,
     model: required("MODEL_ID"),
-    telegramApiRoot,
-    ...(webApiKey ? { webApiKey } : {}),
-    ...(execution === undefined ? {} : { execution }),
-    ...(codemodeConfig === undefined ? {} : { codemode: codemodeConfig }),
+    ...(deepseekWebApiKey ? { deepseekWebApiKey } : {}),
+    ...(exaApiKey ? { exaApiKey } : {}),
     ...paths,
     ...(reminders.enabled ? { reminders } : {}),
+    ...(browser === undefined ? {} : { browser }),
     trace: readTraceConfig(env),
   };
+}
+
+/** The browser the agent drives, named by the endpoint the host runs it on. */
+export type BrowserConfig = {
+  /** The CDP endpoint as agent-browser accepts it on `--cdp`, such as http://172.18.0.1:9222. */
+  readonly cdp: string;
+};
+
+/**
+ * AGENT_BROWSER_CDP names a browser that runs outside this process. The CLI reads the same variable
+ * itself, so one setting decides both what the agent can run and whether the system prompt mentions
+ * it: with no endpoint the prompt stays silent instead of pointing the model at a command that
+ * cannot work. The endpoint is host context, never a model parameter, and it is not a credential —
+ * but it is the browser's whole control channel, so an unreachable or public value is a
+ * configuration error, not something to discover at request time.
+ */
+export function readBrowserConfig(env: NodeJS.ProcessEnv = process.env): BrowserConfig | undefined {
+  const raw = env.AGENT_BROWSER_CDP?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  const shape = "AGENT_BROWSER_CDP must be an http(s) or ws(s) URL, such as http://172.18.0.1:9222";
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new ConfigurationError(shape);
+  }
+  if (!["http:", "https:", "ws:", "wss:"].includes(parsed.protocol)) {
+    throw new ConfigurationError(shape);
+  }
+  return { cdp: raw };
 }
 
 /** One-time reminders (REMINDERS_*). Enabled by default; limits bound each owner's stored rows. */
@@ -213,11 +243,6 @@ export type TraceConfig = {
   readonly publicKey?: string;
   readonly secretKey?: string;
   readonly baseUrl?: string;
-  /**
-   * Upload model-visible content (script, nested tool arguments and results) as observation
-   * input/output. Off by default: traces then keep only sizes, counts and error codes.
-   */
-  readonly captureContent?: boolean;
 };
 
 /** Env var names belong to the Langfuse SDK; `LANGFUSE_HOST` is the common self-hosted alias. */
@@ -226,10 +251,6 @@ export function readTraceConfig(env: NodeJS.ProcessEnv = process.env): TraceConf
   if (raw !== undefined && raw !== "" && !["0", "1", "false", "true"].includes(raw)) {
     throw new ConfigurationError("LANGFUSE_TRACING_ENABLED must be 0, 1, false, or true");
   }
-  const captureRaw = env.LANGFUSE_CAPTURE_CONTENT?.trim().toLowerCase();
-  if (captureRaw !== undefined && captureRaw !== "" && !["0", "1", "false", "true"].includes(captureRaw)) {
-    throw new ConfigurationError("LANGFUSE_CAPTURE_CONTENT must be 0, 1, false, or true");
-  }
   const publicKey = env.LANGFUSE_PUBLIC_KEY?.trim();
   const secretKey = env.LANGFUSE_SECRET_KEY?.trim();
   const baseUrl = env.LANGFUSE_BASE_URL?.trim() || env.LANGFUSE_HOST?.trim();
@@ -237,46 +258,12 @@ export function readTraceConfig(env: NodeJS.ProcessEnv = process.env): TraceConf
   const enabled = (keysConfigured || raw === "1" || raw === "true")
     && raw !== "0"
     && raw !== "false";
-  const captureContent = captureRaw === "1" || captureRaw === "true";
   return {
     enabled,
     ...(publicKey ? { publicKey } : {}),
     ...(secretKey ? { secretKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
-    ...(captureContent ? { captureContent: true } : {}),
   };
-}
-
-/**
- * Tool execution placement. Local is the default. Remote execution picks exactly one transport:
- * `ssh` keeps the legacy broker socket path; `rpc` uses the execution agent's direct sessions, which
- * also carry the file primitives. The control plane never falls back from one to the other.
- */
-export type ExecutionConfig = {
-  /** Working directory on the execution host. The control plane's DATA_DIR never applies there. */
-  readonly remoteCwd: string;
-  readonly defaultTimeoutSeconds: number;
-  readonly maxTimeoutSeconds: number;
-} & (
-  | {
-      readonly transport: "ssh";
-      /** Private host socket shared with the broker container; never a network address. */
-      readonly brokerSocket: string;
-      readonly connectTimeoutMs: number;
-    }
-  | {
-      readonly transport: "rpc";
-      /** Validated execution agent connection; the agent also runs the direct sandbox. */
-      readonly rpc: RpcClientConfig;
-    }
-);
-
-/** `/shared` itself or a path below it; the direct sandbox exposes nothing else to commands. */
-function isSharedRemotePath(value: string): boolean {
-  return value === "/shared"
-    || (value.startsWith("/shared/")
-      && !value.includes("\\")
-      && !value.split("/").includes(".."));
 }
 
 function boundedInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
@@ -291,122 +278,69 @@ function boundedInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, m
 }
 
 /**
- * EXECUTION_MODE=remote selects a remote transport; EXECUTION_REMOTE_TRANSPORT chooses which one
- * (default `ssh`, the legacy broker). Every setting of the selected transport is validated before the
- * process can reach the agent, and settings of the other transport are ignored rather than silently
- * taking effect after a later switch. Ownership of `EXECUTION_REMOTE_CWD` follows the transport: the
- * direct sandbox only exposes `/shared`, so the RPC path confines it there.
+ * The one conversation surface this process serves. Exactly one channel is active: the Inbox holds a
+ * single request stream and a single identity, so two channels cannot share a data directory without
+ * telling each other's messages apart. Switching the variable switches the channel.
  */
-export function readExecutionConfig(env: NodeJS.ProcessEnv = process.env): ExecutionConfig | undefined {
-  const mode = env.EXECUTION_MODE?.trim() || "local";
-  if (mode === "local") return undefined;
-  if (mode !== "remote") throw new ConfigurationError("EXECUTION_MODE must be local or remote");
-  const transport = env.EXECUTION_REMOTE_TRANSPORT?.trim() || "ssh";
-  if (transport !== "ssh" && transport !== "rpc") {
-    throw new ConfigurationError("EXECUTION_REMOTE_TRANSPORT must be ssh or rpc");
-  }
-  const required = (key: string) => {
-    const value = env[key]?.trim();
-    if (!value) throw new ConfigurationError(`Missing configuration: ${key}`);
-    return value;
-  };
-  const remoteCwd = required("EXECUTION_REMOTE_CWD");
-  if (!isAbsoluteRemotePath(remoteCwd)) {
-    throw new ConfigurationError("EXECUTION_REMOTE_CWD must be an absolute POSIX path without control characters");
-  }
-  if (Buffer.byteLength(remoteCwd, "utf8") > 4096) {
-    throw new ConfigurationError("EXECUTION_REMOTE_CWD must be at most 4096 bytes");
-  }
-  if (transport === "rpc" && !isSharedRemotePath(remoteCwd)) {
-    throw new ConfigurationError("EXECUTION_REMOTE_CWD must be /shared or a path below it for the rpc transport");
-  }
-  const defaultTimeoutSeconds = boundedInteger(env, "EXECUTION_DEFAULT_TIMEOUT_SECONDS", 300, 1, 86_400);
-  const maxTimeoutSeconds = boundedInteger(env, "EXECUTION_MAX_TIMEOUT_SECONDS", 3600, 1, 86_400);
-  if (defaultTimeoutSeconds > maxTimeoutSeconds) {
-    throw new ConfigurationError("EXECUTION_DEFAULT_TIMEOUT_SECONDS must not exceed EXECUTION_MAX_TIMEOUT_SECONDS");
-  }
-  if (transport === "rpc") {
-    return {
-      transport,
-      rpc: readRpcClientConfig(env),
-      remoteCwd,
-      defaultTimeoutSeconds,
-      maxTimeoutSeconds,
-    };
-  }
-  const brokerSocket = required("EXECUTION_BROKER_SOCKET");
-  if (!isAbsoluteRemotePath(brokerSocket)) {
-    throw new ConfigurationError("EXECUTION_BROKER_SOCKET must be an absolute POSIX socket path without control characters");
-  }
-  return {
-    transport,
-    brokerSocket,
-    remoteCwd,
-    connectTimeoutMs: boundedInteger(env, "EXECUTION_BROKER_CONNECT_TIMEOUT_MS", 5_000, 100, 60_000),
-    defaultTimeoutSeconds,
-    maxTimeoutSeconds,
-  };
-}
+export type ChannelConfig =
+  | { readonly kind: "telegram"; readonly ownerId: string; readonly token: string; readonly apiRoot?: string }
+  | { readonly kind: "slack"; readonly ownerId: string; readonly botToken: string; readonly appToken: string };
 
-/** PTC / code mode (ADR-0019). Disabled unless explicitly enabled. */
-export type CodemodeConfig = {
-  readonly enabled: boolean;
-  /** When enabled, model-visible file and command tools are hidden behind codemode. */
-  readonly scriptFirst: boolean;
-  /** Per-script deadline, including time spent in nested tool calls. */
-  readonly timeoutMs: number;
-  /** Maximum heap the QuickJS instance may allocate. */
-  readonly memoryLimitBytes: number;
-  /** Present only when execution is remote: the agent that runs the script's VM. */
-  readonly ptc?: CodemodePtcConfig;
-};
+export const CHANNELS = ["telegram", "slack"] as const;
 
-/** The execution agent connection and timeout bounds a remote code mode run needs. */
-export type CodemodePtcConfig = {
-  readonly rpc: RpcClientConfig;
-  readonly defaultTimeoutSeconds: number;
-  readonly maxTimeoutSeconds: number;
-};
+const SLACK_BOT_TOKEN_SHAPE = /^xoxb-[A-Za-z0-9-]{20,250}$/;
+const SLACK_APP_TOKEN_SHAPE = /^xapp-[A-Za-z0-9-]{20,250}$/;
+// Slack member ids: a U (or legacy W) plus the member's alphanumeric id.
+const SLACK_OWNER_ID_SHAPE = /^[UW][A-Z0-9]{6,15}$/;
 
 /**
- * Code mode runs model-written JavaScript in the base's QuickJS sandbox. It is opt-in because the
- * tool adds a prompt section and a write-capable execution path. Both bounds are validated even
- * when disabled so a malformed value cannot silently take effect after the switch is flipped.
+ * Which channel this process serves. The default keeps every existing deployment working, and an
+ * unrecognised value is a startup error rather than a silent fallback to Telegram.
  */
-export function readCodemodeConfig(env: NodeJS.ProcessEnv = process.env): CodemodeConfig {
-  const enabledRaw = env.CODEMODE_ENABLED?.trim();
-  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
-    throw new ConfigurationError("CODEMODE_ENABLED must be 0 or 1");
+function readChannelKind(env: NodeJS.ProcessEnv): "telegram" | "slack" {
+  const raw = env.CHANNEL?.trim().toLowerCase();
+  if (raw !== undefined && raw !== "" && !(CHANNELS as readonly string[]).includes(raw)) {
+    throw new ConfigurationError(`CHANNEL must be one of: ${CHANNELS.join(", ")}`);
   }
-  const enabled = enabledRaw === "1";
-  const scriptFirstRaw = env.CODEMODE_SCRIPT_FIRST?.trim().toLowerCase();
-  if (
-    scriptFirstRaw !== undefined &&
-    scriptFirstRaw !== "" &&
-    scriptFirstRaw !== "0" &&
-    scriptFirstRaw !== "1" &&
-    scriptFirstRaw !== "false" &&
-    scriptFirstRaw !== "true"
-  ) {
-    throw new ConfigurationError("CODEMODE_SCRIPT_FIRST must be 0, 1, false, or true");
+  return raw === "slack" ? "slack" : "telegram";
+}
+
+function readSlackOwnerId(env: NodeJS.ProcessEnv, required: (key: string) => string): string {
+  const ownerId = required("SLACK_OWNER_ID");
+  if (!SLACK_OWNER_ID_SHAPE.test(ownerId)) {
+    throw new ConfigurationError("SLACK_OWNER_ID must be a Slack member ID, such as U0123ABCDEF");
   }
-  return {
-    enabled,
-    // Code mode replaces the model-visible file and command tools by default; an explicit
-    // 0/false keeps the previous exposure and remains a one-switch rollback.
-    scriptFirst: scriptFirstRaw === undefined || scriptFirstRaw === ""
-      ? enabled
-      : scriptFirstRaw === "1" || scriptFirstRaw === "true",
-    // Keep headroom under the 300 s request wait so the script reports its own timeout first.
-    timeoutMs: boundedInteger(env, "CODEMODE_TIMEOUT_MS", 240_000, 1_000, 300_000),
-    memoryLimitBytes: boundedInteger(
-      env,
-      "CODEMODE_MEMORY_LIMIT_BYTES",
-      128 * 1024 * 1024,
-      16 * 1024 * 1024,
-      512 * 1024 * 1024,
-    ),
-  };
+  return ownerId;
+}
+
+/**
+ * Reads the selected channel's own variables. Only the active channel's credentials are required, so
+ * a Telegram deployment never needs Slack tokens and vice versa. A prefix check catches a token
+ * pasted into the wrong variable; a vault placeholder is accepted wherever a credential is expected.
+ */
+function readChannelCredentials(
+  env: NodeJS.ProcessEnv,
+  kind: "telegram" | "slack",
+  ownerId: string,
+  required: (key: string) => string,
+): ChannelConfig {
+  if (kind === "slack") {
+    const botToken = required("SLACK_BOT_TOKEN");
+    const appToken = required("SLACK_APP_TOKEN");
+    assertSlackToken("SLACK_BOT_TOKEN", botToken, SLACK_BOT_TOKEN_SHAPE);
+    assertSlackToken("SLACK_APP_TOKEN", appToken, SLACK_APP_TOKEN_SHAPE);
+    return { kind: "slack", ownerId, botToken, appToken };
+  }
+  const token = required("TELEGRAM_BOT_TOKEN");
+  assertValidCredentialShape("TELEGRAM_BOT_TOKEN", token);
+  const apiRoot = readTelegramApiRoot(env);
+  return { kind: "telegram", ownerId, token, ...(apiRoot ? { apiRoot } : {}) };
+}
+
+function assertSlackToken(key: string, value: string, shape: RegExp): void {
+  assertValidCredentialShape(key, value);
+  if (isVaultPlaceholder(value)) return;
+  if (!shape.test(value)) throw new ConfigurationError(`${key} is not shaped like a Slack token`);
 }
 
 /**

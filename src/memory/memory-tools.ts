@@ -15,7 +15,7 @@
 // instead of trusting an in-memory counter. The host runs tools sequentially within a request,
 // so two calls of one request cannot race this accounting.
 
-import { Type } from "@earendil-works/pi-ai";
+import { arr, bool, int, lit, nul, obj, opt, str, union } from "@earendil-works/pi-schema";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
@@ -44,53 +44,48 @@ const RETRIEVAL_TOOLS = new Set(["memory_search", "memory_read"]);
 const SPEND_SCAN_PAGES = 10;
 const SPEND_PAGE_ENTRIES = 100;
 
-const KindEnum = Type.Union([
-  Type.Literal("goal"),
-  Type.Literal("decision"),
-  Type.Literal("result"),
-  Type.Literal("problem"),
-  Type.Literal("user-requirement"),
-  Type.Literal("open-item"),
+const KindEnum = union([
+  lit("goal"),
+  lit("decision"),
+  lit("result"),
+  lit("problem"),
+  lit("user-requirement"),
+  lit("open-item"),
 ]);
 
-const searchOutputSchema = Type.Object(
+const searchOutputSchema = obj(
   {
-    hits: Type.Array(
-      Type.Object(
-        {
-          id: Type.String({ maxLength: 64 }),
-          date: Type.String({ maxLength: 16 }),
-          page: Type.Integer({ minimum: 1, maximum: DAILY_MAX_PAGES }),
-          kind: KindEnum,
-          status: Type.String({ maxLength: 16 }),
-          file: Type.String({ maxLength: 32 }),
-        },
-        { additionalProperties: false },
-      ),
+    hits: arr(
+      obj({
+        id: str({ maxLength: 64 }),
+        date: str({ maxLength: 16 }),
+        page: int({ minimum: 1, maximum: DAILY_MAX_PAGES }),
+        kind: KindEnum,
+        status: str({ maxLength: 16 }),
+        file: str({ maxLength: 32 }),
+      }),
       { maxItems: DAILY_LIMITS.hits },
     ),
-    scannedFiles: Type.Integer({ minimum: 0 }),
-    scannedSegments: Type.Integer({ minimum: 0 }),
-    available: Type.Integer({ minimum: 0 }),
-    unread: Type.Integer({ minimum: 0 }),
-    truncated: Type.Boolean(),
-    nextCursor: Type.Union([Type.String({ maxLength: 8_192 }), Type.Null()]),
+    scannedFiles: int({ minimum: 0 }),
+    scannedSegments: int({ minimum: 0 }),
+    available: int({ minimum: 0 }),
+    unread: int({ minimum: 0 }),
+    truncated: bool(),
+    nextCursor: union([str({ maxLength: 8_192 }), nul()]),
   },
-  { additionalProperties: false },
 );
 
-const readOutputSchema = Type.Object(
+const readOutputSchema = obj(
   {
-    found: Type.Boolean(),
-    reason: Type.Union([Type.Literal("missing-file"), Type.Literal("missing-segment"), Type.Null()]),
-    id: Type.Union([Type.String({ maxLength: 64 }), Type.Null()]),
-    date: Type.Union([Type.String({ maxLength: 16 }), Type.Null()]),
-    page: Type.Union([Type.Integer({ minimum: 1, maximum: DAILY_MAX_PAGES }), Type.Null()]),
-    kind: Type.Union([KindEnum, Type.Null()]),
-    status: Type.Union([Type.String({ maxLength: 16 }), Type.Null()]),
-    supersededBy: Type.Union([Type.String({ maxLength: 64 }), Type.Null()]),
+    found: bool(),
+    reason: union([lit("missing-file"), lit("missing-segment"), nul()]),
+    id: union([str({ maxLength: 64 }), nul()]),
+    date: union([str({ maxLength: 16 }), nul()]),
+    page: union([int({ minimum: 1, maximum: DAILY_MAX_PAGES }), nul()]),
+    kind: union([KindEnum, nul()]),
+    status: union([str({ maxLength: 16 }), nul()]),
+    supersededBy: union([str({ maxLength: 64 }), nul()]),
   },
-  { additionalProperties: false },
 );
 
 /** One hit as the model reads it: stable identity, provenance, then the fact itself. */
@@ -201,17 +196,14 @@ export function memoryTools(options: MemoryToolsOptions): ToolRegistration[] {
     name: "memory_search",
     description:
       "Search long-term daily memory for dated facts. Returns bounded hits with their segment id, date, file and source entries, says which files were scanned and which were not, and returns a cursor when more hits remain. An empty result means the scanned range held no match; it is not an error. Follow up with memory_read for one full record.",
-    parameters: Type.Object(
-      {
-        text: Type.Optional(Type.String({ maxLength: 200, description: "Case-insensitive substring of the fact text." })),
-        from: Type.Optional(Type.String({ pattern: "^(\\d{4}-\\d{2}-\\d{2}|unknown)$", description: "Earliest event date, inclusive." })),
-        through: Type.Optional(Type.String({ pattern: "^(\\d{4}-\\d{2}-\\d{2}|unknown)$", description: "Latest event date, inclusive." })),
-        kinds: Type.Optional(Type.Array(KindEnum, { maxItems: 6 })),
-        includeHistory: Type.Optional(Type.Boolean({ description: "Also return records a later record superseded. Default false." })),
-        cursor: Type.Optional(Type.String({ maxLength: 8_192, description: "The nextCursor of a previous memory_search in this chain." })),
-      },
-      { additionalProperties: false },
-    ),
+    parameters: obj({
+      text: opt(str({ maxLength: 200, description: "Case-insensitive substring of the fact text." })),
+      from: opt(str({ pattern: "^(\\d{4}-\\d{2}-\\d{2}|unknown)$", description: "Earliest event date, inclusive." })),
+      through: opt(str({ pattern: "^(\\d{4}-\\d{2}-\\d{2}|unknown)$", description: "Latest event date, inclusive." })),
+      kinds: opt(arr(KindEnum, { maxItems: 6 })),
+      includeHistory: opt(bool({ description: "Also return records a later record superseded. Default false." })),
+      cursor: opt(str({ maxLength: 8_192, description: "The nextCursor of a previous memory_search in this chain." })),
+    }),
     structuredOutputSchema: searchOutputSchema,
     replay: "safe",
     execute: async (args, api, context) => {
@@ -298,14 +290,11 @@ export function memoryTools(options: MemoryToolsOptions): ToolRegistration[] {
     name: "memory_read",
     description:
       "Read one daily memory record by the id, date and page a memory_search hit reported. A missing file or missing record is a normal not-found result, distinct from a read failure. The record keeps its source range and supersession state.",
-    parameters: Type.Object(
-      {
-        id: Type.String({ pattern: "^[A-Za-z0-9._:#-]{1,64}$" }),
-        date: Type.String({ pattern: "^(\\d{4}-\\d{2}-\\d{2}|unknown)$" }),
-        page: Type.Optional(Type.Integer({ minimum: 1, maximum: DAILY_MAX_PAGES })),
-      },
-      { additionalProperties: false },
-    ),
+    parameters: obj({
+      id: str({ pattern: "^[A-Za-z0-9._:#-]{1,64}$" }),
+      date: str({ pattern: "^(\\d{4}-\\d{2}-\\d{2}|unknown)$" }),
+      page: opt(int({ minimum: 1, maximum: DAILY_MAX_PAGES })),
+    }),
     structuredOutputSchema: readOutputSchema,
     replay: "safe",
     execute: async (args, api, context) => {

@@ -55,7 +55,7 @@ import {
   type MemoryIntegration,
   type MemoryLogEvent,
 } from "../src/memory/integration.js";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 
 const context = BACKGROUND_CONTEXT;
@@ -904,8 +904,8 @@ test("08-E: the real OpenAI adapter's request bodies keep a byte-stable prefix w
 // base execution state (types only, no submissions/tasks), the application
 // reaches memory only through the composition root, delivery-side modules
 // stay memory-free, and no memory source imports anything beyond Node
-// builtins, the two SDK packages, typebox and relative paths — no event
-// bus, database service or plugin framework crept in.
+// builtins, the SDK packages (pi-ai, pi-durable, pi-schema), typebox and
+// relative paths — no event bus, database service or plugin framework crept in.
 // ---------------------------------------------------------------------------
 
 test("08-H: dependency review — pure Context, Harness-free Daily, state-only Working, one composition seam", async () => {
@@ -956,6 +956,6 @@ test("08-H: dependency review — pure Context, Harness-free Daily, state-only W
 
   const pkg = JSON.parse(await read("package.json")) as { dependencies: Record<string, string> };
   const dependencyNames = Object.keys(pkg.dependencies).sort();
-  assert.deepEqual(dependencyNames, ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-codemode", "@earendil-works/pi-durable", "@earendil-works/pi-mcp", "@langfuse/otel", "@langfuse/tracing", "@opentelemetry/api", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/sdk-trace-node", "abort-controller", "grammy", "typebox"],
-    "the runtime dependency set is exactly the reviewed one (pi-codemode backs PTC, the two Langfuse packages plus their OTel API/exporter/provider back tracing; no event bus, database service or plugin framework)");
+  assert.deepEqual(dependencyNames, ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable", "@earendil-works/pi-mcp", "@earendil-works/pi-schema", "@langfuse/otel", "@langfuse/tracing", "@opentelemetry/api", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/sdk-trace-node", "abort-controller", "grammy", "typebox"],
+    "the runtime dependency set is exactly the reviewed one (pi-schema for built-in tool declarations; the two Langfuse packages plus their OTel API/exporter/provider back tracing; no event bus, database service or plugin framework)");
 });

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
   fauxAssistantMessage,
@@ -473,7 +473,7 @@ test("custom tool schemas reject unknown arguments before execution", { timeout:
       .find((message) => message.role === "toolResult" && message.toolCallId === "unknown");
     assert.ok(result?.role === "toolResult");
     assert.equal(result.isError, true);
-    assert.ok(result.content.some((part) => part.type === "text" && /must not have additional properties/.test(part.text)));
+    assert.ok(result.content.some((part) => part.type === "text" && /unknown field/.test(part.text)));
   } finally {
     try { await harness?.close(context); } finally { await rm(directory, { recursive: true, force: true }); }
   }

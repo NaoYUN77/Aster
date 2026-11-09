@@ -444,6 +444,7 @@ export const WorkingDoc = defineDoc({
   scope: "conversation",
   history: "rewindable",
   fork: "asOf",
+  checkpointWhen: () => false,
   initial: initialWorkingState,
   migrate: migrateWorkingDocument,
 });
@@ -456,6 +457,7 @@ export const WorkingReceiptDoc = defineDocFamily({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: (seed: WorkingReceipt): WorkingReceipt => seed,
 });
 

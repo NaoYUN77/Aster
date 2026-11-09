@@ -13,8 +13,11 @@ ALLOWLIST = {
     "DEEPSEEK_API_KEY": ["api.deepseek.com"],
     "DEEPSEEK_WEB_API_KEY": ["api.deepseek.com"],
     "TELEGRAM_BOT_TOKEN": ["api.telegram.org"],
+    "SLACK_BOT_TOKEN": ["slack.com"],
+    "SLACK_APP_TOKEN": ["slack.com"],
     "LANGFUSE_PUBLIC_KEY": ["cloud.langfuse.com"],
     "LANGFUSE_SECRET_KEY": ["cloud.langfuse.com"],
+    "MAGPIE_API_KEY": ["10.1.4.9", "100.66.135.123"],
 }
 
 
@@ -34,6 +37,29 @@ class SubstituteTests(unittest.TestCase):
         self.assertEqual(web, "Bearer resolved-openbao-deepseek_web_api_key")
         tg = substitute("/bot__vault_TELEGRAM_BOT_TOKEN__/getMe", "api.telegram.org", ALLOWLIST, resolve)
         self.assertEqual(tg, "/botresolved-openbao-telegram_bot_token/getMe")
+
+    def test_private_gateway_entry_matches_each_host_without_a_port(self):
+        # A declared provider's gateway is reached over plain HTTP on an RFC1918/CGNAT address, so the
+        # entry lists the hosts (never host:port) of every network entrance the app may dial.
+        for host in ("10.1.4.9", "100.66.135.123"):
+            self.assertEqual(
+                substitute("Bearer __vault_MAGPIE_API_KEY__", host, ALLOWLIST, resolve),
+                "Bearer resolved-openbao-magpie_api_key",
+            )
+        for host in ("10.1.4.10", "100.66.135.124", "10.1.4.9.evil.example", "10.1.4.9:3425"):
+            with self.subTest(host=host), self.assertRaises(PlaceholderError):
+                substitute("Bearer __vault_MAGPIE_API_KEY__", host, ALLOWLIST, resolve)
+
+    def test_slack_tokens_are_replaced_only_for_slack(self):
+        # Socket Mode's WebSocket host carries no credential header, so only slack.com is allowlisted.
+        for name in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"):
+            self.assertEqual(
+                substitute(f"Bearer __vault_{name}__", "slack.com", ALLOWLIST, resolve),
+                f"Bearer resolved-openbao-{name.lower()}",
+            )
+        for host in ("wss-primary.slack.com", "slack.com.evil.example", "api.telegram.org"):
+            with self.subTest(host=host), self.assertRaises(PlaceholderError):
+                substitute("Bearer __vault_SLACK_BOT_TOKEN__", host, ALLOWLIST, resolve)
 
     def test_host_match_is_case_insensitive_and_exact(self):
         out = substitute("__vault_DEEPSEEK_API_KEY__", "API.DeepSeek.com", ALLOWLIST, resolve)

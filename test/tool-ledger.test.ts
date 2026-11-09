@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type, type Message } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import { type Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { AgentDoc, Harness, MemoryStorage, ResetEntry, defineTool, type Storage, type StorageWrite } from "@earendil-works/pi-durable";
@@ -47,9 +48,13 @@ function fixture() {
 function observe(storage: Storage, batches: StorageWrite[][]): Storage {
   return new Proxy(storage, {
     get(target, property) {
-      if (property === "commit") return async (writes: readonly StorageWrite[], callContext: typeof context) => {
-        batches.push(structuredClone([...writes]));
-        return target.commit(writes, callContext);
+      if (property === "commit") return async (
+        writes: Parameters<Storage["commit"]>[0],
+        receive: Parameters<Storage["commit"]>[1],
+        callContext: typeof context,
+      ) => {
+        batches.push(structuredClone(writes.flat()));
+        return target.commit(writes, receive, callContext);
       };
       const member = Reflect.get(target, property, target);
       return typeof member === "function" ? member.bind(target) : member;
@@ -225,12 +230,17 @@ test("failed append commits neither the agent selection nor the tool ledger", { 
   let fail = false;
   const failing = new Proxy(raw, {
     get(target, property) {
-      if (property === "commit") return async (writes: readonly StorageWrite[], callContext: typeof context) => {
+      if (property === "commit") return async (
+        writes: Parameters<Storage["commit"]>[0],
+        receive: Parameters<Storage["commit"]>[1],
+        callContext: typeof context,
+      ) => {
+        const flat = writes.flat();
         if (fail) {
-          assert.ok(writes.some((write) => write.type === "document.change" && write.content.kind === "base" && write.content.value.sequence === 1));
+          assert.ok(flat.some((write) => write.type === "document.change" && write.content.kind === "base" && write.content.value.sequence === 1));
           throw new Error("append commit failed");
         }
-        return target.commit(writes, callContext);
+        return target.commit(writes, receive, callContext);
       };
       const member = Reflect.get(target, property, target);
       return typeof member === "function" ? member.bind(target) : member;

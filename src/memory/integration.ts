@@ -129,6 +129,7 @@ const MigrationDoc = defineDocFamily({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: (seed: MigrationRecord): MigrationRecord => seed,
 });
 

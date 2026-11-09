@@ -1,0 +1,24 @@
+# Gives the agent a real browser without running one inside this container: mounts the
+# agent-browser CLI (vercel-labs/agent-browser, a native Rust binary) into the image and points it
+# at a Chrome that runs on a separate browser host, reached over a port-forward-only SSH tunnel.
+#
+# Apply on top of docker-compose.yml once the browser host and the tunnel exist (walkthrough in
+# docs/browser-automation.md):
+#   docker compose -f docker-compose.yml -f docker-compose.browser.yml --env-file .env up -d
+# Rollback: remove `-f docker-compose.browser.yml`. The CLI leaves the container's PATH and nothing
+# else about the deployment changes; the app keeps using only /data and its own image.
+#
+# The mount source must be an existing regular file. A missing path makes Docker create a directory
+# in its place and the CLI becomes unusable, so point AGENT_BROWSER_BIN at the real binary.
+#
+# AGENT_BROWSER_CDP is the browser's HTTP discovery endpoint, supplied from the environment so no
+# command needs a --cdp flag. It addresses the browser host as seen from this container: the tunnel
+# binds the app bridge network's gateway (the host itself), and the browser's debugging port stays
+# on the browser host's loopback. Never point this at a publicly reachable address — CDP is
+# unauthenticated remote control of the browser.
+services:
+  personal-agent:
+    volumes:
+      - ${AGENT_BROWSER_BIN:-/home/ubuntu/bin/agent-browser}:/usr/local/bin/agent-browser:ro
+    environment:
+      AGENT_BROWSER_CDP: ${AGENT_BROWSER_CDP:-http://172.18.0.1:9222}

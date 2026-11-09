@@ -3,7 +3,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Api, GrammyError } from "grammy";
 import { AbortController as TelegramAbortController, type AbortSignal as TelegramSignal } from "abort-controller";
 import type { Update } from "grammy/types";
-import { hasProxyEnv, type readConfig } from "./config.js";
+import { deliverNext, type DeliveryChannel, type ReplyFn } from "./channel.js";
+import { hasProxyEnv } from "./config.js";
+import { errorCode } from "./errors.js";
 import type { Inbox } from "./inbox.js";
 import type { TextRequest } from "./messages.js";
 
@@ -20,7 +22,8 @@ async function telegramCall<T>(signal: AbortSignal, call: (signal: TelegramSigna
   }
 }
 
-export class TelegramClient {
+export class TelegramClient implements DeliveryChannel {
+  readonly label = "Telegram";
   private readonly api: Api;
 
   constructor(token: string, apiRoot?: string, env: NodeJS.ProcessEnv = process.env) {
@@ -52,6 +55,14 @@ export class TelegramClient {
       (cancel) => this.api.sendMessage(chatId, text, {}, cancel));
     return String(message.message_id);
   }
+
+  classifyFailure(error: unknown): "failed" | "uncertain" {
+    return classifySendFailure(error);
+  }
+
+  failureCode(error: unknown): string {
+    return failureCode(error);
+  }
 }
 
 function updateIdOf(update: Update): number | undefined {
@@ -81,11 +92,15 @@ export function toRequest(update: Update, ownerId: string, botId: string): TextR
   };
 }
 
+/** `TELEGRAM_<status>` for a Bot API rejection, otherwise the shared channel-independent code. */
 export function failureCode(error: unknown): string {
   if (error instanceof GrammyError) return `TELEGRAM_${error.error_code}`;
-  if (error instanceof Error && "code" in error && typeof error.code === "string" && /^[A-Z][A-Z_]{0,63}$/.test(error.code)) return error.code;
-  if (error instanceof Error && error.name === "TimeoutError") return "TIMEOUT";
-  return "EXECUTION_ERROR";
+  return errorCode(error);
+}
+
+/** An explicit Bot API 4xx rejection means the message was not delivered; anything else is unknown. */
+export function classifySendFailure(error: unknown): "failed" | "uncertain" {
+  return error instanceof GrammyError && error.error_code >= 400 && error.error_code < 500 ? "failed" : "uncertain";
 }
 
 function isFatal(error: unknown): boolean {
@@ -93,64 +108,24 @@ function isFatal(error: unknown): boolean {
 }
 
 export async function serveTelegram(
-  config: ReturnType<typeof readConfig>,
+  ownerId: string,
   botId: string,
   inbox: Inbox,
-  reply: (request: TextRequest, signal: AbortSignal) => Promise<string>,
+  reply: ReplyFn,
   signal: AbortSignal,
   client: Pick<TelegramClient, "updates" | "send">,
 ): Promise<void> {
   if (inbox.blocked().length) console.error("Some replies need delivery reconciliation; run npm run deliveries -- list.");
+  const channel: DeliveryChannel = {
+    label: "Telegram",
+    send: (chatId, text, partSignal) => client.send(chatId, text, partSignal),
+    classifyFailure: classifySendFailure,
+    failureCode,
+  };
   let pollFailures = 0;
   while (!signal.aborted) {
-    const job = inbox.next();
-    if (job) {
-      if (job.status === "pending") {
-        let text: string;
-        let errorCode: string | undefined;
-        try {
-          text = job.text.length > 16_000
-            ? "消息过长，请拆分后再发送。"
-            : await reply(job, signal);
-        } catch (error) {
-          if (signal.aborted) return;
-          // The Session will reject every later request; a failure notice would only hide that.
-          if (isFatal(error)) throw error;
-          errorCode = failureCode(error);
-          console.error(`Agent request failed: ${job.requestId} (${errorCode})`);
-          const partial = errorCode === "AGENT_TRUNCATED" && error instanceof Error && "partialReply" in error
-            && typeof error.partialReply === "string" ? error.partialReply.trim() : "";
-          text = partial
-            ? `${partial}\n\n（回复因长度限制被截断，内容不完整。请拆分请求后重试。）`
-            : errorCode === "AGENT_TIMEOUT"
-              ? "本次处理超时，已请求停止执行。已执行的操作可能仍然生效，请先核对结果。"
-              : errorCode === "AGENT_LOOP_DETECTED"
-                ? "检测到重复调用循环，已停止本次处理。已执行的操作可能仍然生效，请调整请求后重试。"
-                : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
-        }
-        inbox.saveReply(job.requestId, text, errorCode);
-      }
-      if (signal.aborted) return;
-      let part = inbox.nextPart(job.requestId);
-      while (part && !signal.aborted) {
-        inbox.beginPart(job.requestId, part.part);
-        let messageId: string;
-        try {
-          messageId = await client.send(job.conversationId, part.text, signal);
-        } catch (error) {
-          // Explicit Telegram 4xx rejection means not sent. Transport failures remain ambiguous.
-          const status = error instanceof GrammyError && error.error_code >= 400 && error.error_code < 500 ? "failed" : "uncertain";
-          inbox.failPart(job.requestId, part.part, status, failureCode(error));
-          console.error(`Telegram delivery ${status}: ${job.requestId}, part ${part.part}`);
-          break;
-        }
-        // Local state is authoritative: a write failure must stop the process, not look like a send failure.
-        inbox.confirmPart(job.requestId, part.part, messageId);
-        part = inbox.nextPart(job.requestId);
-      }
-      inbox.prune();
-      continue;
-    }
+    // Agent work and reply delivery are shared with the other channels; this loop only owns polling.
+    if (await deliverNext(inbox, reply, signal, channel)) continue;
 
     let updates: Update[];
     try {
@@ -175,7 +150,7 @@ export async function serveTelegram(
         console.error("Skipping Telegram update without a valid update_id");
         continue;
       }
-      inbox.accept(updateId + 1, toRequest(update, config.ownerId, botId));
+      inbox.accept(updateId + 1, toRequest(update, ownerId, botId));
     }
   }
 }

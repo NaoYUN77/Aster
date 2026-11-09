@@ -11,7 +11,7 @@
 // correct it; it never fails the request.
 
 import type { Context } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { arr, int, lit, obj, str, union } from "@earendil-works/pi-schema";
 import {
   defineExtension,
   defineTool,
@@ -58,41 +58,31 @@ function renderProfile(state: WorkingState): string {
   return `profile: ${items.join("; ")}`;
 }
 
-const structuredStateSchema = Type.Object(
+const structuredStateSchema = obj(
   {
-    revision: Type.Integer({ minimum: 1 }),
-    task: Type.Union([Type.Literal("none"), Type.String({ maxLength: MEMORY_LIMITS.goal })]),
-    preferences: Type.Array(
-      Type.Object(
-        { id: Type.String({ maxLength: MEMORY_LIMITS.identifier }), text: Type.String({ maxLength: MEMORY_LIMITS.text }) },
-        { additionalProperties: false },
-      ),
+    revision: int({ minimum: 1 }),
+    task: union([lit("none"), str({ maxLength: MEMORY_LIMITS.goal })]),
+    preferences: arr(
+      obj({ id: str({ maxLength: MEMORY_LIMITS.identifier }), text: str({ maxLength: MEMORY_LIMITS.text }) }),
       { maxItems: MEMORY_LIMITS.preferences },
     ),
-    profile: Type.Array(
-      Type.Object(
-        {
-          id: Type.String({ maxLength: MEMORY_LIMITS.identifier }),
-          text: Type.String({ maxLength: MEMORY_LIMITS.text }),
-          category: Type.String({ maxLength: MEMORY_LIMITS.category }),
-          evidence: Type.Array(
-            Type.Object(
-              {
-                date: Type.String({ maxLength: 10 }),
-                id: Type.String({ maxLength: MEMORY_LIMITS.identifier }),
-                page: Type.Integer({ minimum: 1, maximum: DAILY_MAX_PAGES }),
-              },
-              { additionalProperties: false },
-            ),
-            { maxItems: MEMORY_LIMITS.sources },
-          ),
-        },
-        { additionalProperties: false },
-      ),
+    profile: arr(
+      obj({
+        id: str({ maxLength: MEMORY_LIMITS.identifier }),
+        text: str({ maxLength: MEMORY_LIMITS.text }),
+        category: str({ maxLength: MEMORY_LIMITS.category }),
+        evidence: arr(
+          obj({
+            date: str({ maxLength: 10 }),
+            id: str({ maxLength: MEMORY_LIMITS.identifier }),
+            page: int({ minimum: 1, maximum: DAILY_MAX_PAGES }),
+          }),
+          { maxItems: MEMORY_LIMITS.sources },
+        ),
+      }),
       { maxItems: MEMORY_LIMITS.profile },
     ),
   },
-  { additionalProperties: false },
 );
 
 function structuredState(state: WorkingState) {
@@ -149,7 +139,7 @@ export function workingTools(options: { readonly resolveProfileEvidence?: Profil
     name: "working_read",
     description:
       "Read the current working state: the active task, its progress and blockers, the preferences that outlive it, and the user profile. Call it before updating so the revision you pass is current. The result also lists the numeric entry ids of recent user messages: cite those ids as evidence in working_update, never guess an entry id. Profile lines cite daily-log segments as date/id page; pass those refs back on profile.put.",
-    parameters: Type.Object({}, { additionalProperties: false }),
+    parameters: obj({}),
     structuredOutputSchema: structuredStateSchema,
     replay: "safe",
     execute: async (_args, api, context) => {

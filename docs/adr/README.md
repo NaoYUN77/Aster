@@ -63,7 +63,7 @@ spec 在功能开发完成后删除，ADR 及其记录长期保留。ADR 中的 
 | 0003 | 工具体系 v0.1：统一治理先行，按瘦身清单分期 | Accepted，2026-10-28 | [0003-tool-governance-v01-scope.md](0003-tool-governance-v01-scope.md) |
 | 0004 | 退役 `workspace/MEMORY.md` | Accepted，2026-10-28 | [0004-retire-workspace-memory-md.md](0004-retire-workspace-memory-md.md) |
 | 0005 | 删除 Agent Vault，改为单服务 | Accepted，2026-10-28 | [0005-remove-agent-vault-single-service.md](0005-remove-agent-vault-single-service.md) |
-| 0006 | 提供商只登记显式 API key | Accepted，2026-10-21 | [0006-explicit-api-key-providers.md](0006-explicit-api-key-providers.md) |
+| 0006 | 提供商只登记显式 API key | Accepted，2026-10-21（自定义 base URL 一项由 0024 取代） | [0006-explicit-api-key-providers.md](0006-explicit-api-key-providers.md) |
 | 0007 | 投递不承诺恰好一次 | Accepted，2026-10-21 | [0007-delivery-not-exactly-once.md](0007-delivery-not-exactly-once.md) |
 | 0008 | 外部工具调用不自动重放 | Accepted，2026-10-21 | [0008-unsafe-tool-replay.md](0008-unsafe-tool-replay.md) |
 | 0009 | 同一回合的工具顺序执行 | Accepted，2026-10-21 | [0009-sequential-tool-execution.md](0009-sequential-tool-execution.md) |
@@ -75,7 +75,9 @@ spec 在功能开发完成后删除，ADR 及其记录长期保留。ADR 中的 
 | 0015 | 旧版画像字段导致 working memory 损坏态 | Accepted，2026-10-31 | [working-memory/0015-legacy-profile-memory-corrupt-state.md](working-memory/0015-legacy-profile-memory-corrupt-state.md) |
 | 0016 | 用户画像暂存 working memory | Accepted，2026-10-29 | [0016-user-profile-working-memory.md](0016-user-profile-working-memory.md) |
 | 0018 | GitHub 官方托管 HTTP MCP 与 OpenBao 只读 PAT | Accepted，2026-11-01（实现与真实链路未验收） | [github-access/0018-github-access.md](github-access/0018-github-access.md) |
-| 0019 | PTC 代码调用工具（codemode） | Accepted，2026-11-02 | [codemode-ptc/0019-codemode-ptc.md](codemode-ptc/0019-codemode-ptc.md) |
-| 0020 | 远程 PTC sandbox（脚本与工具同在执行 VPS；2026-11-02 修订为统一 RPC） | Accepted，2026-11-02 | [remote-ptc-sandbox/0020-remote-ptc-sandbox.md](remote-ptc-sandbox/0020-remote-ptc-sandbox.md) |
-| 0021 | 控制面与执行面分离，工具执行先下沉到执行 VPS | Proposed，2026-10-31 | [0021-control-execution-split.md](0021-control-execution-split.md) |
 | 0022 | 提醒由宿主持久化并在进程内调度 | Accepted，2026-11-05 | [reminders/0022-reminders-in-process-scheduler.md](reminders/0022-reminders-in-process-scheduler.md) |
+| 0023 | 新增 Exa 作为可选第二搜索提供商 | Accepted，2026-11-09（真实链路未验收） | [exa-search/0023-exa-search-provider.md](exa-search/0023-exa-search-provider.md) |
+| 0024 | 自定义模型提供商由声明文件描述，底层用底座原语 | Accepted，2026-11-09（真实网关的目录与推理已验证；MITM 出站链路未验收） | [custom-providers/0024-custom-provider-declarations.md](custom-providers/0024-custom-provider-declarations.md) |
+| 0025 | Slack 作为可切换的第二个渠道，用 Socket Mode 出站接入 | Accepted，2026-11-09（真实 workspace 链路未验收） | [slack-channel/0025-slack-channel.md](slack-channel/0025-slack-channel.md) |
+
+> 0019～0021 曾记录已移除的相关功能，现已删除，编号不复用。

@@ -35,7 +35,6 @@ export class Inbox {
       PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS checkpoint (id INTEGER PRIMARY KEY CHECK (id = 1), offset INTEGER NOT NULL);
       INSERT OR IGNORE INTO checkpoint VALUES (1, 0);
-      CREATE TABLE IF NOT EXISTS identity (id INTEGER PRIMARY KEY CHECK (id = 1), botId TEXT NOT NULL, ownerId TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox (
         requestId TEXT PRIMARY KEY,
         conversationId TEXT NOT NULL,
@@ -68,14 +67,24 @@ export class Inbox {
     addColumn(this.db, "inbox", "repliedAt", "TEXT");
     addColumn(this.db, "deliveries", "createdAt", "TEXT");
     addColumn(this.db, "deliveries", "updatedAt", "TEXT");
+    migrateIdentity(this.db);
   }
 
-  bindIdentity(botId: string, ownerId: string): void {
-    const previous = this.db.prepare("SELECT botId, ownerId FROM identity WHERE id = 1").get();
-    if (previous && (previous.botId !== botId || previous.ownerId !== ownerId)) {
-      throw new StateError("Data directory belongs to another Telegram bot or owner; use a separate DATA_DIR");
-    }
-    this.db.prepare("INSERT OR IGNORE INTO identity VALUES (1, ?, ?)").run(botId, ownerId);
+  /**
+   * Records which bot and owner a channel's messages belong to. One row per channel, because the
+   * conversation is shared: switching CHANNEL keeps the history and the other channel's binding.
+   */
+  bindIdentity(channel: string, botId: string, ownerId: string): void {
+    this.transaction(() => {
+      this.db.prepare("CREATE TABLE IF NOT EXISTS identities (channel TEXT PRIMARY KEY, botId TEXT NOT NULL, ownerId TEXT NOT NULL)").run();
+      const previous = this.db.prepare("SELECT botId, ownerId FROM identities WHERE channel = ?").get(channel) as
+        | { botId: string; ownerId: string }
+        | undefined;
+      if (previous && (previous.botId !== botId || previous.ownerId !== ownerId)) {
+        throw new StateError(`Data directory belongs to another ${channel} bot or owner; use a separate DATA_DIR`);
+      }
+      this.db.prepare("INSERT OR IGNORE INTO identities VALUES (?, ?, ?)").run(channel, botId, ownerId);
+    });
   }
 
   recover(): void {
@@ -205,4 +214,29 @@ export class Inbox {
 function addColumn(db: DatabaseSync, table: string, column: string, type: string): void {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   if (!columns.some((entry) => entry.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
+/**
+ * Moves the single pre-channel identity row into the per-channel table. Databases written before
+ * CHANNEL existed only ever held the Telegram bot, so that is what the row becomes; the old table is
+ * dropped so a later startup cannot read a binding this code no longer maintains.
+ */
+function migrateIdentity(db: DatabaseSync): void {
+  const legacy = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'identity'").get();
+  if (!legacy) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec("CREATE TABLE IF NOT EXISTS identities (channel TEXT PRIMARY KEY, botId TEXT NOT NULL, ownerId TEXT NOT NULL)");
+    const row = db.prepare("SELECT botId, ownerId FROM identity WHERE id = 1").get() as
+      | { botId: string; ownerId: string }
+      | undefined;
+    if (row) {
+      db.prepare("INSERT OR IGNORE INTO identities VALUES ('telegram', ?, ?)").run(row.botId, row.ownerId);
+    }
+    db.exec("DROP TABLE identity");
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }

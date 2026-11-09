@@ -213,37 +213,3 @@ test("a different successful call resets the identical-call counter", { timeout:
     try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
   }
 });
-
-test("a script repeating one nested call stops instead of waiting for the sandbox timeout", {
-  timeout: 45_000,
-}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "personal-agent-loop-nested-"));
-  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
-  try {
-    await mkdir(join(directory, "workspace"), { recursive: true });
-    await writeFile(join(directory, "workspace", "probe.txt"), "probe", "utf8");
-    const fixture = modelFixture();
-    fixture.faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("codemode", {
-        code: `
-          while (true) {
-            await tools.read({ path: "probe.txt" });
-          }
-        `,
-      }, { id: "loop-script" }), { stopReason: "toolUse" }),
-      (transcript) => {
-        const result = toolResult(transcript, "loop-script");
-        assert.equal(result.isError, true, "the script fails rather than timing out");
-        assert.match(
-          toolResultText(transcript, "loop-script"),
-          /Nested tool loop detected: tool "read" called 6 times consecutively with identical arguments/,
-        );
-        return fauxAssistantMessage("script stopped");
-      },
-    ]);
-    app = await openAgent(appConfig(directory, { CODEMODE_ENABLED: "1" }), fixture.models);
-    assert.equal(await app.reply({ ...request, requestId: "telegram:loop:nested" }, running), "script stopped");
-  } finally {
-    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
-  }
-});

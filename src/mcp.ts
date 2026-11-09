@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { Type, type TSchema } from "@earendil-works/pi-ai";
+import type { TSchema } from "typebox";
+import type { Schema } from "@earendil-works/pi-schema";
 import {
   defineExtension,
   defineTool,
@@ -520,7 +521,9 @@ export function buildMcpTool(
   return Object.assign(defineTool({
     name,
     description: sanitizeDescription(info.description, info.name),
-    parameters: Type.Unsafe<Record<string, unknown>>(schema),
+    // pi-durable accepts any JSON Schema object as `parameters`; the brand only records the argument
+    // type, which a schema the remote server wrote cannot express.
+    parameters: schema as Schema<Record<string, unknown>>,
     replay: "unsafe",
     deferred: true,
     outputLimits: { maxBytes: MAX_OUTPUT_BYTES, maxLines: MAX_OUTPUT_LINES, retain: "head" },

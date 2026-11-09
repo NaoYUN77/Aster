@@ -25,7 +25,7 @@
 
 镜像入口为 `flock --no-fork --nonblock /data/app.lock node dist/src/main.js`。同一个数据卷上的第二个应用容器会因拿不到锁而立即退出，这是有意的保护。它只覆盖“同卷多容器”：
 
-- 不同数据卷、同一个 bot token 或同一个 owner 的两个实例不会被镜像检测。Telegram 长轮询会互相争抢，可能产生重复回复。
+- 不同数据卷、同一个 bot token 或同一个 owner 的两个实例不会被镜像检测。Telegram 长轮询会互相争抢，Slack 侧则是同一个应用被两个进程各自开一条 Socket Mode 连接，两者都可能产生重复回复。
 - 迁移、回滚或演练期间不要让旧实例和新实例同时消费同一个 bot。
 - 同一数据卷只允许一个容器使用；不要用 `docker compose up --scale` 扩容。
 
@@ -41,19 +41,21 @@ vi .env
 chmod 600 .env
 ```
 
-必填项：
+必填项（渠道二选一，见 [Slack 通道](slack.md)）：
 
-- `TELEGRAM_BOT_TOKEN`：BotFather 创建的 bot token。
-- `TELEGRAM_OWNER_ID`：纯数字 Telegram 用户 ID；不要写用户名。
 - `MODEL_PROVIDER`：`src/providers.ts` 注册表内的 id。
-- `MODEL_ID`：该提供商在 pi-ai 1.3.0 模型目录中的 id。
+- `MODEL_ID`：该提供商在 pi-ai 1.5.0 模型目录中的 id。
 - 当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`）；其他提供商的 key 留空。
-- `TELEGRAM_API_ROOT`（可选）：https 前缀，无 query 或 fragment。供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理。未设置时使用官方根地址。仓库没有记录这项是否在某台机器上使用。
+- `CHANNEL`（可选）：`telegram`（默认）或 `slack`。只校验选中渠道的变量。
+- Telegram（默认）：`TELEGRAM_BOT_TOKEN`（BotFather 创建的 token）、`TELEGRAM_OWNER_ID`（纯数字用户 ID，不要写用户名）。
+- Slack（`CHANNEL=slack`）：`SLACK_BOT_TOKEN`（`xoxb-`）、`SLACK_APP_TOKEN`（`xapp-`）、`SLACK_OWNER_ID`（`U…` member ID）。
+- `TELEGRAM_API_ROOT`（可选，仅 Telegram）：https 前缀，无 query 或 fragment。供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理。未设置时使用官方根地址。仓库没有记录这项是否在某台机器上使用。
 
 只检查键是否存在，不要在终端或日志中回显值：
 
 ```sh
-grep -cE '^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # 预期 4
+grep -cE '^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # Telegram 部署预期 4
+grep -cE '^(SLACK_BOT_TOKEN|SLACK_APP_TOKEN|SLACK_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # Slack 部署预期 5
 grep -cE '^[A-Z0-9_]*_API_KEY=.+' .env                                            # 至少 1
 ```
 
@@ -65,7 +67,7 @@ grep -cE '^[A-Z0-9_]*_API_KEY=.+' .env                                          
 docker compose run --rm --no-deps personal-agent node dist/src/check-config.js
 ```
 
-预期输出 `Configuration OK: MODEL_PROVIDER=... MODEL_ID=... MCP_SERVERS=...`。缺失项会打印 `Missing configuration: <KEY>`，提供商或模型 id 错误会打印候选列表；先修配置，不要反复重启。bot 已有 webhook 时应用拒绝启动，需先在原部署中停用。
+预期输出 `Configuration OK: CHANNEL=telegram MODEL_PROVIDER=... MODEL_ID=... MCP_SERVERS=...`。缺失项会打印 `Missing configuration: <KEY>`，提供商或模型 id 错误会打印候选列表；先修配置，不要反复重启。Telegram 部署中 bot 已有 webhook 时应用拒绝启动，需先在原部署中停用。
 
 MCP 配置默认读取 `DATA_DIR/mcp.json`，即卷内 `/data/mcp.json`；文件不存在表示关闭。默认路径上的文件级错误只禁用 MCP，`MCP_CONFIG` 显式指定的文件错误会使检查失败。配置格式见 [工具与 MCP](mcp.md)。
 
@@ -103,7 +105,7 @@ docker compose up -d --no-build
 docker compose logs --tail 50 personal-agent
 ```
 
-预期日志出现 `Personal agent starting; single-owner private Telegram messages enabled.`，随后进入长轮询且无持续报错。`docker compose ps` 显示 `running` 只表示进程存在，不代表已通过 Telegram 验收。
+预期日志出现 `Personal agent starting; single-owner private Telegram messages enabled.`（`CHANNEL=slack` 时为 `... private Slack messages enabled.`），Telegram 随后进入长轮询、Slack 随后保持 socket 连接，且无持续报错。`docker compose ps` 显示 `running` 只表示进程存在，不代表已通过渠道验收。
 
 用 owner 账号私聊 bot 发送“现在几点？”。预期收到与服务器 UTC 时间一致的回复，日志中没有 `Agent request failed`。数据卷中应出现：
 
@@ -156,7 +158,7 @@ docker compose run --rm --no-deps personal-agent node dist/src/mcp-check.js
 docker compose start personal-agent
 ```
 
-`deliveries.js list` 输出 `blocked` 与 `failures` 两个数组；该命令会先执行恢复，强杀时处于 `sending` 的分段会以 `uncertain` 出现。先核对 Telegram 实际收到的内容，再决定 `retry` 或 `sent`。命令语义见 [投递核查与补发](deliveries.md)。这两条命令只改本地投递状态，不重新执行 agent。
+`deliveries.js list` 输出 `blocked` 与 `failures` 两个数组；该命令会先执行恢复，强杀时处于 `sending` 的分段会以 `uncertain` 出现。先核对当前渠道实际收到的内容，再决定 `retry` 或 `sent`。命令语义见 [投递核查与补发](deliveries.md)。这两条命令只改本地投递状态，不重新执行 agent。
 
 ### MCP OAuth
 
@@ -282,13 +284,15 @@ docker compose logs --tail 50 personal-agent
 | `pull access denied` / 找不到镜像 | 镜像未构建、未 `load` 或引用写错 | 核对 `ASTER_IMAGE`；构建机分发或从仓库拉取 |
 | 启动即退出，`Missing configuration` | `.env` 缺项 | 补齐对应键 |
 | 启动即退出，webhook 错误 | bot 已有 webhook | 先停用原 webhook |
-| 启动即退出，`belongs to another Telegram bot or owner` | 数据卷来自别的 bot／用户 | 换独立数据卷，或确认身份后迁移 |
+| 启动即退出，`belongs to another telegram bot or owner` / `another slack bot or owner` | 同一渠道的数据卷来自别的 bot／用户 | 换独立数据卷，或确认身份后迁移；换渠道本身不算冲突 |
+| 启动即退出，`CHANNEL must be one of` | `CHANNEL` 值不是 `telegram`／`slack` | 改成合法值或不设置 |
+| `CHANNEL=slack` 启动即退出，`SLACK_* is not shaped like a Slack token` | bot token 与 app token 填反了 | 按 `xoxb-`／`xapp-` 前缀对调；细节见 [Slack 通道](slack.md) |
 | 启动即退出，`flock` 无法加锁 | 同一数据卷已有实例 | 停掉旧容器；不要并行运行 |
 | `EACCES` / `Unable to open the database file` | 卷内文件属主不是 uid 1000 | `chown -R 1000:1000 /data` |
-| 容器 `running` 但无回复 | 模型或 Telegram 网络失败 | 看日志错误码；核对服务器出网与模型端点可达性 |
+| 容器 `running` 但无回复 | 模型或渠道网络失败 | 看日志错误码；核对服务器出网与模型端点可达性 |
 | 备份归档为空 | 卷名错误 | `docker volume ls` 核对 `personal-agent-data` |
 | 收到截断提示 | 模型输出达到长度上限 | 让用户拆分问题；不会自动续写 |
-| 回复重复 | 发送结果曾未知后人工 `retry` | 核对 Telegram 实际消息，重复属预期风险 |
+| 回复重复 | 发送结果曾未知后人工 `retry` | 核对渠道实际消息，重复属预期风险 |
 
 ## 9. 上线判定与验证边界
 
