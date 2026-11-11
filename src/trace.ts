@@ -5,12 +5,15 @@
 //   beginRequest(meta)                    start the root observation for one user request
 //   recordGeneration(...)                 one LLM generation, from the existing response hook
 //   recordRegistryDecision(...)           one authorization decision, allow or deny
+//   beginToolExecution(meta)              start one admitted tool execution; end it when it settles
 //   recordLoopGuard(...)                  warning/halt evidence, correlated to its request
 //   TraceRuntime.close()                  end abandoned observations, flush, release Langfuse
 //
 // Inputs: host-observed identifiers (conversation, request, task, call, session) and lengths,
 // counts and error codes. Message text, tool arguments, file contents and tool results are never
-// attached; credentials, authorization headers and provider error messages never enter the trace.
+// attached: a tool execution carries the argument names, their count and the serialized size of the
+// call, never a value. Credentials, authorization headers and provider error messages never enter
+// the trace either.
 //
 // Errors: tracing is diagnostics. A construction or export failure disables tracing and is logged
 // once; it never propagates into a tool call, hook or shutdown path.
@@ -35,11 +38,32 @@ import { hasProxyEnv, type TraceConfig } from "./config.js";
 const ACTIVE_LIMIT = 256;
 /** One observation may not grow without bound through events. */
 const MAX_EVENTS_PER_SPAN = 256;
+/** Argument names are a bounded summary of the call, never its payload. */
+const MAX_ARGUMENT_NAMES = 24;
+const MAX_ARGUMENT_NAMES_CHARS = 512;
 const FLUSH_TIMEOUT_MS = 5_000;
 
 export type TraceFields = Readonly<Record<string, string | number | boolean | undefined>>;
 export type TraceOutcome = "ok" | "error" | "aborted" | "unknown" | "halted";
 export type TraceSpanKind = "span" | "tool" | "agent";
+
+/** One admitted tool execution, described at the boundary: identity, policy and sizes, never values. */
+export type ToolExecutionMeta = {
+  readonly tool: string;
+  /** Where the implementation came from: `builtin:<extension>`, `mcp:<server>` or `plugin:<name>`. */
+  readonly source: string;
+  readonly trust: string;
+  readonly authz: string;
+  readonly replay: string;
+  readonly tier: number;
+  /** Argument names, not argument values. */
+  readonly argNames: readonly string[];
+  /** Serialized size of the whole call, so an oversized argument is visible without its content. */
+  readonly argsBytes: number;
+  readonly conversationId: ConversationId;
+  readonly taskId: TaskId;
+  readonly callId?: string;
+};
 
 type Identity = {
   readonly conversationId: ConversationId;
@@ -279,6 +303,37 @@ export class TraceRuntime {
     }
   }
 
+  /**
+   * One tool call that passed review, as its own span under the active request. The span measures
+   * the execution itself: it opens after authorization and the caller ends it when the tool
+   * settles, so its duration and outcome are the tool's, not the review's. A call with no active
+   * request (background work) is not traced, exactly like a registry decision.
+   */
+  beginToolExecution(meta: ToolExecutionMeta): TraceSpan | undefined {
+    if (this.#closing) return undefined;
+    const parent = this.requestFor(meta.conversationId);
+    if (parent === undefined) return undefined;
+    return startSpan({
+      name: "tool.execution",
+      kind: "tool",
+      parent: parent.spanContext,
+      fields: {
+        tool: meta.tool.slice(0, 128),
+        source: meta.source.slice(0, 128),
+        trust: meta.trust,
+        authz: meta.authz,
+        replay: meta.replay,
+        tier: meta.tier,
+        taskId: String(meta.taskId),
+        ...(meta.callId === undefined ? {} : { callId: meta.callId.slice(0, 128) }),
+        argNames: meta.argNames.slice(0, MAX_ARGUMENT_NAMES).join(",").slice(0, MAX_ARGUMENT_NAMES_CHARS),
+        argCount: meta.argNames.length,
+        argsBytes: meta.argsBytes,
+      },
+      log: this.#log,
+    });
+  }
+
   recordLoopGuard(
     call: Identity & { tool: string; count: number; reason?: string },
     code: "LOOP_GUARD_WARNING" | "LOOP_GUARD_HALT",
@@ -483,4 +538,9 @@ export function recordLoopGuard(
   code: "LOOP_GUARD_WARNING" | "LOOP_GUARD_HALT",
 ): void {
   activeRuntime?.recordLoopGuard(call, code);
+}
+
+/** Undefined when tracing is off, no request is active, or the span could not be created. */
+export function beginToolExecution(meta: ToolExecutionMeta): TraceSpan | undefined {
+  return activeRuntime?.beginToolExecution(meta);
 }

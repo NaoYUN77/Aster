@@ -49,6 +49,7 @@ chmod 600 .env
 - `CHANNEL`（可选）：`telegram`（默认）或 `slack`。只校验选中渠道的变量。
 - Telegram（默认）：`TELEGRAM_BOT_TOKEN`（BotFather 创建的 token）、`TELEGRAM_OWNER_ID`（纯数字用户 ID，不要写用户名）。
 - Slack（`CHANNEL=slack`）：`SLACK_BOT_TOKEN`（`xoxb-`）、`SLACK_APP_TOKEN`（`xapp-`）、`SLACK_OWNER_ID`（`U…` member ID）。
+- `SLACK_ALLOWED_USERS` / `SLACK_ALLOWED_CHANNELS`（可选，仅 Slack）：允许在频道里驱动 bot 的成员 ID 与允许回话的频道 ID，逗号分隔、不写空格。空着即只服务所有者单聊；值只参与进程内比对，不出站。
 - `TELEGRAM_API_ROOT`（可选，仅 Telegram）：https 前缀，无 query 或 fragment。供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理。未设置时使用官方根地址。仓库没有记录这项是否在某台机器上使用。
 
 只检查键是否存在，不要在终端或日志中回显值：

@@ -65,6 +65,10 @@ export class Inbox {
     // instead of backfilling them with a time the process never observed.
     addColumn(this.db, "inbox", "receivedAt", "TEXT");
     addColumn(this.db, "inbox", "repliedAt", "TEXT");
+    // A reply is only in the right place if the thread anchor survives a restart; NULL is a flat reply.
+    addColumn(this.db, "inbox", "threadTs", "TEXT");
+    // The received message itself, kept so a reaction can still be attached after a restart.
+    addColumn(this.db, "inbox", "messageTs", "TEXT");
     addColumn(this.db, "deliveries", "createdAt", "TEXT");
     addColumn(this.db, "deliveries", "updatedAt", "TEXT");
     migrateIdentity(this.db);
@@ -106,12 +110,19 @@ export class Inbox {
   accept(nextOffset: number, request?: TextRequest): void {
     this.transaction(() => {
       if (request) {
-        const existing = this.db.prepare("SELECT * FROM inbox WHERE requestId = ?").get(request.requestId);
-        if (existing && (existing.text !== request.text || existing.conversationId !== request.conversationId || existing.senderId !== request.senderId)) {
+        const existing = this.db.prepare("SELECT * FROM inbox WHERE requestId = ?").get(request.requestId) as
+          | { text: string; conversationId: string; senderId: string; threadTs: string | null }
+          | undefined;
+        // A row written before the thread column existed has no anchor to compare; it keeps its meaning.
+        const anchorChanged = existing !== undefined && existing.threadTs !== null
+          && existing.threadTs !== (request.threadTs ?? null);
+        if (existing && (existing.text !== request.text || existing.conversationId !== request.conversationId
+          || existing.senderId !== request.senderId || anchorChanged)) {
           throw new Error("Request ID reused with different content");
         }
-        this.db.prepare(`INSERT OR IGNORE INTO inbox (requestId, conversationId, senderId, text, receivedAt)
-          VALUES (?, ?, ?, ?, ?)`).run(request.requestId, request.conversationId, request.senderId, request.text, timestamp());
+        this.db.prepare(`INSERT OR IGNORE INTO inbox (requestId, conversationId, senderId, text, threadTs, messageTs, receivedAt)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(request.requestId, request.conversationId, request.senderId, request.text,
+          request.threadTs ?? null, request.messageTs ?? null, timestamp());
       }
       // Telegram can randomize update IDs after an idle week; do not use MAX(offset).
       this.db.prepare("UPDATE checkpoint SET offset = ? WHERE id = 1").run(nextOffset);
@@ -119,7 +130,12 @@ export class Inbox {
   }
 
   next(): Job | undefined {
-    return this.db.prepare("SELECT * FROM inbox WHERE status IN ('pending', 'ready') ORDER BY rowid LIMIT 1").get() as Job | undefined;
+    const row = this.db.prepare("SELECT * FROM inbox WHERE status IN ('pending', 'ready') ORDER BY rowid LIMIT 1").get() as
+      | (Omit<Job, "threadTs" | "messageTs"> & { threadTs: string | null; messageTs: string | null }) | undefined;
+    if (row === undefined) return undefined;
+    // SQLite has no undefined: a stored NULL means "flat reply", not "unknown thread", and a request
+    // whose channel cannot address its own message stays that way instead of inventing an anchor.
+    return { ...row, threadTs: row.threadTs ?? undefined, messageTs: row.messageTs ?? undefined };
   }
 
   saveReply(requestId: string, reply: string, errorCode?: string): void {

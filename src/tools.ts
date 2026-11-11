@@ -3,7 +3,7 @@ import { obj } from "@earendil-works/pi-schema";
 import { createRegistry, defineExtension, defineTool, GenerationTask, hook, type Extension, type Registry, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
-import { recordGeneration, recordRegistryDecision } from "./trace.js";
+import { beginToolExecution, recordGeneration, recordRegistryDecision, type TraceFields } from "./trace.js";
 
 export const currentTime = defineTool({
   name: "current_time",
@@ -62,7 +62,55 @@ export interface ToolRegistry extends Registry {
   setDisabled(name: string, disabled: boolean): void;
 }
 
-const READ_TOOLS = new Set(["read", "current_time", "working_read", "memory_search", "memory_read", "tool_search", "reminder_list"]);
+// `emoji_search` lists what the channel can react with; it reads a list and changes nothing, while
+// the reaction it informs is a write.
+const READ_TOOLS = new Set(["read", "current_time", "working_read", "memory_search", "memory_read", "tool_search", "reminder_list", "emoji_search"]);
+
+/** Where a tool's implementation came from, as one trace label. */
+function sourceLabel(source: ToolSource): string {
+  switch (source.kind) {
+    case "mcp": return `mcp:${source.server}`;
+    case "plugin": return `plugin:${source.plugin}`;
+    default: return `builtin:${source.extension}`;
+  }
+}
+
+/**
+ * Arguments are described, never attached. Argument names and the serialized size of the whole call
+ * make an oversized or unexpected argument visible in the trace without putting a value, a command
+ * or a file body into Langfuse.
+ */
+function argumentSummary(args: unknown): { names: string[]; bytes: number } {
+  const names = args !== null && typeof args === "object" && !Array.isArray(args) ? Object.keys(args) : [];
+  return { names, bytes: jsonBytes(args ?? null) };
+}
+
+function jsonBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+  } catch {
+    return 0;
+  }
+}
+
+/** A host error code, from the review details or a provider-shaped `error.code`; never its message. */
+function errorCodeOf(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const code = (value as { code?: unknown }).code;
+  if (typeof code === "string") return code;
+  return errorCodeOf((value as { error?: unknown }).error);
+}
+
+/** Result boundary only: sizes, item counts and host error codes; the result text stays local. */
+function executionResultFields(result: ToolExecutionResult): TraceFields {
+  const code = errorCodeOf(result.details) ?? errorCodeOf(result.structuredOutput);
+  return {
+    ...(code === undefined ? {} : { errorCode: code }),
+    resultBytes: jsonBytes(result.output ?? []),
+    outputItems: result.output?.length ?? 0,
+    diagnostics: result.diagnostics?.length ?? 0,
+  };
+}
 
 function registration(extension: Extension, tool: GovernedTool): ToolRecord {
   const governance = tool.governance ?? {
@@ -183,9 +231,10 @@ export function createToolRegistry(
       ...tool,
       execute: async (args, api, context) => {
         context.abortSignal?.throwIfAborted();
-        const rejected = review(tool.name, { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId }, registration);
+        const identity = { conversationId: api.conversationId, taskId: api.taskId, callId: api.callId };
+        const rejected = review(tool.name, identity, registration);
         if (rejected !== undefined) return rejected;
-        return tool.execute(args, {
+        const delegated: ToolExecutionApi = {
           ...api,
           executeTool: (name, args, context, options) => {
             // Native resolution rejects missing nested names before hooks or an executor can run.
@@ -198,7 +247,34 @@ export function createToolRegistry(
               return { ...agent, deferred: agent.deferred.filter(({ name }) => records.get(name)?.state === "available") };
             },
           } : {}),
-        }, context);
+        };
+        // review() proved the record exists and is available; only a rejected call skips execution.
+        const record = records.get(tool.name)!;
+        const summary = argumentSummary(args);
+        const execution = beginToolExecution({
+          tool: tool.name,
+          source: sourceLabel(record.source),
+          trust: record.trust,
+          authz: record.authz,
+          replay: record.replay,
+          tier: record.tier,
+          argNames: summary.names,
+          argsBytes: summary.bytes,
+          conversationId: api.conversationId,
+          taskId: api.taskId,
+          ...(api.callId === undefined ? {} : { callId: api.callId }),
+        });
+        if (execution === undefined) return tool.execute(args, delegated, context);
+        try {
+          const result = await tool.execute(args, delegated, context);
+          execution.end(result.isError === true ? "error" : "ok", executionResultFields(result));
+          return result;
+        } catch (error) {
+          // A thrown executor is an unknown result for the caller; the trace still records that the
+          // tool ran and failed, and the caller's own error handling decides what the model sees.
+          execution.end(context.abortSignal?.aborted === true ? "aborted" : "error", { errorCode: "TOOL_EXECUTION_FAILED" });
+          throw error;
+        }
       },
     };
   }

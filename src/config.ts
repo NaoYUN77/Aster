@@ -3,6 +3,7 @@ import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
+import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
 import type { CustomProviderDeclaration } from "./provider-config.js";
 import {
   assertSchema,
@@ -284,7 +285,20 @@ function boundedInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, m
  */
 export type ChannelConfig =
   | { readonly kind: "telegram"; readonly ownerId: string; readonly token: string; readonly apiRoot?: string }
-  | { readonly kind: "slack"; readonly ownerId: string; readonly botToken: string; readonly appToken: string };
+  | {
+    readonly kind: "slack";
+    readonly ownerId: string;
+    readonly botToken: string;
+    readonly appToken: string;
+    /** Members allowed to drive the bot besides the owner. Empty keeps the owner-only DM behaviour. */
+    readonly allowedUsers: readonly string[];
+    /** Channels the bot answers in. Empty keeps the owner-only DM behaviour. */
+    readonly allowedChannels: readonly string[];
+    /** Emoji the bot attaches to a message while it works, and the ones that can replace it. */
+    readonly receipts: ReceiptEmojis;
+    /** How many reactions the model may spend on one message; keeps a lively answer from becoming a wall. */
+    readonly maxReactions: number;
+  };
 
 export const CHANNELS = ["telegram", "slack"] as const;
 
@@ -292,6 +306,8 @@ const SLACK_BOT_TOKEN_SHAPE = /^xoxb-[A-Za-z0-9-]{20,250}$/;
 const SLACK_APP_TOKEN_SHAPE = /^xapp-[A-Za-z0-9-]{20,250}$/;
 // Slack member ids: a U (or legacy W) plus the member's alphanumeric id.
 const SLACK_OWNER_ID_SHAPE = /^[UW][A-Z0-9]{6,15}$/;
+// Channel ids: C (public), G (private or legacy group) or D (direct); the bot token type decides access.
+const SLACK_CHANNEL_ID_SHAPE = /^[CGD][A-Z0-9]{6,15}$/;
 
 /**
  * Which channel this process serves. The default keeps every existing deployment working, and an
@@ -313,6 +329,52 @@ function readSlackOwnerId(env: NodeJS.ProcessEnv, required: (key: string) => str
   return ownerId;
 }
 
+/** The emoji receipts a Slack deployment asks for by default; each one can be turned off explicitly. */
+const SLACK_RECEIPT_DEFAULTS = {
+  working: "eyes",
+  done: "white_check_mark",
+  failed: "warning",
+  lost: "x",
+} as const;
+/** A deployment that wants no receipt at all writes one of these instead of a name. */
+const RECEIPT_OFF = new Set(["none", "off", "0", "-"]);
+
+/**
+ * Reads one receipt emoji. Absent means the default, an empty or explicit "none" means this receipt
+ * is off, and anything Slack could not accept as an emoji name is a startup error rather than a bot
+ * whose acknowledgement silently never appears.
+ */
+function readReceiptEmoji(env: NodeJS.ProcessEnv, key: string, fallback: string): string | undefined {
+  const raw = env[key]?.trim();
+  if (raw === undefined) return fallback;
+  if (raw === "" || RECEIPT_OFF.has(raw.toLowerCase())) return undefined;
+  const name = normalizeEmojiName(raw);
+  if (name === undefined) {
+    throw new ConfigurationError(`${key} must be a Slack emoji name, such as ${fallback}, or none`);
+  }
+  return name;
+}
+
+/**
+ * A comma-separated allowlist. Absent or empty is not "allow everything": it is the owner-only
+ * behaviour this deployment had before team channels existed. A malformed id is a startup error, so a
+ * typo shows up as a refused boot instead of a member whose messages are silently ignored.
+ */
+function readSlackIdList(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  shape: RegExp,
+  what: string,
+): readonly string[] {
+  const raw = env[key]?.trim();
+  if (raw === undefined || raw === "") return [];
+  const ids = raw.split(",").map((value) => value.trim()).filter((value) => value !== "");
+  for (const id of ids) {
+    if (!shape.test(id)) throw new ConfigurationError(`${key} must list ${what}, comma-separated and without spaces`);
+  }
+  return [...new Set(ids)];
+}
+
 /**
  * Reads the selected channel's own variables. Only the active channel's credentials are required, so
  * a Telegram deployment never needs Slack tokens and vice versa. A prefix check catches a token
@@ -329,7 +391,29 @@ function readChannelCredentials(
     const appToken = required("SLACK_APP_TOKEN");
     assertSlackToken("SLACK_BOT_TOKEN", botToken, SLACK_BOT_TOKEN_SHAPE);
     assertSlackToken("SLACK_APP_TOKEN", appToken, SLACK_APP_TOKEN_SHAPE);
-    return { kind: "slack", ownerId, botToken, appToken };
+    // Receipts need `reactions:write`; the shape is checked here so a bad name is a refused boot, and a
+    // missing scope shows up as a refused call rather than as a bot that never reacts.
+    const working = readReceiptEmoji(env, "SLACK_ACK_EMOJI", SLACK_RECEIPT_DEFAULTS.working);
+    const done = readReceiptEmoji(env, "SLACK_DONE_EMOJI", SLACK_RECEIPT_DEFAULTS.done);
+    const failed = readReceiptEmoji(env, "SLACK_FAIL_EMOJI", SLACK_RECEIPT_DEFAULTS.failed);
+    const lost = readReceiptEmoji(env, "SLACK_LOST_EMOJI", SLACK_RECEIPT_DEFAULTS.lost);
+    return {
+      kind: "slack",
+      ownerId,
+      botToken,
+      appToken,
+      // Both lists are optional: an empty one is the owner-only private behaviour, not an open door.
+      allowedUsers: readSlackIdList(env, "SLACK_ALLOWED_USERS", SLACK_OWNER_ID_SHAPE, "Slack member IDs"),
+      allowedChannels: readSlackIdList(env, "SLACK_ALLOWED_CHANNELS", SLACK_CHANNEL_ID_SHAPE, "Slack channel IDs"),
+      receipts: {
+        ...(working === undefined ? {} : { working }),
+        ...(done === undefined ? {} : { done }),
+        ...(failed === undefined ? {} : { failed }),
+        ...(lost === undefined ? {} : { lost }),
+      },
+      // A reaction budget per message, not per process: the model is asked to be lively, not to decorate.
+      maxReactions: boundedInteger(env, "SLACK_MAX_REACTIONS", 3, 1, 10),
+    };
   }
   const token = required("TELEGRAM_BOT_TOKEN");
   assertValidCredentialShape("TELEGRAM_BOT_TOKEN", token);

@@ -57,7 +57,7 @@ import {
 import { readWorking } from "./working.js";
 import { requireCurrentProfileEvidence } from "./profile.js";
 import { createWorkingExtension } from "./working-tools.js";
-import { openDaily } from "./daily.js";
+import { openDaily, type DailyStore } from "./daily.js";
 import { createArchiveTask, initializeArchive, readArchive, reconcileArchive, requestArchive, type ArchiveTask } from "./archive-task.js";
 import {
   confirmCompactionCycle,
@@ -148,23 +148,73 @@ export function isMemoryError(error: unknown): error is MemoryError {
 export class MemoryIntegration {
   readonly #options: MemoryIntegrationOptions;
   readonly #log: (event: MemoryLogEvent) => void;
-  readonly #store;
+  /** The attached root's store; every other conversation maps to a root in `#conversationRoots`. */
+  readonly #rootStore: DailyStore;
+  /** One store handle per resolved root; a hub and its forks therefore share one. */
+  readonly #stores = new Map<string, DailyStore>();
+  /** Conversation id to resolved root; the attached root conversation is not listed (it is `#rootStore`). */
+  readonly #conversationRoots = new Map<ConversationId, string>();
   readonly #archiveTask: ArchiveTask;
+  /** Conversations already initialized in this process; durable archive state stays keyed by id. */
+  readonly #initialized = new Set<ConversationId>();
   #harness: Harness | undefined;
   #root: Conversation | undefined;
-  #initialized = false;
+  #rootConversationId: ConversationId | undefined;
   #closed = false;
 
   constructor(options: MemoryIntegrationOptions) {
     this.#options = options;
     this.#log = options.log ?? ((event) => console.error(`Memory ${event.event}: ${JSON.stringify(event)}`));
-    this.#store = openDaily(options.root);
+    this.#rootStore = openDaily(options.root);
+    this.#stores.set(this.#rootStore.root, this.#rootStore);
     this.#archiveTask = createArchiveTask({
-      store: this.#store,
+      store: (conversationId) => this.#storeFor(conversationId),
       model: options.model,
       ...(options.archiveTimeoutMs === undefined ? {} : { timeoutMs: options.archiveTimeoutMs }),
       ...(options.profile === undefined ? {} : { profile: options.profile }),
     });
+  }
+
+  /**
+   * Bind a conversation's long-term memory to a host root. `root` means what `options.root` means:
+   * the store lives under `<root>/memory/daily`. Idempotent for the same pair. A different root for
+   * an already registered conversation is a programming error. Registering the attached root
+   * conversation is a no-op: it already maps to `options.root`. Store handles open lazily and are
+   * cached by root, so a hub and its forks share one store.
+   */
+  registerConversationStore(conversationId: ConversationId, root: string): void {
+    const resolved = openDaily(root).root;
+    if (conversationId === this.#rootConversationId) {
+      if (resolved !== this.#rootStore.root) {
+        throw new MemoryError("invalid-input", "The attached root conversation already maps to the configured root");
+      }
+      return;
+    }
+    const existing = this.#conversationRoots.get(conversationId);
+    if (existing !== undefined) {
+      if (existing !== resolved) {
+        throw new MemoryError("invalid-input", "Conversation memory store is already registered with a different root");
+      }
+      return;
+    }
+    this.#conversationRoots.set(conversationId, resolved);
+  }
+
+  /**
+   * The store for one conversation: never a model parameter, always the durable conversation the
+   * operation belongs to. An unregistered conversation is an explicit error, never a fallback to
+   * another hub's (or the owner's) memory.
+   */
+  #storeFor(conversationId: ConversationId): DailyStore {
+    const root = this.#conversationRoots.get(conversationId)
+      ?? (conversationId === this.#rootConversationId ? this.#rootStore.root : undefined);
+    if (root === undefined) throw new MemoryError("invalid-input", "Conversation has no registered memory store");
+    let store = this.#stores.get(root);
+    if (store === undefined) {
+      store = openDaily(root);
+      this.#stores.set(root, store);
+    }
+    return store;
   }
 
   /** The native compaction policy for the harness settings, derived from the one budget (§10). */
@@ -188,9 +238,10 @@ export class MemoryIntegration {
     };
     return [
       createWorkingExtension({
-        resolveProfileEvidence: (refs) => requireCurrentProfileEvidence(this.#store, refs),
+        resolveProfileEvidence: (refs, conversationId) =>
+          requireCurrentProfileEvidence(this.#storeFor(conversationId), refs),
       }),
-      memoryToolsExtension({ store: this.#store, budget: this.#options.budget }),
+      memoryToolsExtension({ store: (conversationId) => this.#storeFor(conversationId), budget: this.#options.budget }),
       createCompactionExtension({
         commit,
         model: this.#options.model,
@@ -211,21 +262,38 @@ export class MemoryIntegration {
   /** Bind the opened harness and its root conversation. Call once, before `initialize`. */
   attach(harness: Harness, root: Conversation): void {
     if (this.#harness !== undefined) throw new MemoryError("invalid-input", "Memory integration is already attached");
+    const registered = this.#conversationRoots.get(root.id);
+    if (registered !== undefined && registered !== this.#rootStore.root) {
+      throw new MemoryError("invalid-input", "The root conversation is registered to a different memory store");
+    }
     this.#harness = harness;
     this.#root = root;
+    this.#rootConversationId = root.id;
   }
 
   /**
-   * First-upgrade migration and startup re-scan, idempotent across restarts. The archive origin
-   * is the conversation's current tail: pre-upgrade history is never backfilled unless an
-   * operator later moves the target explicitly. A timezone that contradicts the initialized
-   * archive is a `revision-conflict`, not a silent change.
+   * First-upgrade migration and startup re-scan for the attached root conversation. A thin
+   * delegation to `initializeConversation`; existing callers keep root-bound meaning.
    */
   async initialize(context: Context): Promise<void> {
-    if (this.#initialized) return;
+    return this.initializeConversation(this.#conversation(), context);
+  }
+
+  /**
+   * First-upgrade migration and startup re-scan for one conversation, idempotent across restarts
+   * and per conversation. The archive origin is the conversation's current tail: pre-upgrade
+   * history is never backfilled unless an operator later moves the target explicitly. A timezone
+   * that contradicts the initialized archive is a `revision-conflict`, not a silent change.
+   * Archive state is keyed by `conversation.id` in durable storage, so conversations never share it.
+   *
+   * A fork has no archive of its own: its inherited history belongs to the Hub, and it reaches the
+   * Hub's long-term memory only through the shared store it was registered with. Its lifecycle is
+   * marked initialized so the request path does not fault; archive boundary work skips it (no state).
+   */
+  async initializeConversation(conversation: Conversation, context: Context): Promise<void> {
+    if (this.#initialized.has(conversation.id)) return;
     const session = this.#session();
-    const root = this.#conversation();
-    const state = await readArchive(session, root.id, context);
+    const state = await readArchive(session, conversation.id, context);
     if (state?.initialized === true) {
       if (state.timezone !== this.#options.timezone) {
         throw new MemoryError("revision-conflict", "Archive timezone is already fixed", {
@@ -233,35 +301,51 @@ export class MemoryIntegration {
         });
       }
     } else {
-      const tail = await session.commit(async (tx) => {
-        const page = await tx.scanEntries({ conversationId: root.id, order: "descending" }, 1);
-        return page.items[0]?.id ?? null;
-      }, context);
-      await session.commit(async (tx) => {
-        const slot = await tx.doc(MigrationDoc, root.id, "v1", UNSET_MIGRATION);
-        if ((slot as MigrationRecord).at === UNSET_MIGRATION.at) {
-          Object.assign(slot, {
-            version: MEMORY_SCHEMA_VERSION,
-            archiveOrigin: tail,
-            hadHistory: tail !== null,
-            at: Date.now(),
-          } satisfies MigrationRecord);
-        }
-      }, context);
-      await initializeArchive(session, root.id, tail, this.#options.timezone, context);
-      this.#log({ event: "memory.upgrade", conversationId: root.id, action: tail === null ? "fresh" : "origin-at-tail" });
+      const forked = await session.commit(
+        async (tx) => (await tx.conversation(conversation.id))?.parent !== undefined,
+        context,
+      );
+      if (forked) {
+        this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: "fork" });
+      } else {
+        const tail = await session.commit(async (tx) => {
+          const page = await tx.scanEntries({ conversationId: conversation.id, order: "descending" }, 1);
+          return page.items[0]?.id ?? null;
+        }, context);
+        await session.commit(async (tx) => {
+          const slot = await tx.doc(MigrationDoc, conversation.id, "v1", UNSET_MIGRATION);
+          if ((slot as MigrationRecord).at === UNSET_MIGRATION.at) {
+            Object.assign(slot, {
+              version: MEMORY_SCHEMA_VERSION,
+              archiveOrigin: tail,
+              hadHistory: tail !== null,
+              at: Date.now(),
+            } satisfies MigrationRecord);
+          }
+        }, context);
+        await initializeArchive(session, conversation.id, tail, this.#options.timezone, context);
+        this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: tail === null ? "fresh" : "origin-at-tail" });
+      }
     }
-    this.#initialized = true;
-    await this.#rescan(context);
+    this.#initialized.add(conversation.id);
+    await this.#rescanIn(conversation, context);
   }
 
   /**
-   * The durable steps before a user input is submitted. Throws a `MEMORY_*`-coded error for a
-   * plan-level refusal (the request must not run), and lets storage failures propagate untouched.
+   * The durable steps before a user input is submitted, for the attached root conversation. A thin
+   * delegation to `prepareRequestIn`; existing callers keep root-bound meaning.
    */
   async prepareRequest(request: { readonly requestId: string; readonly text: string }, context: Context): Promise<PreparedRequest> {
+    return this.prepareRequestIn(this.#conversation(), request, context);
+  }
+
+  /**
+   * The durable steps before a user input is submitted, for one conversation. Throws a `MEMORY_*`-coded
+   * error for a plan-level refusal (the request must not run), and lets storage failures propagate untouched.
+   */
+  async prepareRequestIn(conversation: Conversation, request: { readonly requestId: string; readonly text: string }, context: Context): Promise<PreparedRequest> {
     try {
-      return await this.#prepareRequest(request, context);
+      return await this.#prepareRequestIn(conversation, request, context);
     } catch (error) {
       // Every memory business error leaves this module in its mapped application shape, so the
       // request layer can never mistake one for a Session failure (MEM-01 mapping).
@@ -270,11 +354,11 @@ export class MemoryIntegration {
     }
   }
 
-  async #prepareRequest(request: { readonly requestId: string; readonly text: string }, context: Context): Promise<PreparedRequest> {
+  async #prepareRequestIn(conversation: Conversation, request: { readonly requestId: string; readonly text: string }, context: Context): Promise<PreparedRequest> {
     this.#assertOpen();
     const started = Date.now();
     const session = this.#session();
-    const root = this.#conversation();
+    const root = conversation;
     const existing = await session.commit(
       async (tx) => tx.submissionByRequest(root.id, request.requestId),
       context,
@@ -285,7 +369,7 @@ export class MemoryIntegration {
       return { kind };
     }
 
-    await this.#rescan(context);
+    await this.#rescanIn(root, context);
 
     // A projection committed for this request whose input was never submitted is reused as
     // written (§6): recomputing it could publish different bytes for the same fact.
@@ -355,16 +439,24 @@ export class MemoryIntegration {
   }
 
   /**
-   * The durable steps after a request completed with an answer: count it once, evaluate
-   * compaction at the boundary, and re-scan archive coverage. Counting is idempotent by
+   * The durable steps after a request completed with an answer, for the attached root conversation.
+   * A thin delegation to `afterRequestIn`; existing callers keep root-bound meaning.
+   */
+  async afterRequest(requestId: string, context: Context): Promise<void> {
+    return this.afterRequestIn(this.#conversation(), requestId, context);
+  }
+
+  /**
+   * The durable steps after a request completed with an answer, for one conversation: count it once,
+   * evaluate compaction at the boundary, and re-scan archive coverage. Counting is idempotent by
    * requestId, so a recovered request that completes now is counted exactly once and a replay
    * is filtered by the caller. Housekeeping failures are logged, never thrown into a finished
    * request; storage failures still propagate.
    */
-  async afterRequest(requestId: string, context: Context): Promise<void> {
+  async afterRequestIn(conversation: Conversation, requestId: string, context: Context): Promise<void> {
     this.#assertOpen();
     const session = this.#session();
-    const root = this.#conversation();
+    const root = conversation;
     const started = Date.now();
     let counted: { completedUserTurns: number; shouldEvaluate: boolean } | undefined;
     try {
@@ -386,19 +478,27 @@ export class MemoryIntegration {
       this.#log({ event: "memory.evaluate", conversationId: root.id, requestId, action: decision.kind, turns: counted.completedUserTurns });
       if (decision.kind !== "none") await root.compact(undefined, context);
     }
-    await this.#rescan(context);
+    await this.#rescanIn(root, context);
     this.#log({ event: "memory.complete", conversationId: root.id, requestId, turns: counted?.completedUserTurns, durationMs: Date.now() - started });
   }
 
   /**
-   * End the current context cycle. The reset itself is admitted by the base; the next request's
-   * prepare step establishes the new B behind it (§12.4), so no snapshot is written here.
+   * End the current context cycle of the attached root conversation. A thin delegation to
+   * `resetConversationIn`; existing callers keep root-bound meaning.
    */
   async resetConversation(context: Context): Promise<void> {
+    return this.resetConversationIn(this.#conversation(), context);
+  }
+
+  /**
+   * End one conversation's current context cycle. The reset itself is admitted by the base; the
+   * next request's prepare step establishes the new B behind it (§12.4), so no snapshot is written here.
+   */
+  async resetConversationIn(conversation: Conversation, context: Context): Promise<void> {
     try {
       this.#assertOpen();
-      await this.#conversation().reset(undefined, context);
-      this.#log({ event: "memory.reset", conversationId: this.#conversation().id });
+      await conversation.reset(undefined, context);
+      this.#log({ event: "memory.reset", conversationId: conversation.id });
     } catch (error) {
       if (error instanceof MemoryError) throw memoryAppError(error);
       throw error;
@@ -433,9 +533,20 @@ export class MemoryIntegration {
    * reconciler until this pass is done. Best-effort per item — one failure is logged with its
    * safe code and never blocks the request or the other items.
    */
-  async #rescan(context: Context): Promise<void> {
+  async #rescanIn(conversation: Conversation, context: Context): Promise<void> {
     const session = this.#session();
-    const root = this.#conversation();
+    const root = conversation;
+    // Boundary work is archive work. A conversation with no archive state (an uninitialized
+    // member, or a fork whose inherited history belongs to its Hub) has nothing to re-scan.
+    let initialized = false;
+    try {
+      initialized = (await readArchive(session, root.id, context))?.initialized === true;
+    } catch (error) {
+      if (!(error instanceof MemoryError)) throw error;
+      this.#log({ event: "memory.archive.reconcile", conversationId: root.id, action: "failed", code: error.appCode });
+      return;
+    }
+    if (!initialized) return;
     try {
       const tasks = await session.commit(
         async (tx) => (await tx.scanTasks({ conversationId: root.id, kind: "pi.compaction" }, 40)).items,

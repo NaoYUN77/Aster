@@ -14,7 +14,8 @@ services:
     # TELEGRAM_BOT_TOKEN=__vault_TELEGRAM_BOT_TOKEN__, DEEPSEEK_API_KEY=__vault_DEEPSEEK_API_KEY__,
     # DEEPSEEK_WEB_API_KEY=__vault_DEEPSEEK_WEB_API_KEY__, EXA_API_KEY=__vault_EXA_API_KEY__;
     # CHANNEL=slack uses SLACK_BOT_TOKEN / SLACK_APP_TOKEN instead of the Telegram pair);
-    # non-secret settings (TELEGRAM_OWNER_ID, MODEL_PROVIDER, MODEL_ID, DATA_DIR, MEMORY_*)
+    # non-secret settings (TELEGRAM_OWNER_ID, SLACK_OWNER_ID, SLACK_ALLOWED_USERS,
+    # SLACK_ALLOWED_CHANNELS, MODEL_PROVIDER, MODEL_ID, DATA_DIR, MEMORY_*)
     # keep their normal values.
     env_file:
       - .env

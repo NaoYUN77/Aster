@@ -2,7 +2,7 @@
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![Telegram](https://img.shields.io/badge/Telegram-grammY_1.46.0-26A5E4?logo=telegram&logoColor=white)](https://grammy.dev/) [![Slack](https://img.shields.io/badge/Slack-Socket_Mode-4A154B?logo=slack&logoColor=white)](docs/slack.md) [![SQLite](https://img.shields.io/badge/SQLite-node:sqlite-003B57?logo=sqlite&logoColor=white)](https://nodejs.org/api/sqlite.html) [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/) [![MCP](https://img.shields.io/badge/MCP-pi--mcp_1.5.0-111111)](docs/mcp.md) [![pi-durable](https://img.shields.io/badge/pi--durable-1.5.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
 
-个人 AI agent，当前从单 owner 的私聊接收消息，在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。渠道二选一：Telegram 长轮询或 Slack Socket Mode（见 [Slack 通道](docs/slack.md)）。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。
+个人 AI agent：所有者通过私聊使用；Slack 下还可以在**白名单频道**里当团队助手——@ 它提问、在它的回复下追问，每位成员一个独立会话（Hub），见 [Slack 通道](docs/slack.md)。消息在可恢复的 durable 执行环境里运行 agent 与工具，再把回复分段送回。渠道二选一：Telegram 长轮询或 Slack Socket Mode。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。
 
 功能开发按 `docs/spec-YYYYMMDD-<feature-name>.md` 临时规格推进，日期取本次开发开始当天。一个功能可有多个 spec，均引用同一份长期保留的功能 ADR；ADR 按时间记录各部分的取舍、缺陷与 spec 名称。功能开发完成后删除临时 spec，见 [按功能的临时规格](docs/README.md#按功能的临时规格)。下面描述当前可用能力。
 
@@ -10,31 +10,44 @@
 
 ## 架构
 
-一条消息的路径：渠道收件（Telegram 长轮询或 Slack Socket Mode）→ 渠道层收件箱落盘 → 运行时恢复或推进会话 → 记忆层组装上下文 → 模型层调用提供商 → 工具层执行 → 回复落盘后分段发送。
+一条消息的路径：渠道收件（Telegram 长轮询或 Slack Socket Mode）→ 入向策略（白名单、身份只取传输层参数、@/线程判定）→ 收件箱落盘（含线程锚点）→ 路由到一个会话（所有者的 root 会话、成员自己的 Hub、或线程的 fork）→ 记忆层组装上下文 → 模型层调用提供商 → 工具层执行 → 回复落盘后带线程锚点分段发送。
 
 ```mermaid
-flowchart LR
-  tg["渠道收件<br/>Telegram 长轮询 / Slack Socket Mode"] --> inbox["收件箱 inbox.sqlite"]
-  inbox --> runtime["运行时 Session"]
-  runtime --> memory["记忆：规则 / 快照 / 近期原文"]
+flowchart TB
+  subgraph channels["渠道入口（CHANNEL 二选一，一个进程只服务一个）"]
+    slack["Slack（Socket Mode）<br/>单聊 / 白名单频道 @bot / 线程追问"]
+    telegram["Telegram（长轮询）<br/>仅所有者私聊"]
+  end
+  slack --> policy
+  telegram --> policy
+  policy["入向策略<br/>白名单 + 身份只取 Slack 的 user + @ 与线程判定"]
+  policy --> inbox["收件箱 inbox.sqlite<br/>先落盘再确认 · threadTs 线程锚点"]
+  policy --> hubs["Hub 记账 hubs.sqlite<br/>成员 ↔ 会话 · 线程 ↔ fork · 回合数"]
+  inbox --> route["路由<br/>所有者 → root 会话 · 成员 → 自己的 Hub · 线程 → Hub 的 fork"]
+  hubs --> route
+  route --> runtime["pi-durable Session（agent.sqlite）<br/>root 会话 / 每人一个 Hub / 线程 fork"]
+  runtime --> memory["记忆：按会话解析 daily store<br/>所有者 memory/daily · 成员 memory/members 子目录"]
+  runtime --> tools["常驻工具 / Web / MCP / 浏览器<br/>成员 Hub 没有 bash · powershell · 提醒工具"]
   memory --> model["模型提供商"]
-  runtime --> tools["常驻工具与 MCP"]
   tools --> runtime
   model --> runtime
   runtime --> saved["回复先落盘"]
-  saved --> send["分段发送"]
+  saved --> send["分段发送（每段带同一线程锚点）"]
 ```
+
+观测是旁路：每个请求一条 Langfuse trace（`agent.request` → `llm.generation` / `tool.execution` / `registry.decision` / `loop_guard.*`），只记标识、长度、耗时与结果码，不记正文与凭据，见 [Langfuse Tracing](docs/langfuse-tracing.md)。
 
 | 层 | 职责 | 主要文件 |
 | --- | --- | --- |
 | 入口与部署 | 组合接线、部署渲染、环境预检、发布清单 | `src/main.ts`、`src/deployment-*.ts`、`src/release-*.ts` |
-| 渠道 | 二选一的消息通道：Telegram 长轮询或 Slack Socket Mode，都含所有者过滤；持久化收件箱（offset 检查点、分段投递与对账）与共享的投递/失败分类（`src/channel.ts`） | `src/telegram.ts`、`src/slack.ts`、`src/channel.ts`、`src/inbox.ts` |
-| 运行时 | 基于 pi-durable 的 Session：durable 执行、checkpoint、replay 恢复 | `src/agent.ts` |
-| 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具 | `src/memory/` |
+| 渠道 | 二选一的消息通道：Telegram 长轮询或 Slack Socket Mode；单聊只服务所有者，Slack 还接白名单频道里的 @ 与会话线程；持久化收件箱（offset 检查点、线程锚点、分段投递与对账）与共享的投递/失败分类（`src/channel.ts`） | `src/telegram.ts`、`src/slack.ts`、`src/channel.ts`、`src/inbox.ts` |
+| 团队 Hub | 成员 ↔ 会话映射、线程 ↔ fork 记账与回合上限；一人一个 Hub 的隔离边界 | `src/hubs.ts`、`docs/adr/team-channel/0026-team-channel-hubs.md` |
+| 运行时 | 基于 pi-durable 的 Session：durable 执行、checkpoint、replay 恢复；按请求选择会话（root / Hub / fork） | `src/agent.ts` |
+| 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具；store 按会话解析，因此每人一份 | `src/memory/` |
 | 工具 | 工具注册表（常驻 + deferred）、MCP 接入与 OAuth 凭据保管 | `src/tools.ts`、`src/mcp*.ts` |
 | 模型 | 提供商注册表、声明文件解析、模型目录拉取与解析、启动前目录校验 | `src/providers.ts`、`src/provider-config.ts`、`src/provider-catalog.ts` |
-| 配置 | `.env` 解析与严格校验（缺项/错项启动前失败） | `src/config.ts` |
-| 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`inbox.sqlite` |
+| 配置 | `.env` 解析与严格校验（缺项/错项启动前失败），含频道白名单 | `src/config.ts` |
+| 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`inbox.sqlite`、`hubs.sqlite` |
 
 数据目录：
 
@@ -48,7 +61,7 @@ flowchart LR
 | `mcp-oauth/<server>.json`（可选） | 远程 MCP server 的 OAuth token，仅属主可读 |
 | `providers.json`（可选） | 自定义模型提供商声明（地址与凭据变量名）；随数据目录一起备份 |
 
-约束：同一数据目录只允许一个应用进程（镜像入口以 `flock` 互斥）。数据目录绑定 bot 与 owner，不能换身份续用。当前为单会话、串行请求、顺序工具执行，单个请求等待上限 5 分钟，超时向底座请求取消（外部副作用不保证可撤销）。接入每次最多取 10 条 update，处理完本地待办再轮询。
+约束：同一数据目录只允许一个应用进程（镜像入口以 `flock` 互斥）。数据目录绑定 bot 与 owner，不能换身份续用。同一个数据目录下可以有多个会话（所有者的 root 会话、每位成员一个 Hub、每条线程一个 fork），但请求仍串行、工具顺序执行，单个请求等待上限 5 分钟，超时向底座请求取消（外部副作用不保证可撤销）。接入每次最多取 10 条 update，处理完本地待办再轮询。
 
 ## 已验证与尚未验证
 
@@ -71,7 +84,7 @@ flowchart LR
 **已知限制**
 
 - 回复已持久化但请求收尾未执行时进程被杀，该轮的轮数计数会永久滞后一轮（回复与状态一致，压缩评估点后移）。见 issue #26。
-- 单会话串行。长期繁忙时消息留在 Telegram 侧。
+- 请求串行：一个进程一次只跑一条请求，Hub 之间也不并行。长期繁忙时消息留在渠道侧。
 - `bash` 等工具不是沙箱。
 
 ## 对话示例
@@ -103,6 +116,7 @@ npm start
 - `CHANNEL`（可选，默认 `telegram`）：当前生效的渠道，`telegram` 或 `slack`。只要求所选渠道自己的变量，另一个渠道的变量会被忽略。
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_OWNER_ID`：`CHANNEL=telegram` 时必填，BotFather 创建的 bot token 与允许使用 bot 的个人数字用户 ID。
 - `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` / `SLACK_OWNER_ID`：`CHANNEL=slack` 时必填，见 [Slack 通道](docs/slack.md)。
+- `SLACK_ALLOWED_USERS` / `SLACK_ALLOWED_CHANNELS`（可选）：允许在频道里驱动 bot 的成员与允许回话的频道；空着就是只服务所有者单聊，见 [ADR-0026](docs/adr/team-channel/0026-team-channel-hubs.md)。
 - `MODEL_PROVIDER` / `MODEL_ID`：内置注册表内的提供商 id，或 `DATA_DIR/providers.json` 里声明的自定义 provider id，以及该提供商目录中的模型 id。写错时启动前报错并列出示例，不自动替换。
 - 所选提供商对应的 API key（见下表；只要求当前所选的那个，其余留空不算缺项）。
 

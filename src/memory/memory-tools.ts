@@ -17,7 +17,7 @@
 
 import { arr, bool, int, lit, nul, obj, opt, str, union } from "@earendil-works/pi-schema";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { defineExtension, defineTool, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, type ConversationId, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
 import {
   DAILY_MAX_PAGES,
@@ -35,7 +35,11 @@ import {
 } from "./daily.js";
 
 export type MemoryToolsOptions = {
-  readonly store: DailyStore;
+  /**
+   * The store the tools read, or a resolver by conversation. The composition root passes a resolver,
+   * so each call reads the store of `api.conversationId`; no model parameter can name another store.
+   */
+  readonly store: DailyStore | ((conversationId: ConversationId) => DailyStore);
   readonly budget: MemoryBudget;
 };
 
@@ -188,9 +192,12 @@ function decodeCursor(value: string): SearchCursor {
   return cursor;
 }
 
-/** Retrieval tools bound to one host store and budget; no parameter widens either. */
+/** Retrieval tools bound to the host's store resolver and budget; no parameter widens either. */
 export function memoryTools(options: MemoryToolsOptions): ToolRegistration[] {
-  const { store, budget } = options;
+  const { budget } = options;
+  const storeOption = options.store;
+  const storeFor: (conversationId: ConversationId) => DailyStore =
+    typeof storeOption === "function" ? storeOption : () => storeOption;
 
   const search = defineTool({
     name: "memory_search",
@@ -208,6 +215,7 @@ export function memoryTools(options: MemoryToolsOptions): ToolRegistration[] {
     replay: "safe",
     execute: async (args, api, context) => {
       try {
+        const store = storeFor(api.conversationId);
         const spent = await spentInCurrentRequest(api, context);
         const remaining = budget.requestSearchTokens - spent;
         if (remaining <= 0) return budgetResult(budget, spent);
@@ -299,6 +307,7 @@ export function memoryTools(options: MemoryToolsOptions): ToolRegistration[] {
     replay: "safe",
     execute: async (args, api, context) => {
       try {
+        const store = storeFor(api.conversationId);
         const spent = await spentInCurrentRequest(api, context);
         const remaining = budget.requestSearchTokens - spent;
         if (remaining <= 0) return budgetResult(budget, spent);

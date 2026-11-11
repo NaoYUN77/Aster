@@ -63,7 +63,12 @@ type Result = { archivedThrough: EntryId | null };
 type Runtime = TaskRuntime<Record<string, never>, Checkpoint, Result, object>;
 export type ArchiveBoundary = "extracted" | "saved" | "published" | "confirmed" | "before-cursor" | "profile";
 export type ArchiveTaskOptions = {
-  store: DailyStore;
+  /**
+   * The daily store this task writes to, or a resolver by conversation. A single task serves many
+   * hubs, so the composition root passes a resolver and each run publishes into the store of
+   * `runtime.conversationId`; the model can never choose or widen it.
+   */
+  store: DailyStore | ((conversationId: ConversationId) => DailyStore);
   model: { provider: string; modelId: string };
   timeoutMs?: number;
   /**
@@ -111,8 +116,16 @@ function requireInitialized(state: ArchiveState): void {
   if (!state.initialized) throw new MemoryError("not-covered", "Archive migration boundary is not initialized");
 }
 
+/** The store a run writes to: the conversation's own store under a single task. */
+function storeResolver(
+  store: DailyStore | ((conversationId: ConversationId) => DailyStore),
+): (conversationId: ConversationId) => DailyStore {
+  return typeof store === "function" ? store : () => store;
+}
+
 /** Instantiate once per registry. Persistent configuration is the archive timezone; model is host-owned. */
 export function createArchiveTask(options: ArchiveTaskOptions) {
+  const storeFor = storeResolver(options.store);
   const timeoutMs = options.timeoutMs ?? ARCHIVE_LIMITS.timeoutMs;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) {
     throw new MemoryError("invalid-input", "Archive timeout must be 1..300000 ms");
@@ -245,7 +258,7 @@ export function createArchiveTask(options: ArchiveTaskOptions) {
           try {
             // Daily publication is finite and awaited even on abort. Its atomic replacement cannot
             // be interrupted halfway; cancellation stops the next I/O and recovery checks this ID.
-            const receipts = await publishSegments(options.store, [segment]);
+            const receipts = await publishSegments(storeFor(runtime.conversationId), [segment]);
             if (receipts[0]?.digest !== identityOfSegment(segment)) throw new MemoryError("corrupt-state", "Archive receipt does not match saved body");
           } catch (error) {
             runtime.signal.throwIfAborted();
@@ -277,7 +290,7 @@ export function createArchiveTask(options: ArchiveTaskOptions) {
         let profileDrafts: ReturnType<typeof extractProfileDrafts> = [];
         if (options.profile !== false) {
           try {
-            profileDrafts = await publishedProfileDrafts(options.store, pending.body ?? []);
+            profileDrafts = await publishedProfileDrafts(storeFor(runtime.conversationId), pending.body ?? []);
           } catch (error) {
             runtime.signal.throwIfAborted();
             const failure = error instanceof MemoryError
@@ -314,7 +327,8 @@ export function createArchiveTask(options: ArchiveTaskOptions) {
                 evidence: [],
                 changes,
                 now: runtime.now(),
-                resolveProfileEvidence: (refs) => requireCurrentProfileEvidence(options.store, refs),
+                resolveProfileEvidence: (refs, conversationId) =>
+                  requireCurrentProfileEvidence(storeFor(conversationId), refs),
               });
             }
           }

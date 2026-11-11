@@ -11,6 +11,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { ConfigurationError, readTraceConfig } from "../src/config.js";
 import {
   beginRequest,
+  beginToolExecution,
   recordGeneration,
   recordLoopGuard,
   recordRegistryDecision,
@@ -290,6 +291,104 @@ test("an exporter failure never escapes the tracing boundary", async () => {
     }, "LOOP_GUARD_WARNING");
   });
   await assert.doesNotReject(runtime.close());
+});
+
+test("an admitted tool execution gets its own span without uploading arguments or results", async () => {
+  const { exporter, provider } = setup();
+  const logs: string[] = [];
+  const runtime = startTrace({ enabled: true }, (line) => logs.push(line), { tracerProvider: provider });
+  assert.ok(runtime);
+  const request = beginRequest({ conversationId: 9, requestId: "slack:9:req-1" });
+  assert.ok(request);
+
+  const execution = beginToolExecution({
+    tool: "bash",
+    source: "builtin:coding-tools",
+    trust: "trusted",
+    authz: "write",
+    replay: "unsafe",
+    tier: 1,
+    argNames: ["command", "timeoutMs"],
+    argsBytes: 42,
+    conversationId: 9 as ConversationId,
+    taskId: 5 as TaskId,
+    callId: "call-9",
+  });
+  assert.ok(execution);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  execution.end("ok", { resultBytes: 128, outputItems: 1, diagnostics: 0 });
+  request.end("ok", { replyBytes: 3 });
+
+  const span = spanByName(exporter.getFinishedSpans(), "tool.execution");
+  assert.equal(span.spanContext().traceId, request.traceId);
+  assert.equal(span.parentSpanContext?.spanId, request.spanId, "execution hangs under the request");
+  assert.equal(span.attributes["langfuse.observation.type"], "tool");
+  assert.equal(span.attributes["langfuse.observation.metadata.tool"], "\"bash\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.source"], "\"builtin:coding-tools\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.authz"], "\"write\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.argNames"], "\"command,timeoutMs\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.argCount"], "2");
+  assert.equal(span.attributes["langfuse.observation.metadata.argsBytes"], "42");
+  assert.equal(span.attributes["langfuse.observation.metadata.resultBytes"], "128");
+  assert.equal(span.attributes["langfuse.observation.metadata.outcome"], "\"ok\"");
+  assert.equal(span.attributes["langfuse.observation.level"], "DEFAULT");
+  assert.ok(Number(span.attributes["langfuse.observation.metadata.durationMs"]) >= 5, "duration is the execution's, not the review's");
+  assert.equal(span.attributes["langfuse.observation.input"], undefined, "never the arguments");
+  assert.equal(span.attributes["langfuse.observation.output"], undefined, "never the result");
+  assert.equal(logs.length, 0, "no tracing warnings during a healthy export");
+
+  return runtime.close();
+});
+
+test("a failed execution ends as an error with its host code, and background calls are not traced", async () => {
+  const { exporter, provider } = setup();
+  const runtime = startTrace({ enabled: true }, () => {}, { tracerProvider: provider });
+  assert.ok(runtime);
+  const unattached = beginToolExecution({
+    tool: "bash",
+    source: "builtin:coding-tools",
+    trust: "trusted",
+    authz: "write",
+    replay: "unsafe",
+    tier: 1,
+    argNames: ["command"],
+    argsBytes: 8,
+    conversationId: 10 as ConversationId,
+    taskId: 6 as TaskId,
+  });
+  assert.equal(unattached, undefined, "a call with no active request is not traced");
+
+  const request = beginRequest({ conversationId: 10 });
+  assert.ok(request);
+  const execution = beginToolExecution({
+    tool: "mcp__box__browser_fetch",
+    source: "mcp:box",
+    trust: "untrusted",
+    authz: "write",
+    replay: "unsafe",
+    tier: 2,
+    argNames: ["url"],
+    argsBytes: 30,
+    conversationId: 10 as ConversationId,
+    taskId: 6 as TaskId,
+    callId: "call-10",
+  });
+  assert.ok(execution);
+  execution.end("error", { errorCode: "MCP_TIMEOUT", resultBytes: 0, outputItems: 0, diagnostics: 1 });
+  request.end("ok", { replyBytes: 3 });
+
+  const span = spanByName(exporter.getFinishedSpans(), "tool.execution");
+  assert.equal(span.attributes["langfuse.observation.type"], "tool");
+  assert.equal(span.attributes["langfuse.observation.metadata.tool"], "\"mcp__box__browser_fetch\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.source"], "\"mcp:box\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.trust"], "\"untrusted\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.errorCode"], "\"MCP_TIMEOUT\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.outcome"], "\"error\"");
+  assert.equal(span.attributes["langfuse.observation.metadata.diagnostics"], "1");
+  assert.equal(span.attributes["langfuse.observation.level"], "ERROR");
+  assert.equal(span.attributes["langfuse.observation.status_message"], "MCP_TIMEOUT");
+
+  return runtime.close();
 });
 
 test("disabled tracing is a no-op and a requested but keyless runtime logs once", async () => {

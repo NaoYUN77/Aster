@@ -79,5 +79,6 @@ spec 在功能开发完成后删除，ADR 及其记录长期保留。ADR 中的 
 | 0023 | 新增 Exa 作为可选第二搜索提供商 | Accepted，2026-11-09（真实链路未验收） | [exa-search/0023-exa-search-provider.md](exa-search/0023-exa-search-provider.md) |
 | 0024 | 自定义模型提供商由声明文件描述，底层用底座原语 | Accepted，2026-11-09（真实网关的目录与推理已验证；MITM 出站链路未验收） | [custom-providers/0024-custom-provider-declarations.md](custom-providers/0024-custom-provider-declarations.md) |
 | 0025 | Slack 作为可切换的第二个渠道，用 Socket Mode 出站接入 | Accepted，2026-11-09（真实 workspace 链路未验收） | [slack-channel/0025-slack-channel.md](slack-channel/0025-slack-channel.md) |
+| 0026 | 频道里的团队助手：一人一个 Hub，线程追问 fork 子会话 | Accepted，2026-11-10（真实 workspace 频道链路未验收；取代 0025 的频道/线程「不做」两项） | [team-channel/0026-team-channel-hubs.md](team-channel/0026-team-channel-hubs.md) |
 
 > 0019～0021 曾记录已移除的相关功能，现已删除，编号不复用。

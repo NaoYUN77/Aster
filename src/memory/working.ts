@@ -118,9 +118,14 @@ export type WorkingUpdateRequest = {
   /**
    * Required when `changes` contain `profile.put`. Called inside the commit, after the receipt
    * replay check, so a retry of a committed operation does not re-resolve evidence. The resolver
-   * rejects a ref that is missing or no longer current. This module does not open daily files.
+   * rejects a ref that is missing or no longer current. It is passed the operation's conversation
+   * so the host can resolve that conversation's own daily store; the reference carries no store and
+   * this module never opens daily files.
    */
-  readonly resolveProfileEvidence?: (refs: readonly DailySegmentRef[]) => Promise<void>;
+  readonly resolveProfileEvidence?: (
+    refs: readonly DailySegmentRef[],
+    conversationId: ConversationId,
+  ) => Promise<void>;
 };
 
 /** Host check that profile evidence names current daily-log segments. */
@@ -185,7 +190,7 @@ export async function applyWorkingUpdateInTx(
       if (request.resolveProfileEvidence === undefined) {
         throw new MemoryError("missing-evidence", "Profile evidence was not resolved");
       }
-      await request.resolveProfileEvidence(profileRefs);
+      await request.resolveProfileEvidence(profileRefs, conversationId);
     }
     const referenced = new Set<EntryId>([
       ...args.evidence,

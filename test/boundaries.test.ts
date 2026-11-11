@@ -304,6 +304,39 @@ test("opening a database written before timestamps keeps the old rows unknown", 
   }
 });
 
+test("a thread anchor is part of the request and survives a restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-inbox-thread-"));
+  const path = join(directory, "inbox.sqlite");
+  let inbox = new Inbox(path);
+  try {
+    const threaded = {
+      requestId: "slack:T1:Ev1",
+      conversationId: "C0CHANNEL12",
+      senderId: "U0MEMBER123",
+      text: "and then?",
+      threadTs: "1700000000.000100",
+    };
+    inbox.accept(1, threaded);
+    // The anchor is content, not decoration: a redelivery that lost it would answer outside the thread.
+    assert.throws(() => inbox.accept(1, { ...threaded, threadTs: "1700000000.000999" }), /different content/);
+
+    // The anchor has to outlive the process: a reply whose anchor was lost would leave the thread.
+    inbox.close();
+    inbox = new Inbox(path);
+    assert.equal(inbox.next()?.threadTs, "1700000000.000100");
+
+    inbox.saveReply(threaded.requestId, "an answer");
+    inbox.beginPart(threaded.requestId, 0);
+    inbox.confirmPart(threaded.requestId, 0, "1700000000.000200");
+    // A flat request keeps no anchor, and reading it back does not invent one.
+    inbox.accept(2, { requestId: "slack:T1:Ev2", conversationId: "C0CHANNEL12", senderId: "U0MEMBER123", text: "flat" });
+    assert.equal(inbox.next()?.threadTs, undefined);
+  } finally {
+    inbox.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("prune retains the newest 100 sent requests and every unfinished request", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-prune-"));
   const path = join(directory, "inbox.sqlite");

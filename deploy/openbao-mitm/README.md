@@ -55,6 +55,7 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 | 其他提供商 `*_API_KEY` | 是（按需） | `__vault_<NAME>__` | `secret/aster/<NAME>` | 见 `addon/allowlist.json` |
 | `MAGPIE_API_KEY` | 是（`MODEL_PROVIDER` 声明为 `magpie` 时） | `__vault_MAGPIE_API_KEY__` | `secret/aster/MAGPIE_API_KEY` | `10.1.4.9`、`100.66.135.123` |
 | `TELEGRAM_OWNER_ID` / `SLACK_OWNER_ID` | 否 | 数值用户 ID / Slack member ID（进程内比对，不出站） | — | — |
+| `SLACK_ALLOWED_USERS` / `SLACK_ALLOWED_CHANNELS` | 否 | 频道白名单：成员 ID / 频道 ID 列表（进程内比对，不出站；空着即只服务所有者单聊） | — | — |
 | `CHANNEL` | 否 | `telegram`（默认）或 `slack` | — | — |
 | `MODEL_PROVIDER` / `MODEL_ID` / `DATA_DIR` / `MEMORY_*` / `PROVIDERS_CONFIG` | 否 | 普通配置值 | — | — |
 | `LANGFUSE_SECRET_KEY` | 是（启用 Langfuse Trace 时） | `__vault_LANGFUSE_SECRET_KEY__` | `secret/aster/LANGFUSE_SECRET_KEY` | `cloud.langfuse.com`、`us.cloud.langfuse.com` |

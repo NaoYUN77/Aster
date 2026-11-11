@@ -3,11 +3,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { connectMcp } from "../src/mcp.js";
 import { createToolRegistry, currentTime, personalTools, type GovernedTool } from "../src/tools.js";
+import { beginRequest, startTrace } from "../src/trace.js";
 
 const example = (name: string, parameters = Type.Object({})) => defineTool({
   name,
@@ -137,6 +140,94 @@ test("schema hashes ignore object key order and retain schema differences", () =
   const first = hash(Type.Object({ a: Type.String(), b: Type.Number() }, { required: ["a", "b"] }));
   assert.equal(first, hash(Type.Object({ b: Type.Number(), a: Type.String() }, { required: ["a", "b"] })));
   assert.notEqual(first, hash(Type.Object({ a: Type.String(), b: Type.Boolean() }, { required: ["a", "b"] })));
+});
+
+test("an admitted execution is traced as one tool span, and a denied call never executes", async () => {
+  const exporter = new InMemorySpanExporter();
+  const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+  const runtime = startTrace({ enabled: true }, () => {}, { tracerProvider: provider });
+  assert.ok(runtime);
+  try {
+    const request = beginRequest({ conversationId: 11, requestId: "slack:11:req-1" });
+    assert.ok(request);
+    const writer = defineTool({
+      name: "writer",
+      description: "write",
+      parameters: Type.Object({ body: Type.String() }),
+      execute: async () => ({ output: [{ type: "text", text: "RESULT_SECRET body" }] }),
+    });
+    const registry = createToolRegistry(
+      [personalTools, defineExtension({ name: "writer-ext", tools: [writer] })],
+      { log: () => {} },
+    );
+    const tool = registry.snapshot().tools().find((candidate) => candidate.tool.name === "writer")!.tool;
+    const result = await tool.execute({ body: "ARGUMENT_SECRET value" }, {
+      conversationId: 11, taskId: 7, callId: "call-11",
+    } as ToolExecutionApi, BACKGROUND_CONTEXT);
+    assert.equal(result.isError, undefined);
+
+    const execution = exporter.getFinishedSpans().find(({ name }) => name === "tool.execution");
+    assert.ok(execution, "the admitted execution is traced");
+    assert.equal(execution.parentSpanContext?.spanId, request.spanId);
+    assert.equal(execution.attributes["langfuse.observation.type"], "tool");
+    assert.equal(execution.attributes["langfuse.observation.metadata.tool"], "\"writer\"");
+    assert.equal(execution.attributes["langfuse.observation.metadata.source"], "\"builtin:writer-ext\"");
+    assert.equal(execution.attributes["langfuse.observation.metadata.authz"], "\"write\"");
+    assert.equal(execution.attributes["langfuse.observation.metadata.replay"], "\"unsafe\"");
+    assert.equal(execution.attributes["langfuse.observation.metadata.argNames"], "\"body\"");
+    assert.equal(
+      execution.attributes["langfuse.observation.metadata.argsBytes"],
+      String(Buffer.byteLength(JSON.stringify({ body: "ARGUMENT_SECRET value" }), "utf8")),
+      "the size of the whole call is traced",
+    );
+    assert.equal(
+      execution.attributes["langfuse.observation.metadata.resultBytes"],
+      String(Buffer.byteLength(JSON.stringify([{ type: "text", text: "RESULT_SECRET body" }]), "utf8")),
+      "the size of the result is traced",
+    );
+    assert.equal(execution.attributes["langfuse.observation.metadata.outcome"], "\"ok\"");
+    const exported = JSON.stringify(execution.attributes);
+    assert.equal(exported.includes("ARGUMENT_SECRET"), false, "argument values stay local");
+    assert.equal(exported.includes("RESULT_SECRET"), false, "result text stays local");
+    request.end("ok", { replyBytes: 1 });
+  } finally {
+    await runtime.close();
+  }
+
+  // A rejected call is reviewed, never executed, and therefore gets no execution span.
+  const denied = new InMemorySpanExporter();
+  const deniedProvider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(denied)] });
+  const deniedRuntime = startTrace({ enabled: true }, () => {}, { tracerProvider: deniedProvider });
+  assert.ok(deniedRuntime);
+  try {
+    const request = beginRequest({ conversationId: 12 });
+    assert.ok(request);
+    let executions = 0;
+    const writer = defineTool({
+      name: "writer",
+      description: "write",
+      parameters: Type.Object({}),
+      execute: async () => { executions += 1; return { output: [] }; },
+    });
+    const registry = createToolRegistry([defineExtension({ name: "writer-ext", tools: [writer] })], {
+      authority: "restricted",
+      log: () => {},
+    });
+    const result = await registry.snapshot().tools()[0]!.tool.execute({}, {
+      conversationId: 12, taskId: 8, callId: "call-12",
+    } as ToolExecutionApi, BACKGROUND_CONTEXT);
+    assert.equal((result.details as { code?: string }).code, "TOOL_AUTHZ_DENIED");
+    assert.equal(executions, 0, "a denied call never reaches the executor");
+
+    const spans = denied.getFinishedSpans();
+    assert.equal(spans.some(({ name }) => name === "tool.execution"), false, "no execution span for a denied call");
+    const decision = spans.find(({ name }) => name === "registry.decision");
+    assert.ok(decision);
+    assert.equal(decision.attributes["langfuse.observation.metadata.decision"], "\"deny\"");
+    request.end("ok", { replyBytes: 1 });
+  } finally {
+    await deniedRuntime.close();
+  }
 });
 
 test("MCP registrations use the same records with adapter-owned source and conservative metadata", async () => {

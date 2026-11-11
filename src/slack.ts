@@ -1,8 +1,9 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { deliverNext, type DeliveryChannel, type ReplyFn } from "./channel.js";
+import { deliverNext, type DeliveryChannel, type DeliveryReactions, type ReplyFn } from "./channel.js";
 import { errorCode } from "./errors.js";
 import type { Inbox } from "./inbox.js";
 import type { TextRequest } from "./messages.js";
+import type { ReactionAnchor, ReactionHost, ReceiptEmojis } from "./reactions.js";
 
 const API_ROOT = "https://slack.com/api";
 const CALL_TIMEOUT_MS = 30_000;
@@ -109,7 +110,7 @@ export class SlackClient implements DeliveryChannel {
     return this.#connect(url, signal);
   }
 
-  async send(target: string, text_: string, signal: AbortSignal): Promise<string> {
+  async send(target: string, text_: string, signal: AbortSignal, threadTs?: string): Promise<string> {
     const channel = await this.#resolveTarget(target, signal);
     // Slack renders `text` as mrkdwn, so markup characters are escaped to keep the reply literal.
     const posted = await this.#call("chat.postMessage", {
@@ -117,6 +118,7 @@ export class SlackClient implements DeliveryChannel {
       text: escapeSlackText(text_),
       unfurl_links: false,
       unfurl_media: false,
+      ...(threadTs === undefined ? {} : { thread_ts: threadTs }),
     }, this.#botToken, signal);
     const ts = text(posted.ts);
     if (!ts) throw new SlackError("SLACK_PROTOCOL", "chat.postMessage did not return a timestamp");
@@ -129,6 +131,49 @@ export class SlackClient implements DeliveryChannel {
 
   failureCode(error: unknown): string {
     return failureCode(error);
+  }
+
+  /** Attaches an emoji reaction to one message. `target` resolves exactly as a reply's target does. */
+  async react(target: string, ts: string, name: string, signal: AbortSignal): Promise<void> {
+    await this.#reaction("reactions.add", target, ts, name, signal, "already_reacted");
+  }
+
+  /** Removes a reaction this bot added. A reaction that is already gone is the desired end state. */
+  async unreact(target: string, ts: string, name: string, signal: AbortSignal): Promise<void> {
+    await this.#reaction("reactions.remove", target, ts, name, signal, "no_reaction");
+  }
+
+  async #reaction(
+    method: string,
+    target: string,
+    ts: string,
+    name: string,
+    signal: AbortSignal,
+    done: string,
+  ): Promise<void> {
+    const channel = await this.#resolveTarget(target, signal);
+    try {
+      // The emoji name and the message id are the whole call: no text of either side ever travels.
+      await this.#call(method, { channel, timestamp: ts, name }, this.#botToken, signal);
+    } catch (error) {
+      // Repeating an operation that already happened is the desired state, not a failure.
+      if (error instanceof SlackError && error.code === `SLACK_${done.toUpperCase()}`) return;
+      throw error;
+    }
+  }
+
+  /**
+   * Every emoji name this workspace can react with, including the custom uploads and the aliases that
+   * point at them. Needs `emoji:read`; without it Slack refuses the call and the caller reports that
+   * instead of pretending the standard names are all there is.
+   */
+  async emojiList(signal: AbortSignal): Promise<readonly string[]> {
+    const listed = await this.#call("emoji.list", {}, this.#botToken, signal);
+    const emoji = listed.emoji;
+    if (emoji === null || typeof emoji !== "object" || Array.isArray(emoji)) return [];
+    // Only the names matter: a value is either an image URL or `alias:<name>`, and both are usable
+    // names in `reactions.add`. The values never leave this function.
+    return Object.keys(emoji).sort();
   }
 
   /** A member id has to become its DM channel id; a channel id is already a target. */
@@ -209,24 +254,70 @@ export function escapeSlackText(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+/** Who may drive the bot, and where. Built from configuration; never derived from message content. */
+export type SlackInboundPolicy = {
+  readonly ownerId: string;
+  readonly botId: string;
+  /** Members allowed to drive the bot besides the owner. */
+  readonly allowedUsers: readonly string[];
+  /** Channels the bot answers in. */
+  readonly allowedChannels: readonly string[];
+  /** Diagnostics for a dropped event: a fixed reason code, never the message text. */
+  readonly log?: (line: string) => void;
+};
+
 /**
- * Maps one Events API callback to a request. Only private DMs from the owner count: message edits,
- * joins and other bots carry a subtype or a bot id, and any other channel type is not this owner's
- * private conversation.
+ * Maps one Events API callback to a request. Identity comes from Slack's own `user` field — the
+ * transport's identifier — so no message text can claim to be someone else, and the allowlists decide
+ * who may start work and where. Private DMs stay owner-only. In a channel, an explicit mention starts
+ * a conversation while a reply inside a thread continues one, carrying the thread anchor so the answer
+ * lands where the question was asked. Everything else is dropped with a reason code.
  */
-export function toRequest(payload: unknown, ownerId: string): TextRequest | undefined {
+export function toRequest(payload: unknown, policy: SlackInboundPolicy): TextRequest | undefined {
+  const drop = (reason: string): undefined => {
+    policy.log?.(`Slack event dropped: ${reason}`);
+    return undefined;
+  };
   if (!isRecord(payload) || payload.type !== "event_callback") return;
   const eventId = text(payload.event_id);
   const teamId = text(payload.team_id);
   const event = payload.event;
   if (!eventId || !teamId || !isRecord(event)) return;
-  if (event.type !== "message" || event.subtype !== undefined || event.bot_id !== undefined) return;
-  if (event.channel_type !== "im") return;
-  const conversationId = text(event.channel);
-  const senderId = text(event.user);
-  const content = typeof event.text === "string" ? event.text : "";
-  if (!conversationId || !senderId || senderId !== ownerId || !content.trim()) return;
-  return { requestId: `slack:${teamId}:${eventId}`, conversationId, senderId, text: content };
+  // Another app's message or a bot's own post is never a user request; an edit is not a new question.
+  // `thread_broadcast` is a real reply that also reached the channel, so it stays a request.
+  if (event.bot_id !== undefined) return;
+  if (event.subtype !== undefined && event.subtype !== "thread_broadcast") return;
+  const channel = text(event.channel);
+  const sender = text(event.user);
+  const raw = typeof event.text === "string" ? event.text : "";
+  if (!channel || !sender) return;
+  const mentioned = raw.includes(`<@${policy.botId}>`);
+  if (event.channel_type === "im") {
+    if (event.type !== "message") return;
+    if (sender !== policy.ownerId) return drop("DM_NOT_OWNER");
+  } else if (event.channel_type === "channel" || event.channel_type === "group") {
+    if (event.type !== "message" && event.type !== "app_mention") return;
+    if (!policy.allowedChannels.includes(channel)) return drop("CHANNEL_NOT_ALLOWED");
+    if (sender !== policy.ownerId && !policy.allowedUsers.includes(sender)) return drop("SENDER_NOT_ALLOWED");
+    // A plain channel message counts only as a follow-up inside a thread: the mention is what starts a
+    // conversation, and requiring it keeps the bot from answering every message in the channel.
+    if (!mentioned && typeof event.thread_ts !== "string") return drop("NOT_A_MENTION");
+  } else return;
+  // Slack addresses the bot as `<@U…>`; the model needs the request, not the address.
+  const content = raw.split(`<@${policy.botId}>`).join("").trim();
+  if (!content) return drop("EMPTY_TEXT");
+  const threadTs = text(event.thread_ts);
+  // The message's own timestamp is what a reaction is attached to; the thread anchor is where an
+  // answer goes. A message inside a thread has both, and they are different messages.
+  const messageTs = text(event.ts);
+  return {
+    requestId: `slack:${teamId}:${eventId}`,
+    conversationId: channel,
+    senderId: sender,
+    text: content,
+    ...(threadTs === undefined ? {} : { threadTs }),
+    ...(messageTs === undefined ? {} : { messageTs }),
+  };
 }
 
 function parseFrame(raw: string): SlackFrame | undefined {
@@ -328,28 +419,53 @@ function liveSocket(url: string, signal: AbortSignal): Promise<SlackSocket> {
 }
 
 /**
- * Serves the owner's Slack DMs over Socket Mode: no inbound endpoint, so the bot works behind NAT.
- * The loop owns the socket, and shares agent work and reply delivery with every other channel.
+ * What a Slack deployment adds to delivery: the emoji receipts the owner asked for, and the reaction
+ * host plus the anchor the model's reaction tool works through. Both absent means reactions are off,
+ * which is also what a channel with no reaction concept (Telegram) keeps.
+ */
+export type SlackReactions = {
+  readonly receipts?: ReceiptEmojis;
+  readonly reactions?: { readonly host: ReactionHost; readonly anchor: ReactionAnchor };
+};
+
+/**
+ * Serves the allowed members' Slack traffic over Socket Mode: no inbound endpoint, so the bot works
+ * behind NAT. The loop owns the socket, and shares agent work and reply delivery with every other
+ * channel. `policy` decides who may drive the bot and where; it is configuration, never message text.
  */
 export async function serveSlack(
-  ownerId: string,
-  botId: string,
+  policy: SlackInboundPolicy,
   inbox: Inbox,
   reply: ReplyFn,
   signal: AbortSignal,
   client: Pick<SlackClient, "send" | "open" | "connect">,
+  options: SlackReactions = {},
 ): Promise<void> {
   if (inbox.blocked().length) console.error("Some replies need delivery reconciliation; run npm run deliveries -- list.");
+  // Reactions stay off unless the deployment configured them: with no host there is nothing to call,
+  // and the model's reaction tool is not installed either.
+  const host = options.reactions?.host;
+  const reactions: DeliveryReactions = {
+    ...(options.receipts === undefined ? {} : { receipts: options.receipts }),
+    ...(options.reactions === undefined ? {} : { anchor: options.reactions.anchor }),
+  };
   const channel: DeliveryChannel = {
     label: "Slack",
-    send: (target, text, partSignal) => client.send(target, text, partSignal),
+    send: (target, text, partSignal, threadTs) => client.send(target, text, partSignal, threadTs),
+    ...(host === undefined ? {} : {
+      react: (target: string, ts: string, name: string, partSignal: AbortSignal) => host.react(target, ts, name, partSignal),
+      ...(host.unreact === undefined ? {} : {
+        unreact: (target: string, ts: string, name: string, partSignal: AbortSignal) =>
+          host.unreact!(target, ts, name, partSignal),
+      }),
+    }),
     classifyFailure,
     failureCode,
   };
   let socket: SlackSocket | undefined;
   let failures = 0;
   while (!signal.aborted) {
-    if (await deliverNext(inbox, reply, signal, channel)) continue;
+    if (await deliverNext(inbox, reply, signal, channel, reactions)) continue;
     if (socket === undefined) {
       try {
         socket = await client.connect(await client.open(signal), signal);
@@ -388,7 +504,7 @@ export async function serveSlack(
     // the stored request id keeps that redelivery from being processed twice. A store failure is
     // fatal, exactly as it is on the polling channel: acknowledging would silently drop the owner's
     // message, while an unacknowledged envelope comes back after the restart.
-    const request = toRequest(frame.payload, ownerId);
+    const request = toRequest(frame.payload, policy);
     if (request) inbox.accept(inbox.offset + 1, request);
     socket.ack(frame.envelopeId);
   }

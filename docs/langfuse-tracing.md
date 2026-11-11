@@ -11,13 +11,15 @@
 ```text
 agent.request                 agent  （根 span，session = 会话 id）
 ├── llm.generation            generation（每次模型响应一条）
+├── tool.execution            tool（放行后真正执行的工具调用，每次一条）
 ├── registry.decision         event（工具授权 allow/deny）
 └── loop_guard.warning/halt   event（Loop Guard 证据）
 ```
 
-- `agent.request` 以 durable 会话 id（`root.id`）为 `session.id`，以 `requestId` 区分同一会话的不同请求。
+- `agent.request` 以 durable 会话 id 为 `session.id`（单聊/所有者是 root 会话，团队成员是他自己的 Hub 会话或该 Hub 在线程里的 fork，见 [ADR-0026](adr/team-channel/0026-team-channel-hubs.md)），以 `requestId` 区分同一会话的不同请求。宿主自己答复的请求（线程用满 5 轮后的固定文案，不调用模型）也有一条根 span，带 `hostReply: FORK_CLOSED`，因此每个入向请求都看得到。
 - `llm.generation` 关联提供商、模型、stop reason 和 token 用量；模型 Prompt 与回复原文不在采集范围内。
-- 工具执行不单独建 span：授权事实由 `registry.decision` event 记录，一次模型响应里的工具调用次数汇总在 `llm.generation` 的 `toolCalls` metadata 中。工具参数、命令、文件内容和工具结果都不上传。
+- `tool.execution` 只观察真正执行的那一次调用：span 在授权通过之后开始、在工具结算时结束，所以它的耗时与结果就是工具本身的，不含授权判断与排队。记录工具名、实现来源（`builtin:<extension>`／`mcp:<server>`／`plugin:<name>`）、`trust`/`authz`/`replay`/`tier`、task 与 call id、**参数名、参数个数与整次调用的序列化字节数**、结果字节数与输出条目数、诊断条数，以及 `ok`/`error`/`aborted` 结果、`outcome`、`durationMs` 与宿主错误码。
+- 授权事实仍由 `registry.decision` event 记录：被拒绝、未暴露或未注册的调用**没有** `tool.execution`，只有这条决策事件；一次模型响应里的工具调用次数仍汇总在 `llm.generation` 的 `toolCalls` metadata 中。没有活跃请求的后台调用不建 span（与 `registry.decision` 一致）。
 
 单个 trace 内的活跃请求限 256 个；超限时结束最旧 span（标记 `unknown`），不静默丢弃。
 
@@ -46,15 +48,15 @@ SDK 还会自行读取 `LANGFUSE_FLUSH_AT`、`LANGFUSE_FLUSH_INTERVAL`、`LANGFU
 
 不上传：
 
-- 用户消息、模型回复、thinking、工具参数、命令、文件内容、路径字符串、错误消息原文；
+- 用户消息、模型回复、thinking、工具参数值、命令、文件内容、路径字符串、错误消息与工具结果原文；
 - 图片二进制；
 - 任何凭据或认证头。
 
 只上传宿主已知的边界信息：
 
 - 会话 id、请求 id、task/call/session id；
-- 字节长度（`textBytes` 等）、条目数、token 用量、耗时；
-- 工具名、模型/provider 名称、stop reason、错误码、授权决定；
+- 字节长度（`textBytes`、`argsBytes`、`resultBytes` 等）、计数（参数个数、输出条目数、诊断条数）、token 用量、耗时；
+- 工具名与实现来源、参数名、模型/provider 名称、stop reason、错误码、授权决定；
 - span 结果（`ok`/`error`/`aborted`/`halted`/`unknown`）。
 
 实现上不给 observation 设置 `input`/`output`，媒体上传显式关闭（`mediaUploadEnabled: false`）；metadata 只从固定字段构造，不序列化消息对象，因此没有需要单独脱敏的内容字段。
@@ -161,12 +163,14 @@ LANGFUSE_SECRET_KEY=__vault_LANGFUSE_SECRET_KEY__
 
    - `agent.request` 下至少有 1 条 `llm.generation`；
    - `llm.generation` 的 metadata 里 `toolCalls` 与这次回复实际发起的调用数一致；
+   - 每个**真正执行**的工具调用各有一条 `tool.execution`（type=`tool`）挂在根 span 下，带 `tool`、`source`、`argNames`/`argsBytes`、`resultBytes`、`durationMs`，以及结果对应的 `outcome`（`isError` 为真时为 `error`）与 `errorCode`；
+   - 被拒绝或未暴露的调用**没有** `tool.execution`，只有 `deny` 的 `registry.decision`；
    - 每个工具的授权决定都以 `registry.decision` event 出现在根 span 下；
    - `loop_guard.*` event 同样挂在根 span 下。
 
 5. **核对隐私**
 
-   根 span 和每条 `llm.generation` 都不应有 Input/Output（本实现不设置这两个字段）。Metadata 中只应看到 id、长度、计数、工具名、模型名、错误码等边界字段；不应出现消息原文、命令、文件内容或任何凭据。
+   根 span、每条 `llm.generation` 和每条 `tool.execution` 都不应有 Input/Output（本实现不设置这两个字段）。Metadata 中只应看到 id、长度、计数、工具名与实现来源、参数名、模型名、错误码等边界字段；不应出现消息原文、参数值、命令、文件内容、工具结果原文或任何凭据。
 
 6. **核对失败隔离**
 

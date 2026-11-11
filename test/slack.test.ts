@@ -7,6 +7,7 @@ import test from "node:test";
 import { readConfig } from "../src/config.js";
 import { Inbox } from "../src/inbox.js";
 import type { TextRequest } from "../src/messages.js";
+import { ReactionAnchor } from "../src/reactions.js";
 import {
   escapeSlackText,
   serveSlack,
@@ -14,11 +15,25 @@ import {
   SlackError,
   toRequest,
   type SlackFrameResult,
+  type SlackInboundPolicy,
   type SlackSocket,
 } from "../src/slack.js";
 
 const OWNER = "U0OWNER123";
 const BOT = "U0BOT4567";
+const MEMBER = "U0MEMBER123";
+const STRANGER = "U0STRANGE12";
+const CHANNEL = "C0CHANNEL12";
+const OTHER_CHANNEL = "C0OTHERC12";
+/** The allowlist a deployment configures; nothing in a message can change it. */
+const policy = (overrides: Partial<SlackInboundPolicy> = {}, log: string[] = []) => ({
+  ownerId: OWNER,
+  botId: BOT,
+  allowedUsers: [MEMBER],
+  allowedChannels: [CHANNEL],
+  log: (line: string) => log.push(line),
+  ...overrides,
+});
 const model = {
   MODEL_PROVIDER: "deepseek",
   MODEL_ID: "deepseek-flash",
@@ -31,6 +46,7 @@ const slackEnv = {
   SLACK_OWNER_ID: OWNER,
   ...model,
 };
+const CREDENTIALS = { botToken: "xoxb-1234567890123456789012", appToken: "xapp-1234567890123456789012", ownerId: OWNER };
 const telegramEnv = {
   TELEGRAM_BOT_TOKEN: "token",
   TELEGRAM_OWNER_ID: "42",
@@ -58,6 +74,23 @@ function messageEvent(event: Record<string, unknown> = {}) {
     team_id: "T1",
     event_id: "Ev1",
     event: { type: "message", channel_type: "im", channel: "D0DM", user: OWNER, text: "hello", ...event },
+  };
+}
+
+/** A channel event: `app_mention` by default, since that is how a conversation starts there. */
+function channelEvent(event: Record<string, unknown> = {}) {
+  return {
+    type: "event_callback",
+    team_id: "T1",
+    event_id: "Ev7",
+    event: {
+      type: "app_mention",
+      channel_type: "channel",
+      channel: CHANNEL,
+      user: MEMBER,
+      text: `<@${BOT}> hello`,
+      ...event,
+    },
   };
 }
 
@@ -114,6 +147,10 @@ test("the channel is selected explicitly, and only its own variables are require
     ownerId: OWNER,
     botToken: "xoxb-1234567890123456789012",
     appToken: "xapp-1234567890123456789012",
+    allowedUsers: [],
+    allowedChannels: [],
+    receipts: { working: "eyes", done: "white_check_mark", failed: "warning", lost: "x" },
+    maxReactions: 3,
   });
   assert.equal(readConfig({ ...slackEnv, CHANNEL: " SLACK " }).channel.kind, "slack", "the value is trimmed and case-folded");
   assert.equal(readConfig({ ...telegramEnv, CHANNEL: "" }).channel.kind, "telegram", "an empty value is the default");
@@ -124,7 +161,50 @@ test("Slack credentials and the owner id are checked for shape", () => {
   assert.throws(() => readConfig({ ...slackEnv, SLACK_BOT_TOKEN: "xoxp-user-token-1234567890" }), /SLACK_BOT_TOKEN is not shaped/);
   assert.throws(() => readConfig({ ...slackEnv, SLACK_APP_TOKEN: "xoxb-1234567890123456789012" }), /SLACK_APP_TOKEN is not shaped/);
   assert.throws(() => readConfig({ ...slackEnv, SLACK_OWNER_ID: "@owner" }), /SLACK_OWNER_ID must be a Slack member ID/);
+  assert.throws(
+    () => readConfig({ ...slackEnv, SLACK_ALLOWED_USERS: `${MEMBER}, @member` }),
+    /SLACK_ALLOWED_USERS must list Slack member IDs, comma-separated and without spaces/,
+  );
+  assert.throws(
+    () => readConfig({ ...slackEnv, SLACK_ALLOWED_CHANNELS: "general" }),
+    /SLACK_ALLOWED_CHANNELS must list Slack channel IDs, comma-separated and without spaces/,
+  );
+  // A list is a set: repeating an id does not make it count twice, and blanks are ignored.
+  const listed = readConfig({
+    ...slackEnv,
+    SLACK_ALLOWED_USERS: `${MEMBER},${MEMBER}`,
+    SLACK_ALLOWED_CHANNELS: ` ${CHANNEL} ,`,
+  }).channel;
+  assert.deepEqual(listed.kind === "slack" ? [listed.allowedUsers, listed.allowedChannels] : undefined,
+    [[MEMBER], [CHANNEL]]);
   assert.throws(() => readConfig({ ...slackEnv, SLACK_BOT_TOKEN: "  " }), /Missing configuration: SLACK_BOT_TOKEN/);
+  // Receipt emoji: the defaults are the four the bot uses out of the box, each one is normalized, and
+  // a name Slack could not accept is a refused boot instead of a receipt that never appears.
+  const receiptsOf = (env: Record<string, string>) => {
+    const channel = readConfig({ ...slackEnv, ...env }).channel;
+    return channel.kind === "slack" ? channel.receipts : {};
+  };
+  assert.deepEqual(receiptsOf({}), { working: "eyes", done: "white_check_mark", failed: "warning", lost: "x" });
+  assert.deepEqual(receiptsOf({ SLACK_ACK_EMOJI: ":Eyes:", SLACK_DONE_EMOJI: "tada", SLACK_FAIL_EMOJI: "x", SLACK_LOST_EMOJI: "warning" }),
+    { working: "eyes", done: "tada", failed: "x", lost: "warning" });
+  assert.deepEqual(receiptsOf({ SLACK_ACK_EMOJI: "", SLACK_DONE_EMOJI: "none" }), { failed: "warning", lost: "x" },
+    "each receipt can be turned off without turning the others off");
+  assert.deepEqual(receiptsOf({ SLACK_ACK_EMOJI: "none" }),
+    { done: "white_check_mark", failed: "warning", lost: "x" });
+  assert.throws(() => readConfig({ ...slackEnv, SLACK_ACK_EMOJI: "thumbs up" }),
+    /SLACK_ACK_EMOJI must be a Slack emoji name/);
+  assert.throws(() => readConfig({ ...slackEnv, SLACK_FAIL_EMOJI: "!!" }),
+    /SLACK_FAIL_EMOJI must be a Slack emoji name/);
+  // How many reactions one message may carry: bounded, and an integer or nothing.
+  const maxOf = (value: string) => {
+    const channel = readConfig({ ...slackEnv, SLACK_MAX_REACTIONS: value }).channel;
+    return channel.kind === "slack" ? channel.maxReactions : 0;
+  };
+  assert.equal(maxOf("1"), 1);
+  assert.equal(maxOf("10"), 10);
+  assert.throws(() => readConfig({ ...slackEnv, SLACK_MAX_REACTIONS: "0" }), /SLACK_MAX_REACTIONS must be an integer/);
+  assert.throws(() => readConfig({ ...slackEnv, SLACK_MAX_REACTIONS: "11" }), /SLACK_MAX_REACTIONS must be an integer/);
+  assert.throws(() => readConfig({ ...slackEnv, SLACK_MAX_REACTIONS: "many" }), /SLACK_MAX_REACTIONS must be an integer/);
   assert.throws(
     () => readConfig({ CHANNEL: "slack", SLACK_OWNER_ID: OWNER, SLACK_BOT_TOKEN: "xoxb-1234567890123456789012", ...model }),
     /Missing configuration: SLACK_APP_TOKEN/,
@@ -148,27 +228,94 @@ test("a Slack deployment does not require the Telegram variables, and vice versa
   );
 });
 
-test("only private DMs from the owner become requests, namespaced by team and event", () => {
-  assert.deepEqual(toRequest(messageEvent(), OWNER), {
+test("the owner's private DMs stay the only DM that becomes a request", () => {
+  assert.deepEqual(toRequest(messageEvent(), policy()), {
     requestId: "slack:T1:Ev1",
     conversationId: "D0DM",
     senderId: OWNER,
     text: "hello",
   });
 
-  const rejected: [string, Record<string, unknown>][] = [
-    ["another member", messageEvent({ user: "U0SOMEONE" })],
-    ["a channel message", messageEvent({ channel_type: "channel" })],
-    ["a message edit", messageEvent({ subtype: "message_changed" })],
-    ["another bot", messageEvent({ bot_id: "B0" })],
-    ["an empty message", messageEvent({ text: "   " })],
-    ["a non-message event", messageEvent({ type: "reaction_added" })],
+  // Somebody else's DM is not the owner's conversation, and no allowlist widens a direct message.
+  const log: string[] = [];
+  assert.equal(toRequest(messageEvent({ user: STRANGER, event_id: "Ev2" }), policy({}, log)), undefined);
+  assert.deepEqual(log, ["Slack event dropped: DM_NOT_OWNER"]);
+});
+
+test("a channel needs a mention to start a conversation, an allowed sender and an allowed channel", () => {
+  assert.deepEqual(toRequest(channelEvent(), policy()), {
+    requestId: "slack:T1:Ev7",
+    conversationId: CHANNEL,
+    senderId: MEMBER,
+    // The mention is Slack's addressing, not part of the request.
+    text: "hello",
+  });
+  // The owner may mention the bot anywhere it is allowed to answer.
+  assert.deepEqual(toRequest(channelEvent({ user: OWNER }), policy())?.senderId, OWNER);
+  // `message` with a mention is the same request as `app_mention`: clients differ in what they emit.
+  assert.deepEqual(toRequest(channelEvent({ type: "message" }), policy())?.text, "hello");
+
+  const rejects: [string, Record<string, unknown>, Partial<SlackInboundPolicy>][] = [
+    ["NOT_A_MENTION", channelEvent({ type: "message", text: "hello" }), {}],
+    ["CHANNEL_NOT_ALLOWED", channelEvent({ channel: OTHER_CHANNEL }), {}],
+    ["SENDER_NOT_ALLOWED", channelEvent({ user: STRANGER }), {}],
   ];
-  for (const [reason, payload] of rejected) assert.equal(toRequest(payload, OWNER), undefined, reason);
-  assert.equal(toRequest({ ...messageEvent(), type: "block_actions" }, OWNER), undefined);
-  assert.equal(toRequest({ ...messageEvent(), event_id: undefined }, OWNER), undefined, "no event id");
-  assert.equal(toRequest({ ...messageEvent(), team_id: undefined }, OWNER), undefined, "no team id");
-  assert.equal(toRequest("not an object", OWNER), undefined);
+  for (const [reason, payload, overrides] of rejects) {
+    const log: string[] = [];
+    assert.equal(toRequest(payload, policy(overrides, log)), undefined, reason);
+    assert.deepEqual(log, [`Slack event dropped: ${reason}`], reason);
+  }
+  // An empty allowlist closes channel traffic, and mentioning the bot changes nothing about that.
+  const closed: string[] = [];
+  assert.equal(toRequest(channelEvent(), policy({ allowedChannels: [] }, closed)), undefined);
+  assert.deepEqual(closed, ["Slack event dropped: CHANNEL_NOT_ALLOWED"]);
+});
+
+test("a reply inside a thread continues the conversation and carries its anchor", () => {
+  // A follow-up does not repeat the mention; the thread is what makes it a request.
+  const followUp = channelEvent({ type: "message", text: "and then?", thread_ts: "1700000000.000100" });
+  assert.deepEqual(toRequest(followUp, policy()), {
+    requestId: "slack:T1:Ev7",
+    conversationId: CHANNEL,
+    senderId: MEMBER,
+    text: "and then?",
+    threadTs: "1700000000.000100",
+  });
+  // A threaded mention keeps its anchor too, and a reply that was also broadcast is still a reply.
+  assert.equal(toRequest(channelEvent({ thread_ts: "1700000000.000100" }), policy())?.threadTs, "1700000000.000100");
+  assert.equal(
+    toRequest(channelEvent({ type: "message", subtype: "thread_broadcast", text: "ps", thread_ts: "1700000000.000100" }), policy())?.threadTs,
+    "1700000000.000100",
+  );
+  // A top-level channel request stays flat: the reply goes to the channel, and the member's answer
+  // under it is what opens the thread.
+  assert.equal(toRequest(channelEvent(), policy())?.threadTs, undefined);
+});
+
+test("a request without usable text or identity is dropped, and envelope noise never logs", () => {
+  const log: string[] = [];
+  assert.equal(toRequest(channelEvent({ text: `  <@${BOT}>  ` }), policy({}, log)), undefined);
+  assert.deepEqual(log, ["Slack event dropped: EMPTY_TEXT"]);
+
+  // Transport noise — other apps, the bot's own posts, edits, reactions, malformed envelopes — is not
+  // a rejected member, so it is dropped without a reason line and without reaching the inbox.
+  const silent: unknown[] = [
+    channelEvent({ bot_id: "B0" }),
+    channelEvent({ subtype: "message_changed" }),
+    channelEvent({ subtype: "channel_join" }),
+    channelEvent({ type: "reaction_added" }),
+    channelEvent({ user: undefined }),
+    channelEvent({ channel: undefined }),
+    channelEvent({ channel_type: "mpim" }),
+    { ...channelEvent(), type: "block_actions" },
+    { ...channelEvent(), event_id: undefined },
+    { ...channelEvent(), team_id: undefined },
+    { ...channelEvent(), event: undefined },
+    "not an object",
+  ];
+  const quiet: string[] = [];
+  for (const payload of silent) assert.equal(toRequest(payload, policy({}, quiet)), undefined, JSON.stringify(payload));
+  assert.deepEqual(quiet, []);
 });
 
 test("Slack markup characters are escaped so a reply stays literal", () => {
@@ -245,7 +392,7 @@ test("an events_api envelope is stored before it is acknowledged, and stored onc
         return "ts";
       },
     };
-    const served = serveSlack(OWNER, BOT, inbox, async (job) => {
+    const served = serveSlack(policy(), inbox, async (job) => {
       seen.push(job);
       return "unused";
     }, shutdown.signal, client);
@@ -291,7 +438,7 @@ test("a store failure is fatal and the envelope stays unacknowledged", async () 
     connect: async () => socket,
     send: async () => "ts",
   };
-  const served = serveSlack(OWNER, BOT, inbox, async () => "unused", shutdown.signal, client);
+  const served = serveSlack(policy(), inbox, async () => "unused", shutdown.signal, client);
   socket.push({ kind: "frame", frame: { type: "events_api", envelopeId: "env-1", payload: messageEvent() } });
   await assert.rejects(served, /disk full/);
   assert.deepEqual(socket.acked, [], "an unstored envelope must remain unacknowledged");
@@ -299,28 +446,301 @@ test("a store failure is fatal and the envelope stays unacknowledged", async () 
 
 test("a stored reply is delivered in segments over the channel", async () => {
   await withInbox(async (inbox) => {
-    inbox.accept(1, { requestId: "slack:T1:Ev9", conversationId: "D0DM", senderId: OWNER, text: "hi" });
+    // The anchor survives a restart with the request: this reply belongs inside the thread it came from.
+    inbox.accept(1, {
+      requestId: "slack:T1:Ev9",
+      conversationId: "D0DM",
+      senderId: OWNER,
+      text: "hi",
+      threadTs: "1700000000.000100",
+    });
     const socket = new TestSocket();
     const shutdown = new AbortController();
-    const sent: { target: string; text: string }[] = [];
+    const sent: { target: string; text: string; threadTs?: string }[] = [];
     const client = {
       open: async () => "wss://example.invalid/link",
       connect: async () => socket,
-      send: async (target: string, text: string) => {
-        sent.push({ target, text });
+      send: async (target: string, text: string, _signal: AbortSignal, threadTs?: string) => {
+        sent.push({ target, text, threadTs });
         return "1700000000.000200";
       },
     };
-    const served = serveSlack(OWNER, BOT, inbox, async () => "answer " + "x".repeat(4000), shutdown.signal, client);
+    const served = serveSlack(policy(), inbox, async () => "answer " + "x".repeat(4000), shutdown.signal, client);
     await waitFor(() => sent.length === 2);
     shutdown.abort();
     await served;
 
     assert.deepEqual(sent.map(({ target }) => target), ["D0DM", "D0DM"]);
+    // Every part carries the same anchor, so a segmented answer stays in one thread.
+    assert.deepEqual(sent.map(({ threadTs }) => threadTs), ["1700000000.000100", "1700000000.000100"]);
     assert.equal(sent[0]?.text.length, 4000);
     assert.equal(sent[0]?.text, "answer " + "x".repeat(3993));
     assert.equal(sent[1]?.text, "x".repeat(7));
     assert.equal(inbox.blocked().length, 0);
+  });
+});
+
+test("a received message carries its own timestamp, next to the thread it belongs to", () => {
+  // The thread anchor is where an answer goes; the message's own timestamp is what a reaction is
+  // attached to. Inside a thread they are two different messages, so both have to survive.
+  assert.deepEqual(toRequest(messageEvent({ ts: "1700000000.000100" }), policy()), {
+    requestId: "slack:T1:Ev1",
+    conversationId: "D0DM",
+    senderId: OWNER,
+    text: "hello",
+    messageTs: "1700000000.000100",
+  });
+  assert.deepEqual(toRequest(channelEvent({ ts: "1700000000.000300", thread_ts: "1700000000.000100" }), policy()), {
+    requestId: "slack:T1:Ev7",
+    conversationId: CHANNEL,
+    senderId: MEMBER,
+    text: "hello",
+    threadTs: "1700000000.000100",
+    messageTs: "1700000000.000300",
+  });
+});
+
+test("reactions are added and removed by name, and a repeat is the desired state", async () => {
+  const signal = new AbortController().signal;
+  const { impl, calls } = slackApi({
+    "reactions.add": () => ({ ok: true }),
+    "reactions.remove": () => ({ ok: true }),
+  });
+  const client = new SlackClient(CREDENTIALS, { fetch: impl });
+  await client.react(CHANNEL, "1700000000.000100", "tada", signal);
+  await client.unreact(CHANNEL, "1700000000.000100", "tada", signal);
+  assert.deepEqual(calls.map(({ method }) => method), ["reactions.add", "reactions.remove"]);
+  // The call carries the emoji name and the message id only: no message text either way.
+  assert.deepEqual(calls[0]?.params, { channel: CHANNEL, timestamp: "1700000000.000100", name: "tada" });
+
+  // A member id is not a conversation: it resolves to that member's DM, exactly as a reply would.
+  const member = slackApi({
+    "conversations.open": () => ({ ok: true, channel: { id: "D0DM" } }),
+    "reactions.add": () => ({ ok: true }),
+  });
+  await new SlackClient(CREDENTIALS, { fetch: member.impl }).react(MEMBER, "1700000000.000100", "eyes", signal);
+  assert.equal(member.calls[1]?.params.channel, "D0DM");
+
+  // Repeating an operation that already happened is not a failure; a real refusal still is.
+  const repeated = slackApi({
+    "reactions.add": () => ({ ok: false, error: "already_reacted" }),
+    "reactions.remove": () => ({ ok: false, error: "no_reaction" }),
+  });
+  const tolerating = new SlackClient(CREDENTIALS, { fetch: repeated.impl });
+  await assert.doesNotReject(() => tolerating.react(CHANNEL, "1700000000.000100", "eyes", signal));
+  await assert.doesNotReject(() => tolerating.unreact(CHANNEL, "1700000000.000100", "eyes", signal));
+
+  const refused = slackApi({ "reactions.add": () => ({ ok: false, error: "invalid_name" }) });
+  await assert.rejects(
+    () => new SlackClient(CREDENTIALS, { fetch: refused.impl }).react(CHANNEL, "1700000000.000100", "nope", signal),
+    (error: unknown) => error instanceof SlackError && error.code === "SLACK_INVALID_NAME",
+  );
+  // A missing scope is reported as the scope, not as "the bot ignored you".
+  const unauthorized = slackApi({ "reactions.add": () => ({ ok: false, error: "missing_scope" }) });
+  await assert.rejects(
+    () => new SlackClient(CREDENTIALS, { fetch: unauthorized.impl }).react(CHANNEL, "1700000000.000100", "eyes", signal),
+    (error: unknown) => error instanceof SlackError && error.code === "SLACK_MISSING_SCOPE",
+  );
+});
+
+test("a request is acknowledged with a reaction and settled once its reply is delivered", async () => {
+  await withInbox(async (inbox) => {
+    // The received message's id survives with the request, so the receipt has something to attach to.
+    inbox.accept(1, {
+      requestId: "slack:T1:Ev11",
+      conversationId: "D0DM",
+      senderId: OWNER,
+      text: "hi",
+      messageTs: "1700000000.000100",
+    });
+    const socket = new TestSocket();
+    const shutdown = new AbortController();
+    const events: string[] = [];
+    const client = {
+      open: async () => "wss://example.invalid/link",
+      connect: async () => socket,
+      send: async () => {
+        events.push("send");
+        return "1700000000.000300";
+      },
+    };
+    const anchor = new ReactionAnchor();
+    const host = {
+      react: async (_target: string, ts: string, name: string) => {
+        events.push(`+${name}@${ts}`);
+      },
+      unreact: async (_target: string, ts: string, name: string) => {
+        events.push(`-${name}@${ts}`);
+      },
+    };
+    const served = serveSlack(policy(), inbox, async () => "answer", shutdown.signal, client, {
+      receipts: { working: "eyes", done: "white_check_mark" },
+      reactions: { host, anchor },
+    });
+    await waitFor(() => events.length === 4);
+    shutdown.abort();
+    await served;
+
+    // The acknowledgement goes out before the run, and the receipt replaces it after delivery — the
+    // reaction is always aimed at the message the request arrived on.
+    assert.deepEqual(events, [
+      "+eyes@1700000000.000100",
+      "send",
+      "-eyes@1700000000.000100",
+      "+white_check_mark@1700000000.000100",
+    ]);
+    assert.equal(anchor.peek(), undefined, "the anchor only lives as long as the request");
+  });
+});
+
+test("a reply that was not delivered is marked as lost rather than as done", async () => {
+  await withInbox(async (inbox) => {
+    inbox.accept(1, {
+      requestId: "slack:T1:Ev12",
+      conversationId: "D0DM",
+      senderId: OWNER,
+      text: "hi",
+      messageTs: "1700000000.000100",
+    });
+    const socket = new TestSocket();
+    const shutdown = new AbortController();
+    const events: string[] = [];
+    const client = {
+      open: async () => "wss://example.invalid/link",
+      connect: async () => socket,
+      send: async () => {
+        throw new SlackError("SLACK_NOT_IN_CHANNEL", "Slack chat.postMessage was refused (NOT_IN_CHANNEL)");
+      },
+    };
+    const host = {
+      react: async (_target: string, ts: string, name: string) => {
+        events.push(`+${name}@${ts}`);
+      },
+      unreact: async (_target: string, ts: string, name: string) => {
+        events.push(`-${name}@${ts}`);
+      },
+    };
+    const served = serveSlack(policy(), inbox, async () => "answer", shutdown.signal, client, {
+      receipts: { working: "eyes", done: "white_check_mark", failed: "warning", lost: "x" },
+      reactions: { host, anchor: new ReactionAnchor() },
+    });
+    await waitFor(() => events.length === 3);
+    shutdown.abort();
+    await served;
+    // Nothing reached the channel, so a receipt saying "done" would be a lie the owner has to check.
+    assert.deepEqual(events, [
+      "+eyes@1700000000.000100",
+      "-eyes@1700000000.000100",
+      "+x@1700000000.000100",
+    ]);
+  });
+});
+
+test("a run that ended in an error notice is marked as failed, not as done", async () => {
+  await withInbox(async (inbox) => {
+    inbox.accept(1, {
+      requestId: "slack:T1:Ev14",
+      conversationId: "D0DM",
+      senderId: OWNER,
+      text: "hi",
+      messageTs: "1700000000.000100",
+    });
+    const socket = new TestSocket();
+    const shutdown = new AbortController();
+    const events: string[] = [];
+    const client = {
+      open: async () => "wss://example.invalid/link",
+      connect: async () => socket,
+      send: async () => {
+        events.push("send");
+        return "1700000000.000300";
+      },
+    };
+    const host = {
+      react: async (_target: string, ts: string, name: string) => {
+        events.push(`+${name}@${ts}`);
+      },
+      unreact: async (_target: string, ts: string, name: string) => {
+        events.push(`-${name}@${ts}`);
+      },
+    };
+    const served = serveSlack(policy(), inbox,
+      async () => {
+        throw Object.assign(new Error("Agent request timed out"), { code: "AGENT_TIMEOUT" });
+      },
+      shutdown.signal, client, {
+        receipts: { working: "eyes", done: "white_check_mark", failed: "warning", lost: "x" },
+        reactions: { host, anchor: new ReactionAnchor() },
+      });
+    await waitFor(() => events.length === 4);
+    shutdown.abort();
+    await served;
+    // The timeout notice was delivered, but the run failed: the receipt says which one it was.
+    assert.deepEqual(events, [
+      "+eyes@1700000000.000100",
+      "send",
+      "-eyes@1700000000.000100",
+      "+warning@1700000000.000100",
+    ]);
+  });
+});
+
+test("the workspace's own emoji names come back sorted, and a missing scope is reported as itself", async () => {
+  const signal = new AbortController().signal;
+  const listing = slackApi({
+    "emoji.list": () => ({
+      ok: true,
+      emoji: { party_parrot: "https://example.invalid/p.png", cat: "alias:cat_jam", aaa: "https://example.invalid/a.png" },
+    }),
+  });
+  const client = new SlackClient(CREDENTIALS, { fetch: listing.impl });
+  // A name is what a reaction needs; whether its value is an image or an alias does not matter here.
+  assert.deepEqual(await client.emojiList(signal), ["aaa", "cat", "party_parrot"]);
+  assert.equal(listing.calls[0]?.method, "emoji.list");
+
+  const refused = slackApi({ "emoji.list": () => ({ ok: false, error: "missing_scope" }) });
+  await assert.rejects(
+    () => new SlackClient(CREDENTIALS, { fetch: refused.impl }).emojiList(signal),
+    (error: unknown) => error instanceof SlackError && error.code === "SLACK_MISSING_SCOPE",
+  );
+  // A malformed body is a protocol surprise, not a workspace with no emoji.
+  const malformed = slackApi({ "emoji.list": () => ({ ok: true, emoji: [] }) });
+  assert.deepEqual(await new SlackClient(CREDENTIALS, { fetch: malformed.impl }).emojiList(signal), []);
+});
+
+test("a reaction failure never blocks the reply it was acknowledging", async () => {
+  await withInbox(async (inbox) => {
+    inbox.accept(1, {
+      requestId: "slack:T1:Ev13",
+      conversationId: "D0DM",
+      senderId: OWNER,
+      text: "hi",
+      messageTs: "1700000000.000100",
+    });
+    const socket = new TestSocket();
+    const shutdown = new AbortController();
+    const sent: string[] = [];
+    const client = {
+      open: async () => "wss://example.invalid/link",
+      connect: async () => socket,
+      send: async () => {
+        sent.push("sent");
+        return "1700000000.000300";
+      },
+    };
+    const host = {
+      react: async () => {
+        throw new SlackError("SLACK_MISSING_SCOPE", "Slack reactions.add was refused (MISSING_SCOPE)");
+      },
+    };
+    const served = serveSlack(policy(), inbox, async () => "answer", shutdown.signal, client, {
+      receipts: { working: "eyes", done: "white_check_mark" },
+      reactions: { host, anchor: new ReactionAnchor() },
+    });
+    await waitFor(() => sent.length === 1);
+    shutdown.abort();
+    await served;
+    assert.deepEqual(sent, ["sent"]);
   });
 });
 
@@ -343,7 +763,7 @@ test("a disconnect reconnects with a fresh Socket Mode URL", async () => {
       },
       send: async () => "ts",
     };
-    const served = serveSlack(OWNER, BOT, inbox, async () => "unused", shutdown.signal, client);
+    const served = serveSlack(policy(), inbox, async () => "unused", shutdown.signal, client);
     // Wait until the first connection is serving before asking it to go away.
     await waitFor(() => opened.length === 1);
     first.push({ kind: "frame", frame: { type: "disconnect", reason: "warning" } });
