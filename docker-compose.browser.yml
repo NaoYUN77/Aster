@@ -2,8 +2,7 @@
 # agent-browser CLI (vercel-labs/agent-browser, a native Rust binary) into the image and points it
 # at a Chrome that runs on a separate browser host, reached over a port-forward-only SSH tunnel.
 #
-# Apply on top of docker-compose.yml once the browser host and the tunnel exist (walkthrough in
-# docs/browser-automation.md):
+# Apply on top of docker-compose.yml once the browser host and the tunnel exist:
 #   docker compose -f docker-compose.yml -f docker-compose.browser.yml --env-file .env up -d
 # Rollback: remove `-f docker-compose.browser.yml`. The CLI leaves the container's PATH and nothing
 # else about the deployment changes; the app keeps using only /data and its own image.

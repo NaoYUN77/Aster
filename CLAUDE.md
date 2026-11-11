@@ -1,40 +1,28 @@
 # CLAUDE.md
 
-## 技术栈与版本基线
+## 技术栈
 
-本项目以 pi-durable 为 agent 底座，复用其 agent loop、工具执行与持久化，应用层不另建模型循环。底座 API 以已安装发布版为准，取舍见 [ADR-0013](docs/adr/0013-pi-durable-agent-loop.md)。
-
-部署基线为单台 4 核 CPU、4 GB 内存的云服务器，模型推理由远端服务提供。
+以 pi-durable 为 agent 底座，复用其 agent loop、工具执行与持久化；应用层不另建模型循环，底座 API 以已安装发布版为准。
 
 | 组件 | 版本 | 职责 |
 | --- | --- | --- |
-| Node.js | 24.19.0，见 .node-version | 开发与部署运行时，含内置 SQLite |
-| @earendil-works/pi-durable / pi-ai / chord | 1.5.0 | agent 底座、模型适配与执行上下文 |
+| Node.js | 24.19.0（`.node-version`；`engines: >=24.19.0 <25`） | 运行时，含内置 `node:sqlite` |
+| @earendil-works/pi-durable | 1.5.0 | agent loop、工具执行、持久化 |
+| @earendil-works/pi-ai | 1.5.0 | 模型适配 |
+| @earendil-works/chord | 1.5.0 | 执行上下文 |
 | @earendil-works/pi-mcp | 1.5.0 | MCP 客户端、传输与 OAuth |
 | @earendil-works/pi-schema | 1.5.0 | 内置工具的参数 schema 与静态参数类型推导 |
+| TypeBox | 1.3.27 | 记忆、文档、部署配置与 MCP 远端 schema 的校验 |
+| grammY | 1.46.0 | Telegram 协议适配 |
+| abort-controller | 3.0.0 | Telegram 侧使用的取消信号实现 |
 | @langfuse/otel / @langfuse/tracing | 6.1.1 | 可选 Langfuse Cloud Trace 的 span 处理器与观测 API |
-| @opentelemetry/api / sdk-trace-node / exporter-trace-otlp-http | 1.9.0 / 2.12.0 / 0.223.0 | Trace 的 OpenTelemetry 运行时、provider 与 OTLP 导出（MITM 模式使用支持代理的 agent） |
-| Telegram 客户端 grammY | 1.46.0 | Telegram 协议适配 |
-| TypeBox | 1.3.27 | 记忆、文档、部署配置与 MCP 远端 schema 的校验，与底座版本对齐 |
-| TypeScript / tsx | 7.0.2 / 4.23.15 | 类型检查、构建与开发执行 |
+| @opentelemetry/api | 1.9.0 | Trace API |
+| @opentelemetry/sdk-trace-node | 2.12.0 | Trace provider |
+| @opentelemetry/exporter-trace-otlp-http | 0.223.0 | OTLP 导出（MITM 模式使用支持代理的 agent） |
+| TypeScript / tsx | 7.0.2 / 4.23.15 | 类型检查与构建 / 开发执行 |
 
-直接依赖使用精确版本，传递依赖由提交的 lockfile 固定；运行时版本写入对应版本文件。升级时同步依赖清单、lockfile、版本文件及本表。
+直接依赖使用精确版本（无 `^` / `~`），传递依赖由提交的 lockfile 固定，运行时版本写入对应版本文件；升级时同步依赖清单、lockfile、版本文件与本表。
 
-模型提供商以 `src/providers.ts` 注册表为编译期内置名单，只支持单个显式 API key 配置，不包含 OAuth／订阅登录、云厂商环境凭据或额外端点参数，见 [ADR-0006](docs/adr/0006-explicit-api-key-providers.md)。自建 OpenAI 兼容网关由 `DATA_DIR/providers.json` 声明，底层直接用 pi-ai 的 `createProvider()`／`envApiKeyAuth()` 与四个协议实现，凭据仍只经部署环境注入，见 [ADR-0024](docs/adr/custom-providers/0024-custom-provider-declarations.md)。
+模型提供商：`src/providers.ts` 的 `PROVIDERS` 是编译期内置名单，共 12 家——`anthropic`、`openai`、`deepseek`、`google`、`xai`、`mistral`、`groq`、`moonshotai`、`moonshotai-cn`、`minimax`、`zai`、`openrouter`；每家用 `apiKeyEnv` 指向单个显式 API key。自建 OpenAI 兼容网关由 `DATA_DIR/providers.json` 声明，底层用 pi-ai 的 `createProvider()`／`envApiKeyAuth()`。
 
-消息渠道二选一，由 `CHANNEL` 决定（默认 `telegram`），同一进程只服务一个渠道；投递契约在 `src/channel.ts`，两个适配层 `src/telegram.ts`（长轮询）与 `src/slack.ts`（Socket Mode）各自实现，见 [ADR-0025](docs/adr/slack-channel/0025-slack-channel.md) 与 [Slack 通道](docs/slack.md)。Slack 侧不新增依赖：只用 Node 内置的 `fetch` 与 `WebSocket`。
-
-## 安全审计边界
-
-- 外部输入按不可信数据处理，在协议适配与工具执行边界校验、解释并转换为内部契约；明确标识类型、时间单位、枚举、空值和错误语义，不能用任意默认值掩盖缺失或非法值。
-- 工具参数 schema 同时提供类型与运行时校验，明确必填项、范围及未知字段处理。执行必须经过底座校验路径，并在执行边界复核宿主业务条件与权限；校验或授权失败不得执行。
-- 模型参数只表达任务意图。凭据、认证身份、运行目录与服务客户端由宿主上下文提供，不能由模型参数指定或覆盖。
-- 工具成功、业务失败和执行异常须可区分；错误处理不得吞掉失败或伪造成功。展示回复与运行记录分离，保留工具调用关联、完整会话和恢复状态。
-- 取消与超时须传递到实际 I/O。停止等待、取消执行与进程关闭分别处理；取消确认执行终态，关闭保留可恢复状态。
-- 写文件、发消息和外部写接口须定义幂等性及重试责任。下游幂等键由宿主生成，同一操作重试时保持稳定；底座恢复不保证外部操作恰好一次。
-- 中断重放默认保守，声明安全重放前确认重复执行不会产生不正确副作用。结果未知须明确记录，不能当作未执行。
-- 持久化工具参数是跨版本契约。变更 schema 或实现时兼容未完成调用；不兼容变更须先收敛未完成任务或保留旧实现。
-- 接收、执行与投递状态分开管理；投递失败只重投已保存结果，不重新执行业务任务。请求标识包含来源命名空间，不得为不同请求复用；相同内容的独立发送仍是不同请求。
-- 先持久化接收再确认外部消费，先保存回复再投递；分段发送逐段确认，无法确认的发送记录为未知。
-- 共享可变状态须有单写者或并发控制；请求串行不等于工具串行。输入、输出、时长和并发须有边界，超限显式拒绝、分页或使用文件引用，避免无界队列与静默丢弃。
-- 持久化数据与代码、临时文件分离，部署更新保留数据。不同存储及外部 I/O 不视为天然事务；记忆、上下文、执行恢复与投递状态不能相互替代。
+消息渠道：`CHANNEL` 二选一（默认 `telegram`），同一进程只服务一个渠道。投递契约在 `src/channel.ts`，两个适配层 `src/telegram.ts`（长轮询）与 `src/slack.ts`（Socket Mode）各自实现。Slack 侧不新增依赖：只用 Node 内置的 `fetch` 与 `WebSocket`。

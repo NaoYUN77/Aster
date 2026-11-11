@@ -860,7 +860,7 @@ test("08-D: correction and revocation survive cycles and restarts; old daily mem
 // stream path performs over the adapted transcript, with a real catalog
 // model); the first body must be a strict JSON prefix of the second. The
 // real-model and cloud-cache half of 08-E is environment-bound and is
-// reported in docs/memory-verification.md — no faux result stands in for it.
+// not reproduced here — no faux result stands in for it.
 // ---------------------------------------------------------------------------
 
 test("08-E: the real OpenAI adapter's request bodies keep a byte-stable prefix within a cycle", { timeout: 120_000 }, async () => {
