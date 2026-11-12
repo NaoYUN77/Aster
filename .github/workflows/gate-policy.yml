@@ -1,0 +1,66 @@
+name: Gate policy
+
+# 为什么用 pull_request_target:
+#   GitHub 在 pull_request 事件下执行的是 **PR head 版本的 workflow 文件**。也就是说 PR
+#   可以删掉自己的测试 job、把 job 改名、或者加一句 continue-on-error,让门禁变绿而没人
+#   看见。pull_request_target 执行的则是 **base 分支**的这一份,PR 改不到它。
+#
+# 安全前提(改这个文件前必须逐条确认仍然成立):
+#   1. 本 job 绝不 checkout PR 代码,也不执行 PR 里的任何脚本或依赖 —— 连 `npm ci` 都不跑
+#      (安装脚本就是代码执行)。
+#   2. 只持有默认的只读 token,不接触任何 secret。
+#   3. 只用 git 读 diff 元数据,检查器是零依赖的纯 Node(scripts/ci/gate-policy.mjs)。
+# 三条里破任何一条,pull_request_target 就从"可信门禁"变成"提权入口"。
+#
+# 注意:本文件必须先在默认分支(main)上存在,GitHub 才会用它触发。所以它是"先合并、
+# 后生效"——第一次引入的 PR 需要带 gate-change-approved 标签才能过门禁(先有鸡)。
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-policy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate-policy:
+    # 这个名字就是分支保护里要勾选的必需检查名。改名 = 必需检查消失 = PR 卡住。
+    name: gate-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout base revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          fetch-depth: 0
+
+      # 只 fetch 到对象库,不 checkout。PR 的文件永远不落到工作区、不被当作脚本执行。
+      # 这里刻意保留 checkout 的默认凭据(私有仓库 fetch 需要),因为本 workflow 不持有
+      # 任何 secret,泄露一把只读 token 不构成额外风险。
+      - name: Fetch comparison revision
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head"
+          else
+            git fetch --no-tags origin "${HEAD_SHA}"
+          fi
+
+      - name: Run policy checks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          node scripts/ci/gate-policy.mjs \
+            --base "$BASE_SHA" \
+            --head FETCH_HEAD \
+            --labels "$PR_LABELS"

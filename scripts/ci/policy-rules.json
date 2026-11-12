@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "_comment": [
+    "门禁策略的唯一事实源。改动本文件需要仓库所有者复核(见 .github/CODEOWNERS)。",
+    "本文件由 scripts/ci/gate-policy.mjs 解释执行;规则带 code,失败时只输出固定码与位置,不回显值。"
+  ],
+
+  "protectedPaths": {
+    "_comment": "改这些路径需要 PR 带 gate-change-approved 标签。它们是门禁与不变量的载体,不是普通代码。",
+    "paths": [
+      ".github/",
+      "scripts/ci/",
+      "scripts/deploy/",
+      "package.json",
+      "package-lock.json",
+      "tsconfig.json",
+      "Dockerfile",
+      ".node-version",
+      "docker-compose.yml",
+      "docker-compose.build.yml",
+      "docker-compose.browser.yml",
+      "docker-compose.mitm.yml"
+    ],
+    "label": "gate-change-approved",
+    "code": "GATE_PROTECTED_PATH"
+  },
+
+  "workflow": {
+    "_comment": "workflow 自身的弱化。全部只扫文本,不需要 YAML 解析器(该 job 不能安装任何依赖)。",
+    "dir": ".github/workflows/",
+    "allowPullRequestTarget": [".github/workflows/gate-policy.yml"],
+    "forbidden": [
+      { "code": "GATE_WORKFLOW_WEAKENED", "regex": "continue-on-error\\s*:\\s*true", "why": "禁止把失败放行" },
+      { "code": "GATE_WORKFLOW_WEAKENED", "regex": "^\\s*if\\s*:\\s*false\\s*$", "why": "禁止用 if:false 静默停用 step/job" },
+      { "code": "GATE_WORKFLOW_WEAKENED", "regex": "\\|\\|\\s*true\\b", "why": "禁止 || true 吞掉失败" },
+      { "code": "GATE_WORKFLOW_WEAKENED", "regex": "\\|\\|\\s*:\\s*true", "why": "禁止在表达式里把失败兜成成功" }
+    ],
+    "permissions": {
+      "_comment": "CI 通路的 job 权限必须恰好是 contents: read。放宽需审批。",
+      "allowed": ["contents: read"],
+      "code": "GATE_PERMISSIONS_WIDENED"
+    },
+    "pinUses": {
+      "_comment": "所有第三方 Action 必须钉到 40 位 commit SHA,不接受 tag/分支。",
+      "regex": "^\\s*uses:\\s*(\\S+)",
+      "allowedRefs": ["docker://", "./"],
+      "code": "GATE_ACTION_UNPINNED"
+    }
+  },
+
+  "tests": {
+    "glob": "test/*.test.ts",
+    "countCode": "GATE_TEST_REMOVED",
+    "forbidden": [
+      { "code": "GATE_TEST_WEAKENED", "regex": "\\.skip\\s*\\(", "why": "禁止新增跳过" },
+      { "code": "GATE_TEST_WEAKENED", "regex": "\\.only\\s*\\(", "why": "禁止 .only 缩窄范围" },
+      { "code": "GATE_TEST_WEAKENED", "regex": "\\btodo\\s*\\(", "why": "禁止新增待办测试" },
+      { "code": "GATE_TEST_WEAKENED", "regex": "--test-name-pattern", "why": "禁止缩窄测试选择集" }
+    ]
+  },
+
+  "compose": {
+    "baseFile": "docker-compose.yml",
+    "overlays": [
+      "docker-compose.build.yml",
+      "docker-compose.browser.yml",
+      "docker-compose.mitm.yml"
+    ],
+    "requiredInBase": [
+      { "code": "GATE_COMPOSE_INVARIANT", "regex": "cap_drop\\s*:\\s*\\[\\s*[\"']?ALL[\"']?\\s*\\]", "why": "app 服务必须保留 cap_drop ALL" },
+      { "code": "GATE_COMPOSE_INVARIANT", "regex": "no-new-privileges:true", "why": "必须保留 no-new-privileges" }
+    ],
+    "forbiddenInAny": [
+      { "code": "GATE_COMPOSE_INVARIANT", "regex": "(?m)^\\s*ports\\s*:", "why": "不得发布宿主端口" },
+      { "code": "GATE_COMPOSE_INVARIANT", "regex": "network_mode\\s*:", "why": "不得使用 network_mode" },
+      { "code": "GATE_COMPOSE_INVARIANT", "regex": "image\\s*:\\s*\\S+:latest", "why": "不得使用 :latest" }
+    ]
+  },
+
+  "dependencies": {
+    "manifest": "package.json",
+    "lockfile": "package-lock.json",
+    "pinExact": true,
+    "code": "GATE_DEP_UNPINNED",
+    "lockCode": "GATE_LOCKFILE_DRIFT"
+  },
+
+  "docsAsFix": {
+    "_comment": "同一 PR 既改文档、又删/弱化测试 —— 高度可疑:像在改文档掩盖坏掉的代码。",
+    "docsPaths": ["docs/", "CLAUDE.md", "README.md"],
+    "code": "GATE_DOCS_AS_FIX"
+  },
+
+  "secrets": {
+    "_comment": "扫新增行。不给 test/ 或 docs/ 开白名单 —— 白名单是这条规则失效的唯一原因。",
+    "code": "GATE_SECRET_IN_DIFF",
+    "patterns": [
+      { "name": "telegram-bot-token", "regex": "\\b\\d{8,10}:[A-Za-z0-9_-]{35}\\b" },
+      { "name": "slack-bot-token", "regex": "\\bxoxb-[A-Za-z0-9-]{20,250}" },
+      { "name": "slack-app-token", "regex": "\\bxapp-[A-Za-z0-9-]{20,250}" },
+      { "name": "slack-refresh-token", "regex": "\\bxoxe[.-][A-Za-z0-9.-]{20,}" },
+      { "name": "openai-style-key", "regex": "\\bsk-[A-Za-z0-9_-]{20,}" },
+      { "name": "box-token", "regex": "\\bcb_[A-Za-z0-9]{16,}" },
+      { "name": "aws-access-key", "regex": "\\bAKIA[0-9A-Z]{16}\\b" },
+      { "name": "google-api-key", "regex": "\\bAIza[0-9A-Za-z_-]{35}\\b" },
+      { "name": "github-pat", "regex": "\\b(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,})\\b" },
+      { "name": "huggingface-token", "regex": "\\bhf_[A-Za-z0-9]{30,}" },
+      { "name": "private-key-block", "regex": "BEGIN [A-Z ]*PRIVATE KEY" }
+    ]
+  }
+}

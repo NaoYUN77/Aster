@@ -1,0 +1,27 @@
+# 门禁与不变量的载体:改动这些路径需要仓库所有者复核。
+#
+# 为什么需要这个文件:GitHub Actions 在 pull_request 事件下执行的是 **PR head 版本的
+# workflow 文件**。没有 CODEOWNERS 时,agent 可以把 CI 里的测试 job 删掉、改名、或者加
+# continue-on-error,让门禁变绿而不被任何人看见。这个文件把这些路径的改动强制拉回人审。
+#
+# 配套的分支保护必须开启:
+#   Require review from Code Owners + Dismiss stale approvals + Require approval of most recent push
+# 否则本文件只是一份声明,没有强制力。
+
+# 门禁本体
+/.github/                @NaoYUN77
+/scripts/ci/             @NaoYUN77
+/scripts/deploy/         @NaoYUN77
+
+# 依赖与构建输入:改一个字符就能改变最终镜像里跑什么
+/package.json            @NaoYUN77
+/package-lock.json       @NaoYUN77
+/tsconfig.json           @NaoYUN77
+/Dockerfile              @NaoYUN77
+/.node-version           @NaoYUN77
+
+# 部署拓扑与安全边界(cap_drop / no-new-privileges / 卷 / 端口)
+/docker-compose.yml         @NaoYUN77
+/docker-compose.build.yml   @NaoYUN77
+/docker-compose.browser.yml @NaoYUN77
+/docker-compose.mitm.yml    @NaoYUN77
