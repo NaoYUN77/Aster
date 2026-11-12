@@ -11,6 +11,7 @@ import { PROVIDER_IDS } from "./providers.js";
 import { ReminderScheduler, ReminderStore } from "./reminders.js";
 import { serveSlack, SlackClient } from "./slack.js";
 import { serveTelegram, TelegramClient } from "./telegram.js";
+import { SkillIndex } from "./skills.js";
 import { startTrace, type TraceRuntime } from "./trace.js";
 import { createWatchers, type WatchersRuntime } from "./watchers/index.js";
 import { SqliteWatchStore } from "./watchers/store.js";
@@ -71,6 +72,10 @@ try {
   const botId = await channel.identity(shutdown.signal);
   await mkdir(config.dataDir, { recursive: true });
   let inbox: Inbox | undefined;
+  // Only names and descriptions are read here; a skill body is opened when the model asks.
+  const skills = config.skills === undefined
+    ? undefined
+    : await SkillIndex.scan(config.skills.dir, { log: (line) => console.error(line) });
   let reminders: ReminderStore | undefined;
   let hubs: HubStore | undefined;
   let watchers: WatchersRuntime | undefined;
@@ -112,6 +117,7 @@ try {
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
       ...(hubs === undefined ? {} : { hubStore: hubs }),
       ...(watchers?.extension === undefined ? {} : { extraExtensions: [watchers.extension] }),
+      ...(skills === undefined ? {} : { skills }),
       ...(deployment.kind === "slack"
         ? { reactions: { host: deployment.client, anchor: deployment.anchor, emoji } }
         : {}),
@@ -129,6 +135,9 @@ try {
         ? `Personal agent starting; single-owner private ${channel.label} messages enabled.`
         : `Personal agent starting; the owner's DM and ${deployment.policy.allowedUsers.length} allowed`
           + ` member(s) in ${deployment.policy.allowedChannels.length} allowed channel(s) enabled.`);
+      if (skills !== undefined) {
+        console.info(`Skills: ${skills.summaries().length} indexed (names and descriptions only; bodies load on demand).`);
+      }
       if (deployment.kind === "slack") {
         await serveSlack({ ...deployment.policy, botId }, inbox, agent.reply, shutdown.signal, deployment.client, {
           receipts: deployment.receipts,

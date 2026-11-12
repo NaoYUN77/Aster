@@ -315,7 +315,9 @@ test("an admitted tool execution gets its own span without uploading arguments o
     callId: "call-9",
   });
   assert.ok(execution);
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  // 20ms against a 10ms floor below: the sleep only has to be long enough that a late timer cannot
+  // round the span's duration under the assertion on a loaded runner.
+  await new Promise((resolve) => setTimeout(resolve, 20));
   execution.end("ok", { resultBytes: 128, outputItems: 1, diagnostics: 0 });
   request.end("ok", { replyBytes: 3 });
 
@@ -332,7 +334,7 @@ test("an admitted tool execution gets its own span without uploading arguments o
   assert.equal(span.attributes["langfuse.observation.metadata.resultBytes"], "128");
   assert.equal(span.attributes["langfuse.observation.metadata.outcome"], "\"ok\"");
   assert.equal(span.attributes["langfuse.observation.level"], "DEFAULT");
-  assert.ok(Number(span.attributes["langfuse.observation.metadata.durationMs"]) >= 5, "duration is the execution's, not the review's");
+  assert.ok(Number(span.attributes["langfuse.observation.metadata.durationMs"]) >= 10, "duration is the execution's, not the review's");
   assert.equal(span.attributes["langfuse.observation.input"], undefined, "never the arguments");
   assert.equal(span.attributes["langfuse.observation.output"], undefined, "never the result");
   assert.equal(logs.length, 0, "no tracing warnings during a healthy export");

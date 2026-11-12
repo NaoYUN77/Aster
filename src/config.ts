@@ -167,6 +167,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   if (exaApiKey) assertValidCredentialShape("EXA_API_KEY", exaApiKey);
   const reminders = readReminderConfig(env);
   const watchers = readWatchersConfig(env);
+  const skills = readSkillsConfig(env);
   const browser = readBrowserConfig(env);
   return {
     channel: readChannelCredentials(env, channelKind, ownerId, required),
@@ -177,6 +178,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...paths,
     ...(reminders.enabled ? { reminders } : {}),
     ...(watchers.enabled ? { watchers } : {}),
+    ...(skills.enabled ? { skills } : {}),
     ...(browser === undefined ? {} : { browser }),
     trace: readTraceConfig(env),
   };
@@ -275,6 +277,28 @@ export function readWatchersConfig(env: NodeJS.ProcessEnv = process.env): Watche
     ...(relayToken === undefined || relayToken === "" ? {} : { relayToken }),
     ...(githubToken === undefined || githubToken === "" ? {} : { githubToken }),
   };
+}
+
+/** Skills (SKILLS_*): a directory of procedures indexed at startup; a body is read only on demand. */
+export type SkillsConfig = {
+  readonly enabled: boolean;
+  readonly dir: string;
+};
+
+/**
+ * The directory is resolved once so the index, the loader and an operator looking at the host all
+ * agree on one path. A missing directory is an empty index, not a startup failure.
+ */
+export function readSkillsConfig(env: NodeJS.ProcessEnv = process.env): SkillsConfig {
+  const enabledRaw = env.SKILLS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("SKILLS_ENABLED must be 0 or 1");
+  }
+  const rawDir = env.SKILLS_DIR?.trim();
+  const dir = rawDir === undefined || rawDir === ""
+    ? join(resolve(env.DATA_DIR || "data"), "skills")
+    : resolve(rawDir);
+  return { enabled: enabledRaw !== "0", dir };
 }
 
 /**
