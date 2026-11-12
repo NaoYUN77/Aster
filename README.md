@@ -205,3 +205,5 @@ npm test        # 全量离线测试
 - [CI/CD 实施计划](docs/ci-cd-implementation-plan.md)
 - [历史 Docker 验证记录](docs/docker-verification.md)：对应当日拓扑，不代表当前部署状态
 - 仓库级约束见 [CLAUDE.md](CLAUDE.md)
+
+<!-- gate self-test: clean probe, expect pass -->
