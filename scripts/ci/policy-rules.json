@@ -105,7 +105,8 @@
       { "name": "google-api-key", "regex": "\\bAIza[0-9A-Za-z_-]{35}\\b" },
       { "name": "github-pat", "regex": "\\b(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,})\\b" },
       { "name": "huggingface-token", "regex": "\\bhf_[A-Za-z0-9]{30,}" },
-      { "name": "private-key-block", "regex": "BEGIN [A-Z ]*PRIVATE KEY" }
+      { "name": "private-key-block", "regex": "BEGIN [A-Z ]*PRIVATE KEY" },
+      { "name": "redaction-placeholder", "regex": "[{]{2}[A-Za-z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*[}]{2}" }
     ]
   }
 }
