@@ -32,6 +32,30 @@ test("frontmatter is flat key/value, quoted values included", () => {
   assert.equal(parseFrontmatter("# no frontmatter"), undefined);
 });
 
+test("frontmatter understands the optional fields the format allows", () => {
+  const fields = parseFrontmatter([
+    "---",
+    "name: deploy",
+    "description: Deploy the service",
+    "license: Apache-2.0",
+    "allowed-tools:",
+    "  - Read",
+    "  - Bash(git status)",
+    "metadata:",
+    "  owner: platform",
+    "  version: 2",
+    "tags: [ops, release]",
+    "---",
+    "",
+  ].join("\n"));
+  assert.equal(fields?.["name"], "deploy");
+  assert.equal(fields?.["license"], "Apache-2.0");
+  // Parsed so a conforming file loads, even though this host enforces neither field.
+  assert.deepEqual(fields?.["allowed-tools"], ["Read", "Bash(git status)"]);
+  assert.deepEqual(fields?.["metadata"], { owner: "platform", version: "2" });
+  assert.deepEqual(fields?.["tags"], ["ops", "release"]);
+});
+
 test("the body keeps everything after the frontmatter and nothing before it", () => {
   assert.equal(stripFrontmatter("---\nname: x\n---\n\nStep one\nStep two\n"), "Step one\nStep two\n");
   assert.equal(stripFrontmatter("no frontmatter"), "no frontmatter");
@@ -62,6 +86,31 @@ test("a skill without a description is skipped, because the model could never ch
   });
 });
 
+test("a declared name that does not match its directory is skipped instead of guessed", async () => {
+  await withRoot(async (root) => {
+    await skill(root, "other", "---\nname: deploy\ndescription: Deploy\n---\n", "body");
+    // A directory that is not already the final shape is not normalised into a different skill.
+    await mkdir(join(root, "Bad_Name"), { recursive: true });
+    await writeFile(join(root, "Bad_Name", "SKILL.md"), "---\ndescription: Bad\n---\n", "utf8");
+    const lines: string[] = [];
+    const index = await SkillIndex.scan(root, { log: (line) => lines.push(line) });
+    assert.equal(index.summaries().length, 0);
+    assert.ok(lines.some((line) => line.includes("SKILL_NAME_MISMATCH")));
+  });
+});
+
+test("the description keeps the format's full 1024 characters and is cut beyond it", async () => {
+  await withRoot(async (root) => {
+    const long = "d".repeat(1_000);
+    await skill(root, "long", `---\ndescription: ${long}\n---\n`, "body");
+    await skill(root, "longer", `---\ndescription: ${"e".repeat(1_400)}\n---\n`, "body");
+    const byName = new Map((await SkillIndex.scan(root)).summaries().map((entry) => [entry.name, entry.description]));
+    assert.equal(byName.get("long"), long);
+    assert.equal(byName.get("longer")?.length, 1_024);
+    assert.ok(byName.get("longer")?.endsWith("…"));
+  });
+});
+
 test("a directory without SKILL.md is not a skill and is not logged as a defect", async () => {
   await withRoot(async (root) => {
     await mkdir(join(root, "empty"), { recursive: true });
@@ -89,6 +138,20 @@ test("load reads the body on demand and lists the files the procedure may refere
     const loaded = await index.load("deploy");
     assert.equal(loaded.body, "Step one\n");
     assert.deepEqual(loaded.files, ["scripts/run.sh"]);
+  });
+});
+
+test("bundled files are listed next to SKILL.md and one level down", async () => {
+  await withRoot(async (root) => {
+    await skill(root, "deploy", "---\ndescription: Deploy\n---\n", "body");
+    await writeFile(join(root, "deploy", "examples.md"), "# example\n", "utf8");
+    await writeFile(join(root, "deploy", ".hidden"), "x", "utf8");
+    await mkdir(join(root, "deploy", "templates"), { recursive: true });
+    await writeFile(join(root, "deploy", "templates", "note.md"), "# note\n", "utf8");
+    await mkdir(join(root, "deploy", "scripts"), { recursive: true });
+    await writeFile(join(root, "deploy", "scripts", "run.sh"), "#!/bin/sh\n", "utf8");
+    const loaded = await (await SkillIndex.scan(root)).load("deploy");
+    assert.deepEqual(loaded.files, ["examples.md", "scripts/run.sh", "templates/note.md"]);
   });
 });
 

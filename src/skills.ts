@@ -1,15 +1,23 @@
 import { open, readFile, readdir, realpath, stat } from "node:fs/promises";
-import { basename, join, sep } from "node:path";
+import { join, sep } from "node:path";
 import { obj, str } from "@earendil-works/pi-schema";
 import { defineExtension, defineTool, type Extension, type ToolExecutionResult } from "@earendil-works/pi-durable";
 
 /**
  * Skills: small procedures on disk, indexed by name and one-line description.
  *
- * The whole point is that a skill's body is not in the context window until the model asks for it:
- * startup reads only the first few hundred bytes of each SKILL.md (the frontmatter), the system
- * prompt carries an index of names and descriptions, and `skill_load` is what brings the procedure
- * in. A directory of thirty skills therefore costs thirty lines, not thirty documents.
+ * The on-disk format is the Agent Skills convention — a directory holding a SKILL.md whose YAML
+ * frontmatter carries `name` and `description` — so a skill written for one host can be dropped into
+ * another unedited. The point of the format is the same as the point of this module: the body is not
+ * in the context window until the model asks for it. Startup reads only the first few hundred bytes
+ * of each SKILL.md (the frontmatter), the system prompt carries an index of names and descriptions,
+ * and `skill_load` is what brings the procedure in. A directory of thirty skills therefore costs
+ * thirty lines, not thirty documents.
+ *
+ * The frontmatter is parsed as the YAML subset that format actually uses: flat scalars, one-level
+ * lists, one-level maps. `name` and `description` are what this host acts on; `license`,
+ * `allowed-tools` and `metadata` are read so a conforming file still loads, and deliberately are not
+ * enforced — there is no per-skill tool allowlist here to apply them to.
  *
  * Everything under the root is treated as host-provided content, but the path rules still apply:
  * a name is a single path segment, the resolved file must stay under the root, and a body is
@@ -19,15 +27,15 @@ import { defineExtension, defineTool, type Extension, type ToolExecutionResult }
 /** Frontmatter is parsed from this many leading bytes; a body is never read during a scan. */
 const HEAD_BYTES = 4_096;
 const MAX_SKILLS = 50;
-const MAX_DESCRIPTION_CHARS = 300;
+/** The format allows 1024; the description also sits in every prompt, so it is never longer. */
+const MAX_DESCRIPTION_CHARS = 1_024;
 const MAX_NAME_CHARS = 64;
 const MAX_BODY_CHARS = 32_000;
 const MAX_FILE_BYTES = 512 * 1024;
-/** Sibling files a skill may reference, listed by name so the model can read them itself. */
-const SKILL_SUBDIRS = ["references", "scripts", "assets"] as const;
 const MAX_FILES_PER_SKILL = 20;
 
-const NAME_SHAPE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** Lower-case letters, digits and single hyphens, as the format requires of a skill name. */
+const NAME_SHAPE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export class SkillError extends Error {
   constructor(readonly code: "SKILL_NOT_FOUND" | "SKILL_TOO_LARGE" | "SKILL_UNREADABLE", message: string) {
@@ -57,28 +65,68 @@ function collapse(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+/** A frontmatter value: a scalar, a block list (`allowed-tools:`), or a one-level map (`metadata:`). */
+export type FrontmatterValue = string | readonly string[] | Readonly<Record<string, string>>;
+export type Frontmatter = Readonly<Record<string, FrontmatterValue>>;
+
+function unquote(value: string): string {
+  if (value.length < 2) return value;
+  const first = value[0];
+  if ((first === '"' || first === "'") && value.endsWith(first)) return value.slice(1, -1);
+  return value;
+}
+
 /**
- * Reads the YAML-ish frontmatter every SKILL.md starts with. Only flat `key: value` pairs are
- * understood on purpose: a skill index does not need a YAML parser, and refusing to interpret more
- * keeps a malformed file from being half-loaded.
+ * Reads the YAML frontmatter every SKILL.md starts with. Only the subset the format uses is
+ * understood: `key: value`, `key:` followed by `- item` lines, and `key:` followed by indented
+ * `key: value` lines. No anchors, no multi-line scalars, no nesting past one level — refusing to
+ * interpret more keeps a malformed file from being half-loaded.
  */
-export function parseFrontmatter(head: string): Record<string, string> | undefined {
+export function parseFrontmatter(head: string): Frontmatter | undefined {
   const normalized = head.replaceAll("\r\n", "\n");
   if (!normalized.startsWith("---\n")) return undefined;
   const end = normalized.indexOf("\n---", 4);
   if (end === -1) return undefined;
-  const fields: Record<string, string> = {};
-  for (const line of normalized.slice(4, end).split("\n")) {
-    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+  const fields: Record<string, FrontmatterValue> = {};
+  let block: { key: string; kind: "unknown" | "list" | "map"; items: string[]; entries: Record<string, string> } | undefined;
+  const flush = (): void => {
+    if (block === undefined) return;
+    fields[block.key] = block.kind === "list" ? block.items : block.entries;
+    block = undefined;
+  };
+  for (const raw of normalized.slice(4, end).split("\n")) {
+    if (raw.trim() === "" || raw.trimStart().startsWith("#")) continue;
+    const line = raw.trim();
+    if ((raw.startsWith(" ") || raw.startsWith("\t")) && block !== undefined) {
+      // The first indented line decides whether the block is a list or a map.
+      if (block.kind === "unknown") block.kind = line.startsWith("- ") ? "list" : "map";
+      if (block.kind === "list") {
+        if (line.startsWith("- ")) block.items.push(unquote(line.slice(2).trim()));
+        continue;
+      }
+      const separator = line.indexOf(":");
+      if (separator > 0) {
+        block.entries[line.slice(0, separator).trim()] = unquote(line.slice(separator + 1).trim());
+      }
+      continue;
+    }
     const separator = line.indexOf(":");
     if (separator <= 0) continue;
     const key = line.slice(0, separator).trim().toLowerCase();
-    let value = line.slice(separator + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
+    const rest = line.slice(separator + 1).trim();
+    flush();
+    if (key === "") continue;
+    if (rest === "") {
+      block = { key, kind: "unknown", items: [], entries: {} };
+      continue;
     }
-    if (key !== "") fields[key] = value;
+    if (rest.startsWith("[") && rest.endsWith("]")) {
+      fields[key] = rest.slice(1, -1).split(",").map((item) => unquote(item.trim())).filter((item) => item !== "");
+      continue;
+    }
+    fields[key] = unquote(rest);
   }
+  flush();
   return fields;
 }
 
@@ -89,6 +137,50 @@ export function stripFrontmatter(text: string): string {
   const end = normalized.indexOf("\n---", 4);
   if (end === -1) return normalized;
   return normalized.slice(end + 4).replace(/^\n+/, "");
+}
+
+/** The string value of a frontmatter field, or undefined when it is missing or not a scalar. */
+function scalar(fields: Frontmatter, key: string): string | undefined {
+  const value = fields[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * The files bundled with a skill: its own directory's files, then one level down. The format lets a
+ * skill ship anything next to SKILL.md, so nothing is filtered by name — only by depth, because a
+ * list the model can act on is better than a directory walk.
+ */
+async function bundledFiles(directory: string): Promise<string[]> {
+  const files: string[] = [];
+  const add = (relative: string): void => {
+    if (files.length < MAX_FILES_PER_SKILL) files.push(relative);
+  };
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    return files;
+  }
+  const near = (left: { name: string }, right: { name: string }): number => left.name.localeCompare(right.name);
+  for (const entry of [...entries].sort(near)) {
+    if (files.length >= MAX_FILES_PER_SKILL) break;
+    if (entry.name.startsWith(".")) continue;
+    if (entry.isFile()) {
+      if (entry.name !== "SKILL.md") add(entry.name);
+      continue;
+    }
+    if (!entry.isDirectory()) continue;
+    let children;
+    try {
+      children = await readdir(join(directory, entry.name), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const child of [...children].sort(near)) {
+      if (child.isFile() && !child.name.startsWith(".")) add(`${entry.name}/${child.name}`);
+    }
+  }
+  return files;
 }
 
 async function readHead(path: string): Promise<string> {
@@ -133,8 +225,10 @@ export class SkillIndex {
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       if (summaries.length >= limit) break;
       if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-      const directory = entry.name.toLowerCase();
-      if (!NAME_SHAPE.test(directory) || seen.has(directory)) continue;
+      // The directory name is the skill's identity, so it must already be the final shape: a
+      // capitalised or underscored directory is not silently normalised into a different skill.
+      const directory = entry.name;
+      if (directory.length > MAX_NAME_CHARS || !NAME_SHAPE.test(directory) || seen.has(directory)) continue;
       const path = join(root, entry.name, "SKILL.md");
       let head: string;
       try {
@@ -148,16 +242,22 @@ export class SkillIndex {
         log(`skill skipped: dir=${entry.name} code=SKILL_NO_FRONTMATTER`);
         continue;
       }
-      const declared = (fields["name"] ?? directory).toLowerCase();
-      if (!NAME_SHAPE.test(declared)) {
+      const declared = (scalar(fields, "name") ?? directory).trim().toLowerCase();
+      if (declared.length > MAX_NAME_CHARS || !NAME_SHAPE.test(declared)) {
         log(`skill skipped: dir=${entry.name} code=SKILL_BAD_NAME`);
+        continue;
+      }
+      // The format requires the declared name to name the directory; a mismatch means one of the two
+      // is wrong, and picking either silently would leave `load` reading a path the index calls something else.
+      if (declared !== directory) {
+        log(`skill skipped: dir=${entry.name} code=SKILL_NAME_MISMATCH`);
         continue;
       }
       if (seen.has(declared)) {
         log(`skill skipped: dir=${entry.name} code=SKILL_DUPLICATE`);
         continue;
       }
-      const description = collapse(fields["description"] ?? "");
+      const description = collapse(scalar(fields, "description") ?? "");
       if (description === "") {
         // A skill without a description can never be chosen by the model, so it would only be dead
         // weight in the index.
@@ -218,18 +318,7 @@ export class SkillIndex {
     const text = await readFile(resolved, "utf8");
     const body = stripFrontmatter(text);
     const truncated = body.length > MAX_BODY_CHARS;
-    const files: string[] = [];
-    for (const subdir of SKILL_SUBDIRS) {
-      try {
-        const names = await readdir(join(directory, subdir), { withFileTypes: true });
-        for (const entry of names.slice(0, MAX_FILES_PER_SKILL)) {
-          if (entry.isFile() && !entry.name.startsWith(".")) files.push(`${subdir}/${basename(entry.name)}`);
-        }
-      } catch {
-        // Subdirectories are optional.
-      }
-      if (files.length >= MAX_FILES_PER_SKILL) break;
-    }
+    const files = await bundledFiles(directory);
     return {
       ...summary,
       body: truncated ? `${body.slice(0, MAX_BODY_CHARS)}\n\n[skill truncated at ${MAX_BODY_CHARS} characters]` : body,
