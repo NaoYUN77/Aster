@@ -42,7 +42,7 @@
     },
     "pinUses": {
       "_comment": "所有第三方 Action 必须钉到 40 位 commit SHA,不接受 tag/分支。",
-      "regex": "^\\s*uses:\\s*(\\S+)",
+      "regex": "^\\s*-?\\s*uses:\\s*(\\S+)",
       "allowedRefs": ["docker://", "./"],
       "code": "GATE_ACTION_UNPINNED"
     }
