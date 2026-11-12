@@ -21,3 +21,5 @@ export function errorCode(error: unknown): string {
   if (error instanceof Error && error.name === "TimeoutError") return "TIMEOUT";
   return "EXECUTION_ERROR";
 }
+
+export const GATE_SELFTEST_FIXTURE = "xoxb-7777777777777777777777";
