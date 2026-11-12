@@ -9,7 +9,8 @@ import { readProviderConfig } from "./provider-config.js";
 import { ReactionAnchor } from "./reactions.js";
 import { PROVIDER_IDS } from "./providers.js";
 import { ReminderScheduler, ReminderStore } from "./reminders.js";
-import { serveSlack, SlackClient } from "./slack.js";
+import { REACTIONS_READ_SCOPE, serveSlack, SlackClient, styleStartupLine } from "./slack.js";
+import { StyleLearning, StyleStore } from "./style.js";
 import { serveTelegram, TelegramClient } from "./telegram.js";
 import { startTrace, type TraceRuntime } from "./trace.js";
 
@@ -18,6 +19,7 @@ process.once("SIGINT", () => shutdown.abort());
 process.once("SIGTERM", () => shutdown.abort());
 
 let trace: TraceRuntime | undefined;
+let styleStore: StyleStore | undefined;
 try {
   configureEnvProxy();
   // The provider list must be known before MODEL_PROVIDER is validated: a declared provider supplies
@@ -85,6 +87,25 @@ try {
     // One Hub per member is a shared-channel idea: a Slack deployment gets the bookkeeping, Telegram
     // stays single-owner. The data directory keeps the member mappings across restarts.
     hubs = deployment.kind === "slack" ? new HubStore(join(config.dataDir, "hubs.sqlite")) : undefined;
+    // Reaction feedback is possible only where Slack delivers reaction events, and that is decided by
+    // the scope Slack granted — configuration can only choose what this process does with them.
+    const scopes = deployment.kind === "slack" ? await deployment.client.scopes(shutdown.signal) : [];
+    const canReact = scopes.includes(REACTIONS_READ_SCOPE);
+    // Printed whether or not the feature is on: a deployment that enabled it without the scope has to
+    // be told it is inert, not left with silence nobody can explain.
+    console.info(styleStartupLine(config.style.mode, canReact));
+    // No scope means no events, so nothing is opened and every reaction frame is acknowledged and
+    // forgotten. With a scope, `observe` records and `ask` also sends one bounded question.
+    const styleStore = config.style.mode !== "off" && canReact
+      ? new StyleStore(join(config.dataDir, "style.sqlite"))
+      : undefined;
+    const learning = new StyleLearning({
+      mode: styleStore === undefined ? "off" : config.style.mode,
+      ...(styleStore === undefined ? {} : { store: styleStore }),
+      inert: !canReact,
+      send: (target, body, partSignal, threadTs) => channel.send(target, body, partSignal, threadTs),
+      log: (line) => console.error(line),
+    });
     const agent = await openAgent(config, undefined, undefined, {
       signal: shutdown.signal,
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
@@ -106,9 +127,19 @@ try {
         : `Personal agent starting; the owner's DM and ${deployment.policy.allowedUsers.length} allowed`
           + ` member(s) in ${deployment.policy.allowedChannels.length} allowed channel(s) enabled.`);
       if (deployment.kind === "slack") {
-        await serveSlack({ ...deployment.policy, botId }, inbox, agent.reply, shutdown.signal, deployment.client, {
+        const slackPolicy = { ...deployment.policy, botId };
+        // Captured as a const so the closure below keeps the narrowed handle.
+        const delivered = inbox;
+        await serveSlack(slackPolicy, inbox, agent.reply, shutdown.signal, deployment.client, {
           receipts: deployment.receipts,
           reactions: { host: deployment.client, anchor: deployment.anchor },
+          ...(styleStore === undefined ? {} : {
+            style: {
+              // Who asked the reacted-to reply comes from the Inbox, never from the payload.
+              policy: { ...slackPolicy, attribute: (messageId: string) => delivered.attributedByMessageId(messageId) },
+              learning,
+            },
+          }),
         });
       } else {
         await serveTelegram(config.channel.ownerId, botId, inbox, agent.reply, shutdown.signal, deployment.client);
@@ -122,6 +153,7 @@ try {
     inbox?.close();
     reminders?.close();
     hubs?.close();
+    styleStore?.close();
   }
 } catch (error) {
   if (!shutdown.signal.aborted) {

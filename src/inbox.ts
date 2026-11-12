@@ -178,6 +178,31 @@ export class Inbox {
       WHERE i.status IN ('failed', 'uncertain') ORDER BY i.rowid, d.part`).all();
   }
 
+  /**
+   * The request one *delivered* message answered. A reaction names the message it landed on, and this
+   * is the only way to learn who asked it — nothing in the event payload supplies either. Rows are
+   * pruned with their request, so a reaction on a long-gone message attributes to nothing rather than
+   * to whatever reused a timestamp.
+   */
+  attributedByMessageId(messageId: string): {
+    readonly requestId: string;
+    readonly part: number;
+    readonly conversationId: string;
+    readonly senderId: string;
+    readonly threadTs?: string;
+  } | undefined {
+    const row = this.db.prepare(`SELECT d.requestId, d.part, i.conversationId, i.senderId, i.threadTs
+      FROM deliveries d JOIN inbox i ON i.requestId = d.requestId
+      WHERE d.messageId = ? AND d.status = 'sent' ORDER BY d.part LIMIT 1`).get(messageId) as
+      | { requestId: string; part: number; conversationId: string; senderId: string; threadTs: string | null }
+      | undefined;
+    // SQLite has no undefined: a stored NULL means "flat reply", not "unknown thread", so the question
+    // goes where the reply went instead of inventing an anchor.
+    if (row === undefined) return undefined;
+    const threadTs = row.threadTs ?? undefined;
+    return { requestId: row.requestId, part: row.part, conversationId: row.conversationId, senderId: row.senderId, ...(threadTs === undefined ? {} : { threadTs }) };
+  }
+
   diagnostics() {
     return this.db.prepare("SELECT requestId, code FROM failures ORDER BY rowid DESC LIMIT 100").all();
   }
