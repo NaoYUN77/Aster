@@ -1,0 +1,15 @@
+name = "aster-watch-relay"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+# Binding used by worker.js. Replace database_id with the value printed by
+# `wrangler d1 create aster_watch_relay`; it is an identifier, not a secret.
+[[d1_databases]]
+binding = "DB"
+database_name = "aster_watch_relay"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# Secrets are never written here. Set them once per environment:
+#   wrangler secret put GITHUB_WEBHOOK_SECRET
+#   wrangler secret put RELAY_TOKEN

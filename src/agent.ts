@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, type Conversation, type Storage } from "@earendil-works/pi-durable";
+import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, type Conversation, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -114,6 +114,11 @@ export type OpenAgentOptions = {
    */
   readonly reminderStore?: ReminderStore;
   /**
+   * Extensions a host feature owns (event tracking, for example). They are installed after the
+   * built-ins, so their tools are ordinary trusted tools and their absence changes nothing.
+   */
+  readonly extraExtensions?: readonly Extension[];
+  /**
    * Emoji reactions on the message a request arrived on. When present, the model's reaction tool is
    * registered and the host holds the anchor for the duration of each request; the channel and the
    * message are always the ones the request came from, never a model parameter.
@@ -222,6 +227,9 @@ export async function openAgent(
   // Reminders are host-owned tools; the model never supplies the receiving chat.
   if (options.reminderStore !== undefined) {
     registry.install(createReminderExtension(options.reminderStore, { chatId: config.channel.ownerId }));
+  }
+  if (options.extraExtensions !== undefined) {
+    for (const extension of options.extraExtensions) registry.install(extension);
   }
   // Reactions are the same shape of host-owned tool: the message is the one being answered, and the
   // model only picks the emoji. Without a reaction-capable channel the tool is never registered.
