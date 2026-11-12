@@ -12,6 +12,8 @@ import { ReminderScheduler, ReminderStore } from "./reminders.js";
 import { serveSlack, SlackClient } from "./slack.js";
 import { serveTelegram, TelegramClient } from "./telegram.js";
 import { startTrace, type TraceRuntime } from "./trace.js";
+import { createWatchers, type WatchersRuntime } from "./watchers/index.js";
+import { WatcherStore } from "./watchers/store.js";
 
 const shutdown = new AbortController();
 process.once("SIGINT", () => shutdown.abort());
@@ -71,6 +73,8 @@ try {
   let inbox: Inbox | undefined;
   let reminders: ReminderStore | undefined;
   let hubs: HubStore | undefined;
+  let watchers: WatchersRuntime | undefined;
+  let watchersStore: WatcherStore | undefined;
   try {
     // Reminder state is separate from the Inbox: its lifecycle is a due time, not a user request.
     reminders = config.reminders === undefined
@@ -82,6 +86,27 @@ try {
     inbox.recover();
     // A sending row may already have reached the channel; recovery records it as uncertain instead of resending.
     reminders?.recover();
+    // Event tracking owns its own database: a watcher row is never terminal, so its lifecycle is
+    // neither the Inbox's nor a reminder's. One store backs the poll loop, the relay pull and the
+    // outbox, so there is exactly one writer and one recovery path.
+    if (config.watchers !== undefined) {
+      const store = new WatcherStore(join(config.dataDir, "watchers.sqlite"), {
+          maxActive: config.watchers.maxActive,
+          maxEventsPerHour: config.watchers.maxPerHour,
+        });
+      watchersStore = store;
+      store.recoverInterrupted(new Date().toISOString());
+      watchers = createWatchers({
+        store,
+        config: config.watchers,
+        deliver: (chatId, text, threadTs, signal) => channel.send(chatId, text, signal, threadTs),
+        chatId: config.channel.ownerId,
+        signal: shutdown.signal,
+        log: (line) => console.error(line),
+        classifyFailure: (error) => channel.classifyFailure(error),
+        failureCode: (error) => channel.failureCode(error),
+      });
+    }
     // One Hub per member is a shared-channel idea: a Slack deployment gets the bookkeeping, Telegram
     // stays single-owner. The data directory keeps the member mappings across restarts.
     hubs = deployment.kind === "slack" ? new HubStore(join(config.dataDir, "hubs.sqlite")) : undefined;
@@ -89,6 +114,7 @@ try {
       signal: shutdown.signal,
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
       ...(hubs === undefined ? {} : { hubStore: hubs }),
+      ...(watchers?.extension === undefined ? {} : { extraExtensions: [watchers.extension] }),
       ...(deployment.kind === "slack"
         ? { reactions: { host: deployment.client, anchor: deployment.anchor, emoji } }
         : {}),
@@ -100,6 +126,7 @@ try {
       log: (line) => console.error(line),
     });
     scheduler?.start();
+    watchers?.start();
     try {
       console.info(deployment.kind === "telegram"
         ? `Personal agent starting; single-owner private ${channel.label} messages enabled.`
@@ -115,12 +142,14 @@ try {
       }
     } finally {
       // Stop proactive sends before the agent and databases close; an in-flight send becomes uncertain.
+      await watchers?.stop();
       await scheduler?.stop();
       await agent.close();
     }
   } finally {
     inbox?.close();
     reminders?.close();
+    watchersStore?.close();
     hubs?.close();
   }
 } catch (error) {

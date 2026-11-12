@@ -1,0 +1,16 @@
+name = "aster-watchers-relay"
+main = "worker.js"
+compatibility_date = "2026-01-15"
+
+# Public ingress for GitHub webhooks; Aster drains it with long polls. Secrets are runtime-only
+# (`wrangler secret put WEBHOOK_SECRET` / `RELAY_TOKEN`) and never live in this file.
+[[d1_databases]]
+binding = "DB"
+database_name = "aster-watchers"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[triggers]
+crons = ["17 * * * *"] # prune deliveries older than the 7-day retention window
+
+[observability]
+enabled = true

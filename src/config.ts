@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
+import type { WatchersConfig } from "./watchers/protocol.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
 import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
 import type { CustomProviderDeclaration } from "./provider-config.js";
@@ -165,6 +166,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   const exaApiKey = env.EXA_API_KEY?.trim();
   if (exaApiKey) assertValidCredentialShape("EXA_API_KEY", exaApiKey);
   const reminders = readReminderConfig(env);
+  const watchers = readWatchersConfig(env);
   const browser = readBrowserConfig(env);
   return {
     channel: readChannelCredentials(env, channelKind, ownerId, required),
@@ -174,6 +176,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(exaApiKey ? { exaApiKey } : {}),
     ...paths,
     ...(reminders.enabled ? { reminders } : {}),
+    ...(watchers.enabled ? { watchers } : {}),
     ...(browser === undefined ? {} : { browser }),
     trace: readTraceConfig(env),
   };
@@ -231,6 +234,46 @@ export function readReminderConfig(env: NodeJS.ProcessEnv = process.env): Remind
     maxPending: boundedInteger(env, "REMINDERS_MAX_PENDING", 100, 1, 1_000),
     maxPerHour: boundedInteger(env, "REMINDERS_MAX_PER_HOUR", 20, 1, 1_000),
     horizonDays: boundedInteger(env, "REMINDERS_MAX_HORIZON_DAYS", 366, 1, 3_650),
+  };
+}
+
+/**
+ * Event tracking (WATCHERS_*). Off by default: no outbound request is made while no watcher exists,
+ * and every malformed bound fails startup rather than being discovered at the first check.
+ */
+export function readWatchersConfig(env: NodeJS.ProcessEnv = process.env): WatchersConfig {
+  const enabledRaw = env.WATCHERS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("WATCHERS_ENABLED must be 0 or 1");
+  }
+  const relayUrl = env.WATCHERS_RELAY_URL?.trim();
+  if (relayUrl !== undefined && relayUrl !== "" && !/^https?:\/\/[^\s]+$/.test(relayUrl)) {
+    throw new ConfigurationError("WATCHERS_RELAY_URL must be an absolute http(s) URL");
+  }
+  const relayToken = env.WATCHERS_RELAY_TOKEN?.trim();
+  if (relayToken !== undefined && relayToken !== "" && relayToken.length < 16) {
+    throw new ConfigurationError("WATCHERS_RELAY_TOKEN must be at least 16 characters");
+  }
+  const githubToken = env.WATCHERS_GITHUB_TOKEN?.trim();
+  if (githubToken !== undefined && githubToken !== "" && githubToken.length < 16) {
+    throw new ConfigurationError("WATCHERS_GITHUB_TOKEN must be at least 16 characters");
+  }
+  // Half a relay configuration is a mistake: the URL without a secret would 404 forever, and the
+  // secret without a URL would silently disable GitHub tracking.
+  if ((relayUrl === undefined || relayUrl === "") !== (relayToken === undefined || relayToken === "")) {
+    throw new ConfigurationError("WATCHERS_RELAY_URL and WATCHERS_RELAY_TOKEN must be set together");
+  }
+  return {
+    enabled: enabledRaw !== "0",
+    maxActive: boundedInteger(env, "WATCHERS_MAX_ACTIVE", 20, 1, 100),
+    maxPerHour: boundedInteger(env, "WATCHERS_MAX_PER_HOUR", 10, 1, 100),
+    feedIntervalSec: boundedInteger(env, "WATCHERS_FEED_INTERVAL_SEC", 600, 300, 86_400),
+    xIntervalSec: boundedInteger(env, "WATCHERS_X_INTERVAL_SEC", 900, 300, 86_400),
+    githubReconcileMin: boundedInteger(env, "WATCHERS_GITHUB_RECONCILE_MIN", 15, 0, 1_440),
+    fetchTimeoutMs: boundedInteger(env, "WATCHERS_FETCH_TIMEOUT_MS", 15_000, 1_000, 60_000),
+    ...(relayUrl === undefined || relayUrl === "" ? {} : { relayUrl }),
+    ...(relayToken === undefined || relayToken === "" ? {} : { relayToken }),
+    ...(githubToken === undefined || githubToken === "" ? {} : { githubToken }),
   };
 }
 
