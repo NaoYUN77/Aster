@@ -4,6 +4,9 @@ import { errorCode } from "./errors.js";
 import type { Inbox } from "./inbox.js";
 import type { TextRequest } from "./messages.js";
 import type { ReactionAnchor, ReactionHost, ReceiptEmojis } from "./reactions.js";
+import { normalizeEmojiName } from "./reactions.js";
+import { POSITIVE_REACTIONS, type StyleEvent, type StyleLearning } from "./style.js";
+import type { StyleConfig } from "./config.js";
 
 const API_ROOT = "https://slack.com/api";
 const CALL_TIMEOUT_MS = 30_000;
@@ -96,6 +99,16 @@ export class SlackClient implements DeliveryChannel {
     await this.#directMessage(this.#ownerId, signal);
     await this.open(signal);
     return botId;
+  }
+
+  /**
+   * The bot scopes this installation actually holds, as Slack reports them in `auth.test`'s
+   * `x-oauth-scopes` header. Whether reaction events can arrive at all is decided by Slack's own
+   * grant, not by configuration, so this is what the startup self-check reads.
+   */
+  async scopes(signal: AbortSignal): Promise<readonly string[]> {
+    const auth = await this.#call("auth.test", {}, this.#botToken, signal, true);
+    return readScopes(auth.headers);
   }
 
   /** One single-use Socket Mode URL. Reconnects call this again; the previous URL stops working. */
@@ -197,7 +210,8 @@ export class SlackClient implements DeliveryChannel {
     params: Record<string, unknown>,
     token: string,
     signal: AbortSignal,
-  ): Promise<Record<string, unknown>> {
+    keepHeaders = false,
+  ): Promise<Record<string, unknown> & { headers?: Headers }> {
     let response: Response;
     try {
       response = await this.#fetch(`${API_ROOT}/${method}`, {
@@ -223,7 +237,8 @@ export class SlackClient implements DeliveryChannel {
       const reason = typeof body.error === "string" && /^[a-z_]{1,64}$/.test(body.error) ? body.error.toUpperCase() : "UNKNOWN";
       throw new SlackError(`SLACK_${reason}`, `Slack ${method} was refused (${reason})`);
     }
-    return body;
+    // Only a caller that asked for the headers keeps them, and only the one it names is ever read.
+    return keepHeaders ? { ...body, headers: response.headers } : body;
   }
 }
 
@@ -247,6 +262,34 @@ export function classifyFailure(error: unknown): "failed" | "uncertain" {
 
 export function failureCode(error: unknown): string {
   return error instanceof SlackError ? error.code : errorCode(error);
+}
+
+/**
+ * Bot scopes from one `auth.test` response header. A missing or unreadable header is not a grant of
+ * anything, so it reads as an empty list and the caller degrades instead of assuming.
+ */
+export function readScopes(headers: Headers | undefined): readonly string[] {
+  const raw = headers?.get("x-oauth-scopes");
+  if (typeof raw !== "string") return [];
+  return raw.split(",").map((scope) => scope.trim().toLowerCase()).filter((scope) => scope !== "");
+}
+
+/** The scope Slack requires before it will deliver any reaction event. */
+export const REACTIONS_READ_SCOPE = "reactions:read";
+
+/**
+ * Startup reading of what reaction feedback is actually able to do. It is printed whether or not
+ * anybody enabled it: a deployment that turned `ask` on without the scope has to be told the feature
+ * is inert, not left producing silence nobody can explain.
+ */
+export function styleStartupLine(
+  mode: StyleConfig["mode"],
+  canAsk: boolean,
+): string {
+  if (mode === "off") return "STYLE_LEARNING: off; reactions recorded only when STYLE_LEARNING=observe or ask";
+  if (!canAsk) return `STYLE_INERT: missing scope ${REACTIONS_READ_SCOPE}; reaction events are not delivered, so nothing is recorded or asked`;
+  if (mode === "observe") return "STYLE_OBSERVING: recording reaction signals; no question is sent (STYLE_LEARNING=observe)";
+  return "STYLE_ASKING: enabled, max 1 ask / 12h per scope";
 }
 
 /** Slack renders `text` as mrkdwn; escaping its three markup characters keeps a reply literal. */
@@ -317,6 +360,99 @@ export function toRequest(payload: unknown, policy: SlackInboundPolicy): TextReq
     text: content,
     ...(threadTs === undefined ? {} : { threadTs }),
     ...(messageTs === undefined ? {} : { messageTs }),
+  };
+}
+
+/** `added` → `removed`; anything else is not a reaction event this host handles. */
+const STYLE_KINDS = new Map<string, "added" | "removed">([
+  ["reaction_added", "added"],
+  ["reaction_removed", "removed"],
+]);
+
+/**
+ * Attributing a reaction is a host lookup: Slack names the message that was reacted to, and the
+ * Inbox is what knows which request that message answered and who asked it. Nothing in the payload
+ * supplies either, so no part of the payload can claim to be somebody else's feedback.
+ */
+export type StyleAttribution = {
+  readonly requestId: string;
+  readonly part?: number;
+  readonly conversationId: string;
+  readonly senderId: string;
+  /** Where the answer landed; absent for a flat reply. The question belongs in the same place. */
+  readonly threadTs?: string;
+};
+
+export type SlackStylePolicy = SlackInboundPolicy & {
+  /** Slack member id of this app's bot user: a reaction on someone else's message is not feedback. */
+  readonly botId: string;
+  /** Looks up the delivered message a reaction landed on. */
+  readonly attribute: (messageId: string) => StyleAttribution | undefined;
+};
+
+/**
+ * Maps one reaction event to a style signal. Separate from `toRequest` on purpose: a reaction has no
+ * top-level `event.channel` and no text, so the request path drops it before it reaches an allowlist,
+ * and forcing it through there would give the model a "request" for something nobody asked in words.
+ *
+ * Every refusal has its own reason code and none carries the emoji, the message or a channel name:
+ * the interesting part of a dropped reaction is why, and the payload is external input throughout.
+ */
+export function toStyleEvent(payload: unknown, policy: SlackStylePolicy): StyleEvent | undefined {
+  const drop = (reason: string): undefined => {
+    policy.log?.(`Slack reaction dropped: ${reason}`);
+    return undefined;
+  };
+  if (!isRecord(payload) || payload.type !== "event_callback") return;
+  const eventId = text(payload.event_id);
+  const teamId = text(payload.team_id);
+  const event = payload.event;
+  if (!eventId || !teamId || !isRecord(event)) return;
+  const kind = typeof event.type === "string" ? STYLE_KINDS.get(event.type) : undefined;
+  // Only these two reach the allowlists; every other event type stays transport noise.
+  if (kind === undefined) return;
+  // Reactions attach to files too, and those are nothing this process ever answered: only a reaction
+  // on a message can be feedback, and anything malformed along the way stays transport noise.
+  const item = event.item;
+  if (!isRecord(item) || item.type !== "message") return;
+  const messageId = text(item.ts);
+  const reactorId = text(event.user);
+  if (!messageId || !reactorId) return;
+  if (reactorId === policy.botId) return drop("STYLE_RECEIPT");
+  // `item_user` is the author of the reacted-to message: unless that is this bot, the reaction is
+  // somebody reacting to somebody else entirely and there is no reply of ours to account for.
+  if (text(event.item_user) !== policy.botId) return drop("STYLE_NOT_BOT_REPLY");
+  const attributed = policy.attribute(messageId);
+  if (attributed === undefined) return drop("STYLE_NO_TARGET");
+  const channel = attributed.conversationId;
+  // The same two allowlists the reply went through, applied to whoever reacted and to where the reply
+  // was made: only the owner and the allowed members may have feedback taken into account at all.
+  const permitted = reactorId === policy.ownerId
+    || (policy.allowedUsers.includes(reactorId) && policy.allowedChannels.includes(channel));
+  if (!permitted) return drop("STYLE_NOT_ALLOWED");
+  // Who asked the reply comes from the Inbox, so no payload can claim another member's feedback: the
+  // reactor has to be that same person. Checked after the allowlists, so being unknown to this
+  // deployment is reported rather than being mistaken for reacting to the wrong reply.
+  if (reactorId !== attributed.senderId) return drop("STYLE_REACTOR_MISMATCH");
+  const reaction = typeof event.reaction === "string" ? event.reaction : "";
+  const emoji = normalizeEmojiName(reaction);
+  // Slack never sends a name it could not accept, so a rejected one is malformed input, not a
+  // reaction to record. Custom emoji normalize exactly like the standard ones.
+  if (emoji === undefined) return drop("STYLE_EMOJI_INVALID");
+  const polarity = POSITIVE_REACTIONS.has(emoji) ? "positive" : "other";
+  const threadTs = text(attributed.threadTs);
+  return {
+    eventId: `style:${teamId}:${eventId}`,
+    kind,
+    channel,
+    subjectId: attributed.senderId,
+    reactorId,
+    messageId,
+    requestId: attributed.requestId,
+    ...(attributed.part === undefined ? {} : { part: attributed.part }),
+    emoji,
+    polarity,
+    ...(threadTs === undefined ? {} : { threadTs }),
   };
 }
 
@@ -426,6 +562,11 @@ function liveSocket(url: string, signal: AbortSignal): Promise<SlackSocket> {
 export type SlackReactions = {
   readonly receipts?: ReceiptEmojis;
   readonly reactions?: { readonly host: ReactionHost; readonly anchor: ReactionAnchor };
+  /**
+   * Reaction feedback. Absent means nothing is recorded: a reaction frame is then acknowledged like
+   * any other unhandled envelope instead of being queued up behind a model round.
+   */
+  readonly style?: { readonly policy: SlackStylePolicy; readonly learning: StyleLearning };
 };
 
 /**
@@ -445,6 +586,7 @@ export async function serveSlack(
   // Reactions stay off unless the deployment configured them: with no host there is nothing to call,
   // and the model's reaction tool is not installed either.
   const host = options.reactions?.host;
+  const style = options.style;
   const reactions: DeliveryReactions = {
     ...(options.receipts === undefined ? {} : { receipts: options.receipts }),
     ...(options.reactions === undefined ? {} : { anchor: options.reactions.anchor }),
@@ -464,7 +606,37 @@ export async function serveSlack(
   };
   let socket: SlackSocket | undefined;
   let failures = 0;
+  // Frames read during a turn wait here; the loop serves them before it reads the socket again.
+  const pending: SlackFrame[] = [];
+  /**
+   * Records one reaction and only then acknowledges its envelope. A store failure is fatal and leaves
+   * the envelope unacknowledged, exactly as an unstored request does: Slack redelivers it and the
+   * event id keeps that from asking twice.
+   */
+  const settleReaction = async (payload: unknown, envelopeId: string): Promise<void> => {
+    if (socket === undefined || style === undefined) return;
+    const event = toStyleEvent(payload, style.policy);
+    if (event !== undefined) await style.learning.handle(event, signal);
+    socket.ack(envelopeId);
+  };
+  /**
+   * Serves the reaction frames that arrived while the loop was busy, before another turn starts: a
+   * model round runs for minutes, and a reaction buffered behind one would otherwise be answered long
+   * after it happened. Anything else is left for the ordinary path, so draining drops no message.
+   */
+  const drain = async (): Promise<void> => {
+    if (socket === undefined || style === undefined) return;
+    for (let result = await socket.next(0); result.kind === "frame"; result = await socket.next(0)) {
+      const frame = result.frame;
+      if (frame.type !== "events_api" || !isReactionEnvelope(frame.payload)) {
+        pending.push(frame);
+        continue;
+      }
+      await settleReaction(frame.payload, frame.envelopeId);
+    }
+  };
   while (!signal.aborted) {
+    await drain();
     if (await deliverNext(inbox, reply, signal, channel, reactions)) continue;
     if (socket === undefined) {
       try {
@@ -480,7 +652,10 @@ export async function serveSlack(
         continue;
       }
     }
-    const result = await socket.next(FRAME_WAIT_MS);
+    // A frame read during the turn is served first: nothing that arrived while the model was running
+    // waits behind another socket read.
+    const next = pending.shift();
+    const result = next === undefined ? await socket.next(FRAME_WAIT_MS) : { kind: "frame", frame: next } as const;
     if (result.kind === "idle") continue;
     if (result.kind === "closed") {
       console.error("Slack socket closed; reconnecting");
@@ -500,6 +675,12 @@ export async function serveSlack(
       continue;
     }
     if (frame.type !== "events_api") continue;
+    // A reaction read here, rather than during a drain, is settled the same way — the two paths must
+    // not disagree about what a reaction means.
+    if (style !== undefined && isReactionEnvelope(frame.payload)) {
+      await settleReaction(frame.payload, frame.envelopeId);
+      continue;
+    }
     // Store the request before acknowledging it. Slack redelivers an unacknowledged envelope, and
     // the stored request id keeps that redelivery from being processed twice. A store failure is
     // fatal, exactly as it is on the polling channel: acknowledging would silently drop the owner's
@@ -509,6 +690,17 @@ export async function serveSlack(
     socket.ack(frame.envelopeId);
   }
   socket?.close();
+}
+
+/**
+ * True when an envelope carries one of the two reaction events. Used only to decide whether a frame is
+ * served before a turn or left for the ordinary path — the real validation is `toStyleEvent`'s.
+ */
+function isReactionEnvelope(payload: unknown): boolean {
+  if (!isRecord(payload) || payload.type !== "event_callback") return false;
+  const event = payload.event;
+  if (!isRecord(event) || typeof event.type !== "string") return false;
+  return event.type === "reaction_added" || event.type === "reaction_removed";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

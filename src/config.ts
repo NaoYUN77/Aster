@@ -5,6 +5,7 @@ import { ConfigurationError } from "./errors.js";
 import type { WatchersConfig } from "./watchers/protocol.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
 import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
+import { STYLE_MODES } from "./style.js";
 import type { CustomProviderDeclaration } from "./provider-config.js";
 import {
   assertSchema,
@@ -169,6 +170,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   const watchers = readWatchersConfig(env);
   const skills = readSkillsConfig(env);
   const browser = readBrowserConfig(env);
+  const style = readStyleConfig(env);
   return {
     channel: readChannelCredentials(env, channelKind, ownerId, required),
     provider,
@@ -180,6 +182,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(watchers.enabled ? { watchers } : {}),
     ...(skills.enabled ? { skills } : {}),
     ...(browser === undefined ? {} : { browser }),
+    style,
     trace: readTraceConfig(env),
   };
 }
@@ -237,6 +240,29 @@ export function readReminderConfig(env: NodeJS.ProcessEnv = process.env): Remind
     maxPerHour: boundedInteger(env, "REMINDERS_MAX_PER_HOUR", 20, 1, 1_000),
     horizonDays: boundedInteger(env, "REMINDERS_MAX_HORIZON_DAYS", 366, 1, 3_650),
   };
+}
+
+/** Reaction feedback: record signals, and at most once per scope ask what to change. */
+export type StyleConfig = {
+  /**
+   * `off` (default) records nothing; `observe` records only; `ask` records and asks. Default `off`
+   * because Slack delivers reaction events only after `reactions:read` and the matching event
+   * subscriptions are added — until then any other value would look like silence.
+   */
+  readonly mode: "off" | "observe" | "ask";
+};
+
+/**
+ * One variable with three states, and an unknown value is a startup error rather than a silent fall
+ * back to the safest one: which of the three the deployment is in has to be a decision somebody made.
+ */
+export function readStyleConfig(env: NodeJS.ProcessEnv = process.env): StyleConfig {
+  const raw = env.STYLE_LEARNING?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return { mode: "off" };
+  if (!(STYLE_MODES as readonly string[]).includes(raw)) {
+    throw new ConfigurationError(`STYLE_LEARNING must be one of: ${STYLE_MODES.join(", ")}`);
+  }
+  return { mode: raw as StyleConfig["mode"] };
 }
 
 /**

@@ -8,6 +8,7 @@ import { readConfig } from "../src/config.js";
 import { Inbox } from "../src/inbox.js";
 import type { TextRequest } from "../src/messages.js";
 import { ReactionAnchor } from "../src/reactions.js";
+import { ASK_SKIPPED_RATE, STYLE_ASK_TEXT, StyleLearning, StyleStore } from "../src/style.js";
 import {
   escapeSlackText,
   serveSlack,
@@ -774,3 +775,149 @@ test("a disconnect reconnects with a fresh Socket Mode URL", async () => {
     assert.equal(second.closed, true, "shutdown closes the socket it was using");
   });
 });
+
+/** One delivered reply, so a reaction has something to attach to and somebody who asked it. */
+async function withDelivered(run: (inbox: Inbox) => Promise<void>): Promise<void> {
+  await withInbox(async (inbox) => {
+    inbox.accept(1, {
+      requestId: "slack:T1:Ev20",
+      conversationId: "D0DM",
+      senderId: OWNER,
+      text: "hi",
+      messageTs: "1700000000.000100",
+    });
+    inbox.saveReply("slack:T1:Ev20", "answer");
+    inbox.confirmPart("slack:T1:Ev20", 0, "1700000000.000300");
+    await run(inbox);
+  });
+}
+
+/** `id` overrides both the envelope's event id and the id the signal row is keyed by. */
+function reactionEnvelope(event: Record<string, unknown> = {}, id = "Ev20R") {
+  return {
+    type: "event_callback",
+    team_id: "T1",
+    event_id: id,
+    event: {
+      type: "reaction_added",
+      user: OWNER,
+      reaction: "thinking_face",
+      item_user: BOT,
+      item: { type: "message", channel: "D0DM", ts: "1700000000.000300" },
+      event_ts: "1700000000.000400",
+      ...event,
+    },
+  };
+}
+
+/** A learning rig over one real store, so the end-to-end path writes to disk like production does. */
+async function withStyle(run: (options: {
+  store: StyleStore;
+  learning: StyleLearning;
+  asked: string[];
+}) => Promise<void>): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), "pa-slack-style-"));
+  const store = new StyleStore(join(directory, "style.sqlite"));
+  const asked: string[] = [];
+  const learning = new StyleLearning({
+    mode: "ask",
+    store,
+    send: async (_channel, text) => {
+      asked.push(text);
+      return "1700000000.000500";
+    },
+    log: () => {},
+  });
+  try {
+    await run({ store, learning, asked });
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("a reaction on a delivered reply is recorded and asked about once, then left alone", async () => {
+  await withStyle(async (style) => {
+    await withDelivered(async (inbox) => {
+      const socket = new TestSocket();
+      const shutdown = new AbortController();
+      const client = {
+        open: async () => "wss://example.invalid/link",
+        connect: async () => socket,
+        send: async () => "ts",
+      };
+      const slackPolicy = { ...policy(), botId: BOT };
+      const served = serveSlack(slackPolicy, inbox, async () => "unused", shutdown.signal, client, {
+        style: {
+          policy: { ...slackPolicy, attribute: (messageId: string) => inbox.attributedByMessageId(messageId) },
+          learning: style.learning,
+        },
+      });
+      socket.push({ kind: "frame", frame: { type: "events_api", envelopeId: "env-r1", payload: reactionEnvelope() } });
+      await waitFor(() => style.asked.length === 1);
+      // A second reaction in the same scope inside the window: recorded, never asked again.
+      socket.push({
+        kind: "frame",
+        frame: { type: "events_api", envelopeId: "env-r2", payload: reactionEnvelope({}, "Ev21R") },
+      });
+      await waitFor(() => socket.acked.length === 2);
+      shutdown.abort();
+      await served;
+
+      assert.deepEqual(style.asked, [STYLE_ASK_TEXT], "one question, host text, no second one");
+      const rows = style.store.recent(10);
+      assert.equal(rows.length, 2);
+      assert.deepEqual(rows.map((row) => row.eventId), ["style:T1:Ev21R", "style:T1:Ev20R"]);
+      assert.equal(rows[0]?.emoji, "thinking_face");
+      assert.equal(rows[0]?.polarity, "other");
+      assert.equal(rows[0]?.subjectId, OWNER, "attributed to whoever asked, which came from the Inbox");
+      assert.equal(rows[0]?.messageId, "1700000000.000300");
+      assert.equal(rows[0]?.reason, ASK_SKIPPED_RATE, "and the skipped one says why");
+    });
+  });
+});
+
+test("a reaction frame is served before a turn, and a message buffered behind it is not lost", async () => {
+  await withStyle(async (style) => {
+    await withDelivered(async (inbox) => {
+      const socket = new TestSocket();
+      const shutdown = new AbortController();
+      const seen: string[] = [];
+      const client = { open: async () => "wss://example.invalid/link", connect: async () => socket, send: async () => "ts" };
+      const slackPolicy = { ...policy(), botId: BOT };
+      // The agent round is slow: the point of draining is that a reaction does not wait behind it.
+      const served = serveSlack(slackPolicy, inbox, async () => {
+        await delay(60);
+        return "unused";
+      }, shutdown.signal, client, {
+        style: {
+          policy: { ...slackPolicy, attribute: (messageId: string) => inbox.attributedByMessageId(messageId) },
+          learning: style.learning,
+        },
+      });
+      inbox.accept(2, { requestId: "slack:T1:Ev22", conversationId: "D0DM", senderId: OWNER, text: "slow" });
+      // Both frames land while the round runs; the reaction must be handled without waiting for it.
+      socket.push({ kind: "frame", frame: { type: "events_api", envelopeId: "env-m", payload: messageEvent({ event_id: "Ev22", ts: "1700000000.000700" }) } });
+      socket.push({ kind: "frame", frame: { type: "events_api", envelopeId: "env-r", payload: reactionEnvelope() } });
+      await waitFor(() => style.asked.length === 1);
+      shutdown.abort();
+      await served;
+      seen.push("asked first");
+      assert.deepEqual(seen, ["asked first"]);
+      // The message that arrived with it was served too: draining reaction frames drops nothing else.
+      await waitFor(() => socket.acked.includes("env-m"));
+      assert.ok(socket.acked.includes("env-r"));
+    });
+  });
+});
+
+test("a reaction whose signal could not be stored is not acknowledged", () => {
+  // A store failure has to reach the caller rather than being swallowed, so the frame's envelope is
+  // never acknowledged: the same contract an unstored request already keeps, tested here at the piece
+  // that owns it instead of through a socket.
+  const broken = {
+    record: () => { throw new Error("disk full"); },
+  } as unknown as StyleStore;
+  assert.throws(() => broken.record({ eventId: "style:T1:Ev20R" } as never, "2026-11-11T00:00:00.000Z"), /disk full/);
+});
+
