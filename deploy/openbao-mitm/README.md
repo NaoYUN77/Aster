@@ -17,7 +17,7 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 
 - **主机匹配不含端口，明文 HTTP 也在替换范围内**：`MAGPIE_API_KEY` 这类自建网关是 `http://` 私网地址（模型目录与推理同一地址），代理照样接管（不限于 CONNECT／TLS）。匹配只看 `pretty_host`，端口不参与，所以同一台机器有几个入口就要在 allowlist 里列几个主机（例如 VPC 的 `10.1.4.9` 与 Tailscale 的 `100.66.135.123`）。
 
-> **历史背景**：[ADR-0005](../../docs/adr/0005-remove-agent-vault-single-service.md) 删除的是依赖 Infisical 云的旧 Agent Vault 子系统；本方案使用同机自建的 `aster-openbao` + `aster-mitm` 内网服务完成出站占位替换。
+> **历史背景**：早先已删除依赖 Infisical 云的旧 Agent Vault 子系统；本方案使用同机自建的 `aster-openbao` + `aster-mitm` 内网服务完成出站占位替换。
 
 ## 目录结构
 

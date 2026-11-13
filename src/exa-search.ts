@@ -3,7 +3,7 @@ import { parseStrictJson } from "./strict-json.js";
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
 /**
  * The public base price covers up to 10 results; every result above that is billed separately, so
- * the tool never asks for more. See docs/web-search-provider-research.md.
+ * the tool never asks for more.
  */
 const MAX_RESULTS = 10;
 const DEFAULT_MAX_RESULTS = 5;

@@ -5,7 +5,7 @@
 # Rollback: drop `-f docker-compose.mitm.yml` and restore plaintext values in .env.
 # To give the agent a browser, layer docker-compose.browser.yml as well: it mounts the
 # agent-browser CLI into this container and points it at a browser running on another host
-# (docs/browser-automation.md). The two layers are independent.
+# The two layers are independent.
 services:
   personal-agent:
     image: ${ASTER_IMAGE:-aster:local}

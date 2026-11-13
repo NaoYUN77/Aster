@@ -1,6 +1,6 @@
 # CI 运行入口
 
-镜像与拓扑验收的正文在 [docs/ci-entrypoint.md](../../docs/ci-entrypoint.md)。
+镜像与拓扑验收的正文见 [部署与运维手册](../deploy/README.md) 第 10 节（CI）。
 
 ## 合并门禁
 
