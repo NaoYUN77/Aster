@@ -241,8 +241,9 @@ function checkCompose(files, head) {
       if (!compile(r.regex).test(text)) fail(r.code, rule.baseFile, r.why);
     }
   }
-  for (const path of [rule.baseFile, ...rule.overlays]) {
-    if (!changed.has(path)) continue;
+  const overlayRx = new RegExp("^" + rule.overlayGlob.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$");
+  for (const path of changed) {
+    if (path !== rule.baseFile && !overlayRx.test(path)) continue;
     const text = fileAt(head, path);
     if (text === null) continue;
     text.split("\n").forEach((line, i) => {
@@ -273,6 +274,21 @@ function checkDependencies(files, head) {
       fail(rule.code, rule.manifest, `${field}.${name} = ${spec}`);
     }
   }
+}
+
+function checkTestScript(files, base, head, opts) {
+  const rule = RULES.tests;
+  if (!rule.scriptCode) return;
+  if (!files.some((f) => f.path === "package.json")) return;
+  if (opts.labels.includes(RULES.protectedPaths.label)) return;
+  const testScriptAt = (ref) => {
+    const t = fileAt(ref, "package.json");
+    if (t === null) return null;
+    try { return JSON.parse(t).scripts?.test ?? null; } catch { return null; }
+  };
+  const b = testScriptAt(base), h = testScriptAt(head);
+  if (b === null && h === null) return;
+  if (b !== h) fail(rule.scriptCode, "package.json scripts.test", `已变更 (需 "${RULES.protectedPaths.label}" 标签)`);
 }
 
 function checkSecrets(added) {
@@ -312,13 +328,14 @@ function main() {
   const testFindings = checkTests(opts.staged ? "HEAD" : opts.base, head, added, files, opts);
   checkCompose(files, head);
   checkDependencies(files, head);
+  checkTestScript(files, opts.staged ? "HEAD" : opts.base, head, opts);
   checkSecrets(added);
   checkDocsAsFix(files, testFindings);
 
   if (opts.json) {
     console.log(JSON.stringify({
       status: violations.length === 0 ? "pass" : "fail",
-      checksRun: ["protected-paths", "workflow", "tests", "compose", "dependencies", "secrets", "docs-as-fix"],
+      checksRun: ["protected-paths", "workflow", "tests", "compose", "dependencies", "test-script", "secrets", "docs-as-fix"],
       violations,
     }, null, 2));
   } else if (violations.length === 0) {

@@ -31,7 +31,7 @@
     "allowPullRequestTarget": [".github/workflows/gate-policy.yml"],
     "forbidden": [
       { "code": "GATE_WORKFLOW_WEAKENED", "regex": "continue-on-error\\s*:\\s*true", "why": "禁止把失败放行" },
-      { "code": "GATE_WORKFLOW_WEAKENED", "regex": "^\\s*if\\s*:\\s*false\\s*$", "why": "禁止用 if:false 静默停用 step/job" },
+      { "code": "GATE_WORKFLOW_WEAKENED", "regex": "^\\s*if\\s*:\\s*(false|\\$\\{\\{\\s*false\\s*\\}\\})\\s*$", "why": "禁止用 if:false 静默停用 step/job(含表达式形式)" },
       { "code": "GATE_WORKFLOW_WEAKENED", "regex": "\\|\\|\\s*true\\b", "why": "禁止 || true 吞掉失败" },
       { "code": "GATE_WORKFLOW_WEAKENED", "regex": "\\|\\|\\s*:\\s*true", "why": "禁止在表达式里把失败兜成成功" }
     ],
@@ -42,7 +42,7 @@
     },
     "pinUses": {
       "_comment": "所有第三方 Action 必须钉到 40 位 commit SHA,不接受 tag/分支。",
-      "regex": "^\\s*uses:\\s*(\\S+)",
+      "regex": "^\\s*-?\\s*uses:\\s*(\\S+)",
       "allowedRefs": ["docker://", "./"],
       "code": "GATE_ACTION_UNPINNED"
     }
@@ -51,6 +51,7 @@
   "tests": {
     "glob": "test/*.test.ts",
     "countCode": "GATE_TEST_REMOVED",
+    "scriptCode": "GATE_TEST_SCRIPT_CHANGED",
     "forbidden": [
       { "code": "GATE_TEST_WEAKENED", "regex": "\\.skip\\s*\\(", "why": "禁止新增跳过" },
       { "code": "GATE_TEST_WEAKENED", "regex": "\\.only\\s*\\(", "why": "禁止 .only 缩窄范围" },
@@ -61,11 +62,8 @@
 
   "compose": {
     "baseFile": "docker-compose.yml",
-    "overlays": [
-      "docker-compose.build.yml",
-      "docker-compose.browser.yml",
-      "docker-compose.mitm.yml"
-    ],
+    "overlayGlob": "docker-compose*.yml",
+    "overlayGlobComment": "扫一切 docker-compose*.yml(含新增文件),不再依赖白名单清单",
     "requiredInBase": [
       { "code": "GATE_COMPOSE_INVARIANT", "regex": "cap_drop\\s*:\\s*\\[\\s*[\"']?ALL[\"']?\\s*\\]", "why": "app 服务必须保留 cap_drop ALL" },
       { "code": "GATE_COMPOSE_INVARIANT", "regex": "no-new-privileges:true", "why": "必须保留 no-new-privileges" }
@@ -105,7 +103,8 @@
       { "name": "google-api-key", "regex": "\\bAIza[0-9A-Za-z_-]{35}\\b" },
       { "name": "github-pat", "regex": "\\b(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,})\\b" },
       { "name": "huggingface-token", "regex": "\\bhf_[A-Za-z0-9]{30,}" },
-      { "name": "private-key-block", "regex": "BEGIN [A-Z ]*PRIVATE KEY" }
+      { "name": "private-key-block", "regex": "BEGIN [A-Z ]*PRIVATE KEY" },
+      { "name": "redaction-placeholder", "regex": "[{]{2}[A-Za-z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*[}]{2}" }
     ]
   }
 }
