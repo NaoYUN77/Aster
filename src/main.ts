@@ -13,6 +13,9 @@ import { REACTIONS_READ_SCOPE, serveSlack, SlackClient, styleStartupLine } from 
 import { StyleLearning, StyleStore } from "./style.js";
 import { serveTelegram, TelegramClient } from "./telegram.js";
 import { SkillIndex } from "./skills.js";
+import { SqliteRoutineStore } from "./routines/store.js";
+import { createRoutinesExtension } from "./routines/tools.js";
+import { createRoutines as createRoutinesRuntime, type RoutinesRuntime } from "./routines/runtime.js";
 import { startTrace, type TraceRuntime } from "./trace.js";
 import { createWatchers, type WatchersRuntime } from "./watchers/index.js";
 import { SqliteWatchStore } from "./watchers/store.js";
@@ -82,6 +85,8 @@ try {
   let hubs: HubStore | undefined;
   let watchers: WatchersRuntime | undefined;
   let watchersStore: SqliteWatchStore | undefined;
+  let routinesStore: SqliteRoutineStore | undefined;
+  let routines: RoutinesRuntime | undefined;
   try {
     // Reminder state is separate from the Inbox: its lifecycle is a due time, not a user request.
     reminders = config.reminders === undefined
@@ -111,6 +116,18 @@ try {
         failureCode: (error) => channel.failureCode(error),
       });
     }
+    // Standing tasks own their ledger and their own conversation per task. The tool extension is
+    // built before the agent (it must be in the registry), while the executor needs the agent.
+    if (config.routines !== undefined) {
+      routinesStore = new SqliteRoutineStore(join(config.dataDir, "routines.sqlite"));
+    }
+    const routinesExtension = routinesStore === undefined || config.routines === undefined
+      ? undefined
+      : createRoutinesExtension({
+          store: routinesStore,
+          config: config.routines,
+          chatId: config.channel.ownerId,
+        });
     // One Hub per member is a shared-channel idea: a Slack deployment gets the bookkeeping, Telegram
     // stays single-owner. The data directory keeps the member mappings across restarts.
     hubs = deployment.kind === "slack" ? new HubStore(join(config.dataDir, "hubs.sqlite")) : undefined;
@@ -137,7 +154,14 @@ try {
       signal: shutdown.signal,
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
       ...(hubs === undefined ? {} : { hubStore: hubs }),
-      ...(watchers?.extension === undefined ? {} : { extraExtensions: [watchers.extension] }),
+      ...(watchers?.extension === undefined && routinesExtension === undefined
+        ? {}
+        : {
+            extraExtensions: [
+              ...(watchers?.extension === undefined ? [] : [watchers.extension]),
+              ...(routinesExtension === undefined ? [] : [routinesExtension]),
+            ],
+          }),
       ...(skills === undefined ? {} : { skills }),
       ...(deployment.kind === "slack"
         ? { reactions: { host: deployment.client, anchor: deployment.anchor, emoji } }
@@ -149,8 +173,24 @@ try {
       signal: shutdown.signal,
       log: (line) => console.error(line),
     });
+    // The executor is created after the agent because a routine run is an agent turn; the scheduler
+    // dispatches one at a time and delivers through the same channel the chat uses.
+    routines = routinesStore === undefined || config.routines === undefined
+      ? undefined
+      : createRoutinesRuntime({
+          store: routinesStore,
+          config: config.routines,
+          chatId: config.channel.ownerId,
+          deliver: (chatId, text, signal) => channel.send(chatId, text, signal),
+          run: (request) => agent.routineRun(request),
+          signal: shutdown.signal,
+          log: (line) => console.error(line),
+          classifyFailure: (error) => channel.classifyFailure(error),
+          failureCode: (error) => channel.failureCode(error),
+        });
     scheduler?.start();
     watchers?.start();
+    routines?.start();
     try {
       console.info(deployment.kind === "telegram"
         ? `Personal agent starting; single-owner private ${channel.label} messages enabled.`
@@ -158,6 +198,10 @@ try {
           + ` member(s) in ${deployment.policy.allowedChannels.length} allowed channel(s) enabled.`);
       if (skills !== undefined) {
         console.info(`Skills: ${skills.summaries().length} indexed (names and descriptions only; bodies load on demand).`);
+      }
+      if (config.routines !== undefined) {
+        const routineSettings = config.routines;
+        console.info(`Standing tasks: ${routineSettings.paused ? "paused by ROUTINES_PAUSED=1" : "active"}, timezone ${routineSettings.timezone}.`);
       }
       if (deployment.kind === "slack") {
         const slackPolicy = { ...deployment.policy, botId };
@@ -179,6 +223,7 @@ try {
       }
     } finally {
       // Stop proactive sends before the agent and databases close; an in-flight send becomes uncertain.
+      await routines?.stop();
       await watchers?.stop();
       await scheduler?.stop();
       await agent.close();
@@ -187,6 +232,7 @@ try {
     inbox?.close();
     reminders?.close();
     watchersStore?.close();
+    routinesStore?.close();
     hubs?.close();
     styleStore?.close();
   }

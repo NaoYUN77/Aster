@@ -7,6 +7,8 @@ import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
 import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
 import { STYLE_MODES } from "./style.js";
 import type { CustomProviderDeclaration } from "./provider-config.js";
+import { ROUTINE_DEFAULTS, type RoutinesConfig } from "./routines/protocol.js";
+import { assertTimeZone, isValidTimeOfDay, normalizeTimeOfDay } from "./routines/time.js";
 import {
   assertSchema,
   eventDate,
@@ -168,6 +170,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   if (exaApiKey) assertValidCredentialShape("EXA_API_KEY", exaApiKey);
   const reminders = readReminderConfig(env);
   const watchers = readWatchersConfig(env);
+  const routines = readRoutinesConfig(env);
   const skills = readSkillsConfig(env);
   const browser = readBrowserConfig(env);
   const style = readStyleConfig(env);
@@ -180,6 +183,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...paths,
     ...(reminders.enabled ? { reminders } : {}),
     ...(watchers.enabled ? { watchers } : {}),
+    ...(routines.enabled ? { routines } : {}),
     ...(skills.enabled ? { skills } : {}),
     ...(browser === undefined ? {} : { browser }),
     style,
@@ -302,6 +306,43 @@ export function readWatchersConfig(env: NodeJS.ProcessEnv = process.env): Watche
     ...(relayUrl === undefined || relayUrl === "" ? {} : { relayUrl }),
     ...(relayToken === undefined || relayToken === "" ? {} : { relayToken }),
     ...(githubToken === undefined || githubToken === "" ? {} : { githubToken }),
+  };
+}
+
+/**
+ * Standing tasks (ROUTINES_*). Enabled by default because that is the feature Jay asked for; every
+ * bound is validated even when disabled, so flipping the switch cannot surface a malformed value
+ * later. `ROUTINES_PAUSED=1` is the process-level kill switch: the scheduler never dispatches.
+ */
+export function readRoutinesConfig(env: NodeJS.ProcessEnv = process.env): RoutinesConfig {
+  const switchValue = (key: string, fallback: boolean): boolean => {
+    const raw = env[key]?.trim();
+    if (raw === undefined || raw === "") return fallback;
+    if (raw !== "0" && raw !== "1") throw new ConfigurationError(`${key} must be 0 or 1`);
+    return raw === "1";
+  };
+  const timezone = env.ROUTINES_TIMEZONE?.trim() || ROUTINE_DEFAULTS.timezone;
+  try {
+    assertTimeZone(timezone);
+  } catch {
+    throw new ConfigurationError("ROUTINES_TIMEZONE must be a valid IANA time zone name, such as Asia/Shanghai");
+  }
+  const summaryLocalTime = normalizeTimeOfDay(env.ROUTINES_SUMMARY_TIME?.trim() || ROUTINE_DEFAULTS.summaryLocalTime);
+  if (!isValidTimeOfDay(summaryLocalTime)) {
+    throw new ConfigurationError("ROUTINES_SUMMARY_TIME must be a 24-hour local time such as 21:00");
+  }
+  return {
+    enabled: switchValue("ROUTINES_ENABLED", true),
+    paused: switchValue("ROUTINES_PAUSED", false),
+    timezone,
+    maxPerOwner: boundedInteger(env, "ROUTINES_MAX_PER_OWNER", ROUTINE_DEFAULTS.maxPerOwner, 1, 500),
+    minIntervalMinutes: boundedInteger(env, "ROUTINES_MIN_INTERVAL_MINUTES", ROUTINE_DEFAULTS.minIntervalMinutes, 1, 1_440),
+    // 0 is the confirmed default: no hard cap, with the daily summary and anomaly alert as backstops.
+    maxRunsPerDay: boundedInteger(env, "ROUTINES_MAX_RUNS_PER_DAY", ROUTINE_DEFAULTS.maxRunsPerDay, 0, 10_000),
+    runTimeoutMs: boundedInteger(env, "ROUTINES_RUN_TIMEOUT_MS", ROUTINE_DEFAULTS.runTimeoutMs, 30_000, 3_600_000),
+    summaryEnabled: switchValue("ROUTINES_SUMMARY_ENABLED", true),
+    summaryLocalTime,
+    retentionDays: boundedInteger(env, "ROUTINES_RETENTION_DAYS", ROUTINE_DEFAULTS.retentionDays, 7, 3_650),
   };
 }
 
