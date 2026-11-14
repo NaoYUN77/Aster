@@ -166,6 +166,23 @@ npm start
 
 常驻工具包括底座的 `bash`、`read`、`write`、`edit`，以及 `current_time`、上表中的记忆工具和配置对应 Web 凭据后启用的 `web_search`、`web_fetch` 与 `exa_search`。内置工具使用底座 `defineTool` 注册；名称冲突在注册时直接拒绝。工具不是文件系统沙箱，生产环境应使用独立低权限用户运行。
 
+## 常驻任务
+
+常驻任务（standing task）是宿主按计划发起的一次 agent 运行，不需要你先说话。用聊天创建即可："以后每天 8 点帮我做早报" → `routine_create`。两种模式：
+
+| 模式 | 行为 | 成本 |
+| --- | --- | --- |
+| `agent` | 在任务自己的会话里跑一次完整 agent，把结果发给你 | 每次一次模型调用 |
+| `notify` | 直接发送模板文本，支持 `{{date}}`、`{{time}}`、`{{title}}` | 零模型调用 |
+
+调度支持 `daily`（`at`）、`weekly`（`days` + `at`）、`every`（`every_minutes`，可带 `from`/`to` 窗口），时间按任务时区（默认 `Asia/Shanghai`）的墙上时间解释。日程在领取时先推进再执行，同一时间槽只会运行一次；停机错过超过 6 小时的槽位记为 `skipped` 而不是补跑。失败只对超时、未作答、截断和空回复重试一次，间隔 120 秒；进程中断的运行标记为失败，不会自动重放。
+
+每个任务有独立会话、独立工作目录和独立长期记忆（`memory/routines/<id>`），不会污染主人的上下文。`delivery=report` 时，模型回复 `NO_REPORT` 表示无事可报，宿主动不发消息。
+
+管理工具：`routine_list`、`routine_pause`（`all=true` 即聊天里的总开关）、`routine_resume`、`routine_delete`、`routine_run_now`。环境层还有一个急停：`ROUTINES_PAUSED=1`，调度器不领取任何任务。每日 21:00（`ROUTINES_SUMMARY_TIME`）发一条用量摘要，agent 运行数超过近 7 天日均 3 倍且不少于 5 次时额外告警；`ROUTINES_MAX_RUNS_PER_DAY` 默认 0（不设硬上限），设为正数才启用硬停止。
+
+事件触发（GitHub、RSS → 任务）属于第二批，本批只交付定时类。
+
 ## 部署与运维
 
 生产形态是单个 Docker 服务。镜像构建、Compose、卷备份与还原、维护命令、上线判定见 [部署与运维手册](scripts/deploy/README.md)。结果未知的 Telegram 发送如何核查和补发见该手册。
