@@ -6,13 +6,14 @@ import { join } from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { createModels } from "@earendil-works/pi-ai/models";
-import type { Api, AssistantMessage, Context, Message, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, AssistantMessageEvent, Context, Message, Model } from "@earendil-works/pi-ai";
 import { readMemoryConfig, readModelFailoverConfig, readConfig } from "../src/config.js";
 import { openAgent } from "../src/agent.js";
 import type { TextRequest } from "../src/messages.js";
 import {
   createModelFailover,
   createModelSwitchStore,
+  MODEL_INCOMPATIBLE_MESSAGE,
   MODEL_UNAVAILABLE_MESSAGE,
 } from "../src/model-failover.js";
 import { resolveModelChain } from "../src/providers.js";
@@ -46,6 +47,76 @@ function fixture(options: { fallbackContextWindow?: number } = {}) {
 
 function failed(errorMessage: string): AssistantMessage {
   return fauxAssistantMessage("", { stopReason: "error", errorMessage });
+}
+
+type FauxInput = ("text" | "image")[];
+
+/**
+ * Three real-looking catalog members: an OpenCode primary, a Command Code fallback, and a manual
+ * extra that is outside the configured chain. Separate faux providers keep per-model call counts
+ * and scripted responses apart.
+ */
+function manualFixture(options: { manualInput?: FauxInput } = {}) {
+  const primary = fauxProvider({
+    provider: "opencode",
+    models: [{
+      id: "opencode-go/deepseek-v4.1-flash",
+      contextWindow: 200_000,
+      maxTokens: 8_192,
+      input: ["text", "image"],
+    }],
+  });
+  const fallback = fauxProvider({
+    provider: "commandcode",
+    models: [{
+      id: "commandcode/deepseek/deepseek-v4.1-flash",
+      contextWindow: 200_000,
+      maxTokens: 8_192,
+      input: ["text", "image"],
+    }],
+  });
+  const manual = fauxProvider({
+    provider: "gemini",
+    models: [
+      {
+        id: "commandcode/google/gemini-3.8-flash",
+        contextWindow: 200_000,
+        maxTokens: 8_192,
+        input: options.manualInput ?? ["text", "image"],
+      },
+      {
+        id: "commandcode/claude-sonnet-5-5",
+        contextWindow: 200_000,
+        maxTokens: 8_192,
+        input: ["text", "image"],
+      },
+    ],
+  });
+  const models = createModels();
+  models.setProvider(primary.provider);
+  models.setProvider(fallback.provider);
+  models.setProvider(manual.provider);
+  const chain = resolveModelChain(models, { provider: "opencode", modelId: "opencode-go/deepseek-v4.1-flash" }, [
+    { provider: "commandcode", modelId: "commandcode/deepseek/deepseek-v4.1-flash" },
+  ]) as Model<Api>[];
+  return { models, primary, fallback, manual, chain };
+}
+
+const IMAGE_CONTEXT: Context = {
+  messages: [{
+    role: "user",
+    content: [
+      { type: "text", text: "what is this" },
+      { type: "image", data: "AA==", mimeType: "image/png" },
+    ],
+    timestamp: 1,
+  }],
+};
+
+async function drain(stream: AsyncIterable<unknown>): Promise<unknown[]> {
+  const events: unknown[] = [];
+  for await (const event of stream) events.push(event);
+  return events;
 }
 
 test("MODEL_FALLBACKS absent is off, and a timeout alone is refused", () => {
@@ -293,7 +364,7 @@ test("a successful switch is sticky across calls and survives a new store", asyn
     primary.setResponses([failed("429: rate limited")]);
     fallback.setResponses([fauxAssistantMessage("fallback first")]);
     assert.equal((await wrapped.completeSimple(chain[0]!, CONTEXT)).model, "fallback-1");
-    assert.deepEqual(state.active(), { provider: "fallback", modelId: "fallback-1" });
+    assert.deepEqual(state.active(), { provider: "fallback", modelId: "fallback-1", kind: "auto" });
 
     // A primary that would answer is not tried: the session stays on the fallback.
     fallback.setResponses([fauxAssistantMessage("fallback second")]);
@@ -302,7 +373,7 @@ test("a successful switch is sticky across calls and survives a new store", asyn
 
     // A new wrapper reading the same file is sticky too, which is what a process restart sees.
     const reopened = createModelSwitchStore(path, { log: () => {} });
-    assert.deepEqual(reopened.active(), { provider: "fallback", modelId: "fallback-1" });
+    assert.deepEqual(reopened.active(), { provider: "fallback", modelId: "fallback-1", kind: "auto" });
     const afterRestart = createModelFailover(models, chain, { log: () => {}, state: reopened });
     fallback.setResponses([fauxAssistantMessage("fallback after restart")]);
     assert.equal((await afterRestart.completeSimple(chain[0]!, CONTEXT)).model, "fallback-1");
@@ -345,7 +416,7 @@ test("a 90s timeout switch is sticky too", async () => {
     primary.setResponses([failed("Request timed out")]);
     fallback.setResponses([fauxAssistantMessage("fallback answer")]);
     await wrapped.completeSimple(chain[0]!, CONTEXT);
-    assert.deepEqual(state.active(), { provider: "fallback", modelId: "fallback-1" });
+    assert.deepEqual(state.active(), { provider: "fallback", modelId: "fallback-1", kind: "auto" });
 
     fallback.setResponses([fauxAssistantMessage("fallback again")]);
     assert.equal((await wrapped.completeSimple(chain[0]!, CONTEXT)).model, "fallback-1");
@@ -427,6 +498,205 @@ test("a malformed selection file is ignored", async () => {
     assert.equal(state.active(), undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a manual selection outside the chain is the first attempt and stays manual", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-manual-head-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, manual, chain } = manualFixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  state.set({ provider: "gemini", modelId: "commandcode/google/gemini-3.8-flash", kind: "manual" });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    manual.setResponses([fauxAssistantMessage("gemini answer")]);
+    primary.setResponses([fauxAssistantMessage("primary must not answer")]);
+    const answer = await wrapped.completeSimple(chain[0]!, CONTEXT);
+    assert.equal(answer.model, "commandcode/google/gemini-3.8-flash");
+    assert.equal(primary.state.callCount, 0);
+    assert.equal(fallback.state.callCount, 0);
+    assert.deepEqual(state.active(), {
+      provider: "gemini",
+      modelId: "commandcode/google/gemini-3.8-flash",
+      kind: "manual",
+    });
+
+    // A new wrapper (restart) validates the same manual selection against the catalog and keeps it.
+    const reopened = createModelFailover(models, chain, {
+      log: () => {},
+      state: createModelSwitchStore(path, { log: () => {} }),
+    });
+    manual.setResponses([fauxAssistantMessage("gemini after restart")]);
+    assert.equal((await reopened.completeSimple(chain[0]!, CONTEXT)).model, "commandcode/google/gemini-3.8-flash");
+    assert.equal(primary.state.callCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failing manual selection falls back, records the actual model and says so in the answer", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-manual-fail-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, manual, chain } = manualFixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  state.set({ provider: "gemini", modelId: "commandcode/google/gemini-3.8-flash", kind: "manual" });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    manual.setResponses([failed("429: rate limited")]);
+    primary.setResponses([fauxAssistantMessage("primary answer")]);
+    const events = await drain(wrapped.streamSimple(chain[0]!, CONTEXT));
+    const done = events.at(-1) as Extract<AssistantMessageEvent, { type: "done" }>;
+    assert.equal(done.type, "done");
+    assert.equal(done.message.provider, "opencode");
+    const text = done.message.content
+      .flatMap((block) => block.type === "text" ? [block.text] : [])
+      .join("");
+    assert.match(text, /commandcode\/google\/gemini-3\.8-flash 不可用，本次由 opencode\/opencode-go\/deepseek-v4\.1-flash 回答/);
+    assert.equal(manual.state.callCount, 1);
+    assert.equal(primary.state.callCount, 1);
+    // The primary is the default chain's head, so the manual pin is gone: the next request starts
+    // from the ordinary default chain.
+    assert.equal(state.active(), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failing manual selection falls further to a fallback and that model becomes auto-sticky", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-manual-fallback-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, manual, chain } = manualFixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  state.set({ provider: "gemini", modelId: "commandcode/google/gemini-3.8-flash", kind: "manual" });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    manual.setResponses([failed("503: overloaded")]);
+    primary.setResponses([failed("429: rate limited")]);
+    fallback.setResponses([fauxAssistantMessage("fallback answer")]);
+    const answer = await wrapped.completeSimple(chain[0]!, CONTEXT);
+    assert.equal(answer.provider, "commandcode");
+    assert.deepEqual(state.active(), {
+      provider: "commandcode",
+      modelId: "commandcode/deepseek/deepseek-v4.1-flash",
+      kind: "auto",
+    });
+
+    // Automatic stickiness stays silent: the next answer is plain, with no note.
+    fallback.setResponses([fauxAssistantMessage("plain answer")]);
+    const next = await wrapped.completeSimple(chain[0]!, CONTEXT);
+    assert.equal(next.content.length, 1);
+    assert.equal(primary.state.callCount, 1);
+    assert.equal(manual.state.callCount, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a manual text-only selection refuses an image request instead of silently switching", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-manual-image-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, manual, chain } = manualFixture({ manualInput: ["text"] });
+  const state = createModelSwitchStore(path, { log: () => {} });
+  state.set({ provider: "gemini", modelId: "commandcode/google/gemini-3.8-flash", kind: "manual" });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    const answer = await wrapped.completeSimple(chain[0]!, IMAGE_CONTEXT);
+    assert.equal(answer.errorMessage, MODEL_INCOMPATIBLE_MESSAGE);
+    assert.equal(manual.state.callCount, 0);
+    assert.equal(primary.state.callCount, 0);
+    assert.equal(fallback.state.callCount, 0);
+
+    const events = await drain(wrapped.streamSimple(chain[0]!, IMAGE_CONTEXT));
+    const terminal = events.at(-1) as Extract<AssistantMessageEvent, { type: "error" }>;
+    assert.equal(terminal.type, "error");
+    assert.equal(terminal.error.errorMessage, MODEL_INCOMPATIBLE_MESSAGE);
+    assert.equal(manual.state.callCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a manual selection that is gone or outside the chat scope is cleared at startup", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-manual-stale-"));
+  const path = join(directory, "model-selection.json");
+  const { models, chain } = manualFixture();
+  try {
+    const gone = createModelSwitchStore(path, { log: () => {} });
+    gone.set({ provider: "gone", modelId: "gone", kind: "manual" });
+    createModelFailover(models, chain, { log: () => {}, state: gone });
+    assert.equal(gone.active(), undefined);
+
+    const outOfScope = createModelSwitchStore(path, { log: () => {} });
+    outOfScope.set({ provider: "gemini", modelId: "commandcode/claude-sonnet-5-5", kind: "manual" });
+    createModelFailover(models, chain, { log: () => {}, state: outOfScope });
+    assert.equal(outOfScope.active(), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a manual selection of a chain fallback starts there and does not retry the primary", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-manual-chain-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, chain } = manualFixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  state.set({ provider: "commandcode", modelId: "commandcode/deepseek/deepseek-v4.1-flash", kind: "manual" });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    fallback.setResponses([fauxAssistantMessage("fallback answer")]);
+    primary.setResponses([fauxAssistantMessage("primary must not answer")]);
+    const answer = await wrapped.completeSimple(chain[0]!, CONTEXT);
+    assert.equal(answer.provider, "commandcode");
+    assert.equal(primary.state.callCount, 0);
+    assert.equal(state.active()?.kind, "manual");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("$model is answered by the host without calling a model", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-model-command-agent-"));
+  const signal = new AbortController().signal;
+  const faux = fauxProvider({
+    provider: "openai",
+    models: [{ id: "faux-1", contextWindow: 200_000 }, { id: "faux-2", contextWindow: 200_000 }],
+  });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const config = {
+    ...readConfig({
+      TELEGRAM_BOT_TOKEN: "offline-test",
+      TELEGRAM_OWNER_ID: "1",
+      MODEL_PROVIDER: "openai",
+      MODEL_ID: "faux-1",
+      OPENAI_API_KEY: "offline-test",
+      MODEL_FALLBACKS: "openai:faux-2",
+      DATA_DIR: directory,
+    }),
+    memory: { ...readMemoryConfig({}), enabled: false },
+  };
+  const base: TextRequest = {
+    requestId: "telegram:model-command:1",
+    conversationId: "telegram:model-command",
+    senderId: "1",
+    text: "$model",
+  };
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    app = await openAgent(config, models);
+    assert.match(await app.reply(base, signal), /当前模型：openai\/faux-1/);
+    assert.match(
+      await app.reply({ ...base, requestId: "telegram:model-command:2", text: "$model primary" }, signal),
+      /已经是主模型/,
+    );
+    assert.match(
+      await app.reply({ ...base, requestId: "telegram:model-command:3", text: "$model list" }, signal),
+      /没有可切的模型/,
+    );
+    assert.equal(faux.state.callCount, 0);
+    assert.equal(existsSync(join(directory, "model-selection.json")), false);
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
   }
 });
 

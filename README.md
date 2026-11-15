@@ -145,8 +145,10 @@ npm start
 - context overflow、内容审核、请求参数错误、调用方主动取消：不切换，原始错误照旧交给上层（overflow 仍由 compaction 处理）。
 - `MODEL_REQUEST_TIMEOUT_MS` 默认 90000：单次模型请求超过 90 秒就换下一个。超时切换和错误切换一样会变成粘性选择。
 - **切换成功后会话保持粘性**：后续请求直接从该 fallback 开始，主模型不再被重试；即使下一次请求时主模型已经恢复，也不会自动切回。选择写入 `DATA_DIR/model-selection.json`，进程重启后继续生效；启动日志会打印当前粘在哪个 fallback 上。
-- 只有手动切回才会回到主模型：删除 `DATA_DIR/model-selection.json`，或调用 `createModelSwitchStore(...).clear()`（后续聊天里的手动切换就接在这里）。选择在每次请求时重新读取，因此从另一个实例清除会立刻生效，不需要重启进程。粘性模型如果不在当前链里（例如 fallback 被删掉），启动时会告警并回到主模型。
-- 切换只写进程日志（模型、原因、截断后的错误文本），不在聊天里提示。整条链都失败时，聊天只显示「模型暂时不可用」，细节留在日志；全链失败不会清除已有的粘性选择。
+- 只有手动切回才会回到主模型：发 `$model primary`（或整句「切回主模型」「切回默认模型」），或删除 `DATA_DIR/model-selection.json`。选择在每次请求时重新读取，因此从另一个实例清除会立刻生效，不需要重启进程。粘性模型如果不在当前链里（例如 fallback 被删掉），启动时会告警并回到主模型。
+- **对话框手动切换（`$model`，仅 owner）**：`$model` 查看当前模型与默认链；`$model list [opencode|commandcode]` 列出当前目录里可切的模型；`$model <model id>` 指定模型；`$model primary` 切回主模型。别名 `opencode`/`commandcode` 指向该供应商默认的 DeepSeek Flash。可切范围只有 OpenCode（`opencode-go/`）与 Command Code（`commandcode/`）目录中、应用能映射成聊天模型的 DeepSeek、GLM、Gemini Flash；速度变体（Fast / Ultra Fast / HighSpeed / UltraSpeed）不开放；id 每次按实时目录校验，不硬编码。命令由宿主机直接答复，不调用模型、不写 durable turn，因此当前模型不可用时也能切走；其他成员发同样文字按普通聊天处理。
+- 手动指定同样是粘性的：写同一个 `model-selection.json`（`kind: "manual"`），跨请求、跨重启生效，直到再次 `$model primary` 或指定别的模型。选中模型 429/超时/不可访问时仍按默认链降级，并在该次回复末尾提示「（<选中的模型> 不可用，本次由 <实际模型> 回答）」；降级成功的实际模型记为自动粘性。用户未手动指定时的自动切换仍然完全静默。手动选中的纯文本模型收到图片请求时直接拒绝并说明，不会静默换模型。
+- 切换只写进程日志（模型、原因、截断后的错误文本），自动切换不在聊天里提示；`$model` 主动切换回一行确认。整条链都失败时，聊天只显示「模型暂时不可用」，细节留在日志；全链失败不会清除已有的粘性选择。
 - 跨模型重放历史时，会去掉上一家 provider/model 私有的 thinking 签名；图片请求不会切到只接受文本的 fallback；`maxTokens` 与 reasoning 参数按目标模型收窄。
 - 关闭开关（`MODEL_FALLBACKS` 为空）时不会设置 90 秒请求超时，也不包装模型调用。
 
