@@ -24,7 +24,13 @@ import { createLoopGuard } from "./loop-guard.js";
 import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { readProviderConfig } from "./provider-config.js";
 import { createReactionExtension, type EmojiSource, type ReactionAnchor, type ReactionHost } from "./reactions.js";
-import { createProviderModels, findCustomProvider, PROVIDER_IDS, refreshProviderCatalog, requireModel } from "./providers.js";
+import { createModelFailover, MODEL_UNAVAILABLE_MESSAGE, modelLabel } from "./model-failover.js";
+import {
+  createModelPool,
+  PROVIDER_IDS,
+  refreshProviderCatalogs,
+  resolveModelChain,
+} from "./providers.js";
 import { createReminderExtension, type ReminderStore } from "./reminders.js";
 import { NO_REPORT, type RoutineDelivery, type RoutineRunRequest } from "./routines/protocol.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
@@ -35,7 +41,7 @@ import { installMcpTools, orderedMcpExtensions } from "./tool-pins.js";
 
 const context = BACKGROUND_CONTEXT;
 // Failures the request can recover from in-process; anything else thrown by the durable calls means the Session is unusable.
-const requestFailureCodes = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY", "AGENT_LOOP_DETECTED"]);
+const requestFailureCodes = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY", "AGENT_LOOP_DETECTED", "MODEL_UNAVAILABLE"]);
 /**
  * What a member's Hub is not offered, by capability rather than by name: both shells are the same
  * ability on a different host, and the reminder tools are withheld because their target is fixed to
@@ -262,6 +268,7 @@ export async function openAgent(
   const workspace = join(config.dataDir, "workspace");
   await mkdir(workspace, { recursive: true });
 
+  const fallbacks = config.failover?.fallbacks ?? [];
   if (!models) {
     // Read exactly as the running service reads it, so the startup validation and this build cannot
     // disagree about which providers exist.
@@ -272,18 +279,26 @@ export async function openAgent(
       PROVIDER_IDS,
     );
     if (declared.error !== undefined) throw new ConfigurationError(declared.error);
-    models = createProviderModels(config.provider, declared.providers);
+    models = createModelPool(config.provider, fallbacks, declared.providers);
     // A declared provider may list its models from its own endpoint. That fetch happens once here,
-    // before the first request, because MODEL_ID cannot be checked against an unfetched catalog.
-    const declaration = findCustomProvider(declared.providers, config.provider);
-    if (declaration !== undefined) {
-      await refreshProviderCatalog(models, config.provider, declaration, {
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      });
-    }
+    // before the first request, because MODEL_ID and every MODEL_FALLBACKS model are checked against it.
+    await refreshProviderCatalogs(models, config.provider, fallbacks, declared.providers, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
   }
-  // Both the real and the injected (offline test) registries must know the configured model.
-  requireModel(models, config.provider, config.model);
+  // Both the real and the injected (offline test) registries must know every configured model, and a
+  // chain that cannot safely take over fails here rather than on the first outage.
+  const chain = resolveModelChain(models, { provider: config.provider, modelId: config.model }, fallbacks);
+  if (config.failover !== undefined) {
+    for (const member of chain.slice(1)) {
+      if (chain[0]!.input.includes("image") && !member.input.includes("image")) {
+        console.error(
+          `Model failover: ${modelLabel(member)} is text-only; a request carrying images will not switch to it`,
+        );
+      }
+    }
+    models = createModelFailover(models, chain);
+  }
 
   const workingDirectory = workspace;
   const instructions = buildInstructions({
@@ -362,6 +377,9 @@ export async function openAgent(
       registry,
       settings: {
         toolExecution: "sequential",
+        // Only a configured chain changes the request bound. Without fallbacks the durable harness
+        // keeps pi-ai's own timeout defaults, so an empty MODEL_FALLBACKS is a true no-op.
+        ...(config.failover === undefined ? {} : { stream: { timeoutMs: config.failover.requestTimeoutMs } }),
         ...(memory ? { compaction: memoryCompactionSettings(memory) } : {}),
       },
       env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? workspace }),
@@ -661,6 +679,11 @@ export async function openAgent(
             // request is admitted as a fresh run instead of being withdrawn by this abort.
             await target.abort(context).catch(() => undefined);
             throw halted;
+          }
+          // Every configured model failed with a provider-side condition. The chain already logged
+          // the details; the owner sees one stable message instead of raw upstream text.
+          if (settled.detail === MODEL_UNAVAILABLE_MESSAGE) {
+            throw Object.assign(new Error("Model temporarily unavailable"), { code: "MODEL_UNAVAILABLE" });
           }
           throw Object.assign(new Error(`Agent request unanswered: ${settled.reason}`, { cause: settled.detail }), { code: "AGENT_UNANSWERED" });
         }

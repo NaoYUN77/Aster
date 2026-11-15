@@ -136,6 +136,18 @@ npm start
 
 注册表定义在 `src/providers.ts`。本应用只支持显式 API key 的提供商：不含 OAuth／订阅登录、云厂商环境凭据（Bedrock、Vertex）。自建的 OpenAI 兼容网关（包括按模型选择 `openai-completions`／`openai-responses`／`anthropic-messages`／`google-generative-ai` 四种协议）用 `DATA_DIR/providers.json` 声明，不需要改代码：`PROVIDERS_CONFIG` 可换路径，`MODEL_ID` 从声明或该网关的 `/models` 目录解析，凭据变量名由声明里的 `apiKeyEnv` 给出并与其他提供商走同一套必填与占位符校验。声明 provider 的启动预检会真的请求它的目录端点，因此该路径不再离线。
 
+### 模型自动切换（MODEL_FALLBACKS）
+
+`MODEL_FALLBACKS` 是逗号分隔的 `provider:model` 列表，按顺序排在 `MODEL_PROVIDER`/`MODEL_ID` 之后。留空表示关闭，请求路径与之前完全一致。可以跨 provider，也可以在同一网关内换模型；provider 可以是内置的，也可以是 `providers.json` 声明的。
+
+- 启动时逐个校验：provider 必须存在，模型必须出现在该 provider 的目录里，fallback 的 context window 不得小于主模型，列表不得重复主模型、不得出现重复项；任何一项不合法都会让启动检查失败并报出变量名，不会静默跳过。
+- 429、额度/账单耗尽、401/403/404（模型不可访问或缺席）、网络错误、超时、5xx：立刻换下一个模型，不再把 429 当普通限流重试。
+- context overflow、内容审核、请求参数错误、调用方主动取消：不切换，原始错误照旧交给上层（overflow 仍由 compaction 处理）。
+- `MODEL_REQUEST_TIMEOUT_MS` 默认 90000：单次模型请求超过 90 秒就换下一个；切换后不会自动切回主模型（后续由手动切换负责）。
+- 切换只写进程日志（模型、原因、截断后的错误文本），不在聊天里提示。整条链都失败时，聊天只显示「模型暂时不可用」，细节留在日志。
+- 跨模型重放历史时，会去掉上一家 provider/model 私有的 thinking 签名；图片请求不会切到只接受文本的 fallback；`maxTokens` 与 reasoning 参数按目标模型收窄。
+- 关闭开关（`MODEL_FALLBACKS` 为空）时不会设置 90 秒请求超时，也不包装模型调用。
+
 常用可选项（均有默认值，注释里的数字与 `src/memory/contracts.ts`、`src/config.ts` 一致，完整清单见 `.env.example`）：
 
 - `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。
