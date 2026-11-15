@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   createAssistantMessageEventStream,
   type Api,
@@ -35,6 +37,113 @@ export function modelLabel(model: Pick<Model<Api>, "provider" | "id">): string {
 
 export function sameModel(model: Model<Api>, ref: ModelRef): boolean {
   return model.provider === ref.provider && model.id === ref.modelId;
+}
+
+/**
+ * The model the session is stuck on after a failover switch. It lives outside the model chain
+ * because a switch is a session decision, not a request decision: every later request starts at
+ * this model until somebody clears it. A manual chat switch back must call `clear()` (or `set()`
+ * with the chosen model); removing the file has the same effect.
+ */
+export type ModelSwitchState = {
+  active(): ModelRef | undefined;
+  set(ref: ModelRef): void;
+  clear(): void;
+};
+
+const MODEL_SELECTION_VERSION = 1;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseSwitchState(raw: string, log: (line: string) => void): ModelRef | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || parsed.version !== MODEL_SELECTION_VERSION || !isRecord(parsed.model)) {
+      throw new Error("unexpected shape");
+    }
+    const provider = parsed.model.provider;
+    const modelId = parsed.model.modelId;
+    if (typeof provider !== "string" || provider === "" || typeof modelId !== "string" || modelId === "") {
+      throw new Error("unexpected shape");
+    }
+    return { provider, modelId };
+  } catch {
+    log("Model failover: the stored model selection is unreadable; starting from the primary");
+    return undefined;
+  }
+}
+
+/**
+ * One tiny JSON file in the data directory. Writes are rename-atomic, so a crash leaves either the
+ * previous selection or the new one, never a half-written file. `active()` re-reads the file, so a
+ * manual switch that uses another store instance (or edits the file directly) takes effect on the
+ * next model call, not only after a restart.
+ */
+export function createModelSwitchStore(
+  path: string,
+  options: { log?: (line: string) => void } = {},
+): ModelSwitchState {
+  const log = options.log ?? ((line: string) => console.error(line));
+  let cachedRaw: string | undefined;
+  let cachedSelection: ModelRef | undefined;
+  let readFailureLogged = false;
+
+  const active = (): ModelRef | undefined => {
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        cachedRaw = undefined;
+        cachedSelection = undefined;
+        readFailureLogged = false;
+        return undefined;
+      }
+      // A missing file is the ordinary "no switch yet" state; any other read failure is
+      // recoverable by starting from the primary, but the operator should hear about it once.
+      if (!readFailureLogged) {
+        log(`Model failover: the stored model selection could not be read: ${error instanceof Error ? error.message : String(error)}`);
+        readFailureLogged = true;
+      }
+      return cachedSelection;
+    }
+    readFailureLogged = false;
+    if (raw === cachedRaw) return cachedSelection;
+    cachedRaw = raw;
+    cachedSelection = parseSwitchState(raw, log);
+    return cachedSelection;
+  };
+
+  return {
+    active,
+    set(ref) {
+      const selection = { provider: ref.provider, modelId: ref.modelId };
+      cachedSelection = selection;
+      try {
+        mkdirSync(dirname(path), { recursive: true });
+        const temporary = `${path}.${process.pid}.tmp`;
+        const raw = `${JSON.stringify({ version: MODEL_SELECTION_VERSION, model: selection })}\n`;
+        writeFileSync(temporary, raw, { mode: 0o600 });
+        renameSync(temporary, path);
+        cachedRaw = raw;
+      } catch (error) {
+        // The in-memory cache still keeps this process sticky; only a restart loses the choice.
+        cachedRaw = undefined;
+        log(`Model failover: the model selection could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    clear() {
+      cachedRaw = undefined;
+      cachedSelection = undefined;
+      try {
+        rmSync(path, { force: true });
+      } catch (error) {
+        log(`Model failover: the model selection could not be cleared: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  };
 }
 
 const EMPTY_USAGE: Usage = {
@@ -257,6 +366,11 @@ function safeDetail(text: string | undefined): string {
 export type ModelFailoverOptions = {
   /** Structured log sink; defaults to stderr. Switching is never announced in chat. */
   readonly log?: (line: string) => void;
+  /**
+   * Where the post-switch selection lives. Without it the wrapper is sticky only for this process's
+   * lifetime; the application passes a file-backed store so a restart keeps the fallback active.
+   */
+  readonly state?: ModelSwitchState;
 };
 
 type AttemptFailure = {
@@ -270,11 +384,12 @@ function unavailable(last: Model<Api>): AssistantMessage {
 }
 
 /**
- * Wrap a `Models` collection so a failed primary call continues with the next configured model.
+ * Wrap a `Models` collection so a failed call continues with the next configured model.
  *
  * Only calls whose model belongs to `chain` are managed; every other method and every other model
- * passes through untouched. Once a call has moved past a model it never goes back to it, and the
- * wrapper keeps no state between calls: the next request starts at its own first chain entry.
+ * passes through untouched. A successful fallback is remembered: later requests start at that
+ * fallback and never retry an earlier member, until the selection is cleared (a manual switch back)
+ * or the configured chain no longer contains it. Within one call the chain only moves forward.
  *
  * Streaming events are held until an attempt ends, then replayed only if it succeeded. A failed
  * attempt therefore never leaks a partial answer or a second `start` event to the durable harness.
@@ -284,11 +399,59 @@ export function createModelFailover(
   chain: readonly Model<Api>[],
   options: ModelFailoverOptions = {},
 ): Models {
-  if (chain.length < 2) return models;
   const log = options.log ?? ((line: string) => console.error(line));
+  const state = options.state;
+  if (chain.length < 2) return models;
 
-  const startIndex = (requested: Model<Api>): number =>
-    chain.findIndex((model) => model.provider === requested.provider && model.id === requested.id);
+  // Without a store the selection lives only in this wrapper; with one it is read on every call, so
+  // a manual switch back through another store instance (or the file itself) takes effect at once.
+  let localSelection: ModelRef | undefined;
+  const selection = (): ModelRef | undefined => (state === undefined ? localSelection : state.active());
+  const persistSelection = (ref: ModelRef | undefined): void => {
+    localSelection = ref;
+    if (ref === undefined) state?.clear();
+    else state?.set(ref);
+  };
+
+  const initial = selection();
+  if (initial !== undefined) {
+    const index = chain.findIndex((model) => sameModel(model, initial));
+    if (index < 0) {
+      log(
+        `Model failover: the stored selection ${initial.provider}/${initial.modelId} is not in the chain; `
+        + "starting from the primary",
+      );
+      persistSelection(undefined);
+    } else if (index === 0) {
+      // The stored selection is the primary, which is already the default; drop the file.
+      persistSelection(undefined);
+    } else {
+      log(
+        `Model failover: sticky fallback ${modelLabel(chain[index]!)} is active; `
+        + "the primary is not retried until a manual switch back",
+      );
+    }
+  }
+
+  const startIndex = (requested: Model<Api>): number => {
+    const requestedIndex = chain.findIndex(
+      (model) => model.provider === requested.provider && model.id === requested.id,
+    );
+    if (requestedIndex < 0) return -1;
+    // An explicitly selected fallback wins; the sticky selection only replaces the primary default.
+    if (requestedIndex > 0) return requestedIndex;
+    const sticky = selection();
+    const stickyIndex = sticky === undefined ? -1 : chain.findIndex((model) => sameModel(model, sticky));
+    return stickyIndex > 0 ? stickyIndex : requestedIndex;
+  };
+
+  const rememberSuccess = (model: Model<Api>, index: number): void => {
+    if (index === 0) return;
+    const sticky = selection();
+    if (sticky !== undefined && sameModel(model, sticky)) return;
+    persistSelection({ provider: model.provider, modelId: model.id });
+    log(`Model failover: session is now sticky on ${modelLabel(model)} until a manual switch back`);
+  };
 
   const noteSkip = (model: Model<Api>, context: Context): boolean => {
     if (!hasImageContent(context) || model.input.includes("image")) return false;
@@ -337,9 +500,11 @@ export function createModelFailover(
           output.end(aborted);
           return;
         }
-        if (index > start && noteSkip(model, context)) continue;
-        const attemptContext = index === start ? context : contextForModel(context, model);
-        const attemptOptions = index === start ? streamOptions : optionsForModel(streamOptions, model);
+        // A sticky start can itself be a text-only fallback, so compatibility is checked for every
+        // attempted model, including the one the call starts on. The chain still only moves forward.
+        if (noteSkip(model, context)) continue;
+        const attemptContext = contextForModel(context, model);
+        const attemptOptions = index === 0 ? streamOptions : optionsForModel(streamOptions, model);
         let stream: AssistantMessageEventStream;
         try {
           stream = models.streamSimple(model, attemptContext, attemptOptions);
@@ -360,6 +525,7 @@ export function createModelFailover(
         }
         const terminal = await terminalEvent(stream, model);
         if (terminal.type === "done") {
+          rememberSuccess(model, index);
           if (failures.length > 0) log(`Model failover: answered by ${modelLabel(model)}`);
           output.push(terminal);
           output.end(terminal.message);
@@ -408,9 +574,11 @@ export function createModelFailover(
       const model = chain[index]!;
       lastModel = model;
       if (completeOptions?.signal?.aborted) return errorAssistant(model, "Request was aborted", "aborted");
-      if (index > start && noteSkip(model, context)) continue;
-      const attemptContext = index === start ? context : contextForModel(context, model);
-      const attemptOptions = index === start ? completeOptions : optionsForModel(completeOptions, model);
+      // A sticky start can itself be a text-only fallback, so compatibility is checked for every
+      // attempted model, including the one the call starts on. The chain still only moves forward.
+      if (noteSkip(model, context)) continue;
+      const attemptContext = contextForModel(context, model);
+      const attemptOptions = index === 0 ? completeOptions : optionsForModel(completeOptions, model);
       let message: AssistantMessage;
       try {
         message = await models.completeSimple(model, attemptContext, attemptOptions);
@@ -425,6 +593,7 @@ export function createModelFailover(
         return message;
       }
       if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+        rememberSuccess(model, index);
         if (failures.length > 0) log(`Model failover: answered by ${modelLabel(model)}`);
         return message;
       }

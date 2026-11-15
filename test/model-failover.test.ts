@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +10,11 @@ import type { Api, AssistantMessage, Context, Message, Model } from "@earendil-w
 import { readMemoryConfig, readModelFailoverConfig, readConfig } from "../src/config.js";
 import { openAgent } from "../src/agent.js";
 import type { TextRequest } from "../src/messages.js";
-import { createModelFailover, MODEL_UNAVAILABLE_MESSAGE } from "../src/model-failover.js";
+import {
+  createModelFailover,
+  createModelSwitchStore,
+  MODEL_UNAVAILABLE_MESSAGE,
+} from "../src/model-failover.js";
 import { resolveModelChain } from "../src/providers.js";
 
 const CONTEXT: Context = {
@@ -278,6 +283,153 @@ test("a chain of one leaves every call unwrapped", () => {
   assert.equal(wrapped, models);
 });
 
+test("a successful switch is sticky across calls and survives a new store", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-sticky-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, chain } = fixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    primary.setResponses([failed("429: rate limited")]);
+    fallback.setResponses([fauxAssistantMessage("fallback first")]);
+    assert.equal((await wrapped.completeSimple(chain[0]!, CONTEXT)).model, "fallback-1");
+    assert.deepEqual(state.active(), { provider: "fallback", modelId: "fallback-1" });
+
+    // A primary that would answer is not tried: the session stays on the fallback.
+    fallback.setResponses([fauxAssistantMessage("fallback second")]);
+    assert.equal((await wrapped.completeSimple(chain[0]!, CONTEXT)).model, "fallback-1");
+    assert.equal(primary.state.callCount, 1);
+
+    // A new wrapper reading the same file is sticky too, which is what a process restart sees.
+    const reopened = createModelSwitchStore(path, { log: () => {} });
+    assert.deepEqual(reopened.active(), { provider: "fallback", modelId: "fallback-1" });
+    const afterRestart = createModelFailover(models, chain, { log: () => {}, state: reopened });
+    fallback.setResponses([fauxAssistantMessage("fallback after restart")]);
+    assert.equal((await afterRestart.completeSimple(chain[0]!, CONTEXT)).model, "fallback-1");
+    assert.equal(primary.state.callCount, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a manual switch back through another store instance takes effect at once", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-sticky-manual-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, chain } = fixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    primary.setResponses([failed("429: rate limited")]);
+    fallback.setResponses([fauxAssistantMessage("fallback answer")]);
+    assert.equal((await wrapped.completeSimple(chain[0]!, CONTEXT)).model, "fallback-1");
+
+    // The chat-side switch back clears the selection through its own store instance; the running
+    // wrapper must see that without a restart.
+    createModelSwitchStore(path, { log: () => {} }).clear();
+
+    primary.setResponses([fauxAssistantMessage("primary answer")]);
+    assert.equal((await wrapped.completeSimple(chain[0]!, CONTEXT)).provider, "primary");
+    assert.equal(state.active(), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a 90s timeout switch is sticky too", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-sticky-timeout-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, chain } = fixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    primary.setResponses([failed("Request timed out")]);
+    fallback.setResponses([fauxAssistantMessage("fallback answer")]);
+    await wrapped.completeSimple(chain[0]!, CONTEXT);
+    assert.deepEqual(state.active(), { provider: "fallback", modelId: "fallback-1" });
+
+    fallback.setResponses([fauxAssistantMessage("fallback again")]);
+    assert.equal((await wrapped.completeSimple(chain[0]!, CONTEXT)).model, "fallback-1");
+    assert.equal(primary.state.callCount, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a sticky text-only fallback is not bypassed by an image request", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-sticky-image-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, chain } = fixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    primary.setResponses([failed("429: rate limited")]);
+    fallback.setResponses([fauxAssistantMessage("fallback answer")]);
+    await wrapped.completeSimple(chain[0]!, CONTEXT);
+
+    primary.setResponses([fauxAssistantMessage("the primary must not answer")]);
+    const withImage: Context = {
+      messages: [{
+        role: "user",
+        content: [{ type: "text", text: "what is this" }, { type: "image", data: "AA==", mimeType: "image/png" }],
+        timestamp: 1,
+      }],
+    };
+    const answer = await wrapped.completeSimple(chain[0]!, withImage);
+    assert.equal(answer.errorMessage, MODEL_UNAVAILABLE_MESSAGE);
+    // Only the first call's failed primary attempt; stickiness never sends this request to it.
+    assert.equal(primary.state.callCount, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a whole-chain failure does not pin the session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-sticky-failed-"));
+  const path = join(directory, "model-selection.json");
+  const { models, primary, fallback, chain } = fixture();
+  const state = createModelSwitchStore(path, { log: () => {} });
+  const wrapped = createModelFailover(models, chain, { log: () => {}, state });
+  try {
+    primary.setResponses([failed("429: rate limited")]);
+    fallback.setResponses([failed("503: overloaded")]);
+    assert.equal((await wrapped.completeSimple(chain[0]!, CONTEXT)).errorMessage, MODEL_UNAVAILABLE_MESSAGE);
+    assert.equal(state.active(), undefined);
+
+    primary.setResponses([fauxAssistantMessage("primary recovered")]);
+    const next = await wrapped.completeSimple(chain[0]!, CONTEXT);
+    assert.equal(next.provider, "primary");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a stored selection outside the chain is discarded", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-sticky-stale-"));
+  const path = join(directory, "model-selection.json");
+  writeFileSync(path, JSON.stringify({ version: 1, model: { provider: "gone", modelId: "gone" } }));
+  const state = createModelSwitchStore(path, { log: () => {} });
+  const { models, chain } = fixture();
+  try {
+    createModelFailover(models, chain, { log: () => {}, state });
+    assert.equal(state.active(), undefined);
+    assert.equal(existsSync(path), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a malformed selection file is ignored", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-sticky-bad-"));
+  const path = join(directory, "model-selection.json");
+  writeFileSync(path, "not json");
+  const state = createModelSwitchStore(path, { log: () => {} });
+  try {
+    assert.equal(state.active(), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("one durable turn fails over, settles done and replays the same answer", async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-model-failover-"));
   const signal = new AbortController().signal;
@@ -287,7 +439,14 @@ test("one durable turn fails over, settles done and replays the same answer", as
   });
   const models = createModels();
   models.setProvider(faux.provider);
-  faux.setResponses([failed("429: rate limited"), fauxAssistantMessage("answered by the fallback")]);
+  const byModel = (primaryText: string, fallbackText: string) =>
+    (_transcript: unknown, _options: unknown, _state: unknown, model: { id: string }) =>
+      fauxAssistantMessage(model.id === "faux-2" ? fallbackText : primaryText);
+  faux.setResponses([
+    failed("429: rate limited"),
+    byModel("answered by the primary", "answered by the fallback"),
+    byModel("second primary answer", "second fallback answer"),
+  ]);
   const config = {
     ...readConfig({
       TELEGRAM_BOT_TOKEN: "offline-test",
@@ -315,6 +474,59 @@ test("one durable turn fails over, settles done and replays the same answer", as
     // submitting the request again.
     assert.equal(await app.reply(request, signal), "answered by the fallback");
     assert.equal(faux.state.callCount, 2);
+    // A new request starts directly on the fallback; the primary is not tried again.
+    const next: TextRequest = { ...request, requestId: "telegram:failover:2", text: "answer again" };
+    assert.equal(await app.reply(next, signal), "second fallback answer");
+    assert.equal(faux.state.callCount, 3);
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("a sticky fallback survives a process restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-model-sticky-restart-"));
+  const signal = new AbortController().signal;
+  const faux = fauxProvider({
+    provider: "openai",
+    models: [{ id: "faux-1", contextWindow: 200_000 }, { id: "faux-2", contextWindow: 200_000 }],
+  });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const config = {
+    ...readConfig({
+      TELEGRAM_BOT_TOKEN: "offline-test",
+      TELEGRAM_OWNER_ID: "1",
+      MODEL_PROVIDER: "openai",
+      MODEL_ID: "faux-1",
+      OPENAI_API_KEY: "offline-test",
+      MODEL_FALLBACKS: "openai:faux-2",
+      DATA_DIR: directory,
+    }),
+    memory: { ...readMemoryConfig({}), enabled: false },
+  };
+  const base: TextRequest = {
+    requestId: "telegram:restart:1",
+    conversationId: "telegram:restart",
+    senderId: "1",
+    text: "answer this",
+  };
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    faux.setResponses([
+      failed("429: rate limited"),
+      (_transcript, _options, _state, model) =>
+        fauxAssistantMessage(model.id === "faux-2" ? "fallback before restart" : "primary before restart"),
+    ]);
+    app = await openAgent(config, models);
+    assert.equal(await app.reply(base, signal), "fallback before restart");
+    await app.close();
+    app = undefined;
+    assert.equal(existsSync(join(directory, "model-selection.json")), true);
+
+    faux.setResponses([(_transcript, _options, _state, model) =>
+      fauxAssistantMessage(model.id === "faux-2" ? "fallback after restart" : "primary after restart")]);
+    app = await openAgent(config, models);
+    assert.equal(await app.reply({ ...base, requestId: "telegram:restart:2" }, signal), "fallback after restart");
   } finally {
     try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
   }

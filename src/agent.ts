@@ -24,7 +24,12 @@ import { createLoopGuard } from "./loop-guard.js";
 import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { readProviderConfig } from "./provider-config.js";
 import { createReactionExtension, type EmojiSource, type ReactionAnchor, type ReactionHost } from "./reactions.js";
-import { createModelFailover, MODEL_UNAVAILABLE_MESSAGE, modelLabel } from "./model-failover.js";
+import {
+  createModelFailover,
+  createModelSwitchStore,
+  MODEL_UNAVAILABLE_MESSAGE,
+  modelLabel,
+} from "./model-failover.js";
 import {
   createModelPool,
   PROVIDER_IDS,
@@ -297,7 +302,11 @@ export async function openAgent(
         );
       }
     }
-    models = createModelFailover(models, chain);
+    // A successful switch is sticky across requests and across restarts: the selection lives in the
+    // data directory, not in the wrapper alone.
+    models = createModelFailover(models, chain, {
+      state: createModelSwitchStore(join(config.dataDir, "model-selection.json")),
+    });
   }
 
   const workingDirectory = workspace;
