@@ -1,0 +1,364 @@
+# DRAFT — Dev 2 前端临时契约。
+#
+# 正式契约由 Dev 1 维护：docs/api/three-client-v1.openapi.yaml。
+# 该文件到达后运行 `npm run gen:api`，脚本会优先使用正式契约；
+# 本 draft 只用于契约到达前生成类型与 MSW mock，字段来源为
+# docs/architecture/three-client-v1.md 第 4.3–4.7 节。
+openapi: 3.1.0
+info:
+  title: Aster Three-Client API (frontend draft)
+  version: 0.1.0-draft
+  description: Draft used by Dev 2 until Dev 1 publishes the official contract.
+servers:
+  - url: /api/v1
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: 健康检查（无需鉴权）
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, version]
+                properties:
+                  ok: { type: boolean, const: true }
+                  version: { type: string }
+  /auth/login:
+    post:
+      operationId: login
+      summary: 单 owner 密码登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password]
+              properties:
+                password: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: 登录成功
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: 撤销当前 token
+      responses:
+        "204":
+          description: 已退出
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: 当前登录信息
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ownerId, expiresAt]
+                properties:
+                  ownerId: { type: string }
+                  expiresAt: { type: integer, format: int64 }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /messages:
+    get:
+      operationId: listMessages
+      summary: 历史消息（durable transcript 投影）
+      parameters:
+        - name: before
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessagePage" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: sendMessage
+      summary: 提交文本消息（幂等）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [clientMessageId, text]
+              properties:
+                clientMessageId: { type: string, minLength: 1, maxLength: 200 }
+                text: { type: string, minLength: 1, maxLength: 32000 }
+      responses:
+        "202":
+          description: 已入队
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [requestId, status]
+                properties:
+                  requestId: { type: string }
+                  status: { type: string, enum: [queued] }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /requests/{requestId}/abort:
+    post:
+      operationId: abortRequest
+      summary: 停止排队中或正在生成的回复
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 已停止
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [requestId, status]
+                properties:
+                  requestId: { type: string }
+                  status: { type: string, enum: [aborted] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/BadRequest"
+  /models:
+    get:
+      operationId: listModels
+      summary: 当前模型、默认链与可选模型（实时目录）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelsResponse" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /models/select:
+    post:
+      operationId: selectModel
+      summary: 手动选择模型或切回主模型（不调用模型）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelSelectRequest" }
+      responses:
+        "200":
+          description: 新的模型状态
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelSelectResponse" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: 未启用模型切换
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /events:
+    get:
+      operationId: subscribeEvents
+      summary: SSE 事件流（用 fetch + ReadableStream 读取）
+      responses:
+        "200":
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  security:
+    - bearerAuth: []
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [token, expiresAt]
+      properties:
+        token: { type: string }
+        expiresAt: { type: integer, format: int64 }
+    ModelKind:
+      type: string
+      enum: [primary, manual, auto]
+    ModelRef:
+      type: object
+      additionalProperties: false
+      required: [provider, id, label]
+      properties:
+        provider: { type: string }
+        id: { type: string }
+        name: { type: string }
+        label: { type: string }
+    CurrentModel:
+      type: object
+      additionalProperties: false
+      required: [provider, id, name, label, kind]
+      properties:
+        provider: { type: string }
+        id: { type: string }
+        name: { type: string }
+        label: { type: string }
+        kind: { $ref: "#/components/schemas/ModelKind" }
+    SelectableModel:
+      type: object
+      additionalProperties: false
+      required: [provider, id, name, label, supplier, family]
+      properties:
+        provider: { type: string }
+        id: { type: string }
+        name: { type: string }
+        label: { type: string }
+        supplier: { type: string, enum: [opencode, commandcode] }
+        family: { type: string, enum: [deepseek, glm, "gemini-flash"] }
+        contextWindow: { type: integer }
+    ModelsScope:
+      type: object
+      additionalProperties: false
+      required: [suppliers, families, excludesSpeedVariants]
+      properties:
+        suppliers:
+          type: array
+          items: { type: string }
+        families:
+          type: array
+          items: { type: string }
+        excludesSpeedVariants: { type: boolean }
+    ModelsResponse:
+      type: object
+      additionalProperties: false
+      required: [canSelect, current, primary, chain, selectable, scope]
+      properties:
+        canSelect: { type: boolean }
+        current: { $ref: "#/components/schemas/CurrentModel" }
+        primary: { $ref: "#/components/schemas/ModelRef" }
+        chain:
+          type: array
+          items: { $ref: "#/components/schemas/ModelRef" }
+        selectable:
+          type: array
+          items: { $ref: "#/components/schemas/SelectableModel" }
+        scope: { $ref: "#/components/schemas/ModelsScope" }
+    ModelSelectRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, modelId]
+          properties:
+            action: { type: string, const: select }
+            modelId: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [action]
+          properties:
+            action: { type: string, const: primary }
+    ModelSelectResponse:
+      allOf:
+        - $ref: "#/components/schemas/ModelsResponse"
+        - type: object
+          properties:
+            effective:
+              type: string
+              enum: [now, next_request]
+    UiMessage:
+      type: object
+      additionalProperties: false
+      required: [id, role, text, createdAt, status]
+      properties:
+        id: { type: string }
+        role: { type: string, enum: [user, assistant, system] }
+        text: { type: string }
+        createdAt: { type: integer, format: int64 }
+        status: { type: string, enum: [complete, failed, aborted] }
+        requestId: { type: [string, "null"] }
+        model:
+          oneOf:
+            - $ref: "#/components/schemas/ModelRef"
+            - type: "null"
+        errorCode: { type: [string, "null"] }
+        tool:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [name, status]
+              properties:
+                name: { type: string }
+                status: { type: string, enum: [done, failed] }
+            - type: "null"
+    MessagePage:
+      type: object
+      additionalProperties: false
+      required: [messages, nextCursor, hasMore]
+      properties:
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/UiMessage" }
+        nextCursor: { type: [string, "null"] }
+        hasMore: { type: boolean }
+  responses:
+    Unauthorized:
+      description: token 缺失、过期或已撤销
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: 请求不合法
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: 登录限流
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
