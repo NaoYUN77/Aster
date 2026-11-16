@@ -136,6 +136,22 @@ npm start
 
 注册表定义在 `src/providers.ts`。本应用只支持显式 API key 的提供商：不含 OAuth／订阅登录、云厂商环境凭据（Bedrock、Vertex）。自建的 OpenAI 兼容网关（包括按模型选择 `openai-completions`／`openai-responses`／`anthropic-messages`／`google-generative-ai` 四种协议）用 `DATA_DIR/providers.json` 声明，不需要改代码：`PROVIDERS_CONFIG` 可换路径，`MODEL_ID` 从声明或该网关的 `/models` 目录解析，凭据变量名由声明里的 `apiKeyEnv` 给出并与其他提供商走同一套必填与占位符校验。声明 provider 的启动预检会真的请求它的目录端点，因此该路径不再离线。
 
+### 模型自动切换（MODEL_FALLBACKS）
+
+`MODEL_FALLBACKS` 是逗号分隔的 `provider:model` 列表，按顺序排在 `MODEL_PROVIDER`/`MODEL_ID` 之后。留空表示关闭，请求路径与之前完全一致。可以跨 provider，也可以在同一网关内换模型；provider 可以是内置的，也可以是 `providers.json` 声明的。
+
+- 启动时逐个校验：provider 必须存在，模型必须出现在该 provider 的目录里，fallback 的 context window 不得小于主模型，列表不得重复主模型、不得出现重复项；任何一项不合法都会让启动检查失败并报出变量名，不会静默跳过。
+- 429、额度/账单耗尽、401/403/404（模型不可访问或缺席）、网络错误、超时、5xx：立刻换下一个模型，不再把 429 当普通限流重试。
+- context overflow、内容审核、请求参数错误、调用方主动取消：不切换，原始错误照旧交给上层（overflow 仍由 compaction 处理）。
+- `MODEL_REQUEST_TIMEOUT_MS` 默认 90000：单次模型请求超过 90 秒就换下一个。超时切换和错误切换一样会变成粘性选择。
+- **切换成功后会话保持粘性**：后续请求直接从该 fallback 开始，主模型不再被重试；即使下一次请求时主模型已经恢复，也不会自动切回。选择写入 `DATA_DIR/model-selection.json`，进程重启后继续生效；启动日志会打印当前粘在哪个 fallback 上。
+- 只有手动切回才会回到主模型：发 `$model primary`（或整句「切回主模型」「切回默认模型」），或删除 `DATA_DIR/model-selection.json`。选择在每次请求时重新读取，因此从另一个实例清除会立刻生效，不需要重启进程。粘性模型如果不在当前链里（例如 fallback 被删掉），启动时会告警并回到主模型。
+- **对话框手动切换（`$model`，仅 owner）**：`$model` 查看当前模型与默认链；`$model list [opencode|commandcode]` 列出当前目录里可切的模型；`$model <model id>` 指定模型；`$model primary` 切回主模型。别名 `opencode`/`commandcode` 指向该供应商默认的 DeepSeek Flash。可切范围只有 OpenCode（`opencode-go/`）与 Command Code（`commandcode/`）目录中、应用能映射成聊天模型的 DeepSeek、GLM、Gemini Flash；速度变体（Fast / Ultra Fast / HighSpeed / UltraSpeed）不开放；id 每次按实时目录校验，不硬编码。命令由宿主机直接答复，不调用模型、不写 durable turn，因此当前模型不可用时也能切走；其他成员发同样文字按普通聊天处理。
+- 手动指定同样是粘性的：写同一个 `model-selection.json`（`kind: "manual"`），跨请求、跨重启生效，直到再次 `$model primary` 或指定别的模型。选中模型 429/超时/不可访问时仍按默认链降级，并在该次回复末尾提示「（<选中的模型> 不可用，本次由 <实际模型> 回答）」；降级成功的实际模型记为自动粘性。用户未手动指定时的自动切换仍然完全静默。手动选中的纯文本模型收到图片请求时直接拒绝并说明，不会静默换模型。
+- 切换只写进程日志（模型、原因、截断后的错误文本），自动切换不在聊天里提示；`$model` 主动切换回一行确认。整条链都失败时，聊天只显示「模型暂时不可用」，细节留在日志；全链失败不会清除已有的粘性选择。
+- 跨模型重放历史时，会去掉上一家 provider/model 私有的 thinking 签名；图片请求不会切到只接受文本的 fallback；`maxTokens` 与 reasoning 参数按目标模型收窄。
+- 关闭开关（`MODEL_FALLBACKS` 为空）时不会设置 90 秒请求超时，也不包装模型调用。
+
 常用可选项（均有默认值，注释里的数字与 `src/memory/contracts.ts`、`src/config.ts` 一致，完整清单见 `.env.example`）：
 
 - `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。

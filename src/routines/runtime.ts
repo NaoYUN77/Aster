@@ -7,7 +7,7 @@ import { addLocalDays, localDateKey, localParts, minutesOfDay, pad, timeOfDayPar
 const IDLE_WAKE_MS = 60_000;
 const RUN_LEASE_MS = 20 * 60_000;
 const MAX_DISPATCH_PER_TICK = 10;
-const RETRYABLE = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY"]);
+const RETRYABLE = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY", "MODEL_UNAVAILABLE"]);
 
 export type DeliverFn = (chatId: string, text: string, signal: AbortSignal) => Promise<string>;
 

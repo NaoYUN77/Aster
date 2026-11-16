@@ -24,7 +24,21 @@ import { createLoopGuard } from "./loop-guard.js";
 import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, memoryAppError, type MemoryIntegration } from "./memory/integration.js";
 import { readProviderConfig } from "./provider-config.js";
 import { createReactionExtension, type EmojiSource, type ReactionAnchor, type ReactionHost } from "./reactions.js";
-import { createProviderModels, findCustomProvider, PROVIDER_IDS, refreshProviderCatalog, requireModel } from "./providers.js";
+import {
+  createModelFailover,
+  createModelSwitchStore,
+  MODEL_INCOMPATIBLE_MESSAGE,
+  MODEL_UNAVAILABLE_MESSAGE,
+  modelLabel,
+  type ModelSwitchState,
+} from "./model-failover.js";
+import { createModelCommandHandler } from "./model-command.js";
+import {
+  createModelPool,
+  PROVIDER_IDS,
+  refreshProviderCatalogs,
+  resolveModelChain,
+} from "./providers.js";
 import { createReminderExtension, type ReminderStore } from "./reminders.js";
 import { NO_REPORT, type RoutineDelivery, type RoutineRunRequest } from "./routines/protocol.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
@@ -35,7 +49,7 @@ import { installMcpTools, orderedMcpExtensions } from "./tool-pins.js";
 
 const context = BACKGROUND_CONTEXT;
 // Failures the request can recover from in-process; anything else thrown by the durable calls means the Session is unusable.
-const requestFailureCodes = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY", "AGENT_LOOP_DETECTED"]);
+const requestFailureCodes = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY", "AGENT_LOOP_DETECTED", "MODEL_UNAVAILABLE", "MODEL_INCOMPATIBLE"]);
 /**
  * What a member's Hub is not offered, by capability rather than by name: both shells are the same
  * ability on a different host, and the reminder tools are withheld because their target is fixed to
@@ -262,6 +276,7 @@ export async function openAgent(
   const workspace = join(config.dataDir, "workspace");
   await mkdir(workspace, { recursive: true });
 
+  const fallbacks = config.failover?.fallbacks ?? [];
   if (!models) {
     // Read exactly as the running service reads it, so the startup validation and this build cannot
     // disagree about which providers exist.
@@ -272,18 +287,35 @@ export async function openAgent(
       PROVIDER_IDS,
     );
     if (declared.error !== undefined) throw new ConfigurationError(declared.error);
-    models = createProviderModels(config.provider, declared.providers);
+    models = createModelPool(config.provider, fallbacks, declared.providers);
     // A declared provider may list its models from its own endpoint. That fetch happens once here,
-    // before the first request, because MODEL_ID cannot be checked against an unfetched catalog.
-    const declaration = findCustomProvider(declared.providers, config.provider);
-    if (declaration !== undefined) {
-      await refreshProviderCatalog(models, config.provider, declaration, {
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      });
-    }
+    // before the first request, because MODEL_ID and every MODEL_FALLBACKS model are checked against it.
+    await refreshProviderCatalogs(models, config.provider, fallbacks, declared.providers, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
   }
-  // Both the real and the injected (offline test) registries must know the configured model.
-  requireModel(models, config.provider, config.model);
+  // Both the real and the injected (offline test) registries must know every configured model, and a
+  // chain that cannot safely take over fails here rather than on the first outage.
+  const chain = resolveModelChain(models, { provider: config.provider, modelId: config.model }, fallbacks);
+  let switchStore: ModelSwitchState | undefined;
+  if (config.failover !== undefined) {
+    for (const member of chain.slice(1)) {
+      if (chain[0]!.input.includes("image") && !member.input.includes("image")) {
+        console.error(
+          `Model failover: ${modelLabel(member)} is text-only; a request carrying images will not switch to it`,
+        );
+      }
+    }
+    // A successful switch is sticky across requests and across restarts: the selection lives in the
+    // data directory, not in the wrapper alone. A manual `$model` switch uses the same file.
+    switchStore = createModelSwitchStore(join(config.dataDir, "model-selection.json"));
+    models = createModelFailover(models, chain, { state: switchStore });
+  }
+  // The command is host-side on purpose: it must answer even when the active model is unavailable.
+  // Without failover there is no selection store, so `$model` stays ordinary chat text.
+  const modelCommands = switchStore === undefined
+    ? undefined
+    : createModelCommandHandler({ provider: config.provider, models, chain, state: switchStore });
 
   const workingDirectory = workspace;
   const instructions = buildInstructions({
@@ -362,6 +394,9 @@ export async function openAgent(
       registry,
       settings: {
         toolExecution: "sequential",
+        // Only a configured chain changes the request bound. Without fallbacks the durable harness
+        // keeps pi-ai's own timeout defaults, so an empty MODEL_FALLBACKS is a true no-op.
+        ...(config.failover === undefined ? {} : { stream: { timeoutMs: config.failover.requestTimeoutMs } }),
         ...(memory ? { compaction: memoryCompactionSettings(memory) } : {}),
       },
       env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? workspace }),
@@ -662,6 +697,17 @@ export async function openAgent(
             await target.abort(context).catch(() => undefined);
             throw halted;
           }
+          // Every configured model failed with a provider-side condition. The chain already logged
+          // the details; the owner sees one stable message instead of raw upstream text.
+          if (settled.detail === MODEL_UNAVAILABLE_MESSAGE) {
+            throw Object.assign(new Error("Model temporarily unavailable"), { code: "MODEL_UNAVAILABLE" });
+          }
+          // A manually selected model was asked to take a request it cannot (an image for a
+          // text-only model). The user made that choice, so the session explains it rather than
+          // silently answering from a different model.
+          if (settled.detail === MODEL_INCOMPATIBLE_MESSAGE) {
+            throw Object.assign(new Error("Selected model cannot handle this request"), { code: "MODEL_INCOMPATIBLE" });
+          }
           throw Object.assign(new Error(`Agent request unanswered: ${settled.reason}`, { cause: settled.detail }), { code: "AGENT_UNANSWERED" });
         }
         if (settled.type !== "input") throw Object.assign(new Error("Agent returned an unexpected submission type"), { code: "AGENT_UNANSWERED" });
@@ -696,6 +742,16 @@ export async function openAgent(
       // This signal stops the host's wait during shutdown; close() preserves recovery.
       async reply(request: TextRequest, signal: AbortSignal): Promise<string> {
         signal.throwIfAborted();
+        // A `$model` command is answered by the host, not by a model: it has to work even when the
+        // active model is exactly what the owner is trying to switch away from. Only the owner may
+        // change the process-wide selection; anyone else's identical text is ordinary chat.
+        if (modelCommands !== undefined && request.senderId === config.channel.ownerId) {
+          const commandReply = modelCommands(request.text);
+          if (commandReply !== undefined) {
+            console.info(`Model command handled: ${request.requestId}`);
+            return commandReply;
+          }
+        }
         // Which conversation answers is decided before the trace opens: a tool execution is recorded
         // against the conversation it ran in, so the trace must name the one that does the work.
         const routed = await route(request);

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
 import { join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
+import { MODEL_FAILOVER_DEFAULTS, type ModelRef } from "./model-failover.js";
 import type { WatchersConfig } from "./watchers/protocol.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
 import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
@@ -174,10 +175,28 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   const skills = readSkillsConfig(env);
   const browser = readBrowserConfig(env);
   const style = readStyleConfig(env);
+  // The channel's own credentials keep their place in the error order; MODEL_ID follows them as before.
+  const channel = readChannelCredentials(env, channelKind, ownerId, required);
+  const model = required("MODEL_ID");
+  const failover = readModelFailoverConfig(
+    env,
+    { provider, modelId: model },
+    (id) => providerApiKeyEnv(id, customProviders) !== undefined,
+  );
+  // Each provider in the chain is a separate credential. A fallback whose key variable is absent
+  // would only fail at the first outage, so it fails startup instead.
+  for (const fallbackProvider of new Set(failover?.fallbacks.map((fallback) => fallback.provider) ?? [])) {
+    if (fallbackProvider === provider) continue;
+    const fallbackKeyEnv = providerApiKeyEnv(fallbackProvider, customProviders);
+    if (fallbackKeyEnv === undefined) continue; // readModelFailoverConfig already rejected this.
+    const fallbackKey = required(fallbackKeyEnv);
+    assertValidCredentialShape(fallbackKeyEnv, fallbackKey);
+  }
   return {
-    channel: readChannelCredentials(env, channelKind, ownerId, required),
+    channel,
     provider,
-    model: required("MODEL_ID"),
+    model,
+    ...(failover === undefined ? {} : { failover }),
     ...(deepseekWebApiKey ? { deepseekWebApiKey } : {}),
     ...(exaApiKey ? { exaApiKey } : {}),
     ...paths,
@@ -188,6 +207,83 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(browser === undefined ? {} : { browser }),
     style,
     trace: readTraceConfig(env),
+  };
+}
+
+/** At most this many fallbacks; the first batch intentionally keeps the chain short. */
+const MAX_MODEL_FALLBACKS = 5;
+
+/** Model-provider failover (MODEL_FALLBACKS / MODEL_REQUEST_TIMEOUT_MS). */
+export type ModelFailoverConfig = {
+  /** Models to try, in order, after the primary. Never contains the primary itself. */
+  readonly fallbacks: readonly ModelRef[];
+  /** Bound for one model request before the next model takes over. */
+  readonly requestTimeoutMs: number;
+};
+
+/**
+ * `MODEL_FALLBACKS` is a comma-separated `provider:model` list. An absent or empty value means the
+ * feature is off and nothing about the request path changes. Every malformed entry is a startup
+ * error: a typo must not silently leave the deployment without a fallback, and a list that repeats
+ * the primary would double-count it. Model ids may contain a colon, so the first colon separates
+ * provider from model.
+ */
+export function readModelFailoverConfig(
+  env: NodeJS.ProcessEnv,
+  primary: ModelRef,
+  knownProvider: (id: string) => boolean,
+): ModelFailoverConfig | undefined {
+  const raw = env.MODEL_FALLBACKS?.trim();
+  const timeoutConfigured = env.MODEL_REQUEST_TIMEOUT_MS?.trim();
+  if (raw === undefined || raw === "") {
+    if (timeoutConfigured !== undefined && timeoutConfigured !== "") {
+      throw new ConfigurationError("MODEL_REQUEST_TIMEOUT_MS requires MODEL_FALLBACKS");
+    }
+    return undefined;
+  }
+  const entries = raw.split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
+  if (entries.length === 0) {
+    throw new ConfigurationError("MODEL_FALLBACKS must name at least one provider:model");
+  }
+  if (entries.length > MAX_MODEL_FALLBACKS) {
+    throw new ConfigurationError(`MODEL_FALLBACKS must list at most ${MAX_MODEL_FALLBACKS} models`);
+  }
+  const fallbacks: ModelRef[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const separator = entry.indexOf(":");
+    if (separator <= 0 || separator === entry.length - 1) {
+      throw new ConfigurationError(`MODEL_FALLBACKS entry "${entry}" must be provider:model`);
+    }
+    const provider = entry.slice(0, separator).trim();
+    const modelId = entry.slice(separator + 1).trim();
+    if (provider === "" || modelId === "" || /\s/.test(provider) || /\s/.test(modelId)) {
+      throw new ConfigurationError(`MODEL_FALLBACKS entry "${entry}" must be provider:model without spaces`);
+    }
+    if (!knownProvider(provider)) {
+      throw new ConfigurationError(`MODEL_FALLBACKS names an unknown provider: ${provider}`);
+    }
+    const key = `${provider}:${modelId}`;
+    if (seen.has(key)) {
+      throw new ConfigurationError(`MODEL_FALLBACKS lists ${key} more than once`);
+    }
+    seen.add(key);
+    if (provider === primary.provider && modelId === primary.modelId) {
+      throw new ConfigurationError(
+        `MODEL_FALLBACKS lists the primary model ${key}; the primary is already the first model in the chain`,
+      );
+    }
+    fallbacks.push({ provider, modelId });
+  }
+  return {
+    fallbacks,
+    requestTimeoutMs: boundedInteger(
+      env,
+      "MODEL_REQUEST_TIMEOUT_MS",
+      MODEL_FAILOVER_DEFAULTS.requestTimeoutMs,
+      10_000,
+      600_000,
+    ),
   };
 }
 

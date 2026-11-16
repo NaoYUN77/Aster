@@ -17,6 +17,7 @@ import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { xaiProvider } from "@earendil-works/pi-ai/providers/xai";
 import { zaiProvider } from "@earendil-works/pi-ai/providers/zai";
 import { ConfigurationError } from "./errors.js";
+import { modelLabel, sameModel, type ModelRef } from "./model-failover.js";
 import { CatalogError, fetchCatalogModels } from "./provider-catalog.js";
 import {
   modelBaseUrl,
@@ -134,16 +135,41 @@ export function createCustomProvider(declaration: CustomProviderDeclaration): Pr
   });
 }
 
+function providerFor(id: string, custom: readonly CustomProviderDeclaration[], source: string): Provider {
+  const declaration = findCustomProvider(custom, id);
+  if (declaration !== undefined) return createCustomProvider(declaration);
+  const entry: ProviderEntry | undefined = isProviderId(id) ? PROVIDERS[id] : undefined;
+  if (entry === undefined) {
+    throw new ConfigurationError(
+      source === "MODEL_PROVIDER"
+        ? `MODEL_PROVIDER is not a known provider: ${id}`
+        : `${source} names a provider that is not known: ${id}`,
+    );
+  }
+  return entry.create();
+}
+
 export function createProviderModels(id: string, custom: readonly CustomProviderDeclaration[] = []): Models {
   const models = createModels();
-  const declaration = findCustomProvider(custom, id);
-  if (declaration !== undefined) {
-    models.setProvider(createCustomProvider(declaration));
-    return models;
+  models.setProvider(providerFor(id, custom, "MODEL_PROVIDER"));
+  return models;
+}
+
+/**
+ * One registry holding the primary provider and every provider the fallback chain names. Built-ins
+ * and declared providers share the same contract, so the chain can cross both kinds. Duplicate
+ * provider ids are registered once; a provider is still one credential and one client.
+ */
+export function createModelPool(
+  primary: string,
+  fallbacks: readonly ModelRef[],
+  custom: readonly CustomProviderDeclaration[] = [],
+): Models {
+  const models = createModels();
+  const providers = [...new Set([primary, ...fallbacks.map((fallback) => fallback.provider)])];
+  for (const id of providers) {
+    models.setProvider(providerFor(id, custom, id === primary ? "MODEL_PROVIDER" : "MODEL_FALLBACKS"));
   }
-  const entry: ProviderEntry | undefined = isProviderId(id) ? PROVIDERS[id] : undefined;
-  if (entry === undefined) throw new ConfigurationError(`MODEL_PROVIDER is not a known provider: ${id}`);
-  models.setProvider(entry.create());
   return models;
 }
 
@@ -172,10 +198,72 @@ export async function refreshProviderCatalog(
   throw new ConfigurationError(`Model catalog for provider ${providerId} could not be read: ${detail}`);
 }
 
-/** Fail before any network call when MODEL_ID is not in the provider catalog shipped with pi-ai. */
-export function requireModel(models: Models, provider: string, modelId: string): void {
+/**
+ * Refresh every declared provider used by the chain. A catalog that cannot be read is a startup
+ * error exactly as it is for the primary: without it the fallback model id cannot be checked.
+ */
+export async function refreshProviderCatalogs(
+  models: Models,
+  primary: string,
+  fallbacks: readonly ModelRef[],
+  custom: readonly CustomProviderDeclaration[],
+  options: { signal?: AbortSignal } = {},
+): Promise<void> {
+  const providers = [...new Set([primary, ...fallbacks.map((fallback) => fallback.provider)])];
+  for (const id of providers) {
+    const declaration = findCustomProvider(custom, id);
+    if (declaration !== undefined) await refreshProviderCatalog(models, id, declaration, options);
+  }
+}
+
+/** Fail before any network call when a configured model is not in its provider's catalog. */
+export function requireModel(
+  models: Models,
+  provider: string,
+  modelId: string,
+  source = "MODEL_PROVIDER",
+): void {
   if (models.getModel(provider, modelId)) return;
   const examples = models.getModels(provider).slice(0, 5).map((model) => model.id);
   const hint = examples.length > 0 ? `; examples: ${examples.join(", ")}` : "";
-  throw new ConfigurationError(`Unknown MODEL_ID "${modelId}" for MODEL_PROVIDER=${provider}${hint}`);
+  if (source === "MODEL_PROVIDER") {
+    throw new ConfigurationError(`Unknown MODEL_ID "${modelId}" for MODEL_PROVIDER=${provider}${hint}`);
+  }
+  throw new ConfigurationError(`Unknown MODEL_ID "${modelId}" in ${source} for provider ${provider}${hint}`);
+}
+
+/**
+ * Resolve the configured chain to concrete models, in call order, and reject a chain that cannot
+ * actually take over. A fallback with a smaller context window would overflow on exactly the
+ * requests the primary was already carrying, so that is a startup error rather than a later
+ * surprise. Duplicate entries collapse; the primary is always first.
+ */
+export function resolveModelChain(
+  models: Models,
+  primary: ModelRef,
+  fallbacks: readonly ModelRef[] = [],
+): Model<Api>[] {
+  const chain: Model<Api>[] = [];
+  for (const [index, ref] of [primary, ...fallbacks].entries()) {
+    const model = models.getModel(ref.provider, ref.modelId);
+    if (model === undefined) {
+      requireModel(models, ref.provider, ref.modelId, index === 0 ? "MODEL_PROVIDER" : "MODEL_FALLBACKS");
+      continue;
+    }
+    if (chain.some((known) => sameModel(known, ref))) continue;
+    chain.push(model);
+  }
+  const first = chain[0]!;
+  for (const model of chain.slice(1)) {
+    if (model.contextWindow < first.contextWindow) {
+      throw new ConfigurationError(
+        `MODEL_FALLBACKS model ${modelLabel(model)} has a smaller context window `
+        + `(${model.contextWindow}) than the primary (${first.contextWindow}); it cannot take over safely`,
+      );
+    }
+  }
+  if (fallbacks.length > 0 && chain.length < 2) {
+    throw new ConfigurationError("MODEL_FALLBACKS must add at least one model besides the primary");
+  }
+  return chain;
 }
