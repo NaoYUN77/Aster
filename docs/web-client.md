@@ -189,7 +189,14 @@ cd web
 npm run build
 npx cap sync android
 cd android && ./gradlew assembleDebug
+# 产物：android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+- 本机验证环境：JDK 21、Android SDK 36（`ANDROID_HOME`）、Gradle 8.14.3
+- 模拟器没有 KVM 时只能用 `-accel off`（TCG），启动很慢；有硬件加速时正常
+- 壳内页面 origin 为 `https://localhost`（`androidScheme: https`）；用本地 mock 联调时：
+  `adb reverse tcp:8787 tcp:8787`，应用内服务器地址填 `http://127.0.0.1:8787`
+  （loopback 视为可信来源；生产仍应填 HTTPS 地址）
 
 ## 10. 验证命令
 
