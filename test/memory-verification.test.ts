@@ -956,6 +956,6 @@ test("08-H: dependency review — pure Context, Harness-free Daily, state-only W
 
   const pkg = JSON.parse(await read("package.json")) as { dependencies: Record<string, string> };
   const dependencyNames = Object.keys(pkg.dependencies).sort();
-  assert.deepEqual(dependencyNames, ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable", "@earendil-works/pi-mcp", "@earendil-works/pi-schema", "@langfuse/otel", "@langfuse/tracing", "@opentelemetry/api", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/sdk-trace-node", "abort-controller", "grammy", "typebox"],
-    "the runtime dependency set is exactly the reviewed one (pi-schema for built-in tool declarations; the two Langfuse packages plus their OTel API/exporter/provider back tracing; no event bus, database service or plugin framework)");
+  assert.deepEqual(dependencyNames, ["@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable", "@earendil-works/pi-mcp", "@earendil-works/pi-schema", "@fastify/cors", "@fastify/helmet", "@fastify/rate-limit", "@fastify/static", "@langfuse/otel", "@langfuse/tracing", "@opentelemetry/api", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/sdk-trace-node", "abort-controller", "fastify", "grammy", "typebox"],
+    "the runtime dependency set is exactly the reviewed one (pi-schema for built-in tool declarations; the two Langfuse packages plus their OTel API/exporter/provider back tracing; Fastify 5 plus static/CORS/rate-limit/helmet for the web adapter; no event bus, database service, ORM or plugin framework)");
 });

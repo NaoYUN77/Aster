@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "tsx --env-file=.env src/main.ts",
+    "web:set-password": "tsx src/web-set-password.ts",
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
     "start": "node --env-file=.env dist/src/main.js",

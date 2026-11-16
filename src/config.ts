@@ -154,7 +154,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   };
   // The channel comes first: which variables exist, including the owner id, depends on it.
   const channelKind = readChannelKind(env);
-  const ownerId = channelKind === "slack" ? readSlackOwnerId(env, required) : readOwnerId(env);
+  const ownerId = channelKind === "slack"
+    ? readSlackOwnerId(env, required)
+    : channelKind === "web" ? readWebOwnerId(env) : readOwnerId(env);
   const provider = required("MODEL_PROVIDER");
   // A declared provider carries its own credential variable name; either kind resolves to exactly
   // one environment variable holding one explicit key.
@@ -207,6 +209,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(browser === undefined ? {} : { browser }),
     style,
     trace: readTraceConfig(env),
+    // Only a web deployment reads WEB_*; an unused variable in a Telegram deployment stays inert.
+    ...(channelKind === "web" ? { web: readWebConfig(env) } : {}),
   };
 }
 
@@ -528,9 +532,76 @@ export type ChannelConfig =
     readonly receipts: ReceiptEmojis;
     /** How many reactions the model may spend on one message; keeps a lively answer from becoming a wall. */
     readonly maxReactions: number;
-  };
+  }
+  | { readonly kind: "web"; readonly ownerId: string };
 
-export const CHANNELS = ["telegram", "slack"] as const;
+export const CHANNELS = ["telegram", "slack", "web"] as const;
+
+/** Web adapter runtime settings (only read when CHANNEL=web). */
+export type WebConfig = {
+  readonly port: number;
+  readonly host: string;
+  /** Origins allowed to call the API from a desktop/mobile WebView. Same-origin needs no entry. */
+  readonly allowedOrigins: readonly string[];
+  readonly sessionTtlDays: number;
+  /** Directory of the built frontend; relative paths resolve from the process working directory. */
+  readonly staticDir: string;
+  /** Whether to trust X-Forwarded-For from the local reverse proxy for the login rate limit. */
+  readonly trustProxy: boolean;
+};
+
+const WEB_OWNER_ID_SHAPE = /^[A-Za-z0-9._-]{1,64}$/;
+// scheme://authority, no path/query/fragment. Native WebView origins use custom schemes.
+const ORIGIN_SHAPE = /^[a-z][a-z0-9+.-]*:\/\/[^\s/?#]+$/i;
+const DEFAULT_WEB_ORIGINS = [
+  "http://localhost",
+  "http://localhost:5173",
+  "http://tauri.localhost",
+  "tauri://localhost",
+  "capacitor://localhost",
+] as const;
+
+/**
+ * The web adapter is one owner. `WEB_OWNER_ID` is only the internal sender id the agent sees; it is
+ * not a login name and never creates a second user.
+ */
+function readWebOwnerId(env: NodeJS.ProcessEnv): string {
+  const raw = env.WEB_OWNER_ID?.trim();
+  const ownerId = raw === undefined || raw === "" ? "owner" : raw;
+  if (!WEB_OWNER_ID_SHAPE.test(ownerId)) {
+    throw new ConfigurationError("WEB_OWNER_ID must be 1-64 characters of [A-Za-z0-9._-]");
+  }
+  return ownerId;
+}
+
+function readOriginList(env: NodeJS.ProcessEnv, key: string): readonly string[] {
+  const raw = env[key]?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_WEB_ORIGINS;
+  const origins = raw.split(",").map((value) => value.trim()).filter((value) => value !== "");
+  for (const origin of origins) {
+    if (!ORIGIN_SHAPE.test(origin)) {
+      throw new ConfigurationError(`${key} must list origins such as https://desktop.example (no path), comma-separated`);
+    }
+  }
+  return [...new Set(origins)];
+}
+
+export function readWebConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
+  const host = env.WEB_HOST?.trim() || "0.0.0.0";
+  if (/\s/.test(host)) throw new ConfigurationError("WEB_HOST must not contain whitespace");
+  const rawTrustProxy = env.WEB_TRUST_PROXY?.trim();
+  if (rawTrustProxy !== undefined && rawTrustProxy !== "" && rawTrustProxy !== "0" && rawTrustProxy !== "1") {
+    throw new ConfigurationError("WEB_TRUST_PROXY must be 0 or 1");
+  }
+  return {
+    port: boundedInteger(env, "WEB_PORT", 8787, 1, 65_535),
+    host,
+    allowedOrigins: readOriginList(env, "WEB_ALLOWED_ORIGINS"),
+    sessionTtlDays: boundedInteger(env, "WEB_SESSION_TTL_DAYS", 30, 1, 3_650),
+    staticDir: env.WEB_STATIC_DIR?.trim() || "web/dist",
+    trustProxy: rawTrustProxy === "1",
+  };
+}
 
 const SLACK_BOT_TOKEN_SHAPE = /^xoxb-[A-Za-z0-9-]{20,250}$/;
 const SLACK_APP_TOKEN_SHAPE = /^xapp-[A-Za-z0-9-]{20,250}$/;
@@ -543,12 +614,14 @@ const SLACK_CHANNEL_ID_SHAPE = /^[CGD][A-Z0-9]{6,15}$/;
  * Which channel this process serves. The default keeps every existing deployment working, and an
  * unrecognised value is a startup error rather than a silent fallback to Telegram.
  */
-function readChannelKind(env: NodeJS.ProcessEnv): "telegram" | "slack" {
+function readChannelKind(env: NodeJS.ProcessEnv): "telegram" | "slack" | "web" {
   const raw = env.CHANNEL?.trim().toLowerCase();
   if (raw !== undefined && raw !== "" && !(CHANNELS as readonly string[]).includes(raw)) {
     throw new ConfigurationError(`CHANNEL must be one of: ${CHANNELS.join(", ")}`);
   }
-  return raw === "slack" ? "slack" : "telegram";
+  if (raw === "slack") return "slack";
+  if (raw === "web") return "web";
+  return "telegram";
 }
 
 function readSlackOwnerId(env: NodeJS.ProcessEnv, required: (key: string) => string): string {
@@ -612,10 +685,13 @@ function readSlackIdList(
  */
 function readChannelCredentials(
   env: NodeJS.ProcessEnv,
-  kind: "telegram" | "slack",
+  kind: "telegram" | "slack" | "web",
   ownerId: string,
   required: (key: string) => string,
 ): ChannelConfig {
+  // The web adapter has no bot token: the owner authenticates with a password, and the HTTP layer
+  // enforces that. Configuration only names the internal sender id.
+  if (kind === "web") return { kind: "web", ownerId };
   if (kind === "slack") {
     const botToken = required("SLACK_BOT_TOKEN");
     const appToken = required("SLACK_APP_TOKEN");

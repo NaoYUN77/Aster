@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, type Conversation, type ConversationId, type Extension, type Storage } from "@earendil-works/pi-durable";
+import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, type Conversation, type ConversationId, type Cursor, type EntryId, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -30,9 +30,13 @@ import {
   MODEL_INCOMPATIBLE_MESSAGE,
   MODEL_UNAVAILABLE_MESSAGE,
   modelLabel,
+  type ModelSelection,
   type ModelSwitchState,
+  type ModelUsedEvent,
 } from "./model-failover.js";
 import { createModelCommandHandler } from "./model-command.js";
+import { createModelSelectionService } from "./model-control.js";
+import { projectEntry, type HistoryPage, type UiMessage } from "./http/projection.js";
 import {
   createModelPool,
   PROVIDER_IDS,
@@ -163,6 +167,16 @@ export type OpenAgentOptions = {
     /** Present when the channel can also list the workspace's own emoji, which needs `emoji:read`. */
     readonly emoji?: { readonly source: EmojiSource };
   };
+  /**
+   * Called after each request the failover wrapper answered, with the model that actually answered.
+   * Existing channels ignore it; the web adapter records it for `request.done.model`.
+   */
+  readonly onModelUsed?: (event: ModelUsedEvent) => void;
+  /**
+   * Called when the persisted model selection changes, including an automatic sticky fallback.
+   * The web adapter uses it to broadcast `model.changed` without writing the file itself.
+   */
+  readonly onModelSelectionChanged?: (selection: ModelSelection | undefined) => void;
 };
 
 /**
@@ -308,14 +322,27 @@ export async function openAgent(
     }
     // A successful switch is sticky across requests and across restarts: the selection lives in the
     // data directory, not in the wrapper alone. A manual `$model` switch uses the same file.
-    switchStore = createModelSwitchStore(join(config.dataDir, "model-selection.json"));
-    models = createModelFailover(models, chain, { state: switchStore });
+    switchStore = createModelSwitchStore(join(config.dataDir, "model-selection.json"), {
+      ...(options.onModelSelectionChanged === undefined ? {} : { onChange: options.onModelSelectionChanged }),
+    });
+    models = createModelFailover(models, chain, {
+      state: switchStore,
+      ...(options.onModelUsed === undefined ? {} : { onModelUsed: options.onModelUsed }),
+    });
   }
+  // One service for the text command and the HTTP routes. Without a failover store it is read-only
+  // (`canSelect: false`), which is exactly what the UI has to render.
+  const modelService = createModelSelectionService({
+    provider: config.provider,
+    models,
+    chain,
+    ...(switchStore === undefined ? {} : { state: switchStore }),
+  });
   // The command is host-side on purpose: it must answer even when the active model is unavailable.
   // Without failover there is no selection store, so `$model` stays ordinary chat text.
   const modelCommands = switchStore === undefined
     ? undefined
-    : createModelCommandHandler({ provider: config.provider, models, chain, state: switchStore });
+    : createModelCommandHandler({ provider: config.provider, models, chain, state: switchStore, service: modelService });
 
   const workingDirectory = workspace;
   const instructions = buildInstructions({
@@ -738,6 +765,63 @@ export async function openAgent(
       }
     }
 
+    /**
+     * Read-only history over the durable transcript. One page is returned oldest-first; the cursor is
+     * the oldest returned entry id, so a later `before` continues strictly below it. Nothing here
+     * writes or copies messages.
+     */
+    const history = async (options: { readonly before?: string; readonly limit?: number } = {}): Promise<HistoryPage> => {
+      const wanted = Math.min(100, Math.max(1, Math.trunc(options.limit ?? 30)));
+      let maxEntryId: EntryId | undefined;
+      if (options.before !== undefined && options.before !== "") {
+        if (!/^[1-9]\d*$/.test(options.before)) {
+          throw Object.assign(new Error("Invalid history cursor"), { code: "INVALID_REQUEST" });
+        }
+        const value = Number(options.before);
+        if (!Number.isSafeInteger(value)) {
+          throw Object.assign(new Error("Invalid history cursor"), { code: "INVALID_REQUEST" });
+        }
+        maxEntryId = (value - 1) as EntryId;
+      }
+      const collected: UiMessage[] = [];
+      let cursor: Cursor | undefined;
+      let hasMore = false;
+      let lastRawId: EntryId | undefined;
+      let fetched = 0;
+      while (collected.length <= wanted && fetched < 5_000) {
+        const page = await root.entries(
+          { order: "descending", ...(maxEntryId === undefined ? {} : { maxEntryId }) },
+          Math.min(200, Math.max(8, (wanted - collected.length) * 4)),
+          cursor,
+          context,
+        );
+        fetched += page.items.length;
+        for (const entry of page.items) {
+          lastRawId = entry.id;
+          const message = projectEntry(entry);
+          if (message !== undefined) collected.push(message);
+        }
+        if (page.next === undefined) {
+          hasMore = false;
+          cursor = undefined;
+          break;
+        }
+        cursor = page.next;
+        hasMore = true;
+        if (page.items.length === 0) break;
+      }
+      if (collected.length > wanted) {
+        // One extra visible message proves there is an older page; it is returned next time.
+        collected.length = wanted;
+        hasMore = true;
+      }
+      const nextCursor = hasMore
+        ? (collected.at(-1)?.id ?? (lastRawId === undefined ? null : String(lastRawId)))
+        : null;
+      collected.reverse();
+      return { messages: collected, nextCursor, hasMore: nextCursor !== null };
+    };
+
     return {
       // This signal stops the host's wait during shutdown; close() preserves recovery.
       async reply(request: TextRequest, signal: AbortSignal): Promise<string> {
@@ -828,6 +912,10 @@ export async function openAgent(
         const text = await executeRequest(target, request, input.signal, input.timeoutMs, requestTrace);
         return { conversationId: target.id, text };
       },
+      /** Shared by `$model` and the HTTP model routes. */
+      modelService,
+      /** Read-only durable transcript access for the web adapter. */
+      history,
       // Conversation-wide cancellation waits for ordinary tasks to become terminal.
       abort: () => root.abort(context),
       // Ends the current context cycle; the next reply establishes the new snapshot behind the
