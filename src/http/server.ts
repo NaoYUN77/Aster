@@ -41,6 +41,22 @@ function errorBody(code: string, message: string): ErrorBody {
   return { error: { code, message } };
 }
 
+/**
+ * CORS headers for a hijacked response. `reply.hijack()` hands the socket to the route, so
+ * `@fastify/cors` never sees the response and cannot add `Access-Control-Allow-Origin`. Echo the
+ * request origin only when the same `WEB_ALLOWED_ORIGINS` allowlist accepts it.
+ */
+function hijackCorsHeaders(
+  origin: string | undefined,
+  allowedOrigins: readonly string[],
+): Record<string, string> {
+  const headers: Record<string, string> = { Vary: "Origin" };
+  if (origin !== undefined && origin !== "" && allowedOrigins.includes(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
+}
+
 function bearerToken(request: FastifyRequest): string {
   const header = request.headers.authorization;
   if (typeof header !== "string" || !header.startsWith("Bearer ")) return "";
@@ -244,6 +260,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       "Cache-Control": "no-cache, no-transform",
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no",
+      ...hijackCorsHeaders(request.headers.origin, config.allowedOrigins),
     });
     res.flushHeaders?.();
     const active = store.active();

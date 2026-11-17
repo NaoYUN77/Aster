@@ -46,7 +46,9 @@ is broadcast as `model.changed` just like a button click.
 - CORS allows `Authorization`, `Content-Type`, and `Cache-Control`. Defaults include
   `http://localhost:5173`, `https://localhost` (Capacitor), `http://tauri.localhost`,
   `tauri://localhost`, and `capacitor://localhost`. Setting `WEB_ALLOWED_ORIGINS` replaces the
-  defaults, so a native shell deployment must list its exact origin there.
+  defaults, so a native shell deployment must list its exact origin there. The SSE response is
+  written on a hijacked socket and therefore echoes `Access-Control-Allow-Origin` and
+  `Vary: Origin` itself; an origin outside the allowlist gets no ACAO.
 - Errors use `{ "error": { "code", "message" } }`; display `message`, branch on `code`.
 
 ## Error codes

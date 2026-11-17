@@ -20,7 +20,9 @@ info:
     `capacitor://localhost`; requesting clients must send exactly one of them as
     `Origin`. Setting `WEB_ALLOWED_ORIGINS` replaces the defaults, so include the
     native shell's origin there as well. Preflight allows `Authorization`,
-    `Content-Type`, and `Cache-Control` (the SSE client sends the last one).
+    `Content-Type`, and `Cache-Control` (the SSE client sends the last one). The
+    SSE endpoint applies the same allowlist on its hijacked response, echoing
+    `Access-Control-Allow-Origin` and `Vary: Origin`.
 servers:
   - url: /
     description: Same origin (Web behind Caddy); Tauri/Capacitor use their configured server URL.

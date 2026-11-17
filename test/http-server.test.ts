@@ -22,7 +22,7 @@ async function startServer(options: { withSse?: boolean } = {}) {
   const config: WebConfig = {
     port: 0,
     host: "127.0.0.1",
-    allowedOrigins: ["http://localhost:5173", "https://localhost"],
+    allowedOrigins: ["http://localhost:5173", "https://localhost", "tauri://localhost"],
     sessionTtlDays: 30,
     staticDir: join(directory, "web-dist"),
     trustProxy: false,
@@ -291,6 +291,37 @@ test("SSE opens with a snapshot and streams queued/running/done for a new messag
     }
   } finally {
     controller.abort();
+    await server.close();
+  }
+});
+
+test("hijacked SSE keeps CORS: allowed shell origin echoes ACAO, others do not", async () => {
+  const server = await startServer();
+  try {
+    const { token } = (await server.login()).json<{ token: string }>();
+    const open = (origin?: string) => fetch(`${server.url}/api/v1/events`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(origin === undefined ? {} : { origin }),
+      },
+    });
+
+    const allowed = await open("tauri://localhost");
+    assert.equal(allowed.status, 200);
+    assert.equal(allowed.headers.get("access-control-allow-origin"), "tauri://localhost");
+    assert.match(allowed.headers.get("vary") ?? "", /\bOrigin\b/i);
+    await allowed.body?.cancel();
+
+    const denied = await open("https://not-allowed.example");
+    assert.equal(denied.status, 200);
+    assert.equal(denied.headers.get("access-control-allow-origin"), null);
+    assert.match(denied.headers.get("vary") ?? "", /\bOrigin\b/i);
+    await denied.body?.cancel();
+
+    const sameOrigin = await open();
+    assert.equal(sameOrigin.headers.get("access-control-allow-origin"), null);
+    await sameOrigin.body?.cancel();
+  } finally {
     await server.close();
   }
 });
