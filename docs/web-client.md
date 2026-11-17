@@ -34,8 +34,9 @@ web/                     Vite + React + TS 应用（唯一 UI 代码）
 
 ## 3. API 契约
 
-- 正式契约由 Dev 1 维护：`docs/api/three-client-v1.openapi.yaml`。
-- 契约未到位前，`web/openapi/three-client-v1.draft.yaml` 是前端按架构文档第 4.3–4.7 节写的临时契约，仅用于生成类型与 mock。
+- 正式契约由 Dev 1 维护：`docs/api/three-client-v1.openapi.yaml`（PR #81）。
+- 合并前，`web/openapi/three-client-v1.official.yaml` 是 Dev 1 契约的快照
+  （提交 `4f4e99b`），仅用于生成类型；`three-client-v1.draft.yaml` 是更早的临时草案。
 - 重新生成类型：
 
 ```bash
@@ -43,8 +44,12 @@ cd web
 npm run gen:api
 ```
 
-脚本会优先读取正式契约；存在正式契约时不再使用 draft。生成结果在
-`web/src/api/schema.d.ts`，业务代码通过 `web/src/api/client.ts` 的类型化封装访问。
+脚本优先读取仓库根部的正式契约；未合并时读取官方契约快照，最后才回退 draft。
+生成结果在 `web/src/api/schema.d.ts`，业务代码通过 `web/src/api/client.ts` 的类型化封装访问。
+契约路径自带 `/api/v1` 前缀，客户端 baseUrl 只保存服务器根地址。
+
+错误响应统一为 `{"error":{"code","message"}}`；`POST /api/v1/messages` 的 400
+既可能是 `INVALID_REQUEST`，也可能是 `TEXT_TOO_LONG`，客户端按 `error.code` 分支处理。
 
 ### 3.1 SSE
 
@@ -66,7 +71,9 @@ npm run gen:api
 - `PROCESS_INTERRUPTED` → 服务重启，请重试
 - `MODEL_NOT_FOUND` / `MODEL_OUT_OF_SCOPE` / `MODEL_SWITCH_DISABLED` /
   `SELECTION_WRITE_FAILED`
-- `UNAUTHORIZED` / `RATE_LIMITED` / `TEXT_TOO_LONG` / 网络与超时
+- `UNAUTHORIZED` / `RATE_LIMITED` / 网络与超时
+- `TEXT_TOO_LONG`：直接展示服务端 `message`（如“消息过长，最多 32000 个字符”），
+  不用固定文案覆盖
 
 ## 4. 认证、TokenStore 与服务器地址
 

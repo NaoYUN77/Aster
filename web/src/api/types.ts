@@ -5,23 +5,20 @@ export type MessageRole = NonNullable<UiMessage["role"]>;
 export type MessageStatus = NonNullable<UiMessage["status"]>;
 export type MessagePage = components["schemas"]["MessagePage"];
 export type ModelsResponse = components["schemas"]["ModelsResponse"];
-export type ModelSelectResponse = components["schemas"]["ModelSelectResponse"];
-export type ModelKind = components["schemas"]["ModelKind"];
-export type ModelRef = components["schemas"]["ModelRef"];
+export type ModelSelectResponse = components["schemas"]["SelectModelResponse"];
+export type ModelKind = components["schemas"]["ModelSelectionKind"];
+export type ModelRef = components["schemas"]["ModelEntry"];
+export type MessageModel = components["schemas"]["MessageModel"];
 export type CurrentModel = components["schemas"]["CurrentModel"];
 export type SelectableModel = components["schemas"]["SelectableModel"];
 export type LoginResponse = components["schemas"]["LoginResponse"];
-export type MeResponse = { ownerId: string; expiresAt: number };
+export type MeResponse = components["schemas"]["MeResponse"];
 export type HealthResponse = { ok: true; version: string };
-export type ErrorBody = components["schemas"]["Error"];
+/** 错误响应体里的 `error` 对象（契约 ErrorResponse）。 */
+export type ErrorBody = components["schemas"]["ErrorResponse"]["error"];
 
 /** request.done 事件里的模型使用信息。 */
-export type ModelUsage = {
-  requested?: (ModelRef & { kind?: ModelKind }) | null;
-  actual?: ModelRef | null;
-  kind: ModelKind;
-  degraded: boolean;
-};
+export type ModelUsage = components["schemas"]["ModelUsage"];
 
 export const EMPTY_MODEL_KIND_LABEL: Record<ModelKind, string> = {
   primary: "主模型",

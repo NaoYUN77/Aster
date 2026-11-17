@@ -4,14 +4,14 @@
  */
 
 export interface paths {
-    "/health": {
+    "/api/v1/health": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** 健康检查（无需鉴权） */
+        /** Unauthenticated liveness probe */
         get: operations["getHealth"];
         put?: never;
         post?: never;
@@ -21,7 +21,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/auth/login": {
+    "/api/v1/auth/login": {
         parameters: {
             query?: never;
             header?: never;
@@ -30,7 +30,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 单 owner 密码登录 */
+        /**
+         * Exchange the owner password for a bearer token
+         * @description Rate limited to 5 failed attempts per IP per minute. A wrong password
+         *     returns 401 `INVALID_CREDENTIALS`; the response never reveals whether a
+         *     password has been configured.
+         */
         post: operations["login"];
         delete?: never;
         options?: never;
@@ -38,7 +43,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/auth/logout": {
+    "/api/v1/auth/logout": {
         parameters: {
             query?: never;
             header?: never;
@@ -47,7 +52,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 撤销当前 token */
+        /** Revoke the current bearer token */
         post: operations["logout"];
         delete?: never;
         options?: never;
@@ -55,14 +60,14 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/auth/me": {
+    "/api/v1/auth/me": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** 当前登录信息 */
+        /** Current session identity and expiry */
         get: operations["getMe"];
         put?: never;
         post?: never;
@@ -72,25 +77,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/messages": {
+    "/api/v1/messages": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** 历史消息（durable transcript 投影） */
+        /**
+         * Read durable transcript history (projected for the UI)
+         * @description Returns the page in chronological order (oldest first). Pass
+         *     `nextCursor` as `before` to load older messages. The cursor is opaque
+         *     and entry-id based; never derive it from an array index.
+         */
         get: operations["listMessages"];
         put?: never;
-        /** 提交文本消息（幂等） */
-        post: operations["sendMessage"];
+        /**
+         * Queue one owner text message
+         * @description Idempotent per `clientMessageId`: repeating the same id returns the same
+         *     `requestId` and does not enqueue twice. Only one request runs at a time;
+         *     further submissions queue FIFO. The final answer is delivered through SSE
+         *     `request.done`; history is always read from the durable transcript.
+         */
+        post: operations["submitMessage"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/requests/{requestId}/abort": {
+    "/api/v1/requests/{requestId}/abort": {
         parameters: {
             query?: never;
             header?: never;
@@ -99,7 +115,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 停止排队中或正在生成的回复 */
+        /**
+         * Stop the queued or running request
+         * @description Aborts the current generation for the single conversation. A queued
+         *     request is marked aborted and skipped; a running request calls
+         *     `agent.abort()` and is marked aborted. Later queued requests remain.
+         *     The stopped input stays visible in history, but it is excluded from the
+         *     next model context, so the next answer does not answer it again. A stop
+         *     before any visible token leaves no empty assistant message.
+         */
         post: operations["abortRequest"];
         delete?: never;
         options?: never;
@@ -107,14 +131,19 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/models": {
+    "/api/v1/models": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** 当前模型、默认链与可选模型（实时目录） */
+        /**
+         * Live model catalog and current selection
+         * @description `selectable` is the live runtime catalog filtered by the same policy as
+         *     `$model list`. The server never returns API keys, base URLs or provider
+         *     credentials.
+         */
         get: operations["listModels"];
         put?: never;
         post?: never;
@@ -124,7 +153,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/models/select": {
+    "/api/v1/models/select": {
         parameters: {
             query?: never;
             header?: never;
@@ -133,7 +162,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 手动选择模型或切回主模型（不调用模型） */
+        /**
+         * Manually select a model or switch back to the primary
+         * @description Host-side only: does not call a model and does not produce a chat
+         *     message. The selection is persisted (manual sticky) until `primary` is
+         *     requested or the selected model disappears from the catalog.
+         */
         post: operations["selectModel"];
         delete?: never;
         options?: never;
@@ -141,14 +175,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/events": {
+    "/api/v1/events": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** SSE 事件流（用 fetch + ReadableStream 读取） */
+        /**
+         * Server-Sent Events stream
+         * @description Uses the same `Authorization: Bearer` header as every other endpoint, so
+         *     clients must consume it with `fetch` + `ReadableStream`, not
+         *     `EventSource`. The stream opens with a `snapshot` event, sends an SSE
+         *     comment heartbeat every 15 seconds, and broadcasts request and model
+         *     events to every connected client. No event replay is provided: on
+         *     reconnect a client re-reads history and uses the new snapshot.
+         */
         get: operations["subscribeEvents"];
         put?: never;
         post?: never;
@@ -162,55 +204,113 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        Error: {
-            code: string;
-            message: string;
+        HealthResponse: {
+            /** @constant */
+            ok: true;
+            version: string;
+        };
+        LoginRequest: {
+            password: string;
         };
         LoginResponse: {
+            /** @description Opaque bearer token. Store only on the client. */
             token: string;
-            /** Format: int64 */
-            expiresAt: number;
+            /** Format: date-time */
+            expiresAt: string;
+            ownerId: string;
+        };
+        MeResponse: {
+            ownerId: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        SubmitMessageRequest: {
+            /** @description Client-generated id; the idempotency key. */
+            clientMessageId: string;
+            text: string;
         };
         /** @enum {string} */
-        ModelKind: "primary" | "manual" | "auto";
-        ModelRef: {
-            provider: string;
-            id: string;
-            name?: string;
-            label: string;
+        RequestStatus: "queued" | "running" | "done" | "failed" | "aborted";
+        SubmitMessageResponse: {
+            requestId: string;
+            status: components["schemas"]["RequestStatus"];
         };
-        CurrentModel: {
+        AbortResponse: {
+            requestId: string;
+            /** @constant */
+            status: "aborted";
+        };
+        UiMessage: {
+            /** @description Stable server-side message id (durable entry id). */
+            id: string;
+            /** @enum {string} */
+            role: "user" | "assistant" | "system";
+            text: string;
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            createdAt: number;
+            /** @enum {string} */
+            status: "complete" | "failed" | "aborted";
+            requestId?: string | null;
+            model?: components["schemas"]["MessageModel"] | null;
+            errorCode?: string | null;
+            tool?: components["schemas"]["ToolSummary"] | null;
+        };
+        MessageModel: {
+            /** @description Model id as it appears in the runtime catalog. */
+            id: string;
+            /** @description Human label, conventionally `<provider>/<model id>`. */
+            label: string;
+            provider?: string;
+        };
+        ToolSummary: {
+            name: string;
+            /** @enum {string} */
+            status: "done" | "failed";
+        };
+        MessagePage: {
+            /** @description Chronological, oldest first. */
+            messages: components["schemas"]["UiMessage"][];
+            /** @description Pass as `before` to load older messages; null when absent. */
+            nextCursor: string | null;
+            hasMore: boolean;
+        };
+        /** @enum {string} */
+        ModelSelectionKind: "primary" | "manual" | "auto";
+        ModelEntry: {
             provider: string;
             id: string;
             name: string;
             label: string;
-            kind: components["schemas"]["ModelKind"];
         };
-        SelectableModel: {
-            provider: string;
-            id: string;
-            name: string;
-            label: string;
+        CurrentModel: components["schemas"]["ModelEntry"] & {
+            kind: components["schemas"]["ModelSelectionKind"];
+        };
+        SelectableModel: components["schemas"]["ModelEntry"] & {
             /** @enum {string} */
             supplier: "opencode" | "commandcode";
             /** @enum {string} */
             family: "deepseek" | "glm" | "gemini-flash";
             contextWindow?: number;
         };
-        ModelsScope: {
+        ModelScope: {
             suppliers: string[];
             families: string[];
-            excludesSpeedVariants: boolean;
+            /** @constant */
+            excludesSpeedVariants: true;
         };
         ModelsResponse: {
+            /** @description False when no failover chain/selection store is configured; UI renders read-only. */
             canSelect: boolean;
             current: components["schemas"]["CurrentModel"];
-            primary: components["schemas"]["ModelRef"];
-            chain: components["schemas"]["ModelRef"][];
+            primary: components["schemas"]["ModelEntry"];
+            chain: components["schemas"]["ModelEntry"][];
             selectable: components["schemas"]["SelectableModel"][];
-            scope: components["schemas"]["ModelsScope"];
+            scope: components["schemas"]["ModelScope"];
         };
-        ModelSelectRequest: {
+        SelectModelRequest: {
             /** @constant */
             action: "select";
             modelId: string;
@@ -218,60 +318,149 @@ export interface components {
             /** @constant */
             action: "primary";
         };
-        ModelSelectResponse: components["schemas"]["ModelsResponse"] & {
-            /** @enum {string} */
-            effective?: "now" | "next_request";
+        SelectModelResponse: components["schemas"]["ModelsResponse"] & {
+            /**
+             * @description `next_request` when a request is currently running: the current
+             *     generation keeps the model it started with and the new selection
+             *     applies to the next reply.
+             * @enum {string}
+             */
+            effective?: "immediate" | "next_request";
         };
-        UiMessage: {
-            id: string;
-            /** @enum {string} */
-            role: "user" | "assistant" | "system";
-            text: string;
+        ModelUsage: {
+            requested: {
+                id: string;
+                label: string;
+                kind: components["schemas"]["ModelSelectionKind"];
+            };
+            actual: components["schemas"]["MessageModel"];
+            kind: components["schemas"]["ModelSelectionKind"];
+            /** @description True only when a manual selection was unavailable and another model answered. */
+            degraded: boolean;
+        };
+        /** @description Discriminated by the SSE `event:` name. `data` is JSON. */
+        SseEvent: {
+            /** @constant */
+            event: "snapshot";
+            data: {
+                activeRequest: components["schemas"]["ActiveRequest"] | null;
+                /** @description Monotonic selection version; changes on every applied model change. */
+                modelVersion: number;
+            };
+        } | {
+            /** @constant */
+            event: "request.queued";
+            data: {
+                requestId: string;
+                clientMessageId: string;
+            };
+        } | {
+            /** @constant */
+            event: "request.running";
+            data: {
+                requestId: string;
+            };
+        } | {
+            /** @constant */
+            event: "request.done";
+            data: {
+                requestId: string;
+                message: components["schemas"]["UiMessage"];
+                model: components["schemas"]["ModelUsage"];
+            };
+        } | {
+            /** @constant */
+            event: "request.failed";
+            data: {
+                requestId: string;
+                /** @description Stable error code such as MODEL_UNAVAILABLE. */
+                code: string;
+                message: string;
+            };
+        } | {
+            /** @constant */
+            event: "request.aborted";
+            data: {
+                requestId: string;
+            };
+        } | {
+            /** @constant */
+            event: "model.changed";
+            data: {
+                current: components["schemas"]["CurrentModel"];
+                version: number;
+            };
+        } | {
+            /** @constant */
+            event: "heartbeat";
+            data: {
+                /** Format: int64 */
+                ts: number;
+            };
+        };
+        ActiveRequest: {
+            requestId: string;
+            clientMessageId: string;
+            /** @constant */
+            status: "running";
             /** Format: int64 */
-            createdAt: number;
-            /** @enum {string} */
-            status: "complete" | "failed" | "aborted";
-            requestId?: string | null;
-            model?: components["schemas"]["ModelRef"] | null;
-            errorCode?: string | null;
-            tool?: {
-                name: string;
-                /** @enum {string} */
-                status: "done" | "failed";
-            } | null;
+            startedAt: number;
         };
-        MessagePage: {
-            messages: components["schemas"]["UiMessage"][];
-            nextCursor: string | null;
-            hasMore: boolean;
+        ErrorResponse: {
+            error: {
+                /**
+                 * @description Stable machine-readable code. Auth/transport codes: INVALID_REQUEST,
+                 *     TEXT_TOO_LONG, UNAUTHORIZED, RATE_LIMITED, REQUEST_NOT_FOUND,
+                 *     REQUEST_NOT_ACTIVE, PAYLOAD_TOO_LARGE.
+                 *     Model codes: MODEL_NOT_FOUND, MODEL_OUT_OF_SCOPE,
+                 *     MODEL_SWITCH_DISABLED, SELECTION_WRITE_FAILED. Request failure
+                 *     codes sent in `request.failed`: MODEL_UNAVAILABLE,
+                 *     MODEL_INCOMPATIBLE, AGENT_TIMEOUT, AGENT_UNANSWERED,
+                 *     AGENT_TRUNCATED, EMPTY_REPLY, AGENT_LOOP_DETECTED,
+                 *     AGENT_SESSION_FAILED, PROCESS_INTERRUPTED, ABORTED,
+                 *     EXECUTION_ERROR.
+                 */
+                code: string;
+                /** @description Safe user-facing text; never contains stack traces or provider credentials. */
+                message: string;
+            };
         };
     };
     responses: {
-        /** @description token 缺失、过期或已撤销 */
+        /** @description Malformed request or invalid parameters. */
+        InvalidRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Missing, expired or revoked token. */
         Unauthorized: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Error"];
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description 请求不合法 */
-        BadRequest: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["Error"];
-            };
-        };
-        /** @description 登录限流 */
+        /** @description Too many attempts. */
         RateLimited: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Error"];
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Resource not found. */
+        NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
             };
         };
     };
@@ -291,17 +480,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description Service is up. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        /** @constant */
-                        ok: true;
-                        version: string;
-                    };
+                    "application/json": components["schemas"]["HealthResponse"];
                 };
             };
         };
@@ -315,13 +500,11 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    password: string;
-                };
+                "application/json": components["schemas"]["LoginRequest"];
             };
         };
         responses: {
-            /** @description 登录成功 */
+            /** @description Authenticated. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -330,7 +513,16 @@ export interface operations {
                     "application/json": components["schemas"]["LoginResponse"];
                 };
             };
-            401: components["responses"]["Unauthorized"];
+            400: components["responses"]["InvalidRequest"];
+            /** @description Wrong password. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             429: components["responses"]["RateLimited"];
         };
     };
@@ -343,7 +535,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 已退出 */
+            /** @description Token revoked (idempotent). */
             204: {
                 headers: {
                     [name: string]: unknown;
@@ -362,17 +554,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description Current session. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        ownerId: string;
-                        /** Format: int64 */
-                        expiresAt: number;
-                    };
+                    "application/json": components["schemas"]["MeResponse"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -381,6 +569,7 @@ export interface operations {
     listMessages: {
         parameters: {
             query?: {
+                /** @description Opaque cursor from a previous page's `nextCursor`. */
                 before?: string;
                 limit?: number;
             };
@@ -390,7 +579,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description One page of projected history. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -399,10 +588,11 @@ export interface operations {
                     "application/json": components["schemas"]["MessagePage"];
                 };
             };
+            400: components["responses"]["InvalidRequest"];
             401: components["responses"]["Unauthorized"];
         };
     };
-    sendMessage: {
+    submitMessage: {
         parameters: {
             query?: never;
             header?: never;
@@ -411,27 +601,20 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    clientMessageId: string;
-                    text: string;
-                };
+                "application/json": components["schemas"]["SubmitMessageRequest"];
             };
         };
         responses: {
-            /** @description 已入队 */
+            /** @description Accepted (new or idempotent replay). */
             202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        requestId: string;
-                        /** @enum {string} */
-                        status: "queued";
-                    };
+                    "application/json": components["schemas"]["SubmitMessageResponse"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            400: components["responses"]["InvalidRequest"];
             401: components["responses"]["Unauthorized"];
         };
     };
@@ -446,22 +629,26 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 已停止 */
+            /** @description Request aborted. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        requestId: string;
-                        /** @enum {string} */
-                        status: "aborted";
-                    };
+                    "application/json": components["schemas"]["AbortResponse"];
                 };
             };
             401: components["responses"]["Unauthorized"];
-            404: components["responses"]["BadRequest"];
-            409: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            /** @description The request already reached a terminal status. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     listModels: {
@@ -473,7 +660,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description Current model state. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -494,28 +681,55 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ModelSelectRequest"];
+                "application/json": components["schemas"]["SelectModelRequest"];
             };
         };
         responses: {
-            /** @description 新的模型状态 */
+            /** @description Selection applied (or unchanged on an idempotent repeat). */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ModelSelectResponse"];
+                    "application/json": components["schemas"]["SelectModelResponse"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            400: components["responses"]["InvalidRequest"];
             401: components["responses"]["Unauthorized"];
-            /** @description 未启用模型切换 */
+            /** @description Model id is not in the runtime catalog. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Model switching is disabled because no failover chain is configured. */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Error"];
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Model exists but is outside the selectable scope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The selection file could not be written. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -529,7 +743,11 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description text/event-stream */
+            /**
+             * @description `text/event-stream`. Each event uses the standard `event:` and
+             *     `data:` lines. Event names and payloads are defined by
+             *     `SseEvent` below.
+             */
             200: {
                 headers: {
                     [name: string]: unknown;

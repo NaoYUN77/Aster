@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { MessageRole, ModelRef, ModelUsage, UiMessage } from "@/api/types";
+import type { MessageModel, MessageRole, ModelUsage, UiMessage } from "@/api/types";
 import type { OutgoingMessage, OutgoingStatus } from "@/store/chat";
 import { useChatStore } from "@/store/chat";
 
@@ -14,7 +14,7 @@ export type DisplayMessage = {
   createdAt: number;
   status: DisplayStatus;
   requestId: string | null;
-  model: ModelRef | null;
+  model: MessageModel | null;
   errorCode: string | null;
   errorMessage: string | null;
   tool: { name: string; status: "done" | "failed" } | null;

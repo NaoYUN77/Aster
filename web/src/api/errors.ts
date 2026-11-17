@@ -35,18 +35,27 @@ export function statusError(status: number): ApiError {
   return new ApiError(fallback.code, fallback.message, status);
 }
 
+/**
+ * 契约错误体是 `{"error":{"code","message"}}`；同时兼容早期的扁平 `{code,message}`。
+ */
+export function errorBodyOf(value: unknown): ErrorBody | null {
+  if (typeof value !== "object" || value === null) return null;
+  const envelope = (value as { error?: unknown }).error;
+  const candidate = envelope ?? value;
+  if (typeof candidate !== "object" || candidate === null) return null;
+  const body = candidate as ErrorBody;
+  if (typeof body.code !== "string" || typeof body.message !== "string") return null;
+  return body;
+}
+
 export function isErrorBody(value: unknown): value is ErrorBody {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as ErrorBody).code === "string" &&
-    typeof (value as ErrorBody).message === "string"
-  );
+  return errorBodyOf(value) !== null;
 }
 
 export function toApiError(error: unknown, status = 0): ApiError {
   if (error instanceof ApiError) return error;
-  if (isErrorBody(error)) return new ApiError(error.code, error.message, status);
+  const body = errorBodyOf(error);
+  if (body) return new ApiError(body.code, body.message, status);
   if (error instanceof DOMException && error.name === "AbortError") {
     return new ApiError("TIMEOUT", "请求超时，请重试", status);
   }
@@ -69,6 +78,20 @@ export function userFacingMessage(error: unknown): string {
 }
 
 export const ERROR_CODE_TEXT: Record<string, string> = {
+  INVALID_REQUEST: "请求不合法",
+  INVALID_CREDENTIALS: "密码错误",
+  PAYLOAD_TOO_LARGE: "请求内容太大",
+  REQUEST_NOT_FOUND: "请求不存在",
+  REQUEST_NOT_ACTIVE: "请求已结束",
+  UNHEALTHY: "服务器健康检查未通过",
+  ABORTED: "已停止",
+  EXECUTION_ERROR: "执行出错，请重试",
+  AGENT_TIMEOUT: "模型响应超时，请重试",
+  AGENT_UNANSWERED: "模型没有返回内容，请重试",
+  AGENT_TRUNCATED: "回复被截断，请重试",
+  EMPTY_REPLY: "模型返回了空回复，请重试",
+  AGENT_LOOP_DETECTED: "模型执行异常，请重试",
+  AGENT_SESSION_FAILED: "会话启动失败，请重试",
   MODEL_UNAVAILABLE: "模型暂时不可用",
   MODEL_INCOMPATIBLE: "所选模型不支持本次请求，请先切换模型",
   PROCESS_INTERRUPTED: "服务重启，请重试",
@@ -84,7 +107,10 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
 };
 
 export function errorText(code: string | null | undefined, fallback?: string | null): string {
+  const serverMessage = fallback?.trim() ?? "";
+  // 服务端对超长给出了带上限的明确文案，直接展示；其余错误码用固定安全文案。
+  if (code === "TEXT_TOO_LONG" && serverMessage !== "") return serverMessage;
   if (code && ERROR_CODE_TEXT[code]) return ERROR_CODE_TEXT[code];
-  if (fallback && fallback.trim() !== "") return fallback;
+  if (serverMessage !== "") return serverMessage;
   return "操作失败，请重试";
 }

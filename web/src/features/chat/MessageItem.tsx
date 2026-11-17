@@ -88,7 +88,7 @@ export function MessageItem({
   }
 
   const usage = message.usage;
-  const modelLabel = message.model?.name ?? message.model?.label;
+  const modelLabel = message.model?.label ?? message.model?.id;
   const showAutoBadge = usage?.kind === "auto" && !usage.degraded;
 
   return (

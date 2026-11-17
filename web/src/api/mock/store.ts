@@ -164,7 +164,7 @@ export function mockModels(): ModelsResponse {
 export function mockSelectModel(
   input: { action: "select"; modelId: string } | { action: "primary" },
 ):
-  | { ok: true; models: ModelsResponse; effective: "now" | "next_request" }
+  | { ok: true; models: ModelsResponse; effective: "immediate" | "next_request" }
   | { ok: false; status: number; code: string; message: string } {
   if (input.action === "select") {
     const model = selectableById(input.modelId);
@@ -182,7 +182,7 @@ export function mockSelectModel(
 
   const models = mockModels();
   emit("model.changed", { current: models.current, version: state.modelVersion });
-  return { ok: true, models, effective: active ? "next_request" : "now" };
+  return { ok: true, models, effective: active ? "next_request" : "immediate" };
 }
 
 function hasActiveRequest(): boolean {

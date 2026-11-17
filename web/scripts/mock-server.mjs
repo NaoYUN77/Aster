@@ -150,9 +150,9 @@ function sendMessage(clientMessageId, text) {
 
 function abortRequest(requestId) {
   const request = state.requests.find((r) => r.requestId === requestId);
-  if (!request) return { status: 404, body: { code: "NOT_FOUND", message: "请求不存在" } };
+  if (!request) return { status: 404, body: { error: { code: "REQUEST_NOT_FOUND", message: "请求不存在" } } };
   if (request.status !== "queued" && request.status !== "running")
-    return { status: 409, body: { code: "CONFLICT", message: "当前状态不能停止" } };
+    return { status: 409, body: { error: { code: "REQUEST_NOT_ACTIVE", message: "当前状态不能停止" } } };
   clearTimers(requestId);
   request.status = "aborted";
   // 与服务端一致：停止后不再追加空的 assistant 占位消息。
@@ -205,8 +205,10 @@ function authorized(req) {
   return { token, ...session };
 }
 
+/** 与契约一致：错误统一包在 `{ error: { code, message } }` 里。 */
+const fail = (res, status, code, message) => json(res, status, { error: { code, message } });
 const unauthorized = (res, message = "登录已失效，请重新登录") =>
-  json(res, 401, { code: "UNAUTHORIZED", message });
+  fail(res, 401, "UNAUTHORIZED", message);
 
 async function readBody(req) {
   const chunks = [];
@@ -233,14 +235,14 @@ const server = createServer(async (req, res) => {
   if (req.method === "POST" && path === "/api/v1/auth/login") {
     const body = await readBody(req);
     if (!body || typeof body.password !== "string" || body.password === "") {
-      json(res, 400, { code: "INVALID_REQUEST", message: "请输入密码" });
+      fail(res, 400, "INVALID_REQUEST", "请输入密码");
       return;
     }
-    if (body.password !== MOCK_PASSWORD) { unauthorized(res, "密码错误"); return; }
+    if (body.password !== MOCK_PASSWORD) { fail(res, 401, "INVALID_CREDENTIALS", "密码错误"); return; }
     const token = `mock_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
     const expiresAt = Date.now() + 7 * 24 * 3600 * 1000;
     state.sessions.set(token, { ownerId: "owner", expiresAt });
-    json(res, 200, { token, ownerId: "owner", expiresAt });
+    json(res, 200, { token, ownerId: "owner", expiresAt: new Date(expiresAt).toISOString() });
     return;
   }
 
@@ -255,7 +257,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && path === "/api/v1/auth/me") {
     const auth = authorized(req);
     if (!auth) { unauthorized(res); return; }
-    json(res, 200, { ownerId: auth.ownerId, expiresAt: auth.expiresAt });
+    json(res, 200, { ownerId: auth.ownerId, expiresAt: new Date(auth.expiresAt).toISOString() });
     return;
   }
 
@@ -271,12 +273,12 @@ const server = createServer(async (req, res) => {
     if (!authorized(req)) { unauthorized(res); return; }
     const body = await readBody(req);
     if (!body || typeof body.clientMessageId !== "string" || body.clientMessageId.trim() === "" || typeof body.text !== "string") {
-      json(res, 400, { code: "INVALID_REQUEST", message: "请求不合法" });
+      fail(res, 400, "INVALID_REQUEST", "请求不合法");
       return;
     }
     const result = sendMessage(body.clientMessageId, body.text);
     if ("error" in result) {
-      json(res, 413, { code: result.error, message: "消息太长" });
+      fail(res, 400, result.error, "消息过长，最多 32000 个字符");
       return;
     }
     json(res, 202, result);
@@ -301,14 +303,14 @@ const server = createServer(async (req, res) => {
     if (!authorized(req)) { unauthorized(res); return; }
     const body = await readBody(req);
     if (body?.action === "select") {
-      if (typeof body.modelId !== "string") { json(res, 400, { code: "INVALID_REQUEST", message: "action 不合法" }); return; }
+      if (typeof body.modelId !== "string") { fail(res, 400, "INVALID_REQUEST", "action 不合法"); return; }
       const model = SELECTABLE.find((m) => m.id === body.modelId);
-      if (!model) { json(res, 404, { code: "MODEL_NOT_FOUND", message: "模型不存在或不在允许范围内" }); return; }
+      if (!model) { fail(res, 404, "MODEL_NOT_FOUND", "模型不存在或不在允许范围内"); return; }
       state.selection = { id: model.id, kind: "manual" };
     } else if (body?.action === "primary") {
       state.selection = null;
     } else {
-      json(res, 400, { code: "INVALID_REQUEST", message: "action 不合法" });
+      fail(res, 400, "INVALID_REQUEST", "action 不合法");
       return;
     }
     state.modelVersion += 1;
@@ -336,7 +338,7 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  json(res, 404, { code: "NOT_FOUND", message: "接口不存在" });
+  fail(res, 404, "NOT_FOUND", "接口不存在");
 });
 
 server.listen(port, host, () => {

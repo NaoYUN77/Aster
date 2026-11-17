@@ -15,8 +15,13 @@ import {
 
 const API = "*/api/v1";
 
+/** 与契约一致：错误统一包在 `{ error: { code, message } }` 里。 */
+function apiError(code: string, message: string, status: number) {
+  return HttpResponse.json({ error: { code, message } }, { status });
+}
+
 function unauthorized(message = "登录已失效，请重新登录") {
-  return HttpResponse.json({ code: "UNAUTHORIZED", message }, { status: 401 });
+  return apiError("UNAUTHORIZED", message, 401);
 }
 
 function authorized(request: Request) {
@@ -33,13 +38,16 @@ export const handlers = [
     await delay(350);
     const body = (await request.json().catch(() => null)) as { password?: unknown } | null;
     if (!body || typeof body.password !== "string" || body.password === "") {
-      return HttpResponse.json({ code: "INVALID_REQUEST", message: "请输入密码" }, { status: 400 });
+      return apiError("INVALID_REQUEST", "请输入密码", 400);
     }
     const session = mockLogin(body.password);
     if (!session) {
-      return unauthorized("密码错误");
+      return apiError("INVALID_CREDENTIALS", "密码错误", 401);
     }
-    return HttpResponse.json(session);
+    return HttpResponse.json({
+      ...session,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+    });
   }),
 
   http.post(`${API}/auth/logout`, async ({ request }) => {
@@ -54,7 +62,10 @@ export const handlers = [
     await delay(120);
     const auth = authorized(request);
     if (!auth) return unauthorized();
-    return HttpResponse.json({ ownerId: auth.ownerId, expiresAt: auth.expiresAt });
+    return HttpResponse.json({
+      ownerId: auth.ownerId,
+      expiresAt: new Date(auth.expiresAt).toISOString(),
+    });
   }),
 
   http.get(`${API}/messages`, async ({ request }) => {
@@ -79,14 +90,15 @@ export const handlers = [
       body.clientMessageId.trim() === "" ||
       typeof body.text !== "string"
     ) {
-      return HttpResponse.json({ code: "INVALID_REQUEST", message: "请求不合法" }, { status: 400 });
+      return apiError("INVALID_REQUEST", "请求不合法", 400);
     }
     const result = mockSendMessage(body.clientMessageId, body.text);
     if ("error" in result) {
       const tooLong = result.error === "TEXT_TOO_LONG";
-      return HttpResponse.json(
-        { code: result.error, message: tooLong ? "消息太长" : "请求不合法" },
-        { status: tooLong ? 413 : 400 },
+      return apiError(
+        result.error,
+        tooLong ? "消息过长，最多 32000 个字符" : "请求不合法",
+        400,
       );
     }
     return HttpResponse.json(result, { status: 202 });
@@ -97,12 +109,10 @@ export const handlers = [
     if (!authorized(request)) return unauthorized();
     const result = mockAbort(String(params.requestId));
     if (!result.ok) {
-      return HttpResponse.json(
-        {
-          code: result.code ?? "CONFLICT",
-          message: result.status === 404 ? "请求不存在" : "当前状态不能停止",
-        },
-        { status: result.status },
+      return apiError(
+        result.code ?? "CONFLICT",
+        result.status === 404 ? "请求不存在" : "当前状态不能停止",
+        result.status,
       );
     }
     return HttpResponse.json({ requestId: String(params.requestId), status: "aborted" });
@@ -124,10 +134,7 @@ export const handlers = [
     if (body?.action === "select" && typeof body.modelId === "string") {
       const result = mockSelectModel({ action: "select", modelId: body.modelId });
       if (!result.ok) {
-        return HttpResponse.json(
-          { code: result.code, message: result.message },
-          { status: result.status },
-        );
+        return apiError(result.code, result.message, result.status);
       }
       return HttpResponse.json({ ...result.models, effective: result.effective });
     }
@@ -135,15 +142,12 @@ export const handlers = [
     if (body?.action === "primary") {
       const result = mockSelectModel({ action: "primary" });
       if (!result.ok) {
-        return HttpResponse.json(
-          { code: result.code, message: result.message },
-          { status: result.status },
-        );
+        return apiError(result.code, result.message, result.status);
       }
       return HttpResponse.json({ ...result.models, effective: result.effective });
     }
 
-    return HttpResponse.json({ code: "INVALID_REQUEST", message: "action 不合法" }, { status: 400 });
+    return apiError("INVALID_REQUEST", "action 不合法", 400);
   }),
 
   http.get(`${API}/events`, async ({ request }) => {

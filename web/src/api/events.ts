@@ -1,18 +1,31 @@
 import { z } from "zod";
 import type { ModelKind, ModelRef, ModelUsage, UiMessage } from "./types";
 
-const modelRefSchema = z.object({
+/** 目录里的模型条目（ModelEntry）：provider/id/name/label。 */
+const modelEntrySchema = z.object({
   provider: z.string(),
   id: z.string(),
-  name: z.string().optional(),
+  name: z.string(),
+  label: z.string(),
+});
+
+/** 消息/用量里携带的模型（MessageModel）：id/label，provider 可选。 */
+const messageModelSchema = z.object({
+  provider: z.string().optional(),
+  id: z.string(),
   label: z.string(),
 });
 
 const modelKindSchema = z.enum(["primary", "manual", "auto"]);
 
 const modelUsageSchema = z.object({
-  requested: modelRefSchema.extend({ kind: modelKindSchema.optional() }).nullish(),
-  actual: modelRefSchema.nullish(),
+  requested: z.object({
+    provider: z.string().optional(),
+    id: z.string(),
+    label: z.string(),
+    kind: modelKindSchema,
+  }),
+  actual: messageModelSchema,
   kind: modelKindSchema,
   degraded: z.boolean(),
 });
@@ -24,7 +37,7 @@ const uiMessageSchema = z.object({
   createdAt: z.number(),
   status: z.enum(["complete", "failed", "aborted"]),
   requestId: z.string().nullish(),
-  model: modelRefSchema.nullish(),
+  model: messageModelSchema.nullish(),
   errorCode: z.string().nullish(),
   tool: z
     .object({ name: z.string(), status: z.enum(["done", "failed"]) })
@@ -52,7 +65,7 @@ const runningSchema = z.object({ requestId: z.string() });
 const doneSchema = z.object({
   requestId: z.string(),
   message: uiMessageSchema,
-  model: modelUsageSchema.optional(),
+  model: modelUsageSchema,
 });
 
 const failedSchema = z.object({
@@ -64,13 +77,7 @@ const failedSchema = z.object({
 const abortedSchema = z.object({ requestId: z.string() });
 
 const modelChangedSchema = z.object({
-  current: z.object({
-    provider: z.string().optional(),
-    id: z.string(),
-    name: z.string().optional(),
-    label: z.string(),
-    kind: modelKindSchema.optional(),
-  }),
+  current: modelEntrySchema.extend({ kind: modelKindSchema.optional() }),
   version: z.number().optional(),
 });
 
@@ -93,9 +100,14 @@ export type ParsedServerEvent =
   | { type: "ignored"; event: string };
 
 function fallbackUsage(message: UiMessage): ModelUsage {
-  const actual = message.model ?? undefined;
+  const actual = message.model ?? { id: "unknown", label: "未知模型" };
   const kind: ModelKind = "primary";
-  return { requested: undefined, actual, kind, degraded: false };
+  return {
+    requested: { id: actual.id, label: actual.label, kind },
+    actual,
+    kind,
+    degraded: false,
+  };
 }
 
 /** 把 SSE 线格式解析成受控的联合类型；未知或畸形事件返回 ignored，不抛异常。 */
@@ -157,10 +169,10 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
       return {
         type: "model.changed",
         current: {
-          provider: current.provider ?? "unknown",
+          provider: current.provider,
           id: current.id,
           label: current.label,
-          ...(current.name ? { name: current.name } : {}),
+          name: current.name,
         },
         ...(parsed.data.version !== undefined ? { version: parsed.data.version } : {}),
       };
