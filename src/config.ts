@@ -209,6 +209,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(browser === undefined ? {} : { browser }),
     style,
     trace: readTraceConfig(env),
+    // Memory is part of the configuration every channel sees, so an explicit MEMORY_ENABLED=0 is
+    // honored rather than silently replaced by defaults when the agent is composed.
+    memory: readMemoryConfig(env),
     // Only a web deployment reads WEB_*; an unused variable in a Telegram deployment stays inert.
     ...(channelKind === "web" ? { web: readWebConfig(env) } : {}),
   };

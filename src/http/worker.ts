@@ -1,5 +1,6 @@
 import type { HistoryPage, UiMessage } from "./projection.js";
 import type { EventHub } from "./events.js";
+import type { AgentGate } from "./agent-gate.js";
 import type { ModelSelectionService } from "../model-control.js";
 import type { TextRequest } from "../messages.js";
 import type { RequestModelInfo, WebRequestRow, WebRequestStore } from "./store.js";
@@ -24,6 +25,8 @@ export type RequestWorkerOptions = {
   readonly agent: WebAgent;
   readonly hub: EventHub;
   readonly ownerId: string;
+  /** Serializes model turns with host notifications and routine runs. */
+  readonly gate?: AgentGate;
   readonly log?: (line: string) => void;
   /** How long shutdown waits for the current generation before aborting it. */
   readonly shutdownTimeoutMs?: number;
@@ -57,6 +60,7 @@ export class RequestWorker {
   private readonly agent: WebAgent;
   private readonly hub: EventHub;
   private readonly ownerId: string;
+  private readonly gate: AgentGate | undefined;
   private readonly log: (line: string) => void;
   private readonly shutdownTimeoutMs: number;
   private closed = false;
@@ -70,6 +74,7 @@ export class RequestWorker {
     this.agent = options.agent;
     this.hub = options.hub;
     this.ownerId = options.ownerId;
+    this.gate = options.gate;
     this.log = options.log ?? ((line) => console.error(line));
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 15_000;
   }
@@ -128,12 +133,13 @@ export class RequestWorker {
     this.hub.broadcast("request.running", { requestId: row.request_id });
     const requested = this.agent.modelService.catalog().current;
     try {
-      const text = await this.agent.reply({
+      const runReply = () => this.agent.reply({
         requestId: row.request_id,
         conversationId: "owner",
         senderId: this.ownerId,
         text: row.text,
       }, controller.signal);
+      const text = this.gate === undefined ? await runReply() : await this.gate.run(runReply);
       // An abort (or a shutdown) wins even if the generation raced to a result.
       if (!this.store.isRunning(row.request_id)) return;
       const message = await this.doneMessage(row.request_id, row.client_message_id, text, requested);

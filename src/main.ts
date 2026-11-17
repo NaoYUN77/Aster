@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { openAgent } from "./agent.js";
+import { buildAgentOptions } from "./agent-options.js";
 import { ConfigurationError, configureEnvProxy, readConfig, resolveProviderConfigPath } from "./config.js";
 import { errorCode, StateError } from "./errors.js";
 import { HubStore } from "./hubs.js";
@@ -156,8 +157,7 @@ try {
       send: (target, body, partSignal, threadTs) => channel.send(target, body, partSignal, threadTs),
       log: (line) => console.error(line),
     });
-    const agent = await openAgent(config, undefined, undefined, {
-      signal: shutdown.signal,
+    const agent = await openAgent(config, undefined, undefined, buildAgentOptions(config, {
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
       ...(hubs === undefined ? {} : { hubStore: hubs }),
       ...(watchers?.extension === undefined && routinesExtension === undefined
@@ -172,7 +172,7 @@ try {
       ...(deployment.kind === "slack"
         ? { reactions: { host: deployment.client, anchor: deployment.anchor, emoji } }
         : {}),
-    });
+    }, { signal: shutdown.signal }));
     const scheduler = reminders === undefined ? undefined : new ReminderScheduler({
       store: reminders,
       client: channel,

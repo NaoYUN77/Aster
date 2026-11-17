@@ -13,6 +13,7 @@ export type SseEventName =
   | "request.failed"
   | "request.aborted"
   | "model.changed"
+  | "host.message"
   | "heartbeat";
 
 type Client = { readonly id: number; readonly res: ServerResponse };

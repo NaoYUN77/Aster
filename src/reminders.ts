@@ -447,7 +447,15 @@ export class ReminderScheduler {
       if (signal.aborted) break;
       if (!this.#store.beginSend(reminder.id)) continue;
       try {
-        const messageId = await this.#client.send(reminder.chatId, reminderText(reminder), signal);
+        // The key is stable for one reminder row, so a host that persists notifications can suppress
+        // a duplicate after a crash without changing the transport semantics for chat channels.
+        const messageId = await this.#client.send(
+          reminder.chatId,
+          reminderText(reminder),
+          signal,
+          undefined,
+          `reminder:${reminder.id}`,
+        );
         this.#store.markSent(reminder.id, messageId);
         sent += 1;
       } catch (error) {

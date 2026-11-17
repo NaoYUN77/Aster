@@ -155,6 +155,32 @@ test("07-F: memory configuration defaults, overrides and invalid values", () => 
   for (const env of invalid) {
     assert.throws(() => readMemoryConfig(env), ConfigurationError, JSON.stringify(env));
   }
+
+  // The memory section travels with the rest of the configuration: the agent must never fall back
+  // to process defaults, so an explicit MEMORY_ENABLED=0 cannot be lost between readConfig and
+  // openAgent.
+  const base = {
+    TELEGRAM_BOT_TOKEN: "offline-test",
+    TELEGRAM_OWNER_ID: "1",
+    MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1",
+    OPENAI_API_KEY: "offline-test",
+    DATA_DIR: "memory-config-test",
+  };
+  const disabled = readConfig({ ...base, MEMORY_ENABLED: "0" });
+  assert.equal(disabled.memory.enabled, false);
+  const enabled = readConfig({
+    ...base,
+    MEMORY_ENABLED: "1",
+    MEMORY_EVALUATE_AFTER_USER_TURNS: "3",
+    MEMORY_TIMEZONE: "Asia/Shanghai",
+    MEMORY_RESERVE_TOKENS: "8192",
+  });
+  assert.equal(enabled.memory.enabled, true);
+  assert.equal(enabled.memory.budget.evaluateAfterUserTurns, 3);
+  assert.equal(enabled.memory.timezone, "Asia/Shanghai");
+  assert.equal(enabled.memory.reserveTokens, 8192);
+  assert.throws(() => readConfig({ ...base, MEMORY_ENABLED: "yes" }), ConfigurationError);
 });
 
 // ---------------------------------------------------------------------------

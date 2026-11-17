@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { ConversationId, EntryId, EntryRecord } from "@earendil-works/pi-durable";
-import { projectEntry, projectEntries } from "../src/http/projection.js";
+import { projectEntry, projectEntries, WEB_HOST_MESSAGE_KIND } from "../src/http/projection.js";
 
 const conversationId = 1 as ConversationId;
 const usage: Usage = {
@@ -73,6 +73,26 @@ test("a failed answer keeps its stable error code and never exposes provider tex
   assert.equal(projectEntry(entry(5, "pi.assistant", {
     model: [assistant({ content: [], stopReason: "aborted" })],
   })), undefined);
+});
+
+test("host notifications become system rows without a model or request id", () => {
+  const reminder = projectEntry(entry(10, WEB_HOST_MESSAGE_KIND, {
+    data: { text: "提醒：喝水", source: "reminder", createdAt: 1_700_000_000_123, key: "reminder:1" },
+  }));
+  assert.deepEqual(reminder, {
+    id: "10",
+    role: "system",
+    text: "提醒：喝水",
+    createdAt: 1_700_000_000_123,
+    status: "complete",
+    requestId: null,
+    clientMessageId: null,
+    model: null,
+    errorCode: null,
+    tool: null,
+  });
+  assert.equal(projectEntry(entry(11, WEB_HOST_MESSAGE_KIND, { data: { text: "  " } })), undefined);
+  assert.equal(projectEntry(entry(12, WEB_HOST_MESSAGE_KIND, { data: {} })), undefined);
 });
 
 test("tool results are compact rows; internal entries are hidden", () => {

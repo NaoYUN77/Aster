@@ -10,6 +10,15 @@ import { MODEL_INCOMPATIBLE_MESSAGE, MODEL_UNAVAILABLE_MESSAGE } from "../model-
  * never arguments or raw output.
  */
 
+/**
+ * A host-initiated notification (reminder, watch event, routine result). It is a durable entry so it
+ * appears in history in order and survives a restart; it carries no model messages, so it never
+ * enters the model's context.
+ */
+export const WEB_HOST_MESSAGE_KIND = "web.host-message";
+
+export type HostMessageSource = "reminder" | "watch" | "routine";
+
 export type UiMessage = {
   readonly id: string;
   readonly role: "user" | "assistant" | "system";
@@ -121,11 +130,39 @@ function projectTool(entry: EntryRecord): UiMessage | undefined {
   };
 }
 
+/**
+ * Host notifications are written by this process, not by a model. Only the text and a coarse source
+ * survive the projection; any internal key used for idempotency stays in storage.
+ */
+function projectHostMessage(entry: EntryRecord): UiMessage | undefined {
+  if (entry.kind !== WEB_HOST_MESSAGE_KIND) return undefined;
+  const data = entry.data as { readonly text?: unknown; readonly source?: unknown; readonly createdAt?: unknown } | undefined;
+  if (typeof data?.text !== "string") return undefined;
+  const text = data.text.trim();
+  if (text === "") return undefined;
+  const createdAt = typeof data.createdAt === "number" && Number.isFinite(data.createdAt)
+    ? data.createdAt
+    : 0;
+  return {
+    id: String(entry.id),
+    role: "system",
+    text,
+    createdAt,
+    status: "complete",
+    requestId: null,
+    clientMessageId: null,
+    model: null,
+    errorCode: null,
+    tool: null,
+  };
+}
+
 /** One entry, or `undefined` for system/reset/compaction/internal entries that have no UI row. */
 export function projectEntry(entry: EntryRecord): UiMessage | undefined {
   if (UserEntry.is(entry)) return projectUser(entry);
   if (AssistantEntry.is(entry)) return projectAssistant(entry);
   if (ToolResultEntry.is(entry)) return projectTool(entry);
+  if (entry.kind === WEB_HOST_MESSAGE_KIND) return projectHostMessage(entry);
   return undefined;
 }
 

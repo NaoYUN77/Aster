@@ -187,9 +187,10 @@ export interface paths {
          * @description Uses the same `Authorization: Bearer` header as every other endpoint, so
          *     clients must consume it with `fetch` + `ReadableStream`, not
          *     `EventSource`. The stream opens with a `snapshot` event, sends an SSE
-         *     comment heartbeat every 15 seconds, and broadcasts request and model
-         *     events to every connected client. No event replay is provided: on
-         *     reconnect a client re-reads history and uses the new snapshot.
+         *     comment heartbeat every 15 seconds, and broadcasts request, model and
+         *     `host.message` events to every connected client. No event replay is
+         *     provided: on reconnect a client re-reads history (host notifications are
+         *     durable `role: system` rows) and uses the new snapshot.
          */
         get: operations["subscribeEvents"];
         put?: never;
@@ -385,6 +386,17 @@ export interface components {
             event: "request.aborted";
             data: {
                 requestId: string;
+            };
+        } | {
+            /** @constant */
+            event: "host.message";
+            /**
+             * @description A host-originated notification (reminder, watch event or routine result).
+             *     It is also a durable history row (`role: system`), so a client that missed the
+             *     event can recover it with `GET /api/v1/messages`.
+             */
+            data: {
+                message: components["schemas"]["UiMessage"];
             };
         } | {
             /** @constant */

@@ -120,6 +120,47 @@ test("history reads the durable transcript, projects messages and pages by entry
   }
 });
 
+test("host messages are durable, key-idempotent and survive a restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-history-host-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    const firstFaux = fauxProvider({ provider: "openai", models: [{ id: "faux-1" }, { id: "faux-2" }] });
+    const firstModels = createModels();
+    firstModels.setProvider(firstFaux.provider);
+    app = await openAgent(webConfig(directory), firstModels);
+    const first = await app.hostMessage({ text: "提醒：喝水", source: "reminder", key: "reminder:1" });
+    const replay = await app.hostMessage({ text: "提醒：喝水", source: "reminder", key: "reminder:1" });
+    assert.equal(replay.id, first.id, "the same key returns the stored row");
+    assert.equal(first.role, "system");
+    assert.equal(first.model, null);
+    assert.equal(first.requestId, null);
+    const history = await app.history({ limit: 10 });
+    assert.deepEqual(history.messages.map((message) => [message.role, message.text]), [
+      ["system", "提醒：喝水"],
+    ]);
+    assert.equal(firstFaux.state.callCount, 0, "a host message does not call a model");
+    await app.close();
+    app = undefined;
+
+    // A restart rebuilds the key index from the transcript: replaying the same notification must
+    // not append a second row.
+    const secondFaux = fauxProvider({ provider: "openai", models: [{ id: "faux-1" }, { id: "faux-2" }] });
+    const secondModels = createModels();
+    secondModels.setProvider(secondFaux.provider);
+    app = await openAgent(webConfig(directory), secondModels);
+    const afterRestart = await app.hostMessage({ text: "提醒：喝水", source: "reminder", key: "reminder:1" });
+    assert.equal(afterRestart.id, first.id);
+    const second = await app.hostMessage({ text: "提醒：散步", source: "reminder", key: "reminder:2" });
+    assert.notEqual(second.id, first.id);
+    const reopened = await app.history({ limit: 10 });
+    assert.deepEqual(reopened.messages.map((message) => message.text), ["提醒：喝水", "提醒：散步"]);
+    assert.equal(secondFaux.state.callCount, 0);
+  } finally {
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("$model stays host-side: no model call and no durable user row", async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-history-model-"));
   const faux = fauxProvider({

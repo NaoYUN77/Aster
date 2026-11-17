@@ -7,7 +7,7 @@ import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, ToolResul
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { readMemoryConfig, resolveProviderConfigPath, type MemoryConfig, type readConfig } from "./config.js";
+import { resolveProviderConfigPath, type MemoryConfig, type readConfig } from "./config.js";
 import { ConfigurationError, errorCode, StateError } from "./errors.js";
 import { connectMcp, type McpHost } from "./mcp.js";
 import { createSkillsExtension, type SkillIndex, type SkillSummary } from "./skills.js";
@@ -36,7 +36,13 @@ import {
 } from "./model-failover.js";
 import { createModelCommandHandler } from "./model-command.js";
 import { createModelSelectionService } from "./model-control.js";
-import { projectEntry, type HistoryPage, type UiMessage } from "./http/projection.js";
+import {
+  projectEntry,
+  WEB_HOST_MESSAGE_KIND,
+  type HistoryPage,
+  type HostMessageSource,
+  type UiMessage,
+} from "./http/projection.js";
 import {
   createModelPool,
   PROVIDER_IDS,
@@ -424,10 +430,10 @@ export async function openAgent(
     }));
   }
   // Memory wiring (MEM-07) goes through the one composition entry; with MEMORY_ENABLED=0 the
-  // application keeps exactly its previous registry, settings and request path. The memory
-  // section is read from the same environment the rest of the config came from, unless the
-  // caller attached one explicitly (tests do; `readConfig` deliberately keeps its old shape).
-  const memoryConfig: MemoryConfig = (config as { memory?: MemoryConfig }).memory ?? readMemoryConfig({});
+  // application keeps exactly its previous registry, settings and request path. `readConfig`
+  // carries the memory section so the enabled flag always comes from the same environment as the
+  // rest of the configuration; there is deliberately no fallback to process defaults here.
+  const memoryConfig: MemoryConfig = config.memory;
   const memory = memoryConfig.enabled
     ? createMemoryIntegration({
         root: config.dataDir,
@@ -823,6 +829,65 @@ export async function openAgent(
     }
 
     /**
+     * Host notifications (reminders, watch events, routine results) are durable entries in the root
+     * conversation, so history pagination and ordering need no second source. An optional key makes
+     * a replay after a crash return the stored message instead of appending a duplicate; the keys
+     * live only in memory and are rebuilt by scanning the transcript on first use.
+     */
+    const hostMessagesByKey = new Map<string, UiMessage>();
+    let hostMessagesLoaded = false;
+    async function loadHostMessages(): Promise<void> {
+      if (hostMessagesLoaded) return;
+      let cursor: Cursor | undefined;
+      let scanned = 0;
+      do {
+        const page = await root.entries({ order: "ascending" }, 500, cursor, context);
+        scanned += page.items.length;
+        for (const entry of page.items) {
+          if (entry.kind !== WEB_HOST_MESSAGE_KIND) continue;
+          const key = (entry.data as { readonly key?: unknown } | undefined)?.key;
+          if (typeof key !== "string" || key === "") continue;
+          const message = projectEntry(entry);
+          if (message !== undefined) hostMessagesByKey.set(key, message);
+        }
+        cursor = page.next;
+      } while (cursor !== undefined && scanned < 100_000);
+      hostMessagesLoaded = true;
+    }
+    const HOST_MESSAGE_MAX_CHARS = 4_000;
+    const hostMessage = async (input: {
+      readonly text: string;
+      readonly source: HostMessageSource;
+      readonly key?: string;
+    }): Promise<UiMessage> => {
+      const text = input.text.trim();
+      if (text === "" || [...text].length > HOST_MESSAGE_MAX_CHARS) {
+        throw Object.assign(new Error(`Host message must contain 1..${HOST_MESSAGE_MAX_CHARS} characters`), {
+          code: "INVALID_REQUEST",
+        });
+      }
+      await loadHostMessages();
+      if (input.key !== undefined && input.key !== "") {
+        const existing = hostMessagesByKey.get(input.key);
+        if (existing !== undefined) return existing;
+      }
+      const createdAt = Date.now();
+      const entry = await root.commit((tx) => tx.appendEntry(root.id, {
+        kind: WEB_HOST_MESSAGE_KIND,
+        data: {
+          text,
+          source: input.source,
+          createdAt,
+          ...(input.key === undefined || input.key === "" ? {} : { key: input.key }),
+        },
+      }), context);
+      const message = projectEntry(entry);
+      if (message === undefined) throw new StateError("Host message entry could not be projected");
+      if (input.key !== undefined && input.key !== "") hostMessagesByKey.set(input.key, message);
+      return message;
+    };
+
+    /**
      * Read-only history over the durable transcript. One page is returned oldest-first; the cursor is
      * the oldest returned entry id, so a later `before` continues strictly below it. Nothing here
      * writes or copies messages.
@@ -996,6 +1061,8 @@ export async function openAgent(
       modelService,
       /** Read-only durable transcript access for the web adapter. */
       history,
+      /** Append a host-originated notification; durable, idempotent by key, never model-visible. */
+      hostMessage,
       // Conversation-wide cancellation waits for ordinary tasks to become terminal.
       abort: () => root.abort(context),
       // Ends the current context cycle; the next reply establishes the new snapshot behind the

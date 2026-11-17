@@ -42,6 +42,10 @@ is broadcast as `model.changed` just like a button click.
   different model answered. Automatic fallback stays `degraded: false`.
 - `effective: "next_request"` means a generation was running; the selection applies afterwards.
 - SSE has no replay. On reconnect: fetch history, then use the new `snapshot`.
+- Host notifications (reminders, watch events, routine results) arrive as `host.message` with
+  `{ message }`. The same row is durable history with `role: "system"`, `model: null`; a client that
+  missed the event recovers it from `GET /messages`. Replaying a host delivery is keyed
+  server-side, so reconnecting or restarting does not duplicate the row.
 - After `abort`, the stopped input remains in history but is omitted from the next model context;
   the next answer does not answer it again. A stop before any visible token leaves no empty
   assistant message.
