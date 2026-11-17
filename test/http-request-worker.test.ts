@@ -63,7 +63,14 @@ test("clientMessageId is idempotent and one worker drains FIFO with one running 
     assert.equal(maxRunning, 1);
     assert.deepEqual(order, ["first", "second"]);
     assert.ok(events.some((event) => event.event === "request.running"));
-    assert.equal(events.filter((event) => event.event === "request.done").length, 2);
+    const doneEvents = events.filter((event) => event.event === "request.done") as {
+      data: { requestId: string; message: { requestId: string | null; clientMessageId: string | null } };
+    }[];
+    assert.equal(doneEvents.length, 2);
+    for (const { data } of doneEvents) {
+      assert.equal(data.message.requestId, data.requestId);
+      assert.equal(data.message.clientMessageId, store.clientMessageId(data.requestId));
+    }
   } finally {
     await worker.stop();
     store.close();

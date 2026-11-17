@@ -9,6 +9,7 @@ import { EventHub } from "../src/http/events.js";
 import { createWebServer } from "../src/http/server.js";
 import { WebRequestStore } from "../src/http/store.js";
 import { RequestWorker } from "../src/http/worker.js";
+import type { HistoryPage } from "../src/http/projection.js";
 import { fakeAgent, fixtureSelection, message, waitFor } from "./http-testkit.js";
 
 const PASSWORD = "integration-password";
@@ -27,23 +28,24 @@ async function startServer(options: { withSse?: boolean } = {}) {
     staticDir: join(directory, "web-dist"),
     trustProxy: false,
   };
+  let historyPage: HistoryPage = {
+    messages: [
+      message({ id: "41", role: "user", text: "hello", createdAt: 1 }),
+      message({
+        id: "42",
+        text: "reply:hello",
+        createdAt: 2,
+        requestId: "req-x",
+        model: { id: "opencode-go/deepseek-v4.1-flash", label: "magpie/opencode-go/deepseek-v4.1-flash", provider: "magpie" },
+      }),
+    ],
+    nextCursor: null,
+    hasMore: false,
+  };
   const agent = fakeAgent({
     service: fixture.service,
     reply: async (request) => `reply:${request.text}`,
-    history: async () => ({
-      messages: [
-        message({ id: "41", role: "user", text: "hello", createdAt: 1 }),
-        message({
-          id: "42",
-          text: "reply:hello",
-          createdAt: 2,
-          requestId: "req-x",
-          model: { id: "opencode-go/deepseek-v4.1-flash", label: "magpie/opencode-go/deepseek-v4.1-flash", provider: "magpie" },
-        }),
-      ],
-      nextCursor: null,
-      hasMore: false,
-    }),
+    history: async () => historyPage,
   });
   const worker = new RequestWorker({ store, hub, ownerId: "owner", agent });
   let modelVersion = 0;
@@ -77,6 +79,9 @@ async function startServer(options: { withSse?: boolean } = {}) {
     hub,
     login,
     auth,
+    setHistory(page: HistoryPage) {
+      historyPage = page;
+    },
     async close() {
       await app.close();
       await worker.stop();
@@ -171,6 +176,40 @@ test("login, API auth, idempotent enqueue, history, models, switch, primary and 
     const logout = await server.app.inject({ method: "POST", url: "/api/v1/auth/logout", headers: server.auth(token) });
     assert.equal(logout.statusCode, 204);
     assert.equal((await server.app.inject({ method: "GET", url: "/api/v1/auth/me", headers: server.auth(token) })).statusCode, 401);
+  } finally {
+    await server.close();
+  }
+});
+
+test("GET /messages links durable user and assistant rows to requestId and clientMessageId", async () => {
+  const server = await startServer();
+  try {
+    const { token } = (await server.login()).json<{ token: string }>();
+    const posted = await server.app.inject({
+      method: "POST", url: "/api/v1/messages", headers: server.auth(token),
+      payload: { clientMessageId: "history-link", text: "hello" },
+    });
+    const { requestId } = posted.json<{ requestId: string }>();
+    server.setHistory({
+      messages: [
+        message({ id: "41", role: "user", text: "hello", createdAt: 1, requestId }),
+        message({ id: "42", text: "reply:hello", createdAt: 2, requestId }),
+      ],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const history = await server.app.inject({
+      method: "GET", url: "/api/v1/messages?limit=30", headers: server.auth(token),
+    });
+    assert.equal(history.statusCode, 200);
+    const page = history.json<{
+      messages: { role: string; requestId: string | null; clientMessageId: string | null }[];
+    }>();
+    assert.deepEqual(page.messages.map((entry) => entry.role), ["user", "assistant"]);
+    for (const entry of page.messages) {
+      assert.equal(entry.requestId, requestId);
+      assert.equal(entry.clientMessageId, "history-link");
+    }
   } finally {
     await server.close();
   }

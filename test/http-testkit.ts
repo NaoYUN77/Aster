@@ -41,6 +41,7 @@ export function message(overrides: Partial<UiMessage> = {}): UiMessage {
     createdAt: 1,
     status: "complete",
     requestId: null,
+    clientMessageId: null,
     model: null,
     errorCode: null,
     tool: null,

@@ -32,8 +32,12 @@ is broadcast as `model.changed` just like a button click.
 ## Details worth matching on the client
 
 - History messages are returned oldest-first; `nextCursor` goes back as `before`.
-- `request.done.message` has the durable entry id when the turn is durable; a host-side `$model`
-  reply uses a request-scoped id.
+- Durable history rows carry the host `requestId` that produced them (both the user input and its
+  assistant answer) and, for web requests, the `clientMessageId`. Use these to reconcile an
+  optimistic/local message with history instead of matching text or timestamps. A host-side
+  `$model` reply has no durable user row; keep its local user bubble.
+- `request.done.message` has the durable entry id when the turn is durable and includes
+  `requestId` and `clientMessageId`; a host-side `$model` reply uses a request-scoped id.
 - `request.done.model.degraded` is true only when a manual selection was unavailable and a
   different model answered. Automatic fallback stays `degraded: false`.
 - `effective: "next_request"` means a generation was running; the selection applies afterwards.

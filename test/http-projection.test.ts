@@ -39,6 +39,7 @@ test("user and assistant turns become complete UI rows with the actual model", (
     createdAt: 10,
     status: "complete",
     requestId: null,
+    clientMessageId: null,
     model: null,
     errorCode: null,
     tool: null,

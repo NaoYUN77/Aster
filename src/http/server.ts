@@ -196,7 +196,13 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       before = query.before;
     }
     try {
-      return await agent.history({ ...(before === undefined ? {} : { before }), limit });
+      const page = await agent.history({ ...(before === undefined ? {} : { before }), limit });
+      return {
+        ...page,
+        messages: page.messages.map((message) => message.requestId === null
+          ? message
+          : { ...message, clientMessageId: store.clientMessageId(message.requestId) ?? null }),
+      };
     } catch (error) {
       if ((error as { code?: unknown }).code === "INVALID_REQUEST") {
         return reply.code(400).send(errorBody("INVALID_REQUEST", "请求参数不合法"));

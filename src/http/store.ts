@@ -126,6 +126,14 @@ export class WebRequestStore {
       | undefined;
   }
 
+  /** The client idempotency key of one request, used to link durable history rows. */
+  clientMessageId(requestId: string): string | undefined {
+    const row = this.db.prepare("SELECT client_message_id FROM web_requests WHERE request_id = ?").get(requestId) as
+      | { client_message_id: string }
+      | undefined;
+    return row?.client_message_id;
+  }
+
   /** The single running request, if any. Used by the SSE snapshot. */
   active(): WebRequestRow | undefined {
     return this.db.prepare("SELECT * FROM web_requests WHERE status = 'running' ORDER BY started_at LIMIT 1").get() as

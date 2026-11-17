@@ -20,6 +20,19 @@ function config(dataDir: string) {
   });
 }
 
+function webConfig(dataDir: string) {
+  return readConfig({
+    CHANNEL: "web",
+    WEB_OWNER_ID: "owner",
+    MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1",
+    MODEL_FALLBACKS: "openai:faux-2",
+    OPENAI_API_KEY: "offline-test",
+    DATA_DIR: dataDir,
+    MEMORY_ENABLED: "0",
+  });
+}
+
 test("history reads the durable transcript, projects messages and pages by entry cursor", async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-history-"));
   const faux = fauxProvider({ provider: "openai" });
@@ -41,6 +54,12 @@ test("history reads the durable transcript, projects messages and pages by entry
       text,
     }, signal);
     assert.equal(await ask("1", "first question"), "first answer");
+    // The same request id replays the settled turn instead of appending a second user entry.
+    assert.equal(await ask("1", "first question"), "first answer");
+    const replayHistory = await app.history({ limit: 10 });
+    assert.equal(replayHistory.messages.filter(
+      (message) => message.role === "user" && message.text === "first question",
+    ).length, 1);
     assert.equal(await ask("2", "second question"), "second answer");
     assert.equal(await ask("3", "third question"), "third answer");
 
@@ -58,8 +77,16 @@ test("history reads the durable transcript, projects messages and pages by entry
     for (const message of latest.messages) {
       assert.ok(message.createdAt > 0, "every projected message has a timestamp");
       assert.ok(/^\d+$/.test(message.id), "the durable entry id is the message id");
-      assert.equal(message.requestId, null, "history does not invent a request id");
+      assert.equal(message.clientMessageId, null, "the agent does not know web request rows");
     }
+    assert.deepEqual(latest.messages.map((message) => message.requestId), [
+      "web:test:1",
+      "web:test:1",
+      "web:test:2",
+      "web:test:2",
+      "web:test:3",
+      "web:test:3",
+    ], "both the input and its answer carry the request id from durable submissions");
     const assistant = latest.messages.find((message) => message.role === "assistant")!;
     assert.equal(assistant.model?.provider, "openai");
     assert.equal(assistant.model?.id, "faux-1");
@@ -87,6 +114,33 @@ test("history reads the durable transcript, projects messages and pages by entry
 
     await assert.rejects(app.history({ before: "not-a-cursor" }), (error: unknown) =>
       (error as { code?: string }).code === "INVALID_REQUEST");
+  } finally {
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("$model stays host-side: no model call and no durable user row", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-history-model-"));
+  const faux = fauxProvider({
+    provider: "openai",
+    models: [{ id: "faux-1" }, { id: "faux-2" }],
+  });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    app = await openAgent(webConfig(directory), models);
+    const reply = await app.reply({
+      requestId: "web:test:model",
+      conversationId: "owner",
+      senderId: "owner",
+      text: "$model",
+    }, new AbortController().signal);
+    assert.match(reply, /faux-1/);
+    assert.equal(faux.state.callCount, 0, "a host command does not call a model");
+    const history = await app.history({ limit: 10 });
+    assert.deepEqual(history.messages, [], "a host command appends no durable user row");
   } finally {
     await app?.close();
     await rm(directory, { recursive: true, force: true });

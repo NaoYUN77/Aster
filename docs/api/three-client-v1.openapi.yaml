@@ -469,6 +469,10 @@ components:
           enum: [complete, failed, aborted]
         requestId:
           type: [string, "null"]
+          description: Host request id that produced this row, from durable submissions.
+        clientMessageId:
+          type: [string, "null"]
+          description: Web idempotency key of that request; null when no web_requests row exists.
         model:
           oneOf:
             - $ref: "#/components/schemas/MessageModel"

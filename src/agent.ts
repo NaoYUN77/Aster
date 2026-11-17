@@ -840,6 +840,26 @@ export async function openAgent(
         }
         maxEntryId = (value - 1) as EntryId;
       }
+      // Link projected rows back to the host request that produced them. Durable keeps the
+      // mapping in `pi.submissions`; reading the parsed records avoids the raw column's JSON
+      // quoting. Both sides of an answered input map to the same request id.
+      const requestByEntry = new Map<string, string>();
+      let submissionCursor: Cursor | undefined;
+      do {
+        const page = await durableStorage.scanSubmissions(
+          { conversationId: root.id, order: "ascending" },
+          500,
+          submissionCursor,
+          context,
+        );
+        for (const record of page.items) {
+          if (record.type !== "input" || record.requestId === undefined || record.requestId === "") continue;
+          if (record.entry !== undefined) requestByEntry.set(String(record.entry), record.requestId);
+          if (record.answer !== undefined) requestByEntry.set(String(record.answer), record.requestId);
+        }
+        submissionCursor = page.next;
+      } while (submissionCursor !== undefined && requestByEntry.size < 100_000);
+
       const collected: UiMessage[] = [];
       let cursor: Cursor | undefined;
       let hasMore = false;
@@ -856,7 +876,10 @@ export async function openAgent(
         for (const entry of page.items) {
           lastRawId = entry.id;
           const message = projectEntry(entry);
-          if (message !== undefined) collected.push(message);
+          if (message !== undefined) {
+            const requestId = message.requestId ?? requestByEntry.get(message.id);
+            collected.push(requestId === undefined ? message : { ...message, requestId });
+          }
         }
         if (page.next === undefined) {
           hasMore = false;

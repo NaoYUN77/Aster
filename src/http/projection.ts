@@ -17,6 +17,8 @@ export type UiMessage = {
   readonly createdAt: number;
   readonly status: "complete" | "failed" | "aborted";
   readonly requestId: string | null;
+  /** Web idempotency key for the request that produced this message; null outside the web adapter. */
+  readonly clientMessageId: string | null;
   readonly model: { readonly id: string; readonly label: string; readonly provider: string } | null;
   readonly errorCode: string | null;
   readonly tool: { readonly name: string; readonly status: "done" | "failed" } | null;
@@ -72,6 +74,7 @@ function projectUser(entry: EntryRecord): UiMessage | undefined {
     createdAt: message.timestamp,
     status: "complete",
     requestId: null,
+    clientMessageId: null,
     model: null,
     errorCode: null,
     tool: null,
@@ -94,6 +97,7 @@ function projectAssistant(entry: EntryRecord): UiMessage | undefined {
     createdAt: last.timestamp,
     status,
     requestId: null,
+    clientMessageId: null,
     model: modelOf(last),
     errorCode: errorCodeOf(last),
     tool: null,
@@ -110,6 +114,7 @@ function projectTool(entry: EntryRecord): UiMessage | undefined {
     createdAt: message.timestamp,
     status: "complete",
     requestId: null,
+    clientMessageId: null,
     model: null,
     errorCode: null,
     tool: { name: message.toolName, status: message.isError ? "failed" : "done" },

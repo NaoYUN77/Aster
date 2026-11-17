@@ -136,7 +136,7 @@ export class RequestWorker {
       }, controller.signal);
       // An abort (or a shutdown) wins even if the generation raced to a result.
       if (!this.store.isRunning(row.request_id)) return;
-      const message = await this.doneMessage(row.request_id, text, requested);
+      const message = await this.doneMessage(row.request_id, row.client_message_id, text, requested);
       const model = modelInfo(requested, message);
       if (this.store.markDone(row.request_id, text, model)) {
         this.hub.broadcast("request.done", { requestId: row.request_id, message, model });
@@ -165,6 +165,7 @@ export class RequestWorker {
   /** The assistant row to append right after `request.done`; durable id when the transcript has it. */
   private async doneMessage(
     requestId: string,
+    clientMessageId: string,
     text: string,
     requested: { readonly id: string; readonly label: string; readonly provider: string; readonly kind: "primary" | "manual" | "auto" },
   ): Promise<UiMessage> {
@@ -173,7 +174,7 @@ export class RequestWorker {
       const durable = [...page.messages].reverse().find(
         (message) => message.role === "assistant" && message.tool === null && message.text.trim() === text.trim(),
       );
-      if (durable !== undefined) return { ...durable, requestId };
+      if (durable !== undefined) return { ...durable, requestId, clientMessageId };
     } catch (error) {
       this.log(`Could not read the transcript for request.done: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -185,6 +186,7 @@ export class RequestWorker {
       createdAt: Date.now(),
       status: "complete",
       requestId,
+      clientMessageId,
       model: { id: requested.id, label: requested.label, provider: requested.provider },
       errorCode: null,
       tool: null,
