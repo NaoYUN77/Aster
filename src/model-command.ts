@@ -1,7 +1,12 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { modelLabel, sameModelInstance, type ModelSwitchState } from "./model-failover.js";
-import { isSelectableModel, selectableModels, supplierOf, type SelectableSupplier } from "./model-policy.js";
+import {
+  createModelSelectionService,
+  ModelSelectionError,
+  type ModelSelectionService,
+} from "./model-control.js";
+import { supplierOf, type SelectableSupplier } from "./model-policy.js";
 
 /** A parsed `$model` command. `undefined` from the parser means the text is ordinary chat. */
 export type ModelCommand =
@@ -57,51 +62,44 @@ export type ModelCommandOptions = {
   /** The configured automatic chain; its first entry is the primary. */
   readonly chain: readonly Model<Api>[];
   readonly state: ModelSwitchState;
+  /** Pre-built shared service. The agent passes the same instance the HTTP routes use. */
+  readonly service?: ModelSelectionService;
   readonly log?: (line: string) => void;
 };
 
 /**
  * Host-side handler. It never calls a model: a switch must keep working when the current model is
  * exactly what the user is trying to escape. Returns `undefined` when the text is not a command.
+ *
+ * Every decision goes through `ModelSelectionService`, the same object `GET /api/v1/models` and
+ * `POST /api/v1/models/select` use, so the text command and the buttons cannot disagree about the
+ * live catalog or the selectable scope.
  */
 export function createModelCommandHandler(options: ModelCommandOptions): (text: string) => string | undefined {
   const log = options.log ?? ((line: string) => console.error(line));
   const primary = options.chain[0]!;
-  const available = (): Model<Api>[] => selectableModels(options.models, options.provider);
-
-  /** `opencode`/`commandcode` mean that supplier's DeepSeek Flash, which is the configured default. */
-  const byAlias = (target: string): Model<Api> | undefined => {
-    if (target !== "opencode" && target !== "commandcode") return undefined;
-    const supplier = target;
-    const preferred = options.chain.find(
-      (model) => supplierOf(model.id) === supplier && /deepseek/i.test(model.id),
-    );
-    if (preferred !== undefined) return preferred;
-    const all = available();
-    return all.find((model) => supplierOf(model.id) === supplier && /deepseek/i.test(model.id))
-      ?? all.find((model) => supplierOf(model.id) === supplier);
-  };
+  const service = options.service ?? createModelSelectionService({
+    provider: options.provider,
+    models: options.models,
+    chain: options.chain,
+    state: options.state,
+    log,
+  });
 
   const status = (): string => {
-    const selected = options.state.active();
-    const current = selected === undefined
+    const current = service.current();
+    const label = current.selection === undefined
       ? `${modelLabel(primary)}（主模型）`
-      : (() => {
-          const resolved = options.models.getModel(selected.provider, selected.modelId);
-          const label = resolved === undefined
-            ? `${selected.provider}/${selected.modelId}`
-            : `${modelLabel(resolved)}（${resolved.name}）`;
-          return `${label}（${selected.kind === "manual" ? "手动指定" : "自动降级后粘性"}）`;
-        })();
+      : `${modelLabel(current.model)}（${current.model.name}）（${current.selection.kind === "manual" ? "手动指定" : "自动降级后粘性"}）`;
     return [
-      `当前模型：${current}`,
+      `当前模型：${label}`,
       `默认链：${options.chain.map((model) => modelLabel(model)).join(" → ")}`,
       "可切：OpenCode / Command Code 的 DeepSeek、GLM、Gemini Flash；$model list 查看。",
     ].join("\n");
   };
 
   const list = (supplier?: SelectableSupplier): string => {
-    const all = available().filter((model) => supplier === undefined || supplierOf(model.id) === supplier);
+    const all = service.selectable().filter((model) => supplier === undefined || supplierOf(model.id) === supplier);
     if (all.length === 0) return "当前目录没有可切的模型。";
     const lines = [`可切模型（实时目录，共 ${all.length} 个）：`];
     for (const model of all) {
@@ -113,30 +111,32 @@ export function createModelCommandHandler(options: ModelCommandOptions): (text: 
   };
 
   const select = (target: string): string => {
-    const alias = byAlias(target);
+    const alias = service.byAlias(target);
     const id = alias?.id ?? target;
-    const model = options.models.getModel(options.provider, id);
-    if (model === undefined) {
-      return `没有找到模型 ${id}。发 $model list 查看可切模型。`;
+    try {
+      const result = service.select(id);
+      if (sameModelInstance(result.model, primary)) {
+        log(`Model command: selection cleared; back on the primary ${modelLabel(primary)}`);
+        return `已切回主模型：${modelLabel(primary)}。`;
+      }
+      if (result.unchanged) {
+        return `当前已经手动指定为 ${modelLabel(result.model)}（${result.model.name}）。`;
+      }
+      log(`Model command: manual selection set to ${modelLabel(result.model)}`);
+      const smaller = result.model.contextWindow < primary.contextWindow
+        ? `它的 context window 较小（${result.model.contextWindow}），长对话可能先触发压缩。`
+        : "";
+      return `已切换到 ${modelLabel(result.model)}（${result.model.name}）。${smaller}它不可用时按默认链降级；回主模型发 $model primary。`;
+    } catch (error) {
+      if (error instanceof ModelSelectionError) {
+        if (error.code === "MODEL_NOT_FOUND") return `没有找到模型 ${id}。发 $model list 查看可切模型。`;
+        if (error.code === "MODEL_OUT_OF_SCOPE") {
+          return `只能切 OpenCode / Command Code 的 DeepSeek、GLM、Gemini Flash；${id} 不在可切范围内。`;
+        }
+        return "模型切换暂时不可用，请稍后再试。";
+      }
+      throw error;
     }
-    if (!isSelectableModel(model)) {
-      return `只能切 OpenCode / Command Code 的 DeepSeek、GLM、Gemini Flash；${id} 不在可切范围内。`;
-    }
-    if (sameModelInstance(model, primary)) {
-      options.state.clear();
-      log(`Model command: selection cleared; back on the primary ${modelLabel(primary)}`);
-      return `已切回主模型：${modelLabel(primary)}。`;
-    }
-    const selected = options.state.active();
-    if (selected?.kind === "manual" && selected.provider === model.provider && selected.modelId === model.id) {
-      return `当前已经手动指定为 ${modelLabel(model)}（${model.name}）。`;
-    }
-    options.state.set({ provider: model.provider, modelId: model.id, kind: "manual" });
-    log(`Model command: manual selection set to ${modelLabel(model)}`);
-    const smaller = model.contextWindow < primary.contextWindow
-      ? `它的 context window 较小（${model.contextWindow}），长对话可能先触发压缩。`
-      : "";
-    return `已切换到 ${modelLabel(model)}（${model.name}）。${smaller}它不可用时按默认链降级；回主模型发 $model primary。`;
   };
 
   return (text: string): string | undefined => {
@@ -148,11 +148,15 @@ export function createModelCommandHandler(options: ModelCommandOptions): (text: 
       case "list":
         return list(command.supplier);
       case "primary": {
-        const selected = options.state.active();
-        if (selected === undefined) return `当前已经是主模型：${modelLabel(primary)}。`;
-        options.state.clear();
-        log("Model command: selection cleared; back on the primary");
-        return `已切回主模型：${modelLabel(primary)}。`;
+        try {
+          const result = service.primary();
+          if (result.unchanged) return `当前已经是主模型：${modelLabel(primary)}。`;
+          log("Model command: selection cleared; back on the primary");
+          return `已切回主模型：${modelLabel(primary)}。`;
+        } catch (error) {
+          if (error instanceof ModelSelectionError) return "模型切换暂时不可用，请稍后再试。";
+          throw error;
+        }
       }
       case "select":
         return select(command.target);

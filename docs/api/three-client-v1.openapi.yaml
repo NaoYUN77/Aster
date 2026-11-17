@@ -1,0 +1,825 @@
+openapi: 3.1.0
+info:
+  title: Aster Three-Client API
+  version: 1.0.0
+  description: |
+    Single-owner web adapter for Aster. One owner, one conversation, one text
+    request at a time. Authentication is a bearer token obtained from
+    `POST /api/v1/auth/login`; the token is opaque and the server stores only its
+    SHA-256 hash.
+
+    Shared backend contract for Web, Tauri and Capacitor clients. Dev 2 generates
+    its typed client from this file; changes go through this contract first.
+
+    Model ids and the selectable scope are never hardcoded. The server returns
+    exactly the live runtime catalog filtered by the same policy that `$model`
+    uses (`selectableModels()` / `isSelectableModel()`).
+
+    CORS: defaults include the Web dev origin, `http://tauri.localhost`,
+    `tauri://localhost`, Capacitor's `https://localhost`, and
+    `capacitor://localhost`; requesting clients must send exactly one of them as
+    `Origin`. Setting `WEB_ALLOWED_ORIGINS` replaces the defaults, so include the
+    native shell's origin there as well. Preflight allows `Authorization`,
+    `Content-Type`, and `Cache-Control` (the SSE client sends the last one). The
+    SSE endpoint applies the same allowlist on its hijacked response, echoing
+    `Access-Control-Allow-Origin` and `Vary: Origin`.
+servers:
+  - url: /
+    description: Same origin (Web behind Caddy); Tauri/Capacitor use their configured server URL.
+tags:
+  - name: health
+  - name: auth
+  - name: messages
+  - name: models
+  - name: events
+paths:
+  /api/v1/health:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Unauthenticated liveness probe
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Exchange the owner password for a bearer token
+      description: |
+        Rate limited to 5 failed attempts per IP per minute. A wrong password
+        returns 401 `INVALID_CREDENTIALS`; the response never reveals whether a
+        password has been configured.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          description: Wrong password.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidCredentials:
+                  value:
+                    error: { code: INVALID_CREDENTIALS, message: 密码错误 }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Revoke the current bearer token
+      responses:
+        "204":
+          description: Token revoked (idempotent).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: Current session identity and expiry
+      responses:
+        "200":
+          description: Current session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/messages:
+    post:
+      tags: [messages]
+      operationId: submitMessage
+      summary: Queue one owner text message
+      description: |
+        Idempotent per `clientMessageId`: repeating the same id returns the same
+        `requestId` and does not enqueue twice. Only one request runs at a time;
+        further submissions queue FIFO. The final answer is delivered through SSE
+        `request.done`; history is always read from the durable transcript.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitMessageRequest"
+      responses:
+        "202":
+          description: Accepted (new or idempotent replay).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitMessageResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    get:
+      tags: [messages]
+      operationId: listMessages
+      summary: Read durable transcript history (projected for the UI)
+      description: |
+        Returns the page in chronological order (oldest first). Pass
+        `nextCursor` as `before` to load older messages. The cursor is opaque
+        and entry-id based; never derive it from an array index.
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: Opaque cursor from a previous page's `nextCursor`.
+          schema:
+            type: string
+            maxLength: 1024
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 30
+      responses:
+        "200":
+          description: One page of projected history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessagePage"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/requests/{requestId}/abort:
+    post:
+      tags: [messages]
+      operationId: abortRequest
+      summary: Stop the queued or running request
+      description: |
+        Aborts the current generation for the single conversation. A queued
+        request is marked aborted and skipped; a running request calls
+        `agent.abort()` and is marked aborted. Later queued requests remain.
+        The stopped input stays visible in history, but it is excluded from the
+        next model context, so the next answer does not answer it again. A stop
+        before any visible token leaves no empty assistant message.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Request aborted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AbortResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The request already reached a terminal status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                notActive:
+                  value:
+                    error: { code: REQUEST_NOT_ACTIVE, message: 请求已结束 }
+  /api/v1/models:
+    get:
+      tags: [models]
+      operationId: listModels
+      summary: Live model catalog and current selection
+      description: |
+        `selectable` is the live runtime catalog filtered by the same policy as
+        `$model list`. The server never returns API keys, base URLs or provider
+        credentials.
+      responses:
+        "200":
+          description: Current model state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/models/select:
+    post:
+      tags: [models]
+      operationId: selectModel
+      summary: Manually select a model or switch back to the primary
+      description: |
+        Host-side only: does not call a model and does not produce a chat
+        message. The selection is persisted (manual sticky) until `primary` is
+        requested or the selected model disappears from the catalog.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectModelRequest"
+      responses:
+        "200":
+          description: Selection applied (or unchanged on an idempotent repeat).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SelectModelResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Model id is not in the runtime catalog.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                notFound:
+                  value:
+                    error: { code: MODEL_NOT_FOUND, message: 没有找到该模型 }
+        "409":
+          description: Model switching is disabled because no failover chain is configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                disabled:
+                  value:
+                    error: { code: MODEL_SWITCH_DISABLED, message: 当前配置未启用模型切换 }
+        "422":
+          description: Model exists but is outside the selectable scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                outOfScope:
+                  value:
+                    error: { code: MODEL_OUT_OF_SCOPE, message: 该模型不在可切换范围内 }
+        "500":
+          description: The selection file could not be written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                writeFailed:
+                  value:
+                    error: { code: SELECTION_WRITE_FAILED, message: 模型选择保存失败 }
+  /api/v1/events:
+    get:
+      tags: [events]
+      operationId: subscribeEvents
+      summary: Server-Sent Events stream
+      description: |
+        Uses the same `Authorization: Bearer` header as every other endpoint, so
+        clients must consume it with `fetch` + `ReadableStream`, not
+        `EventSource`. The stream opens with a `snapshot` event, sends an SSE
+        comment heartbeat every 15 seconds, and broadcasts request, model and
+        `host.message` events to every connected client. No event replay is
+        provided: on reconnect a client re-reads history (host notifications are
+        durable `role: system` rows) and uses the new snapshot.
+      responses:
+        "200":
+          description: |
+            `text/event-stream`. Each event uses the standard `event:` and
+            `data:` lines. Event names and payloads are defined by
+            `SseEvent` below.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: UTF-8 SSE framing; JSON payload per event name.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Opaque token returned by `POST /api/v1/auth/login`.
+  responses:
+    InvalidRequest:
+      description: Malformed request or invalid parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            invalid:
+              value:
+                error: { code: INVALID_REQUEST, message: 请求参数不合法 }
+            textTooLong:
+              summary: Message text exceeds the 32000-character limit.
+              value:
+                error: { code: TEXT_TOO_LONG, message: 消息过长，最多 32000 个字符 }
+    Unauthorized:
+      description: Missing, expired or revoked token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            unauthorized:
+              value:
+                error: { code: UNAUTHORIZED, message: 未登录或登录已过期 }
+    RateLimited:
+      description: Too many attempts.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            limited:
+              value:
+                error: { code: RATE_LIMITED, message: 尝试过于频繁，请稍后再试 }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            notFound:
+              value:
+                error: { code: REQUEST_NOT_FOUND, message: 没有找到该请求 }
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, version]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        version:
+          type: string
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [token, expiresAt, ownerId]
+      properties:
+        token:
+          type: string
+          description: Opaque bearer token. Store only on the client.
+        expiresAt:
+          type: string
+          format: date-time
+        ownerId:
+          type: string
+    MeResponse:
+      type: object
+      additionalProperties: false
+      required: [ownerId, expiresAt]
+      properties:
+        ownerId:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+    SubmitMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId, text]
+      properties:
+        clientMessageId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Client-generated id; the idempotency key.
+        text:
+          type: string
+          minLength: 1
+          maxLength: 32000
+    RequestStatus:
+      type: string
+      enum: [queued, running, done, failed, aborted]
+    SubmitMessageResponse:
+      type: object
+      additionalProperties: false
+      required: [requestId, status]
+      properties:
+        requestId:
+          type: string
+        status:
+          $ref: "#/components/schemas/RequestStatus"
+    AbortResponse:
+      type: object
+      additionalProperties: false
+      required: [requestId, status]
+      properties:
+        requestId:
+          type: string
+        status:
+          type: string
+          const: aborted
+    UiMessage:
+      type: object
+      additionalProperties: false
+      required: [id, role, text, createdAt, status]
+      properties:
+        id:
+          type: string
+          description: Stable server-side message id (durable entry id).
+        role:
+          type: string
+          enum: [user, assistant, system]
+        text:
+          type: string
+        createdAt:
+          type: integer
+          format: int64
+          description: Unix epoch milliseconds.
+        status:
+          type: string
+          enum: [complete, failed, aborted]
+        requestId:
+          type: [string, "null"]
+          description: Host request id that produced this row, from durable submissions.
+        clientMessageId:
+          type: [string, "null"]
+          description: Web idempotency key of that request; null when no web_requests row exists.
+        model:
+          oneOf:
+            - $ref: "#/components/schemas/MessageModel"
+            - type: "null"
+        errorCode:
+          type: [string, "null"]
+        tool:
+          oneOf:
+            - $ref: "#/components/schemas/ToolSummary"
+            - type: "null"
+    MessageModel:
+      type: object
+      additionalProperties: false
+      required: [id, label]
+      properties:
+        id:
+          type: string
+          description: Model id as it appears in the runtime catalog.
+        label:
+          type: string
+          description: "Human label, conventionally `<provider>/<model id>`."
+        provider:
+          type: string
+    ToolSummary:
+      type: object
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [done, failed]
+    MessagePage:
+      type: object
+      additionalProperties: false
+      required: [messages, nextCursor, hasMore]
+      properties:
+        messages:
+          type: array
+          description: Chronological, oldest first.
+          items:
+            $ref: "#/components/schemas/UiMessage"
+        nextCursor:
+          type: [string, "null"]
+          description: Pass as `before` to load older messages; null when absent.
+        hasMore:
+          type: boolean
+    ModelSelectionKind:
+      type: string
+      enum: [primary, manual, auto]
+    ModelEntry:
+      type: object
+      additionalProperties: false
+      required: [provider, id, name, label]
+      properties:
+        provider:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        label:
+          type: string
+    CurrentModel:
+      allOf:
+        - $ref: "#/components/schemas/ModelEntry"
+        - type: object
+          additionalProperties: false
+          required: [kind]
+          properties:
+            kind:
+              $ref: "#/components/schemas/ModelSelectionKind"
+    SelectableModel:
+      allOf:
+        - $ref: "#/components/schemas/ModelEntry"
+        - type: object
+          additionalProperties: false
+          required: [supplier, family]
+          properties:
+            supplier:
+              type: string
+              enum: [opencode, commandcode]
+            family:
+              type: string
+              enum: [deepseek, glm, gemini-flash]
+            contextWindow:
+              type: integer
+    ModelScope:
+      type: object
+      additionalProperties: false
+      required: [suppliers, families, excludesSpeedVariants]
+      properties:
+        suppliers:
+          type: array
+          items:
+            type: string
+        families:
+          type: array
+          items:
+            type: string
+        excludesSpeedVariants:
+          type: boolean
+          const: true
+    ModelsResponse:
+      type: object
+      additionalProperties: false
+      required: [canSelect, current, primary, chain, selectable, scope]
+      properties:
+        canSelect:
+          type: boolean
+          description: False when no failover chain/selection store is configured; UI renders read-only.
+        current:
+          $ref: "#/components/schemas/CurrentModel"
+        primary:
+          $ref: "#/components/schemas/ModelEntry"
+        chain:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelEntry"
+        selectable:
+          type: array
+          items:
+            $ref: "#/components/schemas/SelectableModel"
+        scope:
+          $ref: "#/components/schemas/ModelScope"
+    SelectModelRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, modelId]
+          properties:
+            action:
+              type: string
+              const: select
+            modelId:
+              type: string
+              minLength: 1
+        - type: object
+          additionalProperties: false
+          required: [action]
+          properties:
+            action:
+              type: string
+              const: primary
+    SelectModelResponse:
+      allOf:
+        - $ref: "#/components/schemas/ModelsResponse"
+        - type: object
+          additionalProperties: false
+          properties:
+            effective:
+              type: string
+              enum: [immediate, next_request]
+              description: |
+                `next_request` when a request is currently running: the current
+                generation keeps the model it started with and the new selection
+                applies to the next reply.
+    ModelUsage:
+      type: object
+      additionalProperties: false
+      required: [requested, actual, kind, degraded]
+      properties:
+        requested:
+          type: object
+          additionalProperties: false
+          required: [id, label, kind]
+          properties:
+            id:
+              type: string
+            label:
+              type: string
+            kind:
+              $ref: "#/components/schemas/ModelSelectionKind"
+        actual:
+          $ref: "#/components/schemas/MessageModel"
+        kind:
+          $ref: "#/components/schemas/ModelSelectionKind"
+        degraded:
+          type: boolean
+          description: True only when a manual selection was unavailable and another model answered.
+    SseEvent:
+      description: |
+        Discriminated by the SSE `event:` name. `data` is JSON.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: snapshot }
+            data:
+              type: object
+              additionalProperties: false
+              required: [activeRequest, modelVersion]
+              properties:
+                activeRequest:
+                  oneOf:
+                    - $ref: "#/components/schemas/ActiveRequest"
+                    - type: "null"
+                modelVersion:
+                  type: integer
+                  description: Monotonic selection version; changes on every applied model change.
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: request.queued }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId, clientMessageId]
+              properties:
+                requestId: { type: string }
+                clientMessageId: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: request.running }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId]
+              properties:
+                requestId: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: request.done }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId, message, model]
+              properties:
+                requestId: { type: string }
+                message:
+                  $ref: "#/components/schemas/UiMessage"
+                model:
+                  $ref: "#/components/schemas/ModelUsage"
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: request.failed }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId, code, message]
+              properties:
+                requestId: { type: string }
+                code:
+                  type: string
+                  description: Stable error code such as MODEL_UNAVAILABLE.
+                message:
+                  type: string
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: request.aborted }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId]
+              properties:
+                requestId: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: host.message }
+            data:
+              type: object
+              additionalProperties: false
+              required: [message]
+              properties:
+                message:
+                  $ref: "#/components/schemas/UiMessage"
+              description: |
+                A host-originated notification (reminder, watch event or routine result).
+                It is also a durable history row (`role: system`), so a client that missed the
+                event can recover it with `GET /api/v1/messages`.
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: model.changed }
+            data:
+              type: object
+              additionalProperties: false
+              required: [current, version]
+              properties:
+                current:
+                  $ref: "#/components/schemas/CurrentModel"
+                version:
+                  type: integer
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: heartbeat }
+            data:
+              type: object
+              additionalProperties: false
+              required: [ts]
+              properties:
+                ts: { type: integer, format: int64 }
+    ActiveRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, clientMessageId, status, startedAt]
+      properties:
+        requestId: { type: string }
+        clientMessageId: { type: string }
+        status:
+          type: string
+          const: running
+        startedAt:
+          type: integer
+          format: int64
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                Stable machine-readable code. Auth/transport codes: INVALID_REQUEST,
+                TEXT_TOO_LONG, UNAUTHORIZED, RATE_LIMITED, REQUEST_NOT_FOUND,
+                REQUEST_NOT_ACTIVE, PAYLOAD_TOO_LARGE.
+                Model codes: MODEL_NOT_FOUND, MODEL_OUT_OF_SCOPE,
+                MODEL_SWITCH_DISABLED, SELECTION_WRITE_FAILED. Request failure
+                codes sent in `request.failed`: MODEL_UNAVAILABLE,
+                MODEL_INCOMPATIBLE, AGENT_TIMEOUT, AGENT_UNANSWERED,
+                AGENT_TRUNCATED, EMPTY_REPLY, AGENT_LOOP_DETECTED,
+                AGENT_SESSION_FAILED, PROCESS_INTERRUPTED, ABORTED,
+                EXECUTION_ERROR.
+            message:
+              type: string
+              description: Safe user-facing text; never contains stack traces or provider credentials.
+security:
+  - bearerAuth: []
