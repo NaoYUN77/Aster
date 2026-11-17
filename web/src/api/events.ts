@@ -37,6 +37,8 @@ const uiMessageSchema = z.object({
   createdAt: z.number(),
   status: z.enum(["complete", "failed", "aborted"]),
   requestId: z.string().nullish(),
+  // Dev 1 契约新增；旧服务端不返回。
+  clientMessageId: z.string().nullish(),
   model: messageModelSchema.nullish(),
   errorCode: z.string().nullish(),
   tool: z

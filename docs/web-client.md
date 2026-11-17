@@ -108,6 +108,11 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 
 - 初始拉最近 30 条；上滚用 `before=<entry cursor>` 加载更早，保持滚动位置。
 - 发送使用 `clientMessageId`（UUID）；202 后显示“排队中”，SSE 推进到“正在回复/完成”。
+- 去重：历史与 SSE live 同 id 合并时保留 `requestId` / `clientMessageId`（历史文本优先）；
+  本地乐观 user 消息只与服务器 **user** 消息按 `clientMessageId` 或 `requestId` 去重，
+  不按文本、也不用 assistant 的 `requestId` 猜。`$model` 命令没有 durable user entry，
+  本地气泡保留。旧服务端缺少这两个字段时宁可不合并，也不误删合法消息。
+  契约新增的 `clientMessageId` 为可选字段，客户端兼容返回与不返回两种服务端。
 - 停止：`POST /api/v1/requests/:requestId/abort`，只在用户消息下显示“已停止”；
   不渲染空 assistant 气泡（服务端也不再追加停止占位消息）。
 - 失败：错误条 + 重试；重试生成新的 `clientMessageId`。
@@ -235,6 +240,7 @@ cd android && ./gradlew assembleDebug
 ```bash
 cd web
 npm run typecheck
+npm test             # vitest：消息去重/合并等显示层逻辑
 npm run build        # 生产构建（不含 mock）
 ```
 

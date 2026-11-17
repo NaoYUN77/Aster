@@ -299,17 +299,22 @@ export function mockSendMessage(
   };
   state.requests.push(request);
 
-  state.messages.push({
-    id: makeId("entry"),
-    role: "user",
-    text,
-    createdAt: now,
-    status: "complete",
-    requestId,
-    model: null,
-    errorCode: null,
-    tool: null,
-  });
+  // 与服务端一致：`$model` 是命令，不产生 durable user entry。
+  // 本地用户气泡只能靠客户端自己保留，历史里不会再出现。
+  if (!text.trim().startsWith("$model")) {
+    state.messages.push({
+      id: makeId("entry"),
+      role: "user",
+      text,
+      createdAt: now,
+      status: "complete",
+      requestId,
+      clientMessageId,
+      model: null,
+      errorCode: null,
+      tool: null,
+    });
+  }
 
   persist();
   emit("request.queued", { requestId, clientMessageId });
@@ -367,6 +372,7 @@ function finishRequest(request: MockRequest): void {
     createdAt: Date.now(),
     status: "complete",
     requestId: request.requestId,
+    clientMessageId: request.clientMessageId,
     model: actual,
     errorCode: null,
     tool: null,

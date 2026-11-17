@@ -114,6 +114,7 @@ function finishRequest(request) {
     id: makeId("entry"), role: "assistant",
     text: degraded ? `（${requestedRef.label} 不可用，本次由 ${actual.label} 回答。）\n\n${reply}` : reply,
     createdAt: Date.now(), status: "complete", requestId: request.requestId,
+    clientMessageId: request.clientMessageId,
     model: actual, errorCode: null, tool: null,
   };
   state.messages.push(message);
@@ -132,10 +133,13 @@ function sendMessage(clientMessageId, text) {
   const requestId = makeId("req");
   const request = { requestId, clientMessageId, text, status: "queued", createdAt: Date.now() };
   state.requests.push(request);
-  state.messages.push({
-    id: makeId("entry"), role: "user", text, createdAt: Date.now(), status: "complete",
-    requestId, model: null, errorCode: null, tool: null,
-  });
+  // 与服务端一致：`$model` 是命令，不产生 durable user entry。
+  if (!text.trim().startsWith("$model")) {
+    state.messages.push({
+      id: makeId("entry"), role: "user", text, createdAt: Date.now(), status: "complete",
+      requestId, clientMessageId, model: null, errorCode: null, tool: null,
+    });
+  }
   emit("request.queued", { requestId, clientMessageId });
 
   const started = setTimeout(() => {
