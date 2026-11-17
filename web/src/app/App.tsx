@@ -5,12 +5,16 @@ import { setUnauthorizedHandler } from "@/api/client";
 import { ChatPage } from "@/features/chat/ChatPage";
 import { useChatEvents } from "@/features/chat/use-chat-events";
 import { LoginPage } from "@/features/auth/LoginPage";
+import { ConnectorsPage } from "@/features/connectors/ConnectorsPage";
+import { CredentialRequestDialog } from "@/features/connectors/CredentialRequestDialog";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { SetupPage } from "@/features/settings/SetupPage";
 import { platform } from "@/lib/platform";
+import { initAudioUnlock } from "@/lib/sound";
 import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
 import { useConnectionStore } from "@/store/connection";
+import { useSoundStore } from "@/store/sound";
 import { Splash } from "./Splash";
 
 let lastUnauthorizedAt = 0;
@@ -75,10 +79,22 @@ function RequireAuth() {
   return <AuthenticatedShell />;
 }
 
-/** 登录后常驻：SSE 在聊天页与设置页之间保持连接，避免切页断流。 */
+/** 登录后常驻：SSE 与安全注入弹窗在聊天/设置/连接器页之间保持。 */
 function AuthenticatedShell() {
   useChatEvents();
-  return <Outlet />;
+
+  useEffect(() => {
+    void useSoundStore.getState().hydrate();
+    // 浏览器要求首次用户手势后才能出声；这里只挂监听，不主动播放。
+    return initAudioUnlock();
+  }, []);
+
+  return (
+    <>
+      <Outlet />
+      <CredentialRequestDialog />
+    </>
+  );
 }
 
 export function App() {
@@ -104,6 +120,7 @@ export function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route element={<RequireAuth />}>
         <Route path="/" element={<ChatPage />} />
+        <Route path="/connectors" element={<ConnectorsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
       {/* RequireAuth 内部渲染 AuthenticatedShell + Outlet，两页共用同一个 SSE 连接。 */}

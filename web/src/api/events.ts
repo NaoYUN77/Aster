@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { CredentialRequest } from "./connectors";
 import type { ModelKind, ModelRef, ModelUsage, UiMessage } from "./types";
 
 /** 目录里的模型条目（ModelEntry）：provider/id/name/label。 */
@@ -83,6 +84,42 @@ const modelChangedSchema = z.object({
   version: z.number().optional(),
 });
 
+/**
+ * Connector 安全注入请求。合同未定，字段按最小集合解析：
+ * 缺少 expiresAt 时用 ttlSeconds（默认 120 秒）换算成绝对时间。
+ */
+const credentialRequestSchema = z.object({
+  requestId: z.string(),
+  connector: z
+    .object({ id: z.string().optional(), name: z.string().optional() })
+    .nullish(),
+  tool: z.string(),
+  scopes: z.array(z.string()).optional(),
+  expiresAt: z.union([z.number(), z.string()]).nullish(),
+  ttlSeconds: z.number().nullish(),
+  reason: z.string().nullish(),
+  accountHint: z.string().nullish(),
+});
+
+/** Connector 连接状态变化；只用于让前端刷新列表，不信任 payload。 */
+const connectorChangedSchema = z.object({}).passthrough();
+
+function normalizeExpiry(value: unknown, ttlSeconds: number | null | undefined): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    // 兼容秒级与毫秒级时间戳。
+    return value < 1_000_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const ttl =
+    typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds) && ttlSeconds > 0
+      ? ttlSeconds
+      : 120;
+  return Date.now() + ttl * 1000;
+}
+
 export type ParsedServerEvent =
   | {
       type: "snapshot";
@@ -99,6 +136,8 @@ export type ParsedServerEvent =
   | { type: "request.failed"; requestId: string; code: string | null; message: string | null }
   | { type: "request.aborted"; requestId: string }
   | { type: "model.changed"; current: ModelRef; version?: number }
+  | { type: "connector.changed" }
+  | { type: "credential.request"; request: CredentialRequest }
   | { type: "ignored"; event: string };
 
 function fallbackUsage(message: UiMessage): ModelUsage {
@@ -177,6 +216,30 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
           name: current.name,
         },
         ...(parsed.data.version !== undefined ? { version: parsed.data.version } : {}),
+      };
+    }
+    case "connector.changed": {
+      const parsed = connectorChangedSchema.safeParse(data);
+      return parsed.success ? { type: "connector.changed" } : { type: "ignored", event };
+    }
+    case "credential.request": {
+      const parsed = credentialRequestSchema.safeParse(data);
+      if (!parsed.success) return { type: "ignored", event };
+      const value = parsed.data;
+      return {
+        type: "credential.request",
+        request: {
+          requestId: value.requestId,
+          connector: {
+            id: value.connector?.id ?? "unknown",
+            name: value.connector?.name ?? "连接器",
+          },
+          tool: value.tool,
+          scopes: value.scopes ?? [],
+          expiresAt: normalizeExpiry(value.expiresAt, value.ttlSeconds),
+          reason: value.reason ?? null,
+          accountHint: value.accountHint ?? null,
+        },
       };
     }
     default:

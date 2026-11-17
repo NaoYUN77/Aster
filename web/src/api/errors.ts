@@ -104,6 +104,13 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   NETWORK_ERROR: "无法连接服务器，请检查网络或服务器地址",
   TIMEOUT: "请求超时，请重试",
   TEXT_TOO_LONG: "消息太长，请缩短后重试",
+  CONNECTOR_NOT_FOUND: "连接器不存在",
+  CONNECTOR_NOT_CONFIGURED: "服务器还没有配置这个连接器",
+  OAUTH_FAILED: "授权失败，请重试",
+  CREDENTIAL_NOT_FOUND: "凭据请求不存在或已结束",
+  CREDENTIAL_NOT_PENDING: "凭据请求已结束",
+  CREDENTIAL_EXPIRED: "凭据请求已超时，请重新发起",
+  CREDENTIAL_REJECTED: "令牌无效或已被拒绝",
 };
 
 export function errorText(code: string | null | undefined, fallback?: string | null): string {

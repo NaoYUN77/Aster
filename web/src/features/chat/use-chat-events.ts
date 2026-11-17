@@ -1,15 +1,18 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { CONNECTORS_QUERY_ROOT } from "@/api/connectors";
 import { parseServerEvent } from "@/api/events";
 import { errorText, toApiError } from "@/api/errors";
 import { subscribeEvents, type ServerEvent } from "@/api/sse";
 import type { ModelsResponse } from "@/api/types";
 import { consumeLocalSelection } from "@/features/models/selection-origin";
 import { modelsQueryKey } from "@/features/models/use-models";
+import { playCue } from "@/lib/sound";
 import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
 import { useConnectionStore } from "@/store/connection";
+import { useCredentialStore } from "@/store/credential";
 
 /**
  * 连接 /api/v1/events 并把事件写进本地聊天状态。
@@ -136,6 +139,22 @@ export function useChatEvents(): void {
           break;
         }
 
+        case "connector.changed": {
+          // 连接状态以服务端为准：任一端授权/断开后，本端重新拉取列表。
+          void queryClient.invalidateQueries({
+            queryKey: [CONNECTORS_QUERY_ROOT],
+          });
+          break;
+        }
+
+        case "credential.request": {
+          const credentials = useCredentialStore.getState();
+          const isNew = credentials.pending?.requestId !== event.request.requestId;
+          credentials.setPending(event.request);
+          if (isNew) playCue("attention");
+          break;
+        }
+
         case "model.changed": {
           const local = consumeLocalSelection();
           const cached = queryClient.getQueryData<ModelsResponse>(modelKey);
@@ -164,6 +183,10 @@ export function useChatEvents(): void {
         if (openedOnce) {
           void queryClient.invalidateQueries({ queryKey: historyKey });
           void queryClient.invalidateQueries({ queryKey: modelKey });
+          // 重连期间可能错过 connector.changed，重连后对齐一次。
+          void queryClient.invalidateQueries({
+            queryKey: [CONNECTORS_QUERY_ROOT],
+          });
         }
         openedOnce = true;
       },

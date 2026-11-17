@@ -4,13 +4,16 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
   CheckCircle2,
+  Link2,
   LogOut,
   PlugZap,
   Server,
   Smartphone,
   UserRound,
+  Volume2,
   XCircle,
 } from "lucide-react";
+import { SoundToggle } from "@/components/SoundToggle";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -167,6 +170,32 @@ export function SettingsPage() {
               </span>
             </div>
           )}
+        </Section>
+
+        <Section icon={<Link2 className="size-4" />} title="连接器">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-medium">GitHub · Gmail</p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                一次授权，三端复用；连接由服务器保存，本机不保存令牌。
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => navigate("/connectors")}>
+              管理连接
+            </Button>
+          </div>
+        </Section>
+
+        <Section icon={<Volume2 className="size-4" />} title="提示音">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-medium">需要令牌 / 授权完成 / 出错</p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                本地合成，不含外部音频；首次点击后才会出声。
+              </p>
+            </div>
+            <SoundToggle />
+          </div>
         </Section>
 
         <Section icon={<UserRound className="size-4" />} title="账号">

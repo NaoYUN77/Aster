@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Asterisk, LogOut, Settings } from "lucide-react";
+import { Asterisk, Link2, LogOut, Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -87,6 +87,10 @@ export function ChatHeader() {
             <DropdownMenuContent>
               <DropdownMenuLabel>{platformLabel()} · 单 owner</DropdownMenuLabel>
               <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => navigate("/connectors")}>
+                <Link2 className="size-3.5" />
+                连接器
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => navigate("/settings")}>
                 <Settings className="size-3.5" />
                 设置

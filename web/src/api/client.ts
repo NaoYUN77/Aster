@@ -32,6 +32,11 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
 }
 
+/** 非 openapi-fetch 的临时接口（如 Connectors）遇到 401 时复用全局会话失效处理。 */
+export function notifyUnauthorized(): void {
+  unauthorizedHandler?.();
+}
+
 export function createApiClient(options: ApiConfig): ApiClient {
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
   return createClient<paths>({

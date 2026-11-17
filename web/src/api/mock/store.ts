@@ -28,6 +28,24 @@ export type MockRequest = {
 
 type Selection = { id: string; kind: "manual" | "auto" } | null;
 
+export type MockConnectorState = {
+  status: "disconnected" | "connected" | "error";
+  account: { id: string; label: string; detail?: string | null } | null;
+  scopes: string[];
+  connectedAt: string | null;
+  lastError: string | null;
+};
+
+export type MockCredentialRequest = {
+  requestId: string;
+  connectorId: string;
+  tool: string;
+  scopes: string[];
+  expiresAt: number;
+  status: "pending" | "submitted" | "cancelled";
+  reason?: string;
+};
+
 type MockState = {
   messages: UiMessage[];
   sessions: Record<string, number>;
@@ -35,7 +53,43 @@ type MockState = {
   requests: MockRequest[];
   modelVersion: number;
   seededAt: number;
+  connectors: Record<string, MockConnectorState>;
+  credentialRequests: Record<string, MockCredentialRequest>;
 };
+
+const CONNECTOR_DEFS = [
+  {
+    id: "github",
+    name: "GitHub",
+    description:
+      "授权后 Aster 可以读取仓库信息，用于代码检索、Issue 与 Pull Request 相关工具。",
+    readOnly: false,
+    scopes: ["repo", "read:user"],
+    account: { id: "aster-dev", label: "aster-dev", detail: "GitHub Mock 账号" },
+  },
+  {
+    id: "gmail",
+    name: "Gmail",
+    description: "本轮 Gmail 仅提供只读能力：搜索和读取邮件，不会发送或删除。",
+    readOnly: true,
+    scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+    account: { id: "aster.demo@gmail.com", label: "aster.demo@gmail.com", detail: "只读" },
+  },
+] as const;
+
+function freshConnectors(): Record<string, MockConnectorState> {
+  const connectors: Record<string, MockConnectorState> = {};
+  for (const def of CONNECTOR_DEFS) {
+    connectors[def.id] = {
+      status: "disconnected",
+      account: null,
+      scopes: [],
+      connectedAt: null,
+      lastError: null,
+    };
+  }
+  return connectors;
+}
 
 type MockEvent = { event: string; data: unknown };
 type Listener = (event: MockEvent) => void;
@@ -52,6 +106,8 @@ function freshState(): MockState {
     requests: [],
     modelVersion: 1,
     seededAt: now,
+    connectors: freshConnectors(),
+    credentialRequests: {},
   };
 }
 
@@ -69,6 +125,8 @@ function load(): MockState {
       requests: parsed.requests ?? [],
       selection: parsed.selection ?? null,
       modelVersion: parsed.modelVersion ?? 1,
+      connectors: { ...freshConnectors(), ...(parsed.connectors ?? {}) },
+      credentialRequests: parsed.credentialRequests ?? {},
     };
     // 模拟后端重启恢复：未完成的请求置为失败，不自动重放。
     for (const request of state.requests) {
@@ -432,6 +490,154 @@ export function mockActiveRequest(): { requestId: string; status: string; client
 
 export function mockSnapshot(): { activeRequest: unknown; modelVersion: number } {
   return { activeRequest: mockActiveRequest(), modelVersion: state.modelVersion };
+}
+
+/* ------------------------------------------------------------------ */
+/* Connectors（仅 mock：状态保存在 mock 服务端，不写客户端存储）        */
+/* ------------------------------------------------------------------ */
+
+function connectorView(id: string) {
+  const def = CONNECTOR_DEFS.find((item) => item.id === id);
+  const current = state.connectors[id];
+  if (!def || !current) return null;
+  return {
+    id: def.id,
+    name: def.name,
+    description: def.description,
+    status: current.status,
+    account: current.account,
+    scopes: current.scopes,
+    readOnly: def.readOnly,
+    connectedAt: current.connectedAt,
+    lastError: current.lastError,
+  };
+}
+
+export function mockConnectors() {
+  return {
+    connectors: CONNECTOR_DEFS.map((def) => connectorView(def.id)),
+    mock: true,
+  };
+}
+
+export function mockConnect(
+  id: string,
+):
+  | { ok: true; connector: NonNullable<ReturnType<typeof connectorView>> }
+  | { ok: false; status: number; code: string; message: string } {
+  const def = CONNECTOR_DEFS.find((item) => item.id === id);
+  const current = state.connectors[id];
+  if (!def || !current) {
+    return { ok: false, status: 404, code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" };
+  }
+
+  current.status = "connected";
+  current.account = { ...def.account };
+  current.scopes = [...def.scopes];
+  current.connectedAt = new Date().toISOString();
+  current.lastError = null;
+  persist();
+  emit("connector.changed", { connectorId: id, status: current.status });
+
+  const connector = connectorView(id);
+  if (!connector) {
+    return { ok: false, status: 500, code: "INTERNAL_ERROR", message: "连接失败" };
+  }
+  return { ok: true, connector };
+}
+
+export function mockDisconnect(
+  id: string,
+): { ok: true } | { ok: false; status: number; code: string; message: string } {
+  const current = state.connectors[id];
+  if (!current) {
+    return { ok: false, status: 404, code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" };
+  }
+  current.status = "disconnected";
+  current.account = null;
+  current.scopes = [];
+  current.connectedAt = null;
+  current.lastError = null;
+  persist();
+  emit("connector.changed", { connectorId: id, status: current.status });
+  return { ok: true };
+}
+
+/** 模拟服务端发起一次安全注入请求，通过 SSE 推给所有端。 */
+export function mockRequestCredential(
+  connectorId = "github",
+): { requestId: string } | { error: "CONNECTOR_NOT_FOUND" } {
+  const def = CONNECTOR_DEFS.find((item) => item.id === connectorId);
+  if (!def) return { error: "CONNECTOR_NOT_FOUND" };
+
+  const gmail = connectorId === "gmail";
+  const requestId = makeId("cred");
+  const request: MockCredentialRequest = {
+    requestId,
+    connectorId,
+    tool: gmail ? "gmail.search" : "github.create_issue_comment",
+    scopes: [...def.scopes],
+    expiresAt: Date.now() + 120_000,
+    status: "pending",
+  };
+  state.credentialRequests[requestId] = request;
+  persist();
+  emit("credential.request", {
+    requestId,
+    connector: { id: def.id, name: def.name },
+    tool: request.tool,
+    scopes: request.scopes,
+    expiresAt: request.expiresAt,
+    reason: gmail
+      ? "读取邮件需要你的 Gmail 只读令牌。"
+      : "这个工具需要你的 GitHub 令牌才能继续。",
+    accountHint: state.connectors[connectorId]?.account?.label ?? def.account.label,
+  });
+  return { requestId };
+}
+
+export function mockSubmitCredential(
+  requestId: string,
+  token: string,
+): { ok: true } | { ok: false; status: number; code: string; message: string } {
+  const request = state.credentialRequests[requestId];
+  if (!request) {
+    return { ok: false, status: 404, code: "CREDENTIAL_NOT_FOUND", message: "凭据请求不存在" };
+  }
+  if (request.status === "submitted") return { ok: true };
+  if (request.status !== "pending") {
+    return { ok: false, status: 409, code: "CREDENTIAL_NOT_PENDING", message: "凭据请求已结束" };
+  }
+  if (request.expiresAt < Date.now()) {
+    request.status = "cancelled";
+    request.reason = "timeout";
+    persist();
+    return { ok: false, status: 409, code: "CREDENTIAL_EXPIRED", message: "凭据请求已超时" };
+  }
+  if (token.trim() === "") {
+    return { ok: false, status: 400, code: "INVALID_REQUEST", message: "令牌不能为空" };
+  }
+  // 只记录状态，不保存 token 明文（mock 同样遵守）。
+  request.status = "submitted";
+  persist();
+  return { ok: true };
+}
+
+export function mockCancelCredential(
+  requestId: string,
+  reason: string,
+): { ok: true } | { ok: false; status: number; code: string; message: string } {
+  const request = state.credentialRequests[requestId];
+  if (!request) {
+    // 已结束/服务端已清理时按幂等处理，避免弹窗卡住。
+    return { ok: true };
+  }
+  if (request.status === "pending") {
+    request.status = "cancelled";
+    request.reason = reason;
+    persist();
+  }
+  return { ok: true };
 }
 
 export { MOCK_FALLBACK, MOCK_PRIMARY };

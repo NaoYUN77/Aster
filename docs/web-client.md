@@ -61,8 +61,10 @@ npm run gen:api   # PR #81 合并后再执行
 
 - `snapshot` / `request.queued` / `request.running` / `request.done` /
   `request.failed` / `request.aborted` / `model.changed`
+- `connector.changed`：失效 Connectors 查询，跨端同步连接状态
+- `credential.request`：打开全局安全注入弹窗（见第 7 节）
 - `: heartbeat` 注释与 `heartbeat` 事件
-- 断线指数退避重连（1s → 15s），重连后重新拉历史与模型，不做事件回放
+- 断线指数退避重连（1s → 15s），重连后重新拉历史、模型与连接器状态，不做事件回放
 - 401 立即清 token 回登录页
 
 ### 3.2 错误码文案
@@ -143,15 +145,93 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 - 列表为空或 `canSelect=false`：只显示当前模型，不显示假列表
 - **前端不硬编码任何模型 id、家族或供应商**；mock fixture 的 `mock/...` 只存在于 mock 模式
 
-## 7. Mock 模式（MSW）
+## 7. Connectors 与安全注入（MVP）
+
+入口：聊天页右上角账号菜单 →「连接器」，以及设置页 →「连接器 → 管理连接」。
+页面只展示 **GitHub / Gmail** 两张卡片；图标来自 `web/src/assets/connectors/`
+的本地 SVG，不热链。
+
+### 7.1 连接状态与授权
+
+- 状态由服务端保存（一次授权、三端复用）。Web / Tauri / Capacitor 都从
+  `GET /api/v1/connectors` 读取同一份状态，本机不保存 Connector token，
+  也不做每端单独登录；Aster 自身登录与 Connector 授权是两件事。
+- 授权在当前卡片/详情内发起（`POST /connectors/{id}/connect`），
+  **不打开独立 OAuth 标签页**；服务端返回 `pending` 时详情里显示“等待服务器确认”，
+  完成后由 SSE `connector.changed` 或重新查询把三端刷新成“已连接”。
+- 支持重新授权（再次 connect）与断开（`POST /connectors/{id}/disconnect`）；
+  断开后相关工具在三端立即不可用。
+- 刷新/重启后状态来自服务端，不来自客户端缓存。若服务端暂时不可达，
+  页面显示错误与“重试”，不会把未知状态显示成已连接。
+- Gmail 本轮只读：UI 标注“只读”，只展示搜索/读取邮件的能力，不出现发送、
+  删除或修改入口。
+
+> **临时契约**：Dev 1 的 Connector API 合同尚未落库，当前 endpoint 与字段形状
+> 固定在后端 `web/src/api/connectors.ts` 的注释中（`GET /connectors`、
+> `POST /connectors/{id}/connect|disconnect`、`POST /credential-requests/{id}`、
+> `POST /credential-requests/{id}/cancel`）。合同稳定后只替换这个文件，
+> 页面与状态逻辑不动。MSW 与 `mock-server.mjs` 按同一形状实现。
+
+### 7.2 安全注入弹窗
+
+SSE 收到 `credential.request` 时，`AuthenticatedShell` 里的全局弹窗出现
+（桌面 Dialog / 手机底部 Sheet），显示 connector、tool、所需 scope 与倒计时：
+
+```json
+{
+  "requestId": "cred_...",
+  "connector": { "id": "github", "name": "GitHub" },
+  "tool": "github.create_issue_comment",
+  "scopes": ["repo"],
+  "expiresAt": 1760000000000,
+  "reason": "可选说明",
+  "accountHint": "可选账号标识"
+}
+```
+
+- 兼容 `expiresAt` 为毫秒、秒或 ISO 字符串；缺失时用 `ttlSeconds`（默认 120 秒）。
+- 输入框 `type=password`、`autocomplete=off`，界面不回显；token 只在提交时作为
+  HTTPS body 发给 `POST /credential-requests/{id}`。
+- **不写 localStorage/sessionStorage、不写日志**；请求元数据只存在内存，
+  切后台再回来仍可继续（MVP 的前台恢复）。进程被杀后由服务端超时结束。
+- 支持提交、拒绝、取消；拒绝/取消/超时都会结束本次工具调用，
+  **客户端不自动重试**。超时后弹窗自动关闭并提示“不会自动重试”。
+- 连接器状态变化（`connector.changed`）只用来失效列表查询，不信任事件里的 payload。
+
+### 7.3 提示音
+
+`web/src/lib/sound.ts` 用 Web Audio 本地合成，不加载外部音频：
+
+- `attention`：凭证请求到达（水滴感滑音）
+- `success`：授权/提交完成（两声上行短音）
+- `error`：连接或提交失败（低音下行）
+- 首次 pointerdown / keydown / touchstart 时创建并 resume AudioContext；
+  未解锁前保持安静，不报错。
+- 开关在设置页与连接器页，状态存 `aster.soundMuted`；开启时播放一次成功音试听。
+
+### 7.4 验收
+
+1. GitHub/Gmail 连接后刷新、重启壳层仍显示已连接（服务端状态）。
+2. 断开后卡片变为未连接，相关工具不可用。
+3. Web / Tauri / Capacitor 都能收到 `credential.request` 并弹出同一个安全注入组件；
+   Android `https://localhost` 的 CORS/SSE 正常。
+4. 提交后 localStorage/sessionStorage 中搜不到输入过的 token，控制台也没有明文。
+5. 首次点击后能听到提示音；静音开关生效并在刷新后保持。
+6. 桌面居中 Dialog、手机底部 Sheet；拒绝/超时后弹窗关闭且没有自动重试。
+
+## 8. Mock 模式（MSW）
 
 开发环境默认启用（`VITE_USE_MOCK=0` 可关闭），登录页会显示 mock 密码提示。
 
-- 覆盖：登录/登出/me、历史分页、发送、停止、模型列表、模型切换、SSE 事件流
+- 覆盖：登录/登出/me、历史分页、发送、停止、模型列表、模型切换、SSE 事件流、
+  Connectors 列表/连接/断开、mock 凭据请求与提交/取消
 - 支持演示场景：
   - 手动选择 `GLM Mock` 时模拟失败，由主模型回答并带 `degraded=true`
   - 停止正在生成的回复得到 `aborted`
-  - 刷新页面后 mock 状态保留在 `localStorage`
+  - 刷新页面后 mock 状态保留在 `localStorage`（Connectors 的 mock 连接状态同样保留）
+  - 连接器详情里的「模拟凭据请求（Mock）」会通过 SSE 推送一条 `credential.request`
+- mock 的 Connector 状态存于 mock 服务端（浏览器 MSW 用 localStorage 模拟服务端持久化），
+  不属于客户端 token 存储；真实后端接入后以服务端数据库为准。
 - 生产构建默认不包含 MSW：Vite 在 production 下把 mock 模块替换为
   `browser.stub.ts`；仅显式 `VITE_USE_MOCK=1` 的演示构建会打包 mock（用于壳层离线验收）。
 
@@ -161,7 +241,7 @@ npm run dev          # mock 默认开启
 VITE_USE_MOCK=0 npm run dev   # 连真实后端（Vite 代理 /api → VITE_DEV_BACKEND）
 ```
 
-### 7.1 壳层联调用的本地 HTTP mock
+### 8.1 壳层联调用的本地 HTTP mock
 
 Tauri / Capacitor 的 WebView 没有可用的 Service Worker，MSW 无法拦截请求。
 为在没有真实后端时验证“填服务器地址 → 测试连接 → 登录 → 聊天”，
@@ -179,7 +259,7 @@ npm run mock:server          # http://127.0.0.1:8787，MOCK_PORT 可改
 
 该服务只用于开发验收；正式环境仍由 Dev 1 的后端提供同一份契约。
 
-## 8. 桌面壳（Tauri 2）
+## 9. 桌面壳（Tauri 2）
 
 - `src-tauri/tauri.conf.json`：`frontendDist: "../dist"`、`devUrl: http://localhost:5173`
 - 窗口 1100×760，最小 380×560
@@ -195,7 +275,7 @@ npm run tauri dev
 npm run tauri build -- --no-bundle
 ```
 
-## 9. 手机壳（Capacitor 8）
+## 10. 手机壳（Capacitor 8）
 
 - `capacitor.config.ts`：`appId: com.aster.mobile`、`webDir: "dist"`、
   `androidScheme: "https"`
@@ -218,7 +298,7 @@ cd android && ./gradlew assembleDebug
 - 启动图与 launcher 图标已换成 Aster 自己的资源（`android/app/src/main/res`），
   不再使用 Capacitor 默认图标；自适应图标背景色 `#5858EB`，前景为白色 Asterisk。
 
-### 9.1 旧 Android WebView 启动兼容
+### 10.1 旧 Android WebView 启动兼容
 
 真机曾出现 APK 永远停在「正在启动…」。原因是 Vite 8 默认 `build.target`
 （baseline-widely-available，约 Chrome 107）会把 class static block / 私有字段
@@ -238,12 +318,12 @@ cd android && ./gradlew assembleDebug
   token（localStorage 与 Preferences）后回到 `#/setup`。这段脚本不依赖打包产物，
   即使主 bundle 语法失败也能执行。
 
-## 10. 验证命令
+## 11. 验证命令
 
 ```bash
 cd web
 npm run typecheck
-npm test             # vitest：消息去重/合并等显示层逻辑
+npm test             # vitest：消息去重/合并、SSE credential 事件解析
 npm run build        # 生产构建（不含 mock）
 ```
 
