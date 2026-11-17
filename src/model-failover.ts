@@ -71,8 +71,10 @@ export type ModelSelection = ModelRef & {
  */
 export type ModelSwitchState = {
   active(): ModelSelection | undefined;
-  set(selection: ModelSelection): void;
-  clear(): void;
+  /** Persist a selection. Returns false when the file could not be written; the state is unchanged then. */
+  set(selection: ModelSelection): boolean;
+  /** Drop the stored selection. Returns false when the file could not be removed. */
+  clear(): boolean;
 };
 
 const MODEL_SELECTION_VERSION = 1;
@@ -109,7 +111,15 @@ function parseSwitchState(raw: string, log: (line: string) => void): ModelSelect
  */
 export function createModelSwitchStore(
   path: string,
-  options: { log?: (line: string) => void } = {},
+  options: {
+    log?: (line: string) => void;
+    /**
+     * Called after a selection was successfully persisted or cleared. The web adapter uses it to
+     * broadcast `model.changed` for a `$model` switch, an HTTP switch and an automatic sticky
+     * fallback alike, without any of them writing the file themselves.
+     */
+    onChange?: (selection: ModelSelection | undefined) => void;
+  } = {},
 ): ModelSwitchState {
   const log = options.log ?? ((line: string) => console.error(line));
   let cachedRaw: string | undefined;
@@ -146,7 +156,8 @@ export function createModelSwitchStore(
     active,
     set(ref) {
       const selection: ModelSelection = { provider: ref.provider, modelId: ref.modelId, kind: ref.kind };
-      cachedSelection = selection;
+      // Write first. A failed write must not leave the process believing the switch happened: the
+      // HTTP contract reports SELECTION_WRITE_FAILED and the previous selection stays in effect.
       try {
         mkdirSync(dirname(path), { recursive: true });
         const temporary = `${path}.${process.pid}.tmp`;
@@ -154,20 +165,26 @@ export function createModelSwitchStore(
         writeFileSync(temporary, raw, { mode: 0o600 });
         renameSync(temporary, path);
         cachedRaw = raw;
+        cachedSelection = selection;
+        options.onChange?.(selection);
+        return true;
       } catch (error) {
-        // The in-memory cache still keeps this process sticky; only a restart loses the choice.
-        cachedRaw = undefined;
         log(`Model failover: the model selection could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
       }
     },
     clear() {
-      cachedRaw = undefined;
-      cachedSelection = undefined;
+      const previous = cachedSelection;
       try {
         rmSync(path, { force: true });
       } catch (error) {
         log(`Model failover: the model selection could not be cleared: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
       }
+      cachedRaw = undefined;
+      cachedSelection = undefined;
+      if (previous !== undefined) options.onChange?.(undefined);
+      return true;
     },
   };
 }
@@ -389,6 +406,17 @@ function safeDetail(text: string | undefined): string {
   return text.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/\s+/g, " ").trim().slice(0, 400);
 }
 
+/** What one successful request actually used, for the HTTP status surface. */
+export type ModelUsedEvent = {
+  /** The model the request started with (the manual head, an auto sticky model, or the primary). */
+  readonly requested: ModelRef & { readonly kind: "primary" | "manual" | "auto" };
+  /** The model whose response was used. */
+  readonly actual: ModelRef;
+  readonly kind: "primary" | "manual" | "auto";
+  /** True only when a manual selection was unavailable and another chain member answered. */
+  readonly degraded: boolean;
+};
+
 export type ModelFailoverOptions = {
   /** Structured log sink; defaults to stderr. Switching is never announced in chat. */
   readonly log?: (line: string) => void;
@@ -397,6 +425,12 @@ export type ModelFailoverOptions = {
    * lifetime; the application passes a file-backed store so a restart keeps the fallback active.
    */
   readonly state?: ModelSwitchState;
+  /**
+   * Called once for every request the wrapper answered, after the winning response is known.
+   * `agent.reply()` still returns text only; the host (the web adapter) records this callback to
+   * report the model that answered. Never called for an aborted or failed request.
+   */
+  readonly onModelUsed?: (event: ModelUsedEvent) => void;
 };
 
 type AttemptFailure = {
@@ -571,6 +605,28 @@ export function createModelFailover(
     return unavailable(model);
   };
 
+  /** Report the model that answered without letting a host callback disturb a completed request. */
+  const reportUsed = (
+    plan: AttemptPlan,
+    requestedKind: "primary" | "manual" | "auto",
+    actual: Model<Api>,
+  ): void => {
+    const callback = options.onModelUsed;
+    if (callback === undefined) return;
+    const requested = plan.manualHead ?? plan.models[0];
+    if (requested === undefined) return;
+    try {
+      callback({
+        requested: { provider: requested.provider, modelId: requested.id, kind: requestedKind },
+        actual: { provider: actual.provider, modelId: actual.id },
+        kind: requestedKind,
+        degraded: plan.manualHead !== undefined && !sameModelInstance(actual, plan.manualHead),
+      });
+    } catch (error) {
+      log(`Model failover: the model-used callback threw: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const streamSimple = (
     requested: Model<Api>,
     context: Context,
@@ -581,6 +637,11 @@ export function createModelFailover(
 
     const attemptChain = plan.models;
     const manualHead = plan.manualHead;
+    // Snapshot after planning: a stale selection may already have been cleared, and a manual head
+    // is by definition the model this request starts with.
+    const requestedKind: "primary" | "manual" | "auto" = manualHead !== undefined
+      ? "manual"
+      : selection()?.kind ?? "primary";
     const output = createAssistantMessageEventStream();
     let lastModel = requested;
     void (async () => {
@@ -630,6 +691,7 @@ export function createModelFailover(
         const terminal = await terminalEvent(stream, model);
         if (terminal.type === "done") {
           rememberSuccess(model, index);
+          reportUsed(plan, requestedKind, model);
           if (failures.length > 0) log(`Model failover: answered by ${modelLabel(model)}`);
           if (manualHead !== undefined && !sameModelInstance(model, manualHead)) {
             // The chat answer itself says the manual choice did not answer, so the reply does not
@@ -686,6 +748,9 @@ export function createModelFailover(
 
     const attemptChain = plan.models;
     const manualHead = plan.manualHead;
+    const requestedKind: "primary" | "manual" | "auto" = manualHead !== undefined
+      ? "manual"
+      : selection()?.kind ?? "primary";
     const failures: AttemptFailure[] = [];
     let lastModel = requested;
     for (let index = 0; index < attemptChain.length; index++) {
@@ -717,6 +782,7 @@ export function createModelFailover(
       }
       if (message.stopReason !== "error" && message.stopReason !== "aborted") {
         rememberSuccess(model, index);
+        reportUsed(plan, requestedKind, model);
         if (failures.length > 0) log(`Model failover: answered by ${modelLabel(model)}`);
         return message;
       }

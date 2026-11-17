@@ -3,11 +3,11 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, type Conversation, type ConversationId, type Extension, type Storage } from "@earendil-works/pi-durable";
+import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, ToolResultEntry, UserEntry, type Conversation, type ConversationId, type Cursor, type EntryId, type Extension, type Storage, type Submission } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { readMemoryConfig, resolveProviderConfigPath, type MemoryConfig, type readConfig } from "./config.js";
+import { resolveProviderConfigPath, type MemoryConfig, type readConfig } from "./config.js";
 import { ConfigurationError, errorCode, StateError } from "./errors.js";
 import { connectMcp, type McpHost } from "./mcp.js";
 import { createSkillsExtension, type SkillIndex, type SkillSummary } from "./skills.js";
@@ -30,9 +30,19 @@ import {
   MODEL_INCOMPATIBLE_MESSAGE,
   MODEL_UNAVAILABLE_MESSAGE,
   modelLabel,
+  type ModelSelection,
   type ModelSwitchState,
+  type ModelUsedEvent,
 } from "./model-failover.js";
 import { createModelCommandHandler } from "./model-command.js";
+import { createModelSelectionService } from "./model-control.js";
+import {
+  projectEntry,
+  WEB_HOST_MESSAGE_KIND,
+  type HistoryPage,
+  type HostMessageSource,
+  type UiMessage,
+} from "./http/projection.js";
 import {
   createModelPool,
   PROVIDER_IDS,
@@ -50,6 +60,50 @@ import { installMcpTools, orderedMcpExtensions } from "./tool-pins.js";
 const context = BACKGROUND_CONTEXT;
 // Failures the request can recover from in-process; anything else thrown by the durable calls means the Session is unusable.
 const requestFailureCodes = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY", "AGENT_LOOP_DETECTED", "MODEL_UNAVAILABLE", "MODEL_INCOMPATIBLE"]);
+/** Bookkeeping entry whose edits keep an interrupted turn out of the model context. */
+const INTERRUPTED_TURN_ENTRY = "web.turn-discarded";
+
+/**
+ * After a stop, the user's input is already durable but its answer never will be. Durable's context
+ * builder already omits the aborted assistant entry; without this, the unanswered question would
+ * join the next request and the model could answer both. Append a context-only edit that omits
+ * every model-visible entry of the interrupted turn. History still shows that the user wrote it.
+ */
+async function discardInterruptedTurn(
+  target: Conversation,
+  submission: Submission,
+  requestId: string,
+): Promise<void> {
+  try {
+    const record = await submission.status(context);
+    // Only an input that became terminal without an answer is an interrupted turn. A run that
+    // managed to commit its answer before the stop is kept, exactly as history shows it.
+    if (record.status !== "unanswered" || record.entry === undefined) return;
+    const first = record.entry;
+    const omitted: EntryId[] = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await target.entries({ order: "ascending", minEntryId: first }, 200, cursor, context);
+      for (const entry of page.items) {
+        // Keep system/prompt and head-marker entries: only this turn's messages and tool traffic
+        // are removed from context.
+        if (entry.id >= first && (UserEntry.is(entry) || AssistantEntry.is(entry) || ToolResultEntry.is(entry))) {
+          omitted.push(entry.id);
+        }
+      }
+      cursor = page.next;
+    } while (cursor !== undefined && omitted.length < 10_000);
+    if (omitted.length === 0) return;
+    await target.commit((tx) => tx.appendEntry(target.id, {
+      kind: INTERRUPTED_TURN_ENTRY,
+      data: { requestId },
+      edits: omitted.map((entry) => ({ target: entry, action: "omit" as const })),
+    }), context);
+    console.info(`Discarded interrupted turn ${requestId} from the next model context`);
+  } catch (error) {
+    console.error(`Could not discard interrupted turn ${requestId}: ${errorCode(error)}`);
+  }
+}
 /**
  * What a member's Hub is not offered, by capability rather than by name: both shells are the same
  * ability on a different host, and the reminder tools are withheld because their target is fixed to
@@ -163,6 +217,16 @@ export type OpenAgentOptions = {
     /** Present when the channel can also list the workspace's own emoji, which needs `emoji:read`. */
     readonly emoji?: { readonly source: EmojiSource };
   };
+  /**
+   * Called after each request the failover wrapper answered, with the model that actually answered.
+   * Existing channels ignore it; the web adapter records it for `request.done.model`.
+   */
+  readonly onModelUsed?: (event: ModelUsedEvent) => void;
+  /**
+   * Called when the persisted model selection changes, including an automatic sticky fallback.
+   * The web adapter uses it to broadcast `model.changed` without writing the file itself.
+   */
+  readonly onModelSelectionChanged?: (selection: ModelSelection | undefined) => void;
 };
 
 /**
@@ -308,14 +372,27 @@ export async function openAgent(
     }
     // A successful switch is sticky across requests and across restarts: the selection lives in the
     // data directory, not in the wrapper alone. A manual `$model` switch uses the same file.
-    switchStore = createModelSwitchStore(join(config.dataDir, "model-selection.json"));
-    models = createModelFailover(models, chain, { state: switchStore });
+    switchStore = createModelSwitchStore(join(config.dataDir, "model-selection.json"), {
+      ...(options.onModelSelectionChanged === undefined ? {} : { onChange: options.onModelSelectionChanged }),
+    });
+    models = createModelFailover(models, chain, {
+      state: switchStore,
+      ...(options.onModelUsed === undefined ? {} : { onModelUsed: options.onModelUsed }),
+    });
   }
+  // One service for the text command and the HTTP routes. Without a failover store it is read-only
+  // (`canSelect: false`), which is exactly what the UI has to render.
+  const modelService = createModelSelectionService({
+    provider: config.provider,
+    models,
+    chain,
+    ...(switchStore === undefined ? {} : { state: switchStore }),
+  });
   // The command is host-side on purpose: it must answer even when the active model is unavailable.
   // Without failover there is no selection store, so `$model` stays ordinary chat text.
   const modelCommands = switchStore === undefined
     ? undefined
-    : createModelCommandHandler({ provider: config.provider, models, chain, state: switchStore });
+    : createModelCommandHandler({ provider: config.provider, models, chain, state: switchStore, service: modelService });
 
   const workingDirectory = workspace;
   const instructions = buildInstructions({
@@ -353,10 +430,10 @@ export async function openAgent(
     }));
   }
   // Memory wiring (MEM-07) goes through the one composition entry; with MEMORY_ENABLED=0 the
-  // application keeps exactly its previous registry, settings and request path. The memory
-  // section is read from the same environment the rest of the config came from, unless the
-  // caller attached one explicitly (tests do; `readConfig` deliberately keeps its old shape).
-  const memoryConfig: MemoryConfig = (config as { memory?: MemoryConfig }).memory ?? readMemoryConfig({});
+  // application keeps exactly its previous registry, settings and request path. `readConfig`
+  // carries the memory section so the enabled flag always comes from the same environment as the
+  // rest of the configuration; there is deliberately no fallback to process defaults here.
+  const memoryConfig: MemoryConfig = config.memory;
   const memory = memoryConfig.enabled
     ? createMemoryIntegration({
         root: config.dataDir,
@@ -668,6 +745,7 @@ export async function openAgent(
       timeoutMs: number,
       requestTrace: ReturnType<typeof beginRequest>,
     ): Promise<string> {
+      let submission: Submission | undefined;
       try {
         // Recovery starts only while a caller is waiting, so the timeout below bounds every resumed task.
         const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
@@ -675,7 +753,7 @@ export async function openAgent(
         // Memory prepare is durable and idempotent per requestId: a replayed or recovered request
         // gets no new projection, and a new request is planned before its input lands.
         const prepared = memory ? await memory.prepareRequestIn(target, request, context) : undefined;
-        const submission = await target.submit({ type: "input", content: request.text, requestId: request.requestId }, context);
+        submission = await target.submit({ type: "input", content: request.text, requestId: request.requestId }, context);
         let settled;
         try {
           settled = await submission.wait(withAbortSignal(waitSignal, context));
@@ -683,6 +761,9 @@ export async function openAgent(
           // Cancelling a wait alone does not cancel the durable run.
           if (!signal.aborted && waitSignal.aborted) {
             await target.abort(context);
+            if (config.channel.kind === "web") {
+              await discardInterruptedTurn(target, submission, request.requestId);
+            }
             throw Object.assign(new Error("Agent request timed out", { cause: error }), { code: "AGENT_TIMEOUT" });
           }
           throw error;
@@ -727,7 +808,16 @@ export async function openAgent(
       } catch (error) {
         requestTrace?.end(requestOutcome(error, signal), { errorCode: requestErrorCode(error) });
         // A host shutdown stops this wait without failing the Session; keep the original abort reason.
-        if (signal.aborted) throw error;
+        if (signal.aborted) {
+          // Only the web adapter has a user-initiated stop. Chat channels keep their shutdown
+          // semantics untouched: throw at once and let recovery settle the interrupted run.
+          if (config.channel.kind !== "web") throw error;
+          await target.abort(context).catch((abortError: unknown) => {
+            console.error(`Could not stop the interrupted run: ${errorCode(abortError)}`);
+          });
+          if (submission !== undefined) await discardInterruptedTurn(target, submission, request.requestId);
+          throw error;
+        }
         const code = (error as { code?: unknown } | null)?.code;
         if (typeof code === "string" && requestFailureCodes.has(code)) throw error;
         // Memory business errors carry their frozen MEMORY_* application code (MEM-01 mapping);
@@ -737,6 +827,145 @@ export async function openAgent(
         throw sessionFailure(error);
       }
     }
+
+    /**
+     * Host notifications (reminders, watch events, routine results) are durable entries in the root
+     * conversation, so history pagination and ordering need no second source. An optional key makes
+     * a replay after a crash return the stored message instead of appending a duplicate; the keys
+     * live only in memory and are rebuilt by scanning the transcript on first use.
+     */
+    const hostMessagesByKey = new Map<string, UiMessage>();
+    let hostMessagesLoaded = false;
+    async function loadHostMessages(): Promise<void> {
+      if (hostMessagesLoaded) return;
+      let cursor: Cursor | undefined;
+      let scanned = 0;
+      do {
+        const page = await root.entries({ order: "ascending" }, 500, cursor, context);
+        scanned += page.items.length;
+        for (const entry of page.items) {
+          if (entry.kind !== WEB_HOST_MESSAGE_KIND) continue;
+          const key = (entry.data as { readonly key?: unknown } | undefined)?.key;
+          if (typeof key !== "string" || key === "") continue;
+          const message = projectEntry(entry);
+          if (message !== undefined) hostMessagesByKey.set(key, message);
+        }
+        cursor = page.next;
+      } while (cursor !== undefined && scanned < 100_000);
+      hostMessagesLoaded = true;
+    }
+    const HOST_MESSAGE_MAX_CHARS = 4_000;
+    const hostMessage = async (input: {
+      readonly text: string;
+      readonly source: HostMessageSource;
+      readonly key?: string;
+    }): Promise<UiMessage> => {
+      const text = input.text.trim();
+      if (text === "" || [...text].length > HOST_MESSAGE_MAX_CHARS) {
+        throw Object.assign(new Error(`Host message must contain 1..${HOST_MESSAGE_MAX_CHARS} characters`), {
+          code: "INVALID_REQUEST",
+        });
+      }
+      await loadHostMessages();
+      if (input.key !== undefined && input.key !== "") {
+        const existing = hostMessagesByKey.get(input.key);
+        if (existing !== undefined) return existing;
+      }
+      const createdAt = Date.now();
+      const entry = await root.commit((tx) => tx.appendEntry(root.id, {
+        kind: WEB_HOST_MESSAGE_KIND,
+        data: {
+          text,
+          source: input.source,
+          createdAt,
+          ...(input.key === undefined || input.key === "" ? {} : { key: input.key }),
+        },
+      }), context);
+      const message = projectEntry(entry);
+      if (message === undefined) throw new StateError("Host message entry could not be projected");
+      if (input.key !== undefined && input.key !== "") hostMessagesByKey.set(input.key, message);
+      return message;
+    };
+
+    /**
+     * Read-only history over the durable transcript. One page is returned oldest-first; the cursor is
+     * the oldest returned entry id, so a later `before` continues strictly below it. Nothing here
+     * writes or copies messages.
+     */
+    const history = async (options: { readonly before?: string; readonly limit?: number } = {}): Promise<HistoryPage> => {
+      const wanted = Math.min(100, Math.max(1, Math.trunc(options.limit ?? 30)));
+      let maxEntryId: EntryId | undefined;
+      if (options.before !== undefined && options.before !== "") {
+        if (!/^[1-9]\d*$/.test(options.before)) {
+          throw Object.assign(new Error("Invalid history cursor"), { code: "INVALID_REQUEST" });
+        }
+        const value = Number(options.before);
+        if (!Number.isSafeInteger(value)) {
+          throw Object.assign(new Error("Invalid history cursor"), { code: "INVALID_REQUEST" });
+        }
+        maxEntryId = (value - 1) as EntryId;
+      }
+      // Link projected rows back to the host request that produced them. Durable keeps the
+      // mapping in `pi.submissions`; reading the parsed records avoids the raw column's JSON
+      // quoting. Both sides of an answered input map to the same request id.
+      const requestByEntry = new Map<string, string>();
+      let submissionCursor: Cursor | undefined;
+      do {
+        const page = await durableStorage.scanSubmissions(
+          { conversationId: root.id, order: "ascending" },
+          500,
+          submissionCursor,
+          context,
+        );
+        for (const record of page.items) {
+          if (record.type !== "input" || record.requestId === undefined || record.requestId === "") continue;
+          if (record.entry !== undefined) requestByEntry.set(String(record.entry), record.requestId);
+          if (record.answer !== undefined) requestByEntry.set(String(record.answer), record.requestId);
+        }
+        submissionCursor = page.next;
+      } while (submissionCursor !== undefined && requestByEntry.size < 100_000);
+
+      const collected: UiMessage[] = [];
+      let cursor: Cursor | undefined;
+      let hasMore = false;
+      let lastRawId: EntryId | undefined;
+      let fetched = 0;
+      while (collected.length <= wanted && fetched < 5_000) {
+        const page = await root.entries(
+          { order: "descending", ...(maxEntryId === undefined ? {} : { maxEntryId }) },
+          Math.min(200, Math.max(8, (wanted - collected.length) * 4)),
+          cursor,
+          context,
+        );
+        fetched += page.items.length;
+        for (const entry of page.items) {
+          lastRawId = entry.id;
+          const message = projectEntry(entry);
+          if (message !== undefined) {
+            const requestId = message.requestId ?? requestByEntry.get(message.id);
+            collected.push(requestId === undefined ? message : { ...message, requestId });
+          }
+        }
+        if (page.next === undefined) {
+          hasMore = false;
+          cursor = undefined;
+          break;
+        }
+        cursor = page.next;
+        hasMore = true;
+        if (page.items.length === 0) break;
+      }
+      if (collected.length > wanted) {
+        // One extra visible message proves there is an older page; it is returned next time.
+        collected.length = wanted;
+        hasMore = true;
+      }
+      const nextCursor = hasMore
+        ? (collected.at(-1)?.id ?? (lastRawId === undefined ? null : String(lastRawId)))
+        : null;
+      collected.reverse();
+      return { messages: collected, nextCursor, hasMore: nextCursor !== null };
+    };
 
     return {
       // This signal stops the host's wait during shutdown; close() preserves recovery.
@@ -828,6 +1057,12 @@ export async function openAgent(
         const text = await executeRequest(target, request, input.signal, input.timeoutMs, requestTrace);
         return { conversationId: target.id, text };
       },
+      /** Shared by `$model` and the HTTP model routes. */
+      modelService,
+      /** Read-only durable transcript access for the web adapter. */
+      history,
+      /** Append a host-originated notification; durable, idempotent by key, never model-visible. */
+      hostMessage,
       // Conversation-wide cancellation waits for ordinary tasks to become terminal.
       abort: () => root.abort(context),
       // Ends the current context cycle; the next reply establishes the new snapshot behind the

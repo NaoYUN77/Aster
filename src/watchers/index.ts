@@ -26,6 +26,8 @@ export type DeliverFn = (
   text: string,
   threadTs: string | undefined,
   signal: AbortSignal,
+  /** Host-side idempotency key; a web host uses it so a crash cannot repeat one outbox row. */
+  deliveryKey?: string,
 ) => Promise<string>;
 
 export type WatchersOptions = {
@@ -126,7 +128,13 @@ export function createWatchers(options: WatchersOptions): WatchersRuntime {
 
   async function sendOne(row: OutboxRow, runSignal: AbortSignal): Promise<number> {
     try {
-      const messageId = await options.deliver(row.chatId, row.text, row.threadTs ?? undefined, runSignal);
+      const messageId = await options.deliver(
+        row.chatId,
+        row.text,
+        row.threadTs ?? undefined,
+        runSignal,
+        `watch:${row.id}`,
+      );
       store.sent(row.id, messageId, now().toISOString());
       return 1;
     } catch (error) {
@@ -142,7 +150,13 @@ export function createWatchers(options: WatchersOptions): WatchersRuntime {
     if (claimed.length === 0) return 0;
     const text = `[跟踪] 还有 ${claimed.length} 条更新未逐条推送。`;
     try {
-      const messageId = await options.deliver(row.chatId, text, row.threadTs ?? undefined, runSignal);
+      const messageId = await options.deliver(
+        row.chatId,
+        text,
+        row.threadTs ?? undefined,
+        runSignal,
+        `watch-merge:${row.id}`,
+      );
       for (const candidate of claimed) store.sent(candidate.id, messageId, now().toISOString());
       return 1;
     } catch (error) {
