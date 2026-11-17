@@ -253,7 +253,10 @@ export interface components {
             createdAt: number;
             /** @enum {string} */
             status: "complete" | "failed" | "aborted";
+            /** @description Host request id that produced this row, from durable submissions. */
             requestId?: string | null;
+            /** @description Web idempotency key of that request; null when no web_requests row exists. */
+            clientMessageId?: string | null;
             model?: components["schemas"]["MessageModel"] | null;
             errorCode?: string | null;
             tool?: components["schemas"]["ToolSummary"] | null;

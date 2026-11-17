@@ -35,16 +35,19 @@ web/                     Vite + React + TS 应用（唯一 UI 代码）
 ## 3. API 契约
 
 - 正式契约由 Dev 1 维护：`docs/api/three-client-v1.openapi.yaml`（PR #81）。
-- 合并前，`web/openapi/three-client-v1.official.yaml` 是 Dev 1 契约的快照
-  （提交 `4f4e99b`），仅用于生成类型；`three-client-v1.draft.yaml` 是更早的临时草案。
-- 重新生成类型：
+- `web/src/api/schema.d.ts` 当前取自 Dev 1 PR #81 提交 `40cad565`：`UiMessage`
+  增加可选 `clientMessageId`，`requestId` 说明为由 durable submissions 反查。
+  本分支的 `docs/api` 契约在 PR #81 合并前仍是旧版，因此**现在不要直接运行
+  `npm run gen:api`**（会按旧契约把字段回退）；PR #81 合并进 `feat/三端联通` 后
+  再运行即可复现。
+- `web/openapi/three-client-v1.official.yaml` 是更早的契约快照（`4f4e99b`），
+  仅作离线回退；`three-client-v1.draft.yaml` 是临时草案。
 
 ```bash
 cd web
-npm run gen:api
+npm run gen:api   # PR #81 合并后再执行
 ```
 
-脚本优先读取仓库根部的正式契约；未合并时读取官方契约快照，最后才回退 draft。
 生成结果在 `web/src/api/schema.d.ts`，业务代码通过 `web/src/api/client.ts` 的类型化封装访问。
 契约路径自带 `/api/v1` 前缀，客户端 baseUrl 只保存服务器根地址。
 
