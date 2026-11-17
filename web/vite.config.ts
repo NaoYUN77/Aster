@@ -53,6 +53,10 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: "dist",
       sourcemap: false,
+      // Vite 8 默认目标是 baseline-widely-available（Chrome 107），会把
+      // class static block / 私有字段原样输出；老 Android WebView 解析即
+      // SyntaxError，表现为永远停在启动页。降到 ES2017 级别的语法目标。
+      target: ["chrome61", "safari12", "firefox60", "edge79"],
     },
   };
 });

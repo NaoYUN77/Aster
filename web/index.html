@@ -6,6 +6,99 @@
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Aster</title>
+    <script>
+      // ES5 看门狗：主 bundle 在老 WebView 上语法失败时，React 根本不会挂载。
+      // 8 秒内 #root 仍为空就展示恢复入口，不依赖任何打包产物。
+      (function () {
+        var BOOT_TIMEOUT_MS = 8000;
+        var bootError = "";
+
+        function record(message) {
+          if (!bootError && message) bootError = String(message).slice(0, 160);
+        }
+
+        window.addEventListener(
+          "error",
+          function (event) {
+            record(event && event.message ? event.message : "脚本加载失败");
+          },
+          true,
+        );
+        window.addEventListener("unhandledrejection", function (event) {
+          var reason = event && event.reason;
+          record(reason && reason.message ? reason.message : "未处理的异常");
+        });
+
+        function clearStoredConfig() {
+          var keys = ["aster.serverUrl", "aster.token", "aster.expiresAt"];
+          for (var i = 0; i < keys.length; i++) {
+            try {
+              window.localStorage.removeItem(keys[i]);
+            } catch (error) {}
+          }
+          // Capacitor 下配置优先存在 Preferences 里，能拿到原生桥就一起清掉。
+          try {
+            var plugins = window.Capacitor && window.Capacitor.Plugins;
+            var preferences = plugins && plugins.Preferences;
+            if (preferences && preferences.remove) {
+              preferences.remove({ key: "serverUrl" });
+              preferences.remove({ key: "token" });
+              preferences.remove({ key: "expiresAt" });
+            }
+          } catch (error) {}
+        }
+
+        function showFailure() {
+          var root = document.getElementById("root");
+          if (root && root.firstChild) return;
+          if (document.getElementById("aster-boot-fallback")) return;
+
+          var box = document.createElement("div");
+          box.id = "aster-boot-fallback";
+          box.setAttribute(
+            "style",
+            "position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483647;" +
+              "display:flex;align-items:center;justify-content:center;padding:24px;" +
+              "background:#f7f8fc;color:#1f2330;text-align:center;" +
+              "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue'," +
+              "Arial,'PingFang SC','Microsoft YaHei',sans-serif;",
+          );
+
+          var panel = document.createElement("div");
+          panel.setAttribute("style", "width:100%;max-width:340px;");
+
+          var title = document.createElement("p");
+          title.setAttribute(
+            "style",
+            "margin:0 0 14px;font-size:15px;line-height:1.6;word-break:break-word;",
+          );
+          title.textContent =
+            "启动失败：" +
+            (bootError || "页面脚本没有执行（可能是 WebView 版本过低）");
+
+          var action = document.createElement("button");
+          action.type = "button";
+          action.setAttribute(
+            "style",
+            "border:0;border-radius:10px;padding:10px 16px;background:#4f46e5;color:#fff;" +
+              "font-size:14px;line-height:1.4;",
+          );
+          action.textContent = "点这里重新配置服务器";
+          action.onclick = function () {
+            clearStoredConfig();
+            window.location.hash = "#/setup";
+            window.location.reload();
+          };
+
+          panel.appendChild(title);
+          panel.appendChild(action);
+          box.appendChild(panel);
+          document.body.appendChild(box);
+        }
+
+        window.setTimeout(showFailure, BOOT_TIMEOUT_MS);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

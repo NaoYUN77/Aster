@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { userFacingMessage } from "@/api/errors";
 import { USE_MOCK } from "@/lib/env";
-import { platformLabel } from "@/lib/platform";
+import { platform, platformLabel } from "@/lib/platform";
 import { useAuthStore } from "@/store/auth";
 import { useConnectionStore } from "@/store/connection";
 
@@ -24,7 +24,8 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  if (needsServer) return <Navigate to="/setup" replace />;
+  // Web 同源，SetupPage 在 Web 上会跳回登录页；两边同时重定向会死循环。
+  if (needsServer && platform() !== "web") return <Navigate to="/setup" replace />;
   if (status === "authenticated") return <Navigate to="/" replace />;
 
   const submit = async (event: FormEvent) => {

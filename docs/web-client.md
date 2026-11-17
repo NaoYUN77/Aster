@@ -207,6 +207,28 @@ cd android && ./gradlew assembleDebug
 - 壳内页面 origin 为 `https://localhost`（`androidScheme: https`）；用本地 mock 联调时：
   `adb reverse tcp:8787 tcp:8787`，应用内服务器地址填 `http://127.0.0.1:8787`
   （loopback 视为可信来源；生产仍应填 HTTPS 地址）
+- 启动图与 launcher 图标已换成 Aster 自己的资源（`android/app/src/main/res`），
+  不再使用 Capacitor 默认图标；自适应图标背景色 `#5858EB`，前景为白色 Asterisk。
+
+### 9.1 旧 Android WebView 启动兼容
+
+真机曾出现 APK 永远停在「正在启动…」。原因是 Vite 8 默认 `build.target`
+（baseline-widely-available，约 Chrome 107）会把 class static block / 私有字段
+原样输出，低版本 WebView 解析 bundle 时直接 `SyntaxError`，React 不会挂载。
+现在有三层兜底：
+
+- `web/vite.config.ts` 设置
+  `build.target: ["chrome61", "safari12", "firefox60", "edge79"]`；
+  产物中不再有 class static block / 私有字段。受动态 `import()` 限制，
+  实际最低约为 Chrome 63。
+- `useBootstrap` 给连接与登录引导加 4 秒超时与异常捕获：超时也会
+  `setReady(true)`；原生壳进入 `/setup` 重新配置服务器，Web 同源则回登录页。
+  同时 `lib/storage.ts` 的 Capacitor Preferences 调用有 1.5 秒超时，
+  超时后本次会话回退 `localStorage`，避免原生桥不回调时卡死。
+- `web/index.html` 内联 ES5 看门狗：8 秒内 `#root` 仍未挂载就显示
+  「启动失败：<错误>，点这里重新配置服务器」；按钮会清掉本地服务器地址和
+  token（localStorage 与 Preferences）后回到 `#/setup`。这段脚本不依赖打包产物，
+  即使主 bundle 语法失败也能执行。
 
 ## 10. 验证命令
 

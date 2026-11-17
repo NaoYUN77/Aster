@@ -30,5 +30,8 @@ export function flattenHistory(
   data: InfiniteData<MessagePage> | undefined,
 ): UiMessage[] {
   if (!data) return [];
-  return [...data.pages].reverse().flatMap((page) => page.messages);
+  // 不用 flatMap（ES2019）：旧 Android WebView 可能没有。
+  return [...data.pages]
+    .reverse()
+    .reduce<UiMessage[]>((all, page) => all.concat(page.messages), []);
 }
