@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-ssr
+*.local
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Capacitor / Tauri build output
+android/app/build
+android/.gradle
+android/build
+ios/App/Pods
+ios/App/build
+src-tauri/target
