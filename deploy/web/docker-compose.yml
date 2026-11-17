@@ -1,0 +1,72 @@
+# DEV / LOCAL ONLY. This stack is independent from the production Aster bot:
+#   project name: aster-web
+#   volume:       aster-web-data
+#   host ports:   8788 (HTTP) / 8443 (HTTPS, when a TLS Caddyfile is used)
+#
+# Do not point it at the production DATA_DIR and do not run it on the production host.
+# See README.md §"Production isolation checklist".
+name: aster-web
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${ASTER_WEB_IMAGE:-aster-web:local}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      CHANNEL: web
+      DATA_DIR: /data
+      WEB_PORT: "8787"
+      WEB_HOST: 0.0.0.0
+      # Resolve relative to this file; the image's working directory is /app.
+      WEB_STATIC_DIR: ${WEB_STATIC_DIR:-/app/web/dist}
+    volumes:
+      - aster-web-data:/data
+      # Built by Dev 2 (`npm run build` in web/). Read-only: the backend never writes the UI.
+      - ../../web/dist:/app/web/dist:ro
+    expose:
+      - "8787"
+    mem_limit: 1g
+    pids_limit: 128
+    init: true
+    stop_grace_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      # Non-standard host ports so a production 80/443 listener is never touched.
+      - "${ASTER_WEB_HTTP_PORT:-8788}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - aster-web-caddy-data:/data
+      - aster-web-caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  aster-web-data:
+    name: aster-web-data
+  aster-web-caddy-data:
+    name: aster-web-caddy-data
+  aster-web-caddy-config:
+    name: aster-web-caddy-config

@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { openAgent } from "./agent.js";
+import { buildAgentOptions } from "./agent-options.js";
 import { ConfigurationError, configureEnvProxy, readConfig, resolveProviderConfigPath } from "./config.js";
 import { errorCode, StateError } from "./errors.js";
 import { HubStore } from "./hubs.js";
@@ -19,6 +20,7 @@ import { createRoutines as createRoutinesRuntime, type RoutinesRuntime } from ".
 import { startTrace, type TraceRuntime } from "./trace.js";
 import { createWatchers, type WatchersRuntime } from "./watchers/index.js";
 import { SqliteWatchStore } from "./watchers/store.js";
+import { runWebMode } from "./http/run-web.js";
 
 const shutdown = new AbortController();
 process.once("SIGINT", () => shutdown.abort());
@@ -41,6 +43,11 @@ try {
   const config = readConfig(process.env, providerConfig.providers);
   // Tracing is auxiliary: absent keys or an exporter failure must not stop the bot.
   trace = startTrace(config.trace);
+  if (config.channel.kind === "web") {
+    // One owner, one conversation: no bot identity, no Inbox polling, and no HubStore. The adapter
+    // owns its own SQLite file under the same (independent) DATA_DIR.
+    await runWebMode(config, shutdown.signal);
+  } else {
   // A Slack deployment carries an inbound policy — who may drive the bot and where — read from
   // configuration once, so no channel event can widen its own access. Telegram has no counterpart.
   const deployment = config.channel.kind === "slack"
@@ -150,8 +157,7 @@ try {
       send: (target, body, partSignal, threadTs) => channel.send(target, body, partSignal, threadTs),
       log: (line) => console.error(line),
     });
-    const agent = await openAgent(config, undefined, undefined, {
-      signal: shutdown.signal,
+    const agent = await openAgent(config, undefined, undefined, buildAgentOptions(config, {
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
       ...(hubs === undefined ? {} : { hubStore: hubs }),
       ...(watchers?.extension === undefined && routinesExtension === undefined
@@ -166,7 +172,7 @@ try {
       ...(deployment.kind === "slack"
         ? { reactions: { host: deployment.client, anchor: deployment.anchor, emoji } }
         : {}),
-    });
+    }, { signal: shutdown.signal }));
     const scheduler = reminders === undefined ? undefined : new ReminderScheduler({
       store: reminders,
       client: channel,
@@ -235,6 +241,7 @@ try {
     routinesStore?.close();
     hubs?.close();
     styleStore?.close();
+  }
   }
 } catch (error) {
   if (!shutdown.signal.aborted) {

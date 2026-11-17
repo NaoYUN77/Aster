@@ -16,7 +16,14 @@ export interface DeliveryChannel {
    * anchor to answer inside when the request arrived in a thread; a channel that has no threads
    * ignores it, and an absent anchor means a flat message.
    */
-  send(target: string, text: string, signal: AbortSignal, threadTs?: string): Promise<string>;
+  send(
+    target: string,
+    text: string,
+    signal: AbortSignal,
+    threadTs?: string,
+    /** Host-side idempotency key for deliveries that must not repeat after a restart. */
+    deliveryKey?: string,
+  ): Promise<string>;
   /**
    * Optional: attaches an emoji reaction to the message a request arrived on — an acknowledgement of
    * the request, never a substitute for delivering its reply. A channel that cannot address the

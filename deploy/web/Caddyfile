@@ -1,0 +1,29 @@
+# DEV / LOCAL ONLY. Plain HTTP on the compose-internal port 80, published as 8788 by
+# docker-compose.yml. For a real deployment add a site address, TLS and the same SSE settings.
+# Never replace the production Caddyfile with this file.
+
+{
+	admin off
+	servers {
+		timeouts {
+			read_body 10m
+			idle 10m
+		}
+	}
+}
+
+:80 {
+	# SSE must not be buffered. The app also sends X-Accel-Buffering: no and a 15s heartbeat.
+	reverse_proxy app:8787 {
+		flush_interval -1
+		header_up X-Accel-Buffering no
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		# HSTS only when this site is actually served over HTTPS:
+		# Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
