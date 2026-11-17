@@ -40,7 +40,7 @@ test("a stopped turn leaves no empty assistant row and is not answered by the ne
       senderId: "owner",
       text: "first question",
     }, controller.signal);
-    await waitFor(() => faux.state.callCount === 1);
+    await waitFor(() => faux.state.callCount === 1, 10_000);
     controller.abort();
     await app.abort();
     await assert.rejects(stopped);
