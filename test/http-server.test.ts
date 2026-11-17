@@ -22,7 +22,7 @@ async function startServer(options: { withSse?: boolean } = {}) {
   const config: WebConfig = {
     port: 0,
     host: "127.0.0.1",
-    allowedOrigins: ["http://localhost:5173"],
+    allowedOrigins: ["http://localhost:5173", "https://localhost"],
     sessionTtlDays: 30,
     staticDir: join(directory, "web-dist"),
     trustProxy: false,
@@ -171,6 +171,63 @@ test("login, API auth, idempotent enqueue, history, models, switch, primary and 
     const logout = await server.app.inject({ method: "POST", url: "/api/v1/auth/logout", headers: server.auth(token) });
     assert.equal(logout.statusCode, 204);
     assert.equal((await server.app.inject({ method: "GET", url: "/api/v1/auth/me", headers: server.auth(token) })).statusCode, 401);
+  } finally {
+    await server.close();
+  }
+});
+
+test("CORS accepts the SSE Cache-Control header from Web, Tauri and Capacitor origins", async () => {
+  const server = await startServer();
+  try {
+    for (const origin of ["http://localhost:5173", "https://localhost"]) {
+      const preflight = await server.app.inject({
+        method: "OPTIONS",
+        url: "/api/v1/events",
+        headers: {
+          origin,
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization,cache-control",
+        },
+      });
+      assert.equal(preflight.statusCode, 204, origin);
+      assert.equal(preflight.headers["access-control-allow-origin"], origin);
+      assert.match(String(preflight.headers["access-control-allow-headers"]), /cache-control/i);
+    }
+    const other = await server.app.inject({
+      method: "OPTIONS",
+      url: "/api/v1/events",
+      headers: {
+        origin: "https://not-allowed.example",
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization,cache-control",
+      },
+    });
+    assert.equal(other.headers["access-control-allow-origin"], undefined);
+  } finally {
+    await server.close();
+  }
+});
+
+test("text over 32000 characters is TEXT_TOO_LONG, not a generic 400 or 413", async () => {
+  const server = await startServer();
+  try {
+    const { token } = (await server.login()).json<{ token: string }>();
+    const atLimit = await server.app.inject({
+      method: "POST", url: "/api/v1/messages", headers: server.auth(token),
+      payload: { clientMessageId: "limit-ok", text: "a".repeat(32_000) },
+    });
+    assert.equal(atLimit.statusCode, 202);
+
+    // Chinese text above the character limit is ~96 KiB of UTF-8: it must still reach the route,
+    // so the error is the contract's TEXT_TOO_LONG rather than a transport-level 413.
+    const tooLong = await server.app.inject({
+      method: "POST", url: "/api/v1/messages", headers: server.auth(token),
+      payload: { clientMessageId: "limit-over", text: "字".repeat(32_001) },
+    });
+    assert.equal(tooLong.statusCode, 400);
+    const body = tooLong.json<{ error: { code: string; message: string } }>();
+    assert.equal(body.error.code, "TEXT_TOO_LONG");
+    assert.match(body.error.message, /32000/);
   } finally {
     await server.close();
   }

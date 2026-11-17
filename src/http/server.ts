@@ -60,7 +60,9 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   const { config, agent, sessions, store, hub, worker, modelService } = options;
   const app = Fastify({
     logger: false,
-    bodyLimit: 64 * 1024,
+    // Large enough that an over-limit text still reaches the route and gets TEXT_TOO_LONG
+    // instead of a transport-level 413; genuinely huge bodies are still refused.
+    bodyLimit: 1024 * 1024,
     trustProxy: config.trustProxy,
   });
 
@@ -75,7 +77,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       callback(null, config.allowedOrigins.includes(origin));
     },
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type"],
+    allowedHeaders: ["Authorization", "Content-Type", "Cache-Control"],
     maxAge: 600,
   });
   // The route config enables the limiter; the shared error handler turns its 429 into the API's
@@ -152,8 +154,11 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     if (typeof clientMessageId !== "string" || clientMessageId.length < 1 || clientMessageId.length > 200) {
       return reply.code(400).send(errorBody("INVALID_REQUEST", "请求参数不合法"));
     }
-    if (typeof text !== "string" || text.trim() === "" || text.length > 32_000) {
+    if (typeof text !== "string" || text.trim() === "") {
       return reply.code(400).send(errorBody("INVALID_REQUEST", "请求参数不合法"));
+    }
+    if (text.length > 32_000) {
+      return reply.code(400).send(errorBody("TEXT_TOO_LONG", "消息过长，最多 32000 个字符"));
     }
     const { row, created } = store.enqueue(clientMessageId, text);
     if (created) {

@@ -22,6 +22,7 @@ test("CHANNEL=web needs no bot token and defaults to a local owner identity", ()
   assert.equal(web.staticDir, "web/dist");
   assert.equal(web.trustProxy, false);
   assert.ok(web.allowedOrigins.includes("http://localhost:5173"));
+  assert.ok(web.allowedOrigins.includes("https://localhost"));
   assert.ok(web.allowedOrigins.includes("tauri://localhost"));
   assert.ok(web.allowedOrigins.includes("capacitor://localhost"));
 });

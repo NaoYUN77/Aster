@@ -67,6 +67,11 @@ test("a failed answer keeps its stable error code and never exposes provider tex
     model: [assistant({ stopReason: "aborted" })],
   }));
   assert.equal(aborted?.status, "aborted");
+
+  // A stop before any visible token leaves no assistant bubble at all.
+  assert.equal(projectEntry(entry(5, "pi.assistant", {
+    model: [assistant({ content: [], stopReason: "aborted" })],
+  })), undefined);
 });
 
 test("tool results are compact rows; internal entries are hidden", () => {

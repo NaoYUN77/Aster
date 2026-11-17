@@ -14,6 +14,13 @@ info:
     Model ids and the selectable scope are never hardcoded. The server returns
     exactly the live runtime catalog filtered by the same policy that `$model`
     uses (`selectableModels()` / `isSelectableModel()`).
+
+    CORS: defaults include the Web dev origin, `http://tauri.localhost`,
+    `tauri://localhost`, Capacitor's `https://localhost`, and
+    `capacitor://localhost`; requesting clients must send exactly one of them as
+    `Origin`. Setting `WEB_ALLOWED_ORIGINS` replaces the defaults, so include the
+    native shell's origin there as well. Preflight allows `Authorization`,
+    `Content-Type`, and `Cache-Control` (the SSE client sends the last one).
 servers:
   - url: /
     description: Same origin (Web behind Caddy); Tauri/Capacitor use their configured server URL.
@@ -169,6 +176,9 @@ paths:
         Aborts the current generation for the single conversation. A queued
         request is marked aborted and skipped; a running request calls
         `agent.abort()` and is marked aborted. Later queued requests remain.
+        The stopped input stays visible in history, but it is excluded from the
+        next model context, so the next answer does not answer it again. A stop
+        before any visible token leaves no empty assistant message.
       parameters:
         - name: requestId
           in: path
@@ -322,6 +332,10 @@ components:
             invalid:
               value:
                 error: { code: INVALID_REQUEST, message: 请求参数不合法 }
+            textTooLong:
+              summary: Message text exceeds the 32000-character limit.
+              value:
+                error: { code: TEXT_TOO_LONG, message: 消息过长，最多 32000 个字符 }
     Unauthorized:
       description: Missing, expired or revoked token.
       content:
@@ -772,7 +786,8 @@ components:
               type: string
               description: |
                 Stable machine-readable code. Auth/transport codes: INVALID_REQUEST,
-                UNAUTHORIZED, RATE_LIMITED, REQUEST_NOT_FOUND, REQUEST_NOT_ACTIVE.
+                TEXT_TOO_LONG, UNAUTHORIZED, RATE_LIMITED, REQUEST_NOT_FOUND,
+                REQUEST_NOT_ACTIVE, PAYLOAD_TOO_LARGE.
                 Model codes: MODEL_NOT_FOUND, MODEL_OUT_OF_SCOPE,
                 MODEL_SWITCH_DISABLED, SELECTION_WRITE_FAILED. Request failure
                 codes sent in `request.failed`: MODEL_UNAVAILABLE,

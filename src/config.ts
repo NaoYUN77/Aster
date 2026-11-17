@@ -556,6 +556,8 @@ const ORIGIN_SHAPE = /^[a-z][a-z0-9+.-]*:\/\/[^\s/?#]+$/i;
 const DEFAULT_WEB_ORIGINS = [
   "http://localhost",
   "http://localhost:5173",
+  // Capacitor WebView origins used by the native shells.
+  "https://localhost",
   "http://tauri.localhost",
   "tauri://localhost",
   "capacitor://localhost",

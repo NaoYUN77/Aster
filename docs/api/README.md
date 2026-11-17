@@ -38,12 +38,22 @@ is broadcast as `model.changed` just like a button click.
   different model answered. Automatic fallback stays `degraded: false`.
 - `effective: "next_request"` means a generation was running; the selection applies afterwards.
 - SSE has no replay. On reconnect: fetch history, then use the new `snapshot`.
+- After `abort`, the stopped input remains in history but is omitted from the next model context;
+  the next answer does not answer it again. A stop before any visible token leaves no empty
+  assistant message.
+- `text` over 32000 characters returns `400 TEXT_TOO_LONG` with a user-facing message; branch on
+  the code rather than on status 400 alone.
+- CORS allows `Authorization`, `Content-Type`, and `Cache-Control`. Defaults include
+  `http://localhost:5173`, `https://localhost` (Capacitor), `http://tauri.localhost`,
+  `tauri://localhost`, and `capacitor://localhost`. Setting `WEB_ALLOWED_ORIGINS` replaces the
+  defaults, so a native shell deployment must list its exact origin there.
 - Errors use `{ "error": { "code", "message" } }`; display `message`, branch on `code`.
 
 ## Error codes
 
-Transport/auth: `INVALID_REQUEST`, `UNAUTHORIZED`, `RATE_LIMITED`, `REQUEST_NOT_FOUND`,
-`REQUEST_NOT_ACTIVE`, `PAYLOAD_TOO_LARGE`, `INTERNAL_ERROR`, `NOT_FOUND`.
+Transport/auth: `INVALID_REQUEST`, `TEXT_TOO_LONG` (text over 32000 characters; message says so),
+`UNAUTHORIZED`, `RATE_LIMITED`, `REQUEST_NOT_FOUND`, `REQUEST_NOT_ACTIVE`,
+`PAYLOAD_TOO_LARGE`, `INTERNAL_ERROR`, `NOT_FOUND`.
 
 Model selection: `MODEL_NOT_FOUND`, `MODEL_OUT_OF_SCOPE`, `MODEL_SWITCH_DISABLED`,
 `SELECTION_WRITE_FAILED`.

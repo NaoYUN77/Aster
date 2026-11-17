@@ -84,7 +84,9 @@ function projectAssistant(entry: EntryRecord): UiMessage | undefined {
   if (last === undefined) return undefined;
   const text = messages.map((message) => contentText(message.content)).join("").trim();
   const status = statusOf(last);
-  if (text === "" && status === "complete") return undefined;
+  // A stopped generation with no visible text is bookkeeping, not a message: showing it would
+  // leave an empty assistant bubble. A partial stopped answer is still shown as aborted.
+  if (text === "" && (status === "complete" || status === "aborted")) return undefined;
   return {
     id: String(entry.id),
     role: "assistant",
