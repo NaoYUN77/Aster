@@ -401,23 +401,11 @@ export function mockAbort(requestId: string): { ok: boolean; status: number; cod
   }
 
   clearTimers(requestId);
-  const wasRunning = request.status === "running";
   request.status = "aborted";
   request.finishedAt = Date.now();
 
-  if (wasRunning) {
-    state.messages.push({
-      id: makeId("entry"),
-      role: "assistant",
-      text: "（已停止，以上为已生成的部分内容。）",
-      createdAt: Date.now(),
-      status: "aborted",
-      requestId,
-      model: activeModelRef(),
-      errorCode: null,
-      tool: null,
-    });
-  }
+  // 与服务端修复对齐：停止后不再追加空的 assistant 占位消息，
+  // 界面上只在用户消息下显示“已停止”。
 
   persist();
   emit("request.aborted", { requestId });

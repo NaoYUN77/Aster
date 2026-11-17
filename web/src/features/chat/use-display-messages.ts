@@ -48,6 +48,15 @@ export function useDisplayMessages(history: UiMessage[]): DisplayMessage[] {
 
     for (const message of byId.values()) {
       if (message.requestId) serverRequestIds.add(message.requestId);
+      // 停止/中断时服务端可能留下空的 assistant 占位，不渲染空气泡；
+      // 失败消息仍需显示错误文案。
+      if (
+        message.role === "assistant" &&
+        message.text.trim() === "" &&
+        message.status !== "failed"
+      ) {
+        continue;
+      }
       const item = outgoingByRequest.get(message.requestId ?? "");
 
       let status: DisplayStatus = (message.status ?? "complete") as DisplayStatus;

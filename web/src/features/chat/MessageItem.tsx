@@ -72,7 +72,12 @@ export function MessageItem({
           <ErrorLine
             code={message.errorCode}
             message={message.errorMessage}
-            onRetry={pending ? undefined : () => onRetry(message)}
+            // 超长需要用户先改内容，重试同样的文本没有意义。
+            onRetry={
+              pending || message.errorCode === "TEXT_TOO_LONG"
+                ? undefined
+                : () => onRetry(message)
+            }
           />
         )}
         {message.status === "aborted" && (

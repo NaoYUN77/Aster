@@ -154,15 +154,8 @@ function abortRequest(requestId) {
   if (request.status !== "queued" && request.status !== "running")
     return { status: 409, body: { code: "CONFLICT", message: "当前状态不能停止" } };
   clearTimers(requestId);
-  const wasRunning = request.status === "running";
   request.status = "aborted";
-  if (wasRunning) {
-    state.messages.push({
-      id: makeId("entry"), role: "assistant", text: "（已停止，以上为已生成的部分内容。）",
-      createdAt: Date.now(), status: "aborted", requestId, model: activeModelRef(),
-      errorCode: null, tool: null,
-    });
-  }
+  // 与服务端一致：停止后不再追加空的 assistant 占位消息。
   emit("request.aborted", { requestId });
   return { status: 200, body: { requestId, status: "aborted" } };
 }

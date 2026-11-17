@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ArrowUp, Square } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -26,7 +27,13 @@ export function Composer({ onSend, onStop, activeStatus }: ComposerProps) {
   const submit = async () => {
     if (pending) return;
     const value = text;
-    if (value.trim() === "" || value.length > MAX_CHARS) return;
+    if (value.trim() === "") return;
+    // 超长直接给出明确文案；服务端仍会返回 TEXT_TOO_LONG 兜底。
+    if (value.length > MAX_CHARS) {
+      toast.error("消息太长，请缩短后重试");
+      textareaRef.current?.focus();
+      return;
+    }
 
     setText("");
     setPending(true);
@@ -108,6 +115,11 @@ export function Composer({ onSend, onStop, activeStatus }: ComposerProps) {
             </span>
           )}
         </div>
+        {overLimit && (
+          <p className="mt-1 px-1.5 text-[11px] text-destructive" role="alert">
+            消息太长：最多 {MAX_CHARS.toLocaleString()} 字符，请缩短后重试
+          </p>
+        )}
       </div>
     </div>
   );

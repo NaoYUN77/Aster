@@ -101,8 +101,11 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 
 - 初始拉最近 30 条；上滚用 `before=<entry cursor>` 加载更早，保持滚动位置。
 - 发送使用 `clientMessageId`（UUID）；202 后显示“排队中”，SSE 推进到“正在回复/完成”。
-- 停止：`POST /api/v1/requests/:requestId/abort`，UI 显示“已停止”。
+- 停止：`POST /api/v1/requests/:requestId/abort`，只在用户消息下显示“已停止”；
+  不渲染空 assistant 气泡（服务端也不再追加停止占位消息）。
 - 失败：错误条 + 重试；重试生成新的 `clientMessageId`。
+- `TEXT_TOO_LONG`：输入超过 32,000 字符时输入框内直接提示“消息太长”，发送被服务端
+  拒绝时错误条与 toast 都显示“消息太长，请缩短后重试”，且不提供无效的重试按钮。
 - 多端：`request.done` 按服务端消息 id 去重；完成/失败/停止后重新拉历史。
 - Markdown 白名单渲染：不渲染原始 HTML、不渲染图片、链接只允许 http(s)/mailto，
   代码块有复制按钮。
