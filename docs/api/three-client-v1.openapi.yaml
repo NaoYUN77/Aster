@@ -31,6 +31,7 @@ tags:
   - name: auth
   - name: messages
   - name: models
+  - name: connectors
   - name: events
 paths:
   /api/v1/health:
@@ -208,6 +209,68 @@ paths:
                 notActive:
                   value:
                     error: { code: REQUEST_NOT_ACTIVE, message: 请求已结束 }
+  /api/v1/requests/{requestId}/steer:
+    post:
+      tags: [messages]
+      operationId: steerRequest
+      summary: Inject text into the currently running request
+      description: |
+        Steer, not queue: when `requestId` is the request that is running now,
+        `text` joins that same agent run and is seen by the model at its next
+        tool boundary. It does not create a `web_requests` row and does not
+        produce a separate `request.done`; the original request's final answer
+        covers it. If the steer arrives after the last tool boundary, the
+        durable runtime starts one more run, and the answer is broadcast as
+        `steer.done`.
+
+        Idempotent per `clientMessageId`: a replay returns the same `steerId`
+        and injects nothing new. The durable submission id is
+        `steer:<clientMessageId>`.
+
+        With no running request the server answers `409 NO_ACTIVE_REQUEST` and
+        the client falls back to a normal `POST /api/v1/messages`. A path
+        `requestId` that is not the running request answers `409
+        REQUEST_NOT_ACTIVE`, which protects a late steer from landing on a
+        newer request.
+
+        Known v1 limitation: a steer that starts one more run does not run
+        Memory's per-request prepare/after-request hooks for that run.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SteerRequest"
+      responses:
+        "202":
+          description: Steer admitted (new or idempotent replay).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SteerResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: No running request, or the path request is not the running one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                idle:
+                  value:
+                    error: { code: NO_ACTIVE_REQUEST, message: 没有正在运行的请求 }
+                notActive:
+                  value:
+                    error: { code: REQUEST_NOT_ACTIVE, message: 请求不是当前运行的请求 }
   /api/v1/models:
     get:
       tags: [models]
@@ -292,6 +355,160 @@ paths:
                 writeFailed:
                   value:
                     error: { code: SELECTION_WRITE_FAILED, message: 模型选择保存失败 }
+  /api/v1/connectors:
+    get:
+      tags: [connectors]
+      operationId: listConnectors
+      summary: List connector providers and this owner's connections
+      description: |
+        Server-side connection state shared by Web, Tauri and Capacitor. No
+        token, refresh token, client secret or file path is ever returned.
+      responses:
+        "200":
+          description: Provider definitions and owner-scoped connections.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Connectors are disabled on this server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      tags: [connectors]
+      operationId: createConnector
+      summary: Create a GitHub, Gmail or local stdio connection
+      description: |
+        Creates a server-side connection identity. GitHub and Gmail start
+        `pending`; the owner then calls `POST /connectors/{slug}/oauth/start` and
+        completes the browser flow once. Every client sees the same connection
+        afterwards. `mcp_stdio` requires `command` (allowlisted server-side) and
+        is `connected` immediately, but its MCP server starts with the next
+        process boot. Local connectors run host binaries: treat as high risk.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConnectorRequest"
+      responses:
+        "201":
+          description: Connection created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateConnectorResponse"
+        "200":
+          description: Idempotent replay of the same provider and slug.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateConnectorResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: The slug belongs to another provider, or connector secrets are missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Connectors are disabled on this server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/connectors/{slug}/oauth/start:
+    post:
+      tags: [connectors]
+      operationId: startConnectorOAuth
+      summary: Start server-side OAuth for one connection
+      description: |
+        Returns the provider authorization URL. The server stores a one-time
+        state and PKCE verifier; the provider redirects the browser to the
+        server callback. Access and refresh tokens stay on the server, encrypted
+        with AES-256-GCM in connectors.sqlite.
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,47}$"
+      responses:
+        "200":
+          description: Authorization URL to open in a browser.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthStartResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: OAuth redirect base URL or client secrets are not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Connectors are disabled on this server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/connectors/oauth/callback:
+    get:
+      tags: [connectors]
+      operationId: connectorOAuthCallback
+      summary: OAuth provider callback (no Bearer token)
+      description: |
+        The provider redirects the browser here. The one-time `state` row is the
+        capability; replayed, expired or unknown state is refused. The response
+        is a small HTML page and never includes a token.
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema: { type: string }
+        - name: state
+          in: query
+          required: false
+          schema: { type: string }
+        - name: error
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Authorization completed; the connection is usable by every client.
+          content:
+            text/html:
+              schema: { type: string }
+        "400":
+          description: State invalid/expired or authorization denied.
+          content:
+            text/html:
+              schema: { type: string }
+        "502":
+          description: Provider token exchange failed; the connection is marked `error`.
+          content:
+            text/html:
+              schema: { type: string }
+        "503":
+          description: Connectors are disabled on this server.
+          content:
+            text/html:
+              schema: { type: string }
   /api/v1/events:
     get:
       tags: [events]
@@ -301,10 +518,11 @@ paths:
         Uses the same `Authorization: Bearer` header as every other endpoint, so
         clients must consume it with `fetch` + `ReadableStream`, not
         `EventSource`. The stream opens with a `snapshot` event, sends an SSE
-        comment heartbeat every 15 seconds, and broadcasts request, model and
-        `host.message` events to every connected client. No event replay is
-        provided: on reconnect a client re-reads history (host notifications are
-        durable `role: system` rows) and uses the new snapshot.
+        comment heartbeat every 15 seconds, and broadcasts request, model,
+        `host.message`, `connector.changed` and `credential.request` events to
+        every connected client. No event replay is provided: on reconnect a
+        client re-reads history (host notifications are durable `role: system`
+        rows), the connector list and the new snapshot.
       responses:
         "200":
           description: |
@@ -412,6 +630,34 @@ components:
         expiresAt:
           type: string
           format: date-time
+    SteerRequest:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId, text]
+      properties:
+        clientMessageId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Client-generated idempotency key; the steer id becomes `steer:<clientMessageId>`.
+        text:
+          type: string
+          minLength: 1
+          maxLength: 32000
+    SteerResponse:
+      type: object
+      additionalProperties: false
+      required: [steerId, requestId, status]
+      properties:
+        steerId:
+          type: string
+          description: "`steer:<clientMessageId>`; stable across replays."
+        requestId:
+          type: string
+          description: The running request the steer joined.
+        status:
+          type: string
+          enum: [accepted]
     SubmitMessageRequest:
       type: object
       additionalProperties: false
@@ -655,6 +901,104 @@ components:
         degraded:
           type: boolean
           description: True only when a manual selection was unavailable and another model answered.
+    ConnectorProvider:
+      type: string
+      enum: [github, gmail, mcp_stdio]
+    ConnectorStatus:
+      type: string
+      enum: [pending, connected, error, revoked]
+    ConnectorDefinition:
+      type: object
+      additionalProperties: false
+      required: [provider, displayName, transport, defaultScopes, tools]
+      properties:
+        provider:
+          $ref: "#/components/schemas/ConnectorProvider"
+        displayName: { type: string }
+        transport:
+          type: string
+          enum: [oauth, stdio]
+        defaultScopes:
+          type: array
+          items: { type: string }
+        tools:
+          type: array
+          description: Read-only model tool names this provider can expose.
+          items: { type: string }
+    ConnectorConnection:
+      type: object
+      additionalProperties: false
+      required: [id, provider, slug, status, accountLabel, scopes, createdAt, updatedAt, lastErrorCode]
+      properties:
+        id:
+          type: string
+          description: Stable internal connection id; slugs are only unique per owner.
+        provider:
+          $ref: "#/components/schemas/ConnectorProvider"
+        slug:
+          type: string
+        status:
+          $ref: "#/components/schemas/ConnectorStatus"
+        accountLabel:
+          type: [string, "null"]
+          description: GitHub login or Gmail address; never a token.
+        scopes:
+          type: array
+          items: { type: string }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+        lastErrorCode:
+          type: [string, "null"]
+    ConnectorListResponse:
+      type: object
+      additionalProperties: false
+      required: [providers, connections]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectorDefinition"
+        connections:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectorConnection"
+    CreateConnectorRequest:
+      type: object
+      additionalProperties: false
+      required: [provider, slug]
+      properties:
+        provider:
+          type: string
+          enum: [github, gmail, mcp_stdio]
+        slug:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,47}$"
+        command:
+          type: string
+          description: |
+            `mcp_stdio` only. Must be named in the server's CONNECTOR_STDIO_ALLOWLIST;
+            it is never run through a shell.
+        args:
+          type: array
+          maxItems: 32
+          items: { type: string }
+          description: "`mcp_stdio` only. Passed as argv entries, never shell-expanded."
+    CreateConnectorResponse:
+      type: object
+      additionalProperties: false
+      required: [connection, created]
+      properties:
+        connection:
+          $ref: "#/components/schemas/ConnectorConnection"
+        created: { type: boolean }
+    OAuthStartResponse:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
     SseEvent:
       description: |
         Discriminated by the SSE `event:` name. `data` is JSON.
@@ -745,6 +1089,48 @@ components:
           additionalProperties: false
           required: [event, data]
           properties:
+            event: { type: string, const: request.steered }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId, steerId, clientMessageId, text, createdAt]
+              description: |
+                A steer was admitted into the running request. `requestId` is the
+                original running request; other clients show this text as the
+                owner's message. A replay of the same `clientMessageId` carries
+                the same `steerId`, so clients should dedupe by it.
+              properties:
+                requestId: { type: string }
+                steerId: { type: string }
+                clientMessageId: { type: string }
+                text: { type: string }
+                createdAt:
+                  type: integer
+                  description: Unix epoch milliseconds.
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: steer.done }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId, steerId, message]
+              description: |
+                The steer's submission settled and produced an assistant answer.
+                If the original run consumed the steer, `message.id` is the
+                original answer, so a client that already applied `request.done`
+                can dedupe by message id. If the steer started one more run, this
+                is the only event carrying that answer.
+              properties:
+                requestId: { type: string }
+                steerId: { type: string }
+                message:
+                  $ref: "#/components/schemas/UiMessage"
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
             event: { type: string, const: host.message }
             data:
               type: object
@@ -757,6 +1143,52 @@ components:
                 A host-originated notification (reminder, watch event or routine result).
                 It is also a durable history row (`role: system`), so a client that missed the
                 event can recover it with `GET /api/v1/messages`.
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: connector.changed }
+            data:
+              type: object
+              additionalProperties: false
+              required: [connection]
+              properties:
+                connection:
+                  type: object
+                  additionalProperties: false
+                  required: [id, provider, slug, status, accountLabel, scopes]
+                  properties:
+                    id: { type: string }
+                    provider:
+                      $ref: "#/components/schemas/ConnectorProvider"
+                    slug: { type: string }
+                    status:
+                      $ref: "#/components/schemas/ConnectorStatus"
+                    accountLabel:
+                      type: [string, "null"]
+                    scopes:
+                      type: array
+                      items: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: credential.request }
+            data:
+              type: object
+              additionalProperties: false
+              required: [connectionId, provider, slug, tool, requestId]
+              description: |
+                A tool needed a connection that is not authorized. No credential
+                or capability is included; the client should start the server-side
+                OAuth flow for this slug.
+              properties:
+                connectionId: { type: string }
+                provider:
+                  $ref: "#/components/schemas/ConnectorProvider"
+                slug: { type: string }
+                tool: { type: string }
+                requestId: { type: string }
         - type: object
           additionalProperties: false
           required: [event, data]

@@ -17,6 +17,8 @@ export type DisplayMessage = {
   tool: { name: string; status: "done" | "failed" } | null;
   usage?: ModelUsage;
   local: boolean;
+  /** 本轮运行中的插话（steer），用于用户气泡上的「插话 · 本轮」标记。 */
+  steer: boolean;
   outgoing?: OutgoingMessage;
 };
 
@@ -54,7 +56,17 @@ export function buildDisplayMessages(
   { live, outgoing, usage, failures }: DisplayState,
 ): DisplayMessage[] {
   const byId = new Map<string, UiMessage>();
-  for (const message of history) byId.set(message.id, message);
+  const historyIds = new Set<string>();
+  // 只用于识别“live 插入的临时 user 行在历史到位后应让位”。
+  // 不能用 byId 里的集合，否则 live 行会用自身的 requestId 把自己过滤掉。
+  const historyUserRequestIds = new Set<string>();
+  for (const message of history) {
+    byId.set(message.id, message);
+    historyIds.add(message.id);
+    if (message.role === "user" && message.requestId) {
+      historyUserRequestIds.add(message.requestId);
+    }
+  }
   for (const liveMessage of Object.values(live)) {
     const existing = byId.get(liveMessage.id);
     if (!existing) {
@@ -82,6 +94,17 @@ export function buildDisplayMessages(
   const items: Array<DisplayMessage & { order: number }> = [];
 
   for (const message of byId.values()) {
+    // 其他端插话时本地先插一条临时 user 行；历史刷新后同一 requestId 的
+    // durable user 行才是权威的，临时行让位，避免刷新后出现两条。
+    if (
+      message.role === "user" &&
+      !historyIds.has(message.id) &&
+      message.requestId &&
+      historyUserRequestIds.has(message.requestId)
+    ) {
+      continue;
+    }
+
     // 停止/中断时服务端可能留下空的 assistant 占位，不渲染空气泡；
     // 失败消息仍需显示错误文案。带 tool 元数据的空 assistant 是工具调用，
     // 必须保留给 ToolRow 渲染。
@@ -125,6 +148,7 @@ export function buildDisplayMessages(
       tool: message.tool ?? null,
       usage: usageInfo,
       local: false,
+      steer: message.requestId?.startsWith("steer:") === true,
       outgoing: item,
       order: items.length,
     });
@@ -155,6 +179,8 @@ export function buildDisplayMessages(
           : null,
       tool: null,
       local: true,
+      steer:
+        item.steer === true || item.requestId?.startsWith("steer:") === true,
       outgoing: item,
       order: items.length,
     });

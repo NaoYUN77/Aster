@@ -139,6 +139,43 @@ export function useChatEvents(): void {
           break;
         }
 
+        case "request.steered": {
+          const state = useChatStore.getState();
+          const local = state.outgoing.find(
+            (item) => item.clientMessageId === event.clientMessageId,
+          );
+          if (local) {
+            // 本端刚发出的插话：只补上 steerId/标记，不重复插一条 user 消息。
+            state.updateOutgoing(local.clientMessageId, {
+              requestId: event.steerId,
+              steer: true,
+            });
+          } else {
+            // 其他端插话：插一条临时 user 行，历史刷新后由 durable 行接管。
+            state.addLiveMessage({
+              id: `steer:${event.steerId}`,
+              role: "user",
+              text: event.text,
+              createdAt: event.createdAt,
+              status: "complete",
+              requestId: event.steerId,
+              clientMessageId: event.clientMessageId,
+              model: null,
+              errorCode: null,
+              tool: null,
+            });
+          }
+          break;
+        }
+
+        case "steer.done": {
+          // 按 message.id 合并；不清理 activeRequestId，原请求的
+          // request.done / request.failed 仍然负责收尾。
+          useChatStore.getState().addLiveMessage(event.message);
+          invalidateHistory(200);
+          break;
+        }
+
         case "connector.changed": {
           // 连接状态以服务端为准：任一端授权/断开后，本端重新拉取列表。
           void queryClient.invalidateQueries({

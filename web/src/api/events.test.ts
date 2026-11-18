@@ -75,3 +75,59 @@ describe("parseServerEvent: credential.request", () => {
     expect(parseServerEvent("connector.changed", undefined).type).toBe("ignored");
   });
 });
+
+const steerMessage = {
+  id: "m2",
+  role: "assistant",
+  text: "补充后的回答",
+  createdAt: 1_760_000_001_000,
+  status: "complete",
+  requestId: "steer:c1",
+  clientMessageId: "c1",
+  model: { id: "mock/primary", label: "Mock Primary" },
+  errorCode: null,
+  tool: null,
+};
+
+describe("parseServerEvent: steer", () => {
+  it("解析 request.steered", () => {
+    const parsed = parseServerEvent("request.steered", {
+      requestId: "req1",
+      steerId: "steer:c1",
+      clientMessageId: "c1",
+      text: "补充一下",
+      createdAt: 1_760_000_000_000,
+    });
+
+    expect(parsed).toEqual({
+      type: "request.steered",
+      requestId: "req1",
+      steerId: "steer:c1",
+      clientMessageId: "c1",
+      text: "补充一下",
+      createdAt: 1_760_000_000_000,
+    });
+  });
+
+  it("解析 steer.done", () => {
+    const parsed = parseServerEvent("steer.done", {
+      requestId: "req1",
+      steerId: "steer:c1",
+      message: steerMessage,
+    });
+
+    expect(parsed.type).toBe("steer.done");
+    if (parsed.type !== "steer.done") return;
+    expect(parsed.steerId).toBe("steer:c1");
+    expect(parsed.message.id).toBe("m2");
+    expect(parsed.message.requestId).toBe("steer:c1");
+  });
+
+  it("畸形 steer 事件被忽略", () => {
+    expect(parseServerEvent("request.steered", { requestId: "req1" }).type).toBe(
+      "ignored",
+    );
+    expect(parseServerEvent("steer.done", { requestId: "req1" }).type).toBe("ignored");
+    expect(parseServerEvent("steer.done", null).type).toBe("ignored");
+  });
+});

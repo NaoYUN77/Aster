@@ -324,3 +324,138 @@ describe("buildDisplayMessages 去重", () => {
     expect(result.filter((item) => item.role === "assistant")).toHaveLength(1);
   });
 });
+
+describe("buildDisplayMessages 插话", () => {
+  it("其他端插话的 live user 行在历史到位后让位，只保留一条", () => {
+    const history = [
+      message({
+        id: "u1",
+        role: "user",
+        text: "补充一下",
+        createdAt: 1,
+        requestId: "steer:c1",
+        clientMessageId: "c1",
+      }),
+      message({
+        id: "a1",
+        role: "assistant",
+        text: "回答",
+        createdAt: 2,
+        requestId: "steer:c1",
+        clientMessageId: "c1",
+      }),
+    ];
+    const result = buildDisplayMessages(
+      history,
+      state({
+        live: {
+          "steer:steer:c1": message({
+            id: "steer:steer:c1",
+            role: "user",
+            text: "补充一下",
+            createdAt: 1,
+            requestId: "steer:c1",
+            clientMessageId: "c1",
+          }),
+        },
+      }),
+    );
+
+    const users = result.filter((item) => item.role === "user");
+    expect(users).toHaveLength(1);
+    expect(users[0]!.id).toBe("u1");
+    expect(users[0]!.local).toBe(false);
+    expect(users[0]!.steer).toBe(true);
+  });
+
+  it("本端插话的 outgoing 与历史同一 requestId 只保留一条服务器行", () => {
+    const history = [
+      message({
+        id: "u1",
+        role: "user",
+        text: "补充一下",
+        createdAt: 1,
+        requestId: "steer:c1",
+      }),
+    ];
+    const result = buildDisplayMessages(
+      history,
+      state({
+        outgoing: [
+          outgoing({
+            clientMessageId: "c1",
+            requestId: "steer:c1",
+            text: "补充一下",
+            status: "done",
+            steer: true,
+          }),
+        ],
+      }),
+    );
+
+    const users = result.filter((item) => item.role === "user");
+    expect(users).toHaveLength(1);
+    expect(users[0]!.id).toBe("u1");
+    expect(users[0]!.local).toBe(false);
+    expect(users[0]!.steer).toBe(true);
+  });
+
+  it("历史未返回时本端插话乐观气泡带标记", () => {
+    const result = buildDisplayMessages(
+      [],
+      state({
+        outgoing: [
+          outgoing({
+            clientMessageId: "c1",
+            text: "补充一下",
+            status: "sending",
+            steer: true,
+          }),
+        ],
+      }),
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.local).toBe(true);
+    expect(result[0]!.steer).toBe(true);
+  });
+
+  it("没有历史时其他端插话的 live user 行保留并带标记", () => {
+    const result = buildDisplayMessages(
+      [],
+      state({
+        live: {
+          "steer:steer:c1": message({
+            id: "steer:steer:c1",
+            role: "user",
+            text: "补充一下",
+            createdAt: 1,
+            requestId: "steer:c1",
+            clientMessageId: "c1",
+          }),
+        },
+      }),
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.role).toBe("user");
+    expect(result[0]!.steer).toBe(true);
+  });
+
+  it("历史 requestId 带 steer: 前缀时自动识别为插话", () => {
+    const result = buildDisplayMessages(
+      [
+        message({
+          id: "u1",
+          role: "user",
+          text: "补充一下",
+          requestId: "steer:c1",
+        }),
+      ],
+      state(),
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.steer).toBe(true);
+  });
+});

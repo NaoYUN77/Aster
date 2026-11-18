@@ -34,19 +34,20 @@ web/                     Vite + React + TS 应用（唯一 UI 代码）
 
 ## 3. API 契约
 
-- 正式契约由 Dev 1 维护：`docs/api/three-client-v1.openapi.yaml`（PR #81）。
-- `web/src/api/schema.d.ts` 当前取自 Dev 1 PR #81 提交 `40cad565`：`UiMessage`
-  增加可选 `clientMessageId`，`requestId` 说明为由 durable submissions 反查。
-  本分支的 `docs/api` 契约在 PR #81 合并前仍是旧版，因此**现在不要直接运行
-  `npm run gen:api`**（会按旧契约把字段回退）；PR #81 合并进 `feat/三端联通` 后
-  再运行即可复现。
-- `web/openapi/three-client-v1.official.yaml` 是更早的契约快照（`4f4e99b`），
-  仅作离线回退；`three-client-v1.draft.yaml` 是临时草案。
+- 正式契约由 Dev 1 维护：`docs/api/three-client-v1.openapi.yaml`。
+- 当前契约已同步 Dev 1 steer 实现（`300a463` / 远程 `3b084c9`），`UiMessage`
+  保留可选 `clientMessageId`，并新增：
+  - `POST /api/v1/requests/{requestId}/steer`（`SteerRequest` / `SteerResponse`）
+  - SSE `request.steered` / `steer.done`
+- 契约变更后从 Dev 1 的分支同步同路径文件，再重新生成：
 
 ```bash
 cd web
-npm run gen:api   # PR #81 合并后再执行
+npm run gen:api
 ```
+
+- `web/openapi/three-client-v1.official.yaml` 是更早的契约快照（`4f4e99b`），
+  仅作离线回退；`three-client-v1.draft.yaml` 是临时草案。
 
 生成结果在 `web/src/api/schema.d.ts`，业务代码通过 `web/src/api/client.ts` 的类型化封装访问。
 契约路径自带 `/api/v1` 前缀，客户端 baseUrl 只保存服务器根地址。
@@ -60,7 +61,8 @@ npm run gen:api   # PR #81 合并后再执行
 `web/src/api/sse.ts`。支持：
 
 - `snapshot` / `request.queued` / `request.running` / `request.done` /
-  `request.failed` / `request.aborted` / `model.changed`
+  `request.failed` / `request.aborted` / `request.steered` / `steer.done` /
+  `model.changed`
 - `connector.changed`：失效 Connectors 查询，跨端同步连接状态
 - `credential.request`：打开全局安全注入弹窗（见第 7 节）
 - `: heartbeat` 注释与 `heartbeat` 事件
@@ -127,6 +129,32 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 - Markdown 白名单渲染：不渲染原始 HTML、不渲染图片、链接只允许 http(s)/mailto，
   代码块有复制按钮。
 - 工具调用只显示“工具：xxx · 完成/失败”紧凑行，不展示参数。
+
+### 5.1 运行中插话（steer）
+
+- 仅当 `activeStatus === "running"` 且存在 `activeRequestId` 时，发送走
+  `POST /api/v1/requests/{requestId}/steer`，body 为 `{ clientMessageId, text }`；
+  202 返回 `steerId = "steer:<clientMessageId>"`。
+- 插话加入当前 run，不产生独立的 `request.done`。成功只把本地乐观消息的
+  `requestId` 改为 `steerId` 并标记完成，**不修改** `activeRequestId`；
+  原请求的 `request.done` / `request.failed` / `request.aborted` 负责收尾。
+- 409 `NO_ACTIVE_REQUEST` / `REQUEST_NOT_ACTIVE` 表示检查与提交之间请求已结束，
+  服务端没有写入；客户端用**同一个** `clientMessageId` 回退到普通
+  `POST /api/v1/messages`。其他错误不回退，按普通失败提示并保留重试。
+- `queued` 或空闲状态保持原来的发送/排队语义，不产生插话。
+- Composer：运行中保留停止按钮；输入框有内容时额外显示发送按钮，其
+  `aria-label` / `title` 为「插话」，底部提示为
+  「正在回复，Enter 插话，Shift+Enter 换行」。排队中仍然只显示停止。
+- 乐观消息：本地 outgoing 增加 `steer` 标记，用户气泡显示小字「插话 · 本轮」。
+  历史消息没有额外字段，按 `requestId?.startsWith("steer:")` 识别。
+- SSE：
+  - `request.steered`：若本地有同 `clientMessageId` 的 outgoing，只补
+    `requestId = steerId` 与 `steer` 标记，不重复插入；其他端发起的插话插入一条
+    临时 live user 行（合成 id `steer:<steerId>`），同一 `steerId` 重放不重复。
+  - `steer.done`：按 `message.id` 合并进 live（同 id 覆盖，不产生第二条），
+    并重新拉历史；不清理 `activeRequestId`。
+  - 历史刷新后，live 临时 user 行若其 `requestId` 已出现在服务器 history 的
+    user 行里，则让位给 durable 行，避免刷新后出现两条插话气泡。
 
 ## 6. 模型选择器（三端同一组件）
 
@@ -323,7 +351,7 @@ cd android && ./gradlew assembleDebug
 ```bash
 cd web
 npm run typecheck
-npm test             # vitest：消息去重/合并、SSE credential 事件解析
+npm test             # vitest：消息去重/合并、steer 发送路径、SSE 事件解析
 npm run build        # 生产构建（不含 mock）
 ```
 

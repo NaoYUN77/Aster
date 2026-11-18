@@ -25,6 +25,9 @@ export type ErrorBody = components["schemas"]["ErrorResponse"]["error"];
 /** request.done 事件里的模型使用信息。 */
 export type ModelUsage = components["schemas"]["ModelUsage"];
 
+/** POST /api/v1/requests/{requestId}/steer 的 202 响应。 */
+export type SteerResponse = components["schemas"]["SteerResponse"];
+
 export const EMPTY_MODEL_KIND_LABEL: Record<ModelKind, string> = {
   primary: "主模型",
   manual: "手动指定",

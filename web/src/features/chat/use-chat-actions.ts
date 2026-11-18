@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { toast } from "sonner";
-import { abortRequest, sendMessage } from "@/api/client";
+import { abortRequest, sendMessage, steerRequest } from "@/api/client";
 import { errorText, toApiError, userFacingMessage } from "@/api/errors";
 import type { DisplayMessage } from "./use-display-messages";
 import { useChatStore } from "@/store/chat";
@@ -14,16 +14,60 @@ export function useSendMessage() {
       const trimmed = text.trim();
       if (trimmed === "") return false;
 
-      const clientMessageId = addOutgoing(trimmed);
+      const state = useChatStore.getState();
+      const steerTarget =
+        state.activeStatus === "running" ? state.activeRequestId : null;
+      const clientMessageId = addOutgoing(trimmed, steerTarget !== null);
+
+      if (steerTarget) {
+        try {
+          const result = await steerRequest(steerTarget, {
+            clientMessageId,
+            text: trimmed,
+          });
+          // 插话加入当前 run：requestId 使用 steerId，但不占用 activeRequestId，
+          // 原请求的 request.done / request.failed 仍然负责收尾。
+          updateOutgoing(clientMessageId, {
+            requestId: result.steerId,
+            status: "done",
+            steer: true,
+          });
+          return true;
+        } catch (error) {
+          const apiError = toApiError(error);
+          // 409 表示检查与提交之间请求已结束，且服务端没有写入；同 id 回退成普通发送。
+          if (
+            apiError.code !== "NO_ACTIVE_REQUEST" &&
+            apiError.code !== "REQUEST_NOT_ACTIVE"
+          ) {
+            updateOutgoing(clientMessageId, {
+              status: "failed",
+              errorCode: apiError.code,
+              errorMessage: apiError.message,
+            });
+            toast.error(errorText(apiError.code, apiError.message));
+            return false;
+          }
+          if (apiError.code === "NO_ACTIVE_REQUEST") {
+            const current = useChatStore.getState();
+            if (current.activeRequestId === steerTarget) {
+              current.setActive(null, null, null);
+            }
+          }
+          // 回退后这是一条普通消息，不再显示插话标记。
+          updateOutgoing(clientMessageId, { steer: false });
+        }
+      }
+
       try {
         const result = await sendMessage({ clientMessageId, text: trimmed });
         updateOutgoing(clientMessageId, {
           requestId: result.requestId,
           status: "queued",
         });
-        const state = useChatStore.getState();
-        if (!state.activeRequestId) {
-          state.setActive(result.requestId, "queued", clientMessageId);
+        const current = useChatStore.getState();
+        if (!current.activeRequestId) {
+          current.setActive(result.requestId, "queued", clientMessageId);
         }
         return true;
       } catch (error) {

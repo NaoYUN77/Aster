@@ -83,6 +83,7 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   PAYLOAD_TOO_LARGE: "请求内容太大",
   REQUEST_NOT_FOUND: "请求不存在",
   REQUEST_NOT_ACTIVE: "请求已结束",
+  NO_ACTIVE_REQUEST: "当前没有正在回复的请求",
   UNHEALTHY: "服务器健康检查未通过",
   ABORTED: "已停止",
   EXECUTION_ERROR: "执行出错，请重试",

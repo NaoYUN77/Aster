@@ -8,6 +8,7 @@ import type {
   MessagePage,
   ModelsResponse,
   ModelSelectResponse,
+  SteerResponse,
 } from "./types";
 
 export type ApiClient = ReturnType<typeof createClient<paths>>;
@@ -160,6 +161,23 @@ export async function sendMessage(input: {
       body: input,
       signal: timeout(20_000),
     }) as Promise<FetchResult<{ requestId: string; status: "queued" }>>,
+  );
+}
+
+/**
+ * 向正在运行的请求插话。只有 `activeStatus === "running"` 时才能调用；
+ * 没有运行中的请求会得到 409 NO_ACTIVE_REQUEST，调用方应回退到 sendMessage。
+ */
+export async function steerRequest(
+  requestId: string,
+  input: { clientMessageId: string; text: string },
+): Promise<SteerResponse> {
+  return unwrap<SteerResponse>(
+    api().POST("/api/v1/requests/{requestId}/steer", {
+      params: { path: { requestId } },
+      body: input,
+      signal: timeout(20_000),
+    }) as Promise<FetchResult<SteerResponse>>,
   );
 }
 

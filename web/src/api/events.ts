@@ -79,6 +79,22 @@ const failedSchema = z.object({
 
 const abortedSchema = z.object({ requestId: z.string() });
 
+/** 运行中插话被接纳；同一 clientMessageId 重放会带同一个 steerId。 */
+const steeredSchema = z.object({
+  requestId: z.string(),
+  steerId: z.string(),
+  clientMessageId: z.string(),
+  text: z.string(),
+  createdAt: z.number(),
+});
+
+/** 插话的提交落地并产生回答；message.id 可能与原始 request.done 相同。 */
+const steerDoneSchema = z.object({
+  requestId: z.string(),
+  steerId: z.string(),
+  message: uiMessageSchema,
+});
+
 const modelChangedSchema = z.object({
   current: modelEntrySchema.extend({ kind: modelKindSchema.optional() }),
   version: z.number().optional(),
@@ -135,6 +151,15 @@ export type ParsedServerEvent =
   | { type: "request.done"; requestId: string; message: UiMessage; usage: ModelUsage }
   | { type: "request.failed"; requestId: string; code: string | null; message: string | null }
   | { type: "request.aborted"; requestId: string }
+  | {
+      type: "request.steered";
+      requestId: string;
+      steerId: string;
+      clientMessageId: string;
+      text: string;
+      createdAt: number;
+    }
+  | { type: "steer.done"; requestId: string; steerId: string; message: UiMessage }
   | { type: "model.changed"; current: ModelRef; version?: number }
   | { type: "connector.changed" }
   | { type: "credential.request"; request: CredentialRequest }
@@ -202,6 +227,21 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
       const parsed = abortedSchema.safeParse(data);
       if (!parsed.success) return { type: "ignored", event };
       return { type: "request.aborted", ...parsed.data };
+    }
+    case "request.steered": {
+      const parsed = steeredSchema.safeParse(data);
+      if (!parsed.success) return { type: "ignored", event };
+      return { type: "request.steered", ...parsed.data };
+    }
+    case "steer.done": {
+      const parsed = steerDoneSchema.safeParse(data);
+      if (!parsed.success) return { type: "ignored", event };
+      return {
+        type: "steer.done",
+        requestId: parsed.data.requestId,
+        steerId: parsed.data.steerId,
+        message: parsed.data.message as UiMessage,
+      };
     }
     case "model.changed": {
       const parsed = modelChangedSchema.safeParse(data);

@@ -10,6 +10,8 @@ export type OutgoingMessage = {
   text: string;
   createdAt: number;
   status: OutgoingStatus;
+  /** 本轮运行中的插话（steer），不是新的排队请求。 */
+  steer?: boolean;
   errorCode?: string | null;
   errorMessage?: string | null;
 };
@@ -31,7 +33,7 @@ type ChatState = {
   lastEventAt: number | null;
   modelVersion: number;
 
-  addOutgoing: (text: string) => string;
+  addOutgoing: (text: string, steer?: boolean) => string;
   updateOutgoing: (clientMessageId: string, patch: Partial<OutgoingMessage>) => void;
   updateByRequestId: (requestId: string, patch: Partial<OutgoingMessage>) => void;
   removeOutgoing: (clientMessageId: string) => void;
@@ -71,7 +73,7 @@ const initial = {
 export const useChatStore = create<ChatState>((set) => ({
   ...initial,
 
-  addOutgoing: (text) => {
+  addOutgoing: (text, steer = false) => {
     const clientMessageId = newClientMessageId();
     set((state) => ({
       outgoing: [
@@ -81,6 +83,7 @@ export const useChatStore = create<ChatState>((set) => ({
           text,
           createdAt: Date.now(),
           status: "sending",
+          ...(steer ? { steer: true } : {}),
         },
       ],
     }));
