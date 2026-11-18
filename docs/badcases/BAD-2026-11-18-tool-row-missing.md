@@ -5,7 +5,7 @@
 | 编号 | BAD-2026-11-18-01 |
 | 日期 | 2026-11-18 |
 | 严重级别 | P1（功能不可见，不崩溃、不影响工具执行） |
-| 状态 | Open |
+| 状态 | Fixed |
 | 归属 | Web 客户端（Dev 2） |
 | 关联分支 | `feat/connectors-ui`（PR #83） |
 | 发现方式 | 真实后端 + 本地 fake OpenAI-compatible 模型的工具调用 E2E |
@@ -150,12 +150,12 @@ if (message.role === "system") {
 
 ## 6. 验收标准
 
-- [ ] 修复前新增测试为红，并保留失败输出（证明 badcase 可复现）。
-- [ ] 修复后新增测试为绿。
-- [ ] `cd web && npm test`、`npm run typecheck`、`npm run build` 全部通过。
-- [ ] 用第 3.3 节重新跑一次 E2E：工具行出现，显示 `完成`；最终回答正常；没有重复空气泡。
-- [ ] 工具失败时显示 `失败`，样式与 `ToolRow` 现有语义一致。
-- [ ] 不修改后端投影、不修改数据库、不合并 `main`、不部署。
+- [x] 修复前新增测试为红，并保留失败输出（证明 badcase 可复现）。
+- [x] 修复后新增测试为绿。
+- [x] `cd web && npm test`、`npm run typecheck`、`npm run build` 全部通过。
+- [x] 用第 3.3 节重新跑一次 E2E：工具行出现，显示 `完成`；最终回答正常；没有重复空气泡。
+- [x] 工具失败时显示 `失败`，样式与 `ToolRow` 现有语义一致。
+- [x] 不修改后端投影、不修改数据库、不合并 `main`、不部署。
 
 ## 7. 证据
 
@@ -169,6 +169,23 @@ if (message.role === "system") {
 - API 返回的工具消息：`role:"assistant", text:"", status:"complete", tool:{name:"current_time",status:"done"}`
 - DOM：`hasToolRowText:false, detailsCount:0`
 
-## 8. 备注
+## 8. 修复记录
+
+- 修复 commit：`dbbde27`（`feat/connectors-ui`）
+- `web/src/features/chat/display-messages.ts`：空文本 assistant 仅在 `tool === null`
+  时过滤；带工具元数据的投影消息保留。
+- `web/src/features/chat/MessageItem.tsx`：`message.tool` 判断提到 role 分支之前，
+  直接渲染 `ToolRow`，不再输出「（无文本内容）」。
+- 回归测试：
+  - `display-messages.test.ts`：保留带 `tool` 的空 assistant，仍过滤无 `tool` 的空 assistant。
+  - `MessageItem.test.tsx`：assistant + `tool` 渲染 `工具：current_time`，成功/失败两态。
+- 验证结果：
+  - 修复前：3 个新增用例失败（数据层返回 0 条；组件渲染「（无文本内容）」）。
+  - 修复后：`npm test` 4 个文件 / 19 个用例全绿；typecheck、build 通过。
+  - 真实后端 + fake model E2E 重跑：DOM `hasToolRowText: true`、`detailsCount: 1`、
+    `emptyBubbleCount: 0`；刷新后从历史重载仍显示工具行与最终回答。
+- 未修改 `src/**`、未改 API 契约、未合并 `main`、未部署。
+
+## 9. 备注
 
 同一轮 E2E 还观察到：第一轮模型请求直接带了 18 个工具，没有体现 `tool_search` 按需延迟加载。该问题与本 badcase 独立，需要 Dev 1 另行确认，不纳入本次修复。
