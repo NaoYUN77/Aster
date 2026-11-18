@@ -14,8 +14,10 @@ through this contract first.
 | GET | `/api/v1/auth/me` | bearer | owner + expiry |
 | POST | `/api/v1/messages` | bearer | enqueue text (idempotent per `clientMessageId`) |
 | GET | `/api/v1/messages` | bearer | durable transcript page |
+| GET | `/api/v1/queue` | bearer | pending queue in worker claim order |
 | POST | `/api/v1/requests/{requestId}/abort` | bearer | stop queued/running request |
 | POST | `/api/v1/requests/{requestId}/steer` | bearer | inject text into the running request |
+| POST | `/api/v1/requests/{requestId}/promote` | bearer | run a queued message now (steer or start) |
 | GET | `/api/v1/models` | bearer | live catalog + current selection |
 | POST | `/api/v1/models/select` | bearer | manual selection / back to primary |
 | GET | `/api/v1/events` | bearer | SSE (fetch + ReadableStream, not EventSource) |
@@ -65,6 +67,19 @@ is broadcast as `model.changed` just like a button click.
 - Known v1 limitation: a steer that starts an extra run does not run Memory's per-request
   projection/after-request hooks for that run; it is part of the current request's context, not a
   new memory request.
+- The pending queue is `GET /api/v1/queue` (`{ items }`, oldest first, `created_at` then insertion
+  order, at most 100) and `snapshot.queue`. `queue.changed` always carries the complete list after
+  an enqueue, a worker claim, a successful promote, or an abort of a queued row; replace the local
+  list with `items` rather than applying deltas. A `promoted` row has left the queue and is not
+  returned. A reconnect recovers the queue from the snapshot, since SSE has no replay.
+- `POST /api/v1/requests/{requestId}/promote` takes one queued message out of the FIFO. If a run is
+  active it is injected into that run (same path as steer, `202 { mode: "steered", steerId }`); if
+  nothing is running it starts immediately ahead of older queued rows (`202 { mode: "started" }`)
+  and broadcasts `request.running`. The row becomes `promoted`, or `running` when it starts.
+  Promoting an already-promoted row replays the same `steerId` without injecting again. A row that
+  is running/done/failed/aborted returns `409 QUEUE_ITEM_NOT_QUEUED`; refresh the queue. A malformed
+  `requestId` returns `400 INVALID_REQUEST`. If the run ends between the decision and the
+  injection, the server starts the message instead of failing.
 - `text` over 32000 characters returns `400 TEXT_TOO_LONG` with a user-facing message; branch on
   the code rather than on status 400 alone.
 - CORS allows `Authorization`, `Content-Type`, and `Cache-Control`. Defaults include
@@ -91,7 +106,7 @@ is broadcast as `model.changed` just like a button click.
 
 Transport/auth: `INVALID_REQUEST`, `TEXT_TOO_LONG` (text over 32000 characters; message says so),
 `UNAUTHORIZED`, `RATE_LIMITED`, `REQUEST_NOT_FOUND`, `REQUEST_NOT_ACTIVE`, `NO_ACTIVE_REQUEST`,
-`PAYLOAD_TOO_LARGE`, `INTERNAL_ERROR`, `NOT_FOUND`.
+`QUEUE_ITEM_NOT_QUEUED`, `PAYLOAD_TOO_LARGE`, `INTERNAL_ERROR`, `NOT_FOUND`.
 
 Model selection: `MODEL_NOT_FOUND`, `MODEL_OUT_OF_SCOPE`, `MODEL_SWITCH_DISABLED`,
 `SELECTION_WRITE_FAILED`.

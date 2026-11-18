@@ -95,6 +95,9 @@ function htmlPage(title: string, detail: string): string {
     + `<h1>${escape(title)}</h1><p>${escape(detail)}</p></body></html>`;
 }
 
+/** Shape of the `req_...` ids the store generates; a malformed path is a client error, not a 404 hunt. */
+const REQUEST_ID = /^req_[A-Za-z0-9_-]{16}$/;
+
 function readLimit(raw: unknown): number | undefined {
   if (raw === undefined || raw === "") return undefined;
   if (typeof raw !== "string" || !/^\d+$/.test(raw)) return undefined;
@@ -214,10 +217,13 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     const { row, created } = store.enqueue(clientMessageId, text);
     if (created) {
       hub.broadcast("request.queued", { requestId: row.request_id, clientMessageId });
+      hub.broadcast("queue.changed", { items: store.listQueued() });
       worker.notify();
     }
     return reply.code(202).send({ requestId: row.request_id, status: row.status });
   });
+
+  app.get("/api/v1/queue", async () => ({ items: store.listQueued() }));
 
   app.get("/api/v1/messages", async (request, reply) => {
     const query = request.query as { before?: unknown; limit?: unknown };
@@ -278,6 +284,20 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
         : reply.code(409).send(errorBody("REQUEST_NOT_ACTIVE", "请求不是当前运行的请求"));
     }
     return reply.code(202).send({ steerId: result.steerId, requestId, status: "accepted" });
+  });
+
+  app.post("/api/v1/requests/:requestId/promote", async (request, reply) => {
+    const { requestId } = request.params as { requestId: string };
+    if (!REQUEST_ID.test(requestId)) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "请求参数不合法"));
+    }
+    const result = await worker.promote(requestId);
+    if (!result.ok) {
+      return reply.code(409).send(errorBody("QUEUE_ITEM_NOT_QUEUED", "消息已不在队列中，请刷新队列"));
+    }
+    return reply.code(202).send(result.mode === "steered"
+      ? { requestId, mode: "steered", steerId: result.steerId }
+      : { requestId, mode: "started" });
   });
 
   // ---------------------------------------------------------------- models
@@ -422,6 +442,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
           startedAt: active.started_at ?? active.created_at,
         },
         modelVersion: options.modelVersion(),
+        queue: store.listQueued(),
       },
     }]);
   });

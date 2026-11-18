@@ -554,3 +554,257 @@ test("steer route: 202 while running, 409 for idle or a stale path, 400 for inva
     await server.close();
   }
 });
+
+test("GET /queue lists only queued rows in claim order and is owner-authenticated", async () => {
+  const gate = Promise.withResolvers<void>();
+  const server = await startServer({
+    reply: async () => {
+      await gate.promise;
+      return "gated answer";
+    },
+  });
+  try {
+    assert.equal((await server.app.inject({ method: "GET", url: "/api/v1/queue" })).statusCode, 401);
+
+    const { token } = (await server.login()).json<{ token: string }>();
+    const headers = server.auth(token);
+    const submit = async (clientMessageId: string, text: string) => server.app.inject({
+      method: "POST", url: "/api/v1/messages", headers, payload: { clientMessageId, text },
+    });
+
+    const first = await submit("queue-first", "first");
+    assert.equal(first.statusCode, 202);
+    const firstId = first.json<{ requestId: string }>().requestId;
+    await waitFor(() => server.store.get(firstId)?.status === "running");
+
+    const second = await submit("queue-second", "second");
+    const secondId = second.json<{ requestId: string }>().requestId;
+    const third = await submit("queue-third", "third");
+    const thirdId = third.json<{ requestId: string }>().requestId;
+
+    const queue = await server.app.inject({ method: "GET", url: "/api/v1/queue", headers });
+    assert.equal(queue.statusCode, 200);
+    assert.deepEqual(queue.json(), {
+      items: [
+        {
+          requestId: secondId,
+          clientMessageId: "queue-second",
+          text: "second",
+          createdAt: server.store.get(secondId)!.created_at,
+        },
+        {
+          requestId: thirdId,
+          clientMessageId: "queue-third",
+          text: "third",
+          createdAt: server.store.get(thirdId)!.created_at,
+        },
+      ],
+    });
+
+    // An idempotent submission replay reports the queued status but adds no second row.
+    const replay = await submit("queue-second", "second");
+    assert.equal(replay.statusCode, 202);
+    assert.deepEqual(replay.json(), { requestId: secondId, status: "queued" });
+    assert.equal((await server.app.inject({ method: "GET", url: "/api/v1/queue", headers }))
+      .json<{ items: unknown[] }>().items.length, 2);
+
+    gate.resolve();
+    await waitFor(() => server.store.get(thirdId)?.status === "done");
+  } finally {
+    await server.close();
+  }
+});
+
+test("promote route steers while running, validates the path and rejects rows out of the queue", async () => {
+  const gate = Promise.withResolvers<void>();
+  let runningId: string | undefined;
+  const steerCalls: string[] = [];
+  const server = await startServer({
+    reply: async (request) => {
+      runningId = request.requestId;
+      await gate.promise;
+      runningId = undefined;
+      return "original answer";
+    },
+    steer: async (request) => {
+      steerCalls.push(request.requestId);
+      if (runningId === undefined) throw Object.assign(new Error("idle"), { code: "NO_ACTIVE_REQUEST" });
+      return { steerId: request.requestId, done: new Promise(() => {}) };
+    },
+  });
+  try {
+    const { token } = (await server.login()).json<{ token: string }>();
+    const headers = server.auth(token);
+    const promote = (requestId: string): Promise<import("light-my-request").Response> =>
+      server.app.inject({
+        method: "POST", url: `/api/v1/requests/${requestId}/promote`, headers,
+      }) as Promise<import("light-my-request").Response>;
+
+    const malformed = await promote("not-a-request-id");
+    assert.equal(malformed.statusCode, 400);
+    assert.equal(malformed.json<{ error: { code: string } }>().error.code, "INVALID_REQUEST");
+
+    const original = server.store.enqueue("client-original", "original question");
+    server.worker.notify();
+    await waitFor(() => server.store.get(original.row.request_id)?.status === "running");
+
+    const queued = server.store.enqueue("client-promote", "promote this");
+    assert.equal(server.store.listQueued().length, 1);
+
+    const promoted = await promote(queued.row.request_id);
+    assert.equal(promoted.statusCode, 202);
+    assert.deepEqual(promoted.json(), {
+      requestId: queued.row.request_id,
+      mode: "steered",
+      steerId: "steer:client-promote",
+    });
+    assert.equal(server.store.get(queued.row.request_id)?.status, "promoted");
+    assert.deepEqual(server.store.listQueued(), []);
+
+    const replay = await promote(queued.row.request_id);
+    assert.equal(replay.statusCode, 202);
+    assert.deepEqual(replay.json(), {
+      requestId: queued.row.request_id,
+      mode: "steered",
+      steerId: "steer:client-promote",
+    });
+    assert.equal(steerCalls.length, 1);
+
+    const running = await promote(original.row.request_id);
+    assert.equal(running.statusCode, 409);
+    assert.equal(running.json<{ error: { code: string } }>().error.code, "QUEUE_ITEM_NOT_QUEUED");
+
+    const missing = await promote("req_AAAAAAAAAAAAAAAA");
+    assert.equal(missing.statusCode, 409);
+    assert.equal(missing.json<{ error: { code: string } }>().error.code, "QUEUE_ITEM_NOT_QUEUED");
+
+    gate.resolve();
+    await waitFor(() => server.store.get(original.row.request_id)?.status === "done");
+  } finally {
+    await server.close();
+  }
+});
+
+test("promote route starts a queued message immediately when the worker is idle", async () => {
+  const server = await startServer();
+  try {
+    const { token } = (await server.login()).json<{ token: string }>();
+    const headers = server.auth(token);
+    // Stop the loop so the row stays queued until promote claims it explicitly.
+    await server.worker.stop();
+
+    const older = server.store.enqueue("client-older", "older");
+    const target = server.store.enqueue("client-target", "start now");
+    assert.equal(server.store.listQueued().length, 2);
+
+    const promoted = await server.app.inject({
+      method: "POST", url: `/api/v1/requests/${target.row.request_id}/promote`, headers,
+    });
+    assert.equal(promoted.statusCode, 202);
+    assert.deepEqual(promoted.json(), { requestId: target.row.request_id, mode: "started" });
+    assert.equal(server.store.get(older.row.request_id)?.status, "queued");
+    await waitFor(() => server.store.get(target.row.request_id)?.status === "done");
+    assert.deepEqual(
+      server.store.listQueued().map((item) => item.clientMessageId),
+      ["client-older"],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("SSE snapshot and queue.changed keep the pending queue in sync across enqueue, claim, promote and abort", async () => {
+  const gate = Promise.withResolvers<void>();
+  const steerDone = new Promise<import("../src/http/projection.js").UiMessage | undefined>(() => {});
+  const server = await startServer({
+    reply: async (request) => {
+      serverRef.runningId = request.requestId;
+      await gate.promise;
+      serverRef.runningId = undefined;
+      return "answer";
+    },
+    steer: async (request) => ({ steerId: request.requestId, done: steerDone }),
+  });
+  const serverRef = { runningId: undefined as string | undefined };
+  const controller = new AbortController();
+  try {
+    const { token } = (await server.login()).json<{ token: string }>();
+    const headers = server.auth(token);
+    const response = await fetch(`${server.url}/api/v1/events`, {
+      headers, signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    const frames: { event: string; data: Record<string, unknown> }[] = [];
+    let buffer = "";
+    const readUntil = async (predicate: () => boolean): Promise<void> => {
+      const deadline = Date.now() + 5_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(`timed out; saw ${frames.map((frame) => frame.event).join(",")}`);
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        let split = buffer.indexOf("\n\n");
+        while (split >= 0) {
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const event = /^event: (.+)$/m.exec(frame)?.[1];
+          const data = /^data: (.+)$/m.exec(frame)?.[1];
+          if (event !== undefined && data !== undefined) {
+            frames.push({ event, data: JSON.parse(data) as Record<string, unknown> });
+          }
+          split = buffer.indexOf("\n\n");
+        }
+      }
+    };
+    const queueItems = (): { clientMessageId: string }[] => {
+      const changed = frames.filter((frame) => frame.event === "queue.changed").at(-1);
+      return (changed?.data.items as { clientMessageId: string }[] | undefined) ?? [];
+    };
+
+    await readUntil(() => frames.some((frame) => frame.event === "snapshot"));
+    assert.deepEqual(frames.find((frame) => frame.event === "snapshot")?.data.queue, []);
+
+    const submit = (clientMessageId: string, text: string) => server.app.inject({
+      method: "POST", url: "/api/v1/messages", headers, payload: { clientMessageId, text },
+    });
+
+    const first = await submit("sse-first", "first");
+    const firstId = first.json<{ requestId: string }>().requestId;
+    await readUntil(() => frames.some((frame) => frame.event === "request.running"));
+    assert.ok(frames.some((frame) => frame.event === "queue.changed"
+      && (frame.data.items as { clientMessageId: string }[]).some((item) => item.clientMessageId === "sse-first")));
+    await readUntil(() => queueItems().length === 0);
+
+    const second = await submit("sse-second", "second");
+    const secondId = second.json<{ requestId: string }>().requestId;
+    await readUntil(() => queueItems().some((item) => item.clientMessageId === "sse-second"));
+
+    const promoted = await server.app.inject({
+      method: "POST", url: `/api/v1/requests/${secondId}/promote`, headers,
+    });
+    assert.equal(promoted.statusCode, 202);
+    assert.deepEqual(promoted.json(), { requestId: secondId, mode: "steered", steerId: "steer:sse-second" });
+    await readUntil(() => frames.some((frame) => frame.event === "request.steered"));
+    await readUntil(() => queueItems().length === 0);
+    assert.equal(server.store.get(secondId)?.status, "promoted");
+
+    const third = await submit("sse-third", "third");
+    const thirdId = third.json<{ requestId: string }>().requestId;
+    await readUntil(() => queueItems().some((item) => item.clientMessageId === "sse-third"));
+    const aborted = await server.app.inject({
+      method: "POST", url: `/api/v1/requests/${thirdId}/abort`, headers,
+    });
+    assert.equal(aborted.statusCode, 200);
+    await readUntil(() => queueItems().length === 0);
+    assert.equal(server.store.get(thirdId)?.status, "aborted");
+    assert.equal(firstId, serverRef.runningId);
+
+    gate.resolve();
+    await readUntil(() => frames.some((frame) => frame.event === "request.done"));
+  } finally {
+    controller.abort();
+    await server.close();
+  }
+});

@@ -8,6 +8,7 @@ import type { ServerResponse } from "node:http";
 export type SseEventName =
   | "snapshot"
   | "request.queued"
+  | "queue.changed"
   | "request.running"
   | "request.done"
   | "request.failed"
