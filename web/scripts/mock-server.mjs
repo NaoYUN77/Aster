@@ -36,33 +36,31 @@ const UNSTABLE_ID = "mock/opencode-glm";
 
 const CONNECTORS = [
   {
-    id: "github", name: "GitHub", readOnly: false,
+    provider: "github", displayName: "GitHub", transport: "oauth", readOnly: false,
+    defaultScopes: ["repo", "read:user"],
+    tools: ["github.search_repositories", "github.create_issue_comment"],
     description: "授权后 Aster 可以读取仓库信息，用于代码检索、Issue 与 Pull Request 相关工具。",
-    scopes: ["repo", "read:user"],
-    account: { id: "aster-dev", label: "aster-dev", detail: "GitHub Mock 账号" },
+    accountLabel: "aster-dev",
   },
   {
-    id: "gmail", name: "Gmail", readOnly: true,
+    provider: "gmail", displayName: "Gmail", transport: "oauth", readOnly: true,
+    defaultScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+    tools: ["gmail.search", "gmail.read"],
     description: "本轮 Gmail 仅提供只读能力：搜索和读取邮件，不会发送或删除。",
-    scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
-    account: { id: "aster.demo@gmail.com", label: "aster.demo@gmail.com", detail: "只读" },
+    accountLabel: "aster.demo@gmail.com",
   },
 ];
 
+const connectorDef = (provider) => CONNECTORS.find((item) => item.provider === provider) ?? null;
+
 function freshConnectors() {
-  const connectors = {};
-  for (const def of CONNECTORS) {
-    connectors[def.id] = {
-      status: "disconnected", account: null, scopes: [], connectedAt: null, lastError: null,
-    };
-  }
-  return connectors;
+  return {};
 }
 
-/** @type {{messages: any[], requests: any[], selection: {id: string, kind: "manual"|"auto"} | null, modelVersion: number, sessions: Map<string, {ownerId: string, expiresAt: number}>, connectors: Record<string, any>, credentialRequests: Record<string, any>}} */
+/** @type {{messages: any[], requests: any[], selection: {id: string, kind: "manual"|"auto"} | null, modelVersion: number, sessions: Map<string, {ownerId: string, expiresAt: number}>, connectors: Record<string, any>}} */
 const state = {
   messages: [], requests: [], selection: null, modelVersion: 1, sessions: new Map(),
-  connectors: freshConnectors(), credentialRequests: {},
+  connectors: freshConnectors(),
 };
 const timers = new Map();
 const listeners = new Set();
@@ -192,96 +190,118 @@ function abortRequest(requestId) {
   return { status: 200, body: { requestId, status: "aborted" } };
 }
 
-function connectorView(id) {
-  const def = CONNECTORS.find((item) => item.id === id);
-  const current = state.connectors[id];
-  if (!def || !current) return null;
+function providerView(def) {
   return {
-    id: def.id, name: def.name, description: def.description,
-    status: current.status, account: current.account, scopes: current.scopes,
-    readOnly: def.readOnly, connectedAt: current.connectedAt, lastError: current.lastError,
+    provider: def.provider,
+    displayName: def.displayName,
+    transport: def.transport,
+    defaultScopes: [...def.defaultScopes],
+    tools: [...def.tools],
   };
 }
 
 function connectorsResponse() {
-  return { connectors: CONNECTORS.map((def) => connectorView(def.id)), mock: true };
+  return {
+    providers: CONNECTORS.map(providerView),
+    connections: Object.values(state.connectors),
+    mock: true,
+  };
 }
 
-function connectConnector(id) {
-  const def = CONNECTORS.find((item) => item.id === id);
-  const current = state.connectors[id];
-  if (!def || !current) return { status: 404, body: { error: { code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" } } };
-  current.status = "connected";
-  current.account = { ...def.account };
-  current.scopes = [...def.scopes];
-  current.connectedAt = new Date().toISOString();
-  current.lastError = null;
-  emit("connector.changed", { connectorId: id, status: current.status });
-  return { status: 200, body: { connector: connectorView(id) } };
+function createConnector(provider, slug) {
+  const def = connectorDef(provider);
+  if (!def) {
+    return { status: 404, body: { error: { code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" } } };
+  }
+
+  const existing = state.connectors[slug];
+  if (existing) {
+    if (existing.provider !== provider) {
+      return { status: 409, body: { error: { code: "CONNECTOR_NOT_CONFIGURED", message: "该 slug 已被其他连接器占用" } } };
+    }
+    return { status: 200, body: { connection: existing, created: false } };
+  }
+
+  const now = new Date().toISOString();
+  const connection = {
+    id: makeId("conn"), provider: def.provider, slug, status: "pending",
+    accountLabel: null, scopes: [...def.defaultScopes], createdAt: now, updatedAt: now,
+    lastErrorCode: null,
+  };
+  state.connectors[slug] = connection;
+  emit("connector.changed", { connection });
+  return { status: 201, body: { connection, created: true } };
 }
 
-function disconnectConnector(id) {
-  const current = state.connectors[id];
-  if (!current) return { status: 404, body: { error: { code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" } } };
-  current.status = "disconnected";
-  current.account = null;
-  current.scopes = [];
-  current.connectedAt = null;
-  current.lastError = null;
-  emit("connector.changed", { connectorId: id, status: current.status });
+function startConnectorOAuth(slug) {
+  const connection = state.connectors[slug];
+  const def = connection ? connectorDef(connection.provider) : null;
+  if (!connection || !def) {
+    return { status: 404, body: { error: { code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" } } };
+  }
+
+  connection.status = "pending";
+  connection.updatedAt = new Date().toISOString();
+  emit("connector.changed", { connection });
+
+  const timerKey = `oauth:${slug}`;
+  const previous = timers.get(timerKey);
+  previous?.forEach((timer) => clearTimeout(timer));
+  const timer = setTimeout(() => {
+    const latest = state.connectors[slug];
+    if (!latest) return;
+    latest.status = "connected";
+    latest.accountLabel = def.accountLabel;
+    latest.scopes = [...def.defaultScopes];
+    latest.updatedAt = new Date().toISOString();
+    latest.lastErrorCode = null;
+    emit("connector.changed", { connection: latest });
+    timers.delete(timerKey);
+  }, 1200);
+  timers.set(timerKey, [timer]);
+
+  return {
+    status: 200,
+    body: {
+      url: `https://example.com/mock-oauth?provider=${encodeURIComponent(
+        connection.provider,
+      )}&slug=${encodeURIComponent(slug)}`,
+    },
+  };
+}
+
+function deleteConnector(slug) {
+  const connection = state.connectors[slug];
+  if (connection) {
+    // 取消可能仍在等待的 mock 授权回调，避免断开后又被定时器连回去。
+    const timerKey = `oauth:${slug}`;
+    timers.get(timerKey)?.forEach(clearTimeout);
+    timers.delete(timerKey);
+    // 与服务端一致：行保留为 revoked，供同一 slug 重新授权。
+    connection.status = "revoked";
+    connection.accountLabel = null;
+    connection.scopes = [];
+    connection.updatedAt = new Date().toISOString();
+    emit("connector.changed", { connection });
+  }
   return { status: 204, body: null };
 }
 
 function requestCredential(connectorId = "github") {
-  const def = CONNECTORS.find((item) => item.id === connectorId);
+  const def = connectorDef(connectorId);
   if (!def) return { status: 404, body: { error: { code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" } } };
 
-  const gmail = connectorId === "gmail";
+  const connection = state.connectors[def.provider];
   const requestId = makeId("cred");
-  const request = {
-    requestId, connectorId,
-    tool: gmail ? "gmail.search" : "github.create_issue_comment",
-    scopes: [...def.scopes], expiresAt: Date.now() + 120000, status: "pending",
-  };
-  state.credentialRequests[requestId] = request;
+  const tool = def.provider === "gmail" ? "gmail.search" : "github.create_issue_comment";
   emit("credential.request", {
+    connectionId: connection?.id ?? `mock_${def.provider}`,
+    provider: def.provider,
+    slug: def.provider,
+    tool,
     requestId,
-    connector: { id: def.id, name: def.name },
-    tool: request.tool,
-    scopes: request.scopes,
-    expiresAt: request.expiresAt,
-    reason: gmail ? "读取邮件需要你的 Gmail 只读令牌。" : "这个工具需要你的 GitHub 令牌才能继续。",
-    accountHint: state.connectors[connectorId]?.account?.label ?? def.account.label,
   });
   return { status: 202, body: { requestId } };
-}
-
-function submitCredential(requestId, token) {
-  const request = state.credentialRequests[requestId];
-  if (!request) return { status: 404, body: { error: { code: "CREDENTIAL_NOT_FOUND", message: "凭据请求不存在" } } };
-  if (request.status === "submitted") return { status: 204, body: null };
-  if (request.status !== "pending") return { status: 409, body: { error: { code: "CREDENTIAL_NOT_PENDING", message: "凭据请求已结束" } } };
-  if (request.expiresAt < Date.now()) {
-    request.status = "cancelled";
-    request.reason = "timeout";
-    return { status: 409, body: { error: { code: "CREDENTIAL_EXPIRED", message: "凭据请求已超时" } } };
-  }
-  if (typeof token !== "string" || token.trim() === "") {
-    return { status: 400, body: { error: { code: "INVALID_REQUEST", message: "令牌不能为空" } } };
-  }
-  // mock 也不保存 token 明文，只记录状态。
-  request.status = "submitted";
-  return { status: 204, body: null };
-}
-
-function cancelCredential(requestId, reason) {
-  const request = state.credentialRequests[requestId];
-  if (request && request.status === "pending") {
-    request.status = "cancelled";
-    request.reason = reason;
-  }
-  // 已经结束/不存在时按幂等处理。
-  return { status: 204, body: null };
 }
 
 function messagesPage(before, limit) {
@@ -450,20 +470,31 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  const connectMatch = /^\/api\/v1\/connectors\/([^/]+)\/connect$/.exec(path);
-  if (req.method === "POST" && connectMatch) {
+  if (req.method === "POST" && path === "/api/v1/connectors") {
     if (!authorized(req)) { unauthorized(res); return; }
-    const result = connectConnector(decodeURIComponent(connectMatch[1]));
+    const body = await readBody(req);
+    if (typeof body?.provider !== "string" || typeof body?.slug !== "string") {
+      fail(res, 400, "INVALID_REQUEST", "请求不合法");
+      return;
+    }
+    const result = createConnector(body.provider, body.slug);
     json(res, result.status, result.body);
     return;
   }
 
-  const disconnectMatch = /^\/api\/v1\/connectors\/([^/]+)\/disconnect$/.exec(path);
-  if (req.method === "POST" && disconnectMatch) {
+  const oauthStartMatch = /^\/api\/v1\/connectors\/([^/]+)\/oauth\/start$/.exec(path);
+  if (req.method === "POST" && oauthStartMatch) {
     if (!authorized(req)) { unauthorized(res); return; }
-    const result = disconnectConnector(decodeURIComponent(disconnectMatch[1]));
-    if (result.status === 204) { res.writeHead(204); res.end(); return; }
+    const result = startConnectorOAuth(decodeURIComponent(oauthStartMatch[1]));
     json(res, result.status, result.body);
+    return;
+  }
+
+  const connectorDeleteMatch = /^\/api\/v1\/connectors\/([^/]+)$/.exec(path);
+  if (req.method === "DELETE" && connectorDeleteMatch) {
+    if (!authorized(req)) { unauthorized(res); return; }
+    deleteConnector(decodeURIComponent(connectorDeleteMatch[1]));
+    res.writeHead(204); res.end();
     return;
   }
 
@@ -472,29 +503,6 @@ const server = createServer(async (req, res) => {
     const body = await readBody(req);
     const connectorId = typeof body?.connectorId === "string" ? body.connectorId : "github";
     const result = requestCredential(connectorId);
-    json(res, result.status, result.body);
-    return;
-  }
-
-  const cancelCredentialMatch = /^\/api\/v1\/credential-requests\/([^/]+)\/cancel$/.exec(path);
-  if (req.method === "POST" && cancelCredentialMatch) {
-    if (!authorized(req)) { unauthorized(res); return; }
-    const body = await readBody(req);
-    const reason = typeof body?.reason === "string" ? body.reason : "cancelled";
-    const result = cancelCredential(decodeURIComponent(cancelCredentialMatch[1]), reason);
-    res.writeHead(result.status); res.end();
-    return;
-  }
-
-  const submitCredentialMatch = /^\/api\/v1\/credential-requests\/([^/]+)$/.exec(path);
-  if (req.method === "POST" && submitCredentialMatch) {
-    if (!authorized(req)) { unauthorized(res); return; }
-    const body = await readBody(req);
-    const result = submitCredential(
-      decodeURIComponent(submitCredentialMatch[1]),
-      body?.token,
-    );
-    if (result.status === 204) { res.writeHead(204); res.end(); return; }
     json(res, result.status, result.body);
     return;
   }

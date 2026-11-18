@@ -1,12 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { AlertTriangle, KeyRound, Lock, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
-import {
-  cancelCredential,
-  submitCredential,
-  type CancelReason,
-} from "@/api/connectors";
-import { errorText, toApiError } from "@/api/errors";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,12 +18,11 @@ import { cn } from "@/lib/utils";
 import { useCredentialStore } from "@/store/credential";
 
 /**
- * 全局安全注入弹窗：SSE `credential.request` 到达时出现。
+ * 全局凭据弹窗：仅由 mock 的 `POST /api/v1/mock/credential-request`
+ * 触发的 SSE `credential.request` 打开。真实 OAuth 连接器不会产生该事件。
  *
- * 安全约束：
- * - 输入框 type=password、autocomplete=off，界面不回显明文；
- * - 明文只在提交时作为 HTTPS body 发给服务端，不写 localStorage/sessionStorage；
- * - 拒绝 / 取消 / 超时都会结束本次工具调用，服务端不会自动重试。
+ * 本组件不再调用不存在的 `/api/v1/credential-requests/*`；输入内容
+ * 不会提交到任何服务器，也不会写入 localStorage/sessionStorage。
  */
 export function CredentialRequestDialog() {
   const pending = useCredentialStore((state) => state.pending);
@@ -83,7 +76,7 @@ export function CredentialRequestDialog() {
     };
   }, [pending]);
 
-  const cancel = async (reason: CancelReason) => {
+  const cancel = (reason: "denied" | "cancelled" | "timeout") => {
     const current = useCredentialStore.getState().pending;
     if (!current) return;
     if (settledRef.current === current.requestId) return;
@@ -95,19 +88,10 @@ export function CredentialRequestDialog() {
     if (reason === "timeout") {
       playCue("error");
       toast.info("凭据请求已超时", {
-        description: "本次工具调用已结束，不会自动重试",
+        description: "本次 Mock 请求已结束",
       });
     } else if (reason === "denied") {
-      toast.info("已拒绝这次凭据请求", {
-        description: "本次工具调用已结束，不会自动重试",
-      });
-    }
-
-    // 服务端可能已经超时/结束，取消失败不需要打扰用户。
-    try {
-      await cancelCredential(current.requestId, reason);
-    } catch {
-      /* ignore */
+      toast.info("已拒绝这次 Mock 凭据请求");
     }
   };
 
@@ -121,7 +105,7 @@ export function CredentialRequestDialog() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expired]);
 
-  const handleSubmit = async (event: FormEvent) => {
+  const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
     const current = useCredentialStore.getState().pending;
     if (!current || submitting) return;
@@ -134,22 +118,14 @@ export function CredentialRequestDialog() {
 
     setSubmitting(true);
     setErrorMessage(null);
-    try {
-      await submitCredential(current.requestId, value);
-      settledRef.current = current.requestId;
-      useCredentialStore.getState().clear(current.requestId);
-      setToken("");
-      playCue("success");
-      toast.success("凭据已提交", {
-        description: "工具会继续执行；客户端不会保留这枚令牌",
-      });
-    } catch (error) {
-      const apiError = toApiError(error);
-      setErrorMessage(errorText(apiError.code, apiError.message));
-      playCue("error");
-    } finally {
-      setSubmitting(false);
-    }
+    settledRef.current = current.requestId;
+    useCredentialStore.getState().clear(current.requestId);
+    setToken("");
+    setSubmitting(false);
+    playCue("success");
+    toast.success("Mock 凭据请求已完成", {
+      description: "输入内容未提交到服务器，也未保存在本设备",
+    });
   };
 
   const handleOpenChange = (open: boolean) => {
@@ -170,10 +146,10 @@ export function CredentialRequestDialog() {
           <ShieldAlert className="size-5" />
         </div>
         <div className="min-w-0">
-          <DialogTitle className="text-base font-semibold">需要访问令牌</DialogTitle>
+          <DialogTitle className="text-base font-semibold">Mock 凭据请求</DialogTitle>
           <DialogDescription className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            Aster 正在调用 <span className="font-medium text-foreground">{pending.tool}</span>
-            ，这个工具需要你的临时授权。
+            这是 mock 服务为 <span className="font-medium text-foreground">{pending.tool}</span>{" "}
+            触发的测试弹窗。真实 OAuth 连接器不会产生此请求。
           </DialogDescription>
         </div>
       </div>
@@ -236,7 +212,7 @@ export function CredentialRequestDialog() {
 
       <form onSubmit={(event) => void handleSubmit(event)} className="mt-4 space-y-2">
         <label htmlFor="credential-token" className="text-[11px] font-medium text-muted-foreground">
-          访问令牌
+          访问令牌（仅 Mock）
         </label>
         <Input
           id="credential-token"
@@ -266,13 +242,13 @@ export function CredentialRequestDialog() {
         <p className="flex items-start gap-1.5 rounded-md bg-muted/50 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
           <Lock className="mt-0.5 size-3 shrink-0" />
           <span>
-            令牌只会在提交时通过 HTTPS 发送给服务器，不会保存在本设备，也不会在界面回显。
+            Mock 模式：输入内容不会提交到服务器，也不会保存在本设备或写入日志。
           </span>
         </p>
 
         <Button type="submit" className="w-full" disabled={submitting || token.trim() === ""}>
           {submitting ? <Spinner /> : <KeyRound />}
-          提交并继续
+          完成 Mock 请求
         </Button>
 
         <div className="flex gap-2">

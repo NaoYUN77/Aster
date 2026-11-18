@@ -313,6 +313,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/connectors/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Disconnect a connector and delete its stored credential
+         * @description Deletes the encrypted OAuth credential and marks the connection `revoked` in
+         *     one transaction. The row and its slug remain, so
+         *     `POST /api/v1/connectors/{slug}/oauth/start` can authorize the same
+         *     connection again. Until it is re-authorized, tools of that provider refuse
+         *     to run with `409 CONNECTOR_NOT_CONNECTED`; the change is broadcast as
+         *     `connector.changed`. Repeating the call on an already revoked, pending or
+         *     error row is still `204`. A local `mcp_stdio` row is revoked the same way
+         *     and its server stops on the next boot.
+         */
+        delete: operations["disconnectConnector"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/connectors/{slug}/oauth/start": {
         parameters: {
             query?: never;
@@ -328,6 +355,19 @@ export interface paths {
          *     state and PKCE verifier; the provider redirects the browser to the
          *     server callback. Access and refresh tokens stay on the server, encrypted
          *     with AES-256-GCM in connectors.sqlite.
+         *
+         *     The connection must exist first (`POST /api/v1/connectors`); an unknown
+         *     slug is `404 CONNECTOR_NOT_FOUND`. A revoked connection can start again.
+         *
+         *     Server-side secret files in the connector secret directory:
+         *     `github_client_id` / `github_client_secret` (GitHub) and
+         *     `google_client_id` / `google_client_secret` (Gmail), plus
+         *     `credential_master_key` for token encryption. The OAuth app's callback
+         *     URL must be
+         *     `{CONNECTOR_OAUTH_REDIRECT_BASE}/api/v1/connectors/oauth/callback`.
+         *     Missing files or an unset redirect base return
+         *     `CONNECTOR_SECRET_MISSING`, `CONNECTOR_NOT_CONFIGURED` or
+         *     `CONNECTOR_OAUTH_DISABLED` (`409`).
          */
         post: operations["startConnectorOAuth"];
         delete?: never;
@@ -1213,7 +1253,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
-            /** @description Connectors are disabled on this server. */
+            /** @description Connectors are disabled on this server (`CONNECTORS_DISABLED`). */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1267,6 +1307,45 @@ export interface operations {
                 };
             };
             /** @description Connectors are disabled on this server. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    disconnectConnector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disconnected; the response has no body. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No connection with this slug belongs to the owner. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Connectors are disabled on this server (`CONNECTORS_DISABLED`). */
             503: {
                 headers: {
                     [name: string]: unknown;

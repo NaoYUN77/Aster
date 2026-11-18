@@ -2,16 +2,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   connectConnector,
+  connectorErrorText,
   connectorsQueryKey,
-  disconnectConnector,
+  deleteConnector,
   listConnectors,
   requestMockCredential,
   type ConnectResult,
-  type Connector,
   type ConnectorId,
-  type ConnectorsResponse,
 } from "@/api/connectors";
-import { errorText, toApiError } from "@/api/errors";
+import { toApiError } from "@/api/errors";
 import { playCue } from "@/lib/sound";
 import { useConnectionStore } from "@/store/connection";
 import { connectorName } from "./catalog";
@@ -25,25 +24,17 @@ export function useConnectors() {
     staleTime: 5_000,
     // 跨端状态：回到前台时重新拉一次，服务端仍是唯一事实来源。
     refetchOnWindowFocus: true,
+    retry: (failureCount, error) => {
+      // 服务器未启用连接器是稳定状态，重试没有意义。
+      if (toApiError(error).code === "CONNECTORS_DISABLED") return false;
+      return failureCount < 2;
+    },
   });
 }
 
 function toastFailure(error: unknown): void {
   const apiError = toApiError(error);
-  toast.error(errorText(apiError.code, apiError.message));
-}
-
-function replaceConnector(
-  previous: ConnectorsResponse | undefined,
-  next: Connector,
-): ConnectorsResponse | undefined {
-  if (!previous) return previous;
-  return {
-    ...previous,
-    connectors: previous.connectors.map((connector) =>
-      connector.id === next.id ? next : connector,
-    ),
-  };
+  toast.error(connectorErrorText(apiError.code));
 }
 
 export function useConnectConnector() {
@@ -52,21 +43,11 @@ export function useConnectConnector() {
 
   return useMutation<ConnectResult, unknown, ConnectorId>({
     mutationFn: (id) => connectConnector(id),
-    onSuccess: (result, id) => {
-      if (result.status === "connected") {
-        queryClient.setQueryData<ConnectorsResponse>(
-          connectorsQueryKey(baseUrl),
-          (previous) => replaceConnector(previous, result.connector),
-        );
-        playCue("success");
-        toast.success(`${connectorName(id)} 已连接`, {
-          description: "连接保存在服务器，三端共用同一份授权",
-        });
-      } else {
-        toast.info("已发起授权，等待服务器确认", {
-          description: "完成授权后这里会自动刷新",
-        });
-      }
+    onSuccess: (_result, id) => {
+      // 只进入等待授权；是否已连接以 connector.changed / 重新拉列表为准。
+      toast.info(`${connectorName(id)} 授权页已打开`, {
+        description: "在浏览器完成授权后回到 App，状态会自动刷新",
+      });
       void queryClient.invalidateQueries({
         queryKey: connectorsQueryKey(baseUrl),
       });
@@ -83,7 +64,7 @@ export function useDisconnectConnector() {
   const baseUrl = useConnectionStore((state) => state.baseUrl);
 
   return useMutation<void, unknown, ConnectorId>({
-    mutationFn: (id) => disconnectConnector(id),
+    mutationFn: (id) => deleteConnector(id),
     onSuccess: (_result, id) => {
       playCue("success");
       toast.success(`${connectorName(id)} 已断开`, {

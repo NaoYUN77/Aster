@@ -3,10 +3,9 @@ import {
   mockAbort,
   mockActiveRequest,
   mockAuthorized,
-  mockCancelCredential,
-  mockConnect,
   mockConnectors,
-  mockDisconnect,
+  mockCreateConnector,
+  mockDeleteConnector,
   mockLogin,
   mockLogout,
   mockMessages,
@@ -15,7 +14,7 @@ import {
   mockSelectModel,
   mockSendMessage,
   mockSnapshot,
-  mockSubmitCredential,
+  mockStartConnectorOAuth,
   subscribeMockEvents,
 } from "./store";
 
@@ -162,19 +161,35 @@ export const handlers = [
     return HttpResponse.json(mockConnectors());
   }),
 
-  http.post(`${API}/connectors/:id/connect`, async ({ request, params }) => {
-    await delay(800);
-    if (!authorized(request)) return unauthorized();
-    const result = mockConnect(String(params.id));
-    if (!result.ok) return apiError(result.code, result.message, result.status);
-    return HttpResponse.json({ connector: result.connector });
-  }),
-
-  http.post(`${API}/connectors/:id/disconnect`, async ({ request, params }) => {
+  http.post(`${API}/connectors`, async ({ request }) => {
     await delay(260);
     if (!authorized(request)) return unauthorized();
-    const result = mockDisconnect(String(params.id));
+    const body = (await request.json().catch(() => null)) as
+      | { provider?: unknown; slug?: unknown }
+      | null;
+    if (typeof body?.provider !== "string" || typeof body.slug !== "string") {
+      return apiError("INVALID_REQUEST", "请求不合法", 400);
+    }
+    const result = mockCreateConnector(body.provider, body.slug);
     if (!result.ok) return apiError(result.code, result.message, result.status);
+    return HttpResponse.json(
+      { connection: result.connection, created: result.created },
+      { status: result.created ? 201 : 200 },
+    );
+  }),
+
+  http.post(`${API}/connectors/:slug/oauth/start`, async ({ request, params }) => {
+    await delay(180);
+    if (!authorized(request)) return unauthorized();
+    const result = mockStartConnectorOAuth(String(params.slug));
+    if (!result.ok) return apiError(result.code, result.message, result.status);
+    return HttpResponse.json({ url: result.url });
+  }),
+
+  http.delete(`${API}/connectors/:slug`, async ({ request, params }) => {
+    await delay(220);
+    if (!authorized(request)) return unauthorized();
+    mockDeleteConnector(String(params.slug));
     return new HttpResponse(null, { status: 204 });
   }),
 
@@ -186,29 +201,6 @@ export const handlers = [
     const result = mockRequestCredential(connectorId);
     if ("error" in result) return apiError(result.error, "连接器不存在", 404);
     return HttpResponse.json(result, { status: 202 });
-  }),
-
-  http.post(`${API}/credential-requests/:requestId`, async ({ request, params }) => {
-    await delay(300);
-    if (!authorized(request)) return unauthorized();
-    const body = (await request.json().catch(() => null)) as { token?: unknown } | null;
-    if (!body || typeof body.token !== "string" || body.token.trim() === "") {
-      return apiError("INVALID_REQUEST", "令牌不能为空", 400);
-    }
-    // 明文 token 只用于本次 mock 校验，不写日志、不写存储。
-    const result = mockSubmitCredential(String(params.requestId), body.token);
-    if (!result.ok) return apiError(result.code, result.message, result.status);
-    return new HttpResponse(null, { status: 204 });
-  }),
-
-  http.post(`${API}/credential-requests/:requestId/cancel`, async ({ request, params }) => {
-    await delay(120);
-    if (!authorized(request)) return unauthorized();
-    const body = (await request.json().catch(() => null)) as { reason?: unknown } | null;
-    const reason = typeof body?.reason === "string" ? body.reason : "cancelled";
-    const result = mockCancelCredential(String(params.requestId), reason);
-    if (!result.ok) return apiError(result.code, result.message, result.status);
-    return new HttpResponse(null, { status: 204 });
   }),
 
   http.get(`${API}/events`, async ({ request }) => {

@@ -7,6 +7,7 @@ import { connectorMeta } from "./catalog";
 
 const STATUS_BADGE = {
   connected: { label: "已连接", variant: "success" as const },
+  pending: { label: "等待授权", variant: "warning" as const },
   disconnected: { label: "未连接", variant: "outline" as const },
   error: { label: "需要重新授权", variant: "destructive" as const },
 };
@@ -69,9 +70,11 @@ export function ConnectorCard({
         <span className="ml-auto min-w-0 truncate text-right text-[11px] text-muted-foreground">
           {connected && connector.account
             ? connector.account.label
-            : connector.lastError
-              ? "连接异常，点击查看"
-              : "点击连接"}
+            : connector.status === "pending"
+              ? "等待浏览器授权"
+              : connector.lastError
+                ? connector.lastError
+                : "点击连接"}
         </span>
       </div>
     </button>

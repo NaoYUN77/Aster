@@ -35,11 +35,13 @@ web/                     Vite + React + TS 应用（唯一 UI 代码）
 ## 3. API 契约
 
 - 正式契约由 Dev 1 维护：`docs/api/three-client-v1.openapi.yaml`。
-- 当前契约已同步 Dev 1 队列契约 `86e70f1`（steer 基线 `300a463` / 远程 `3b084c9`）：
+- 当前契约已同步 Dev 1 Connectors DELETE 契约 `4cb638c`（队列 `86e70f1` / steer 基线 `300a463` / 远程 `3b084c9`）：
   - `POST /api/v1/requests/{requestId}/steer`（`SteerRequest` / `SteerResponse`）
   - `GET /api/v1/queue`（仅 queued，FIFO）
   - `POST /api/v1/requests/{requestId}/promote`（有 running 时 `mode=steered`，
     否则 `mode=started`；行状态可变为 `promoted`）
+  - `GET/POST /api/v1/connectors`、`POST /{slug}/oauth/start`、
+    `DELETE /api/v1/connectors/{slug}`
   - `409 QUEUE_ITEM_NOT_QUEUED` 的 `error.requestStatus` 为
     `running/done/failed/aborted/null`
   - SSE `request.steered` / `steer.done` / `queue.changed`，`snapshot` 增加 `queue`
@@ -69,7 +71,7 @@ npm run gen:api
   `request.failed` / `request.aborted` / `request.steered` / `steer.done` /
   `queue.changed` / `model.changed`
 - `connector.changed`：失效 Connectors 查询，跨端同步连接状态
-- `credential.request`：打开全局安全注入弹窗（见第 7 节）
+- `credential.request`（仅 mock）：打开全局凭据弹窗（见第 7 节）
 - `: heartbeat` 注释与 `heartbeat` 事件
 - 断线指数退避重连（1s → 15s），重连后重新拉历史、模型与连接器状态，不做事件回放
 - 401 立即清 token 回登录页
@@ -224,51 +226,50 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 页面只展示 **GitHub / Gmail** 两张卡片；图标来自 `web/src/assets/connectors/`
 的本地 SVG，不热链。
 
-### 7.1 连接状态与授权
+### 7.1 连接状态与授权（真实契约）
 
 - 状态由服务端保存（一次授权、三端复用）。Web / Tauri / Capacitor 都从
-  `GET /api/v1/connectors` 读取同一份状态，本机不保存 Connector token，
-  也不做每端单独登录；Aster 自身登录与 Connector 授权是两件事。
-- 授权在当前卡片/详情内发起（`POST /connectors/{id}/connect`），
-  **不打开独立 OAuth 标签页**；服务端返回 `pending` 时详情里显示“等待服务器确认”，
-  完成后由 SSE `connector.changed` 或重新查询把三端刷新成“已连接”。
-- 支持重新授权（再次 connect）与断开（`POST /connectors/{id}/disconnect`）；
-  断开后相关工具在三端立即不可用。
+  `GET /api/v1/connectors` 读取 `{providers, connections}`，本机不保存 Connector
+  token，也不做每端单独登录；Aster 自身登录与 Connector 授权是两件事。
+- 列表映射：`connection.status` 为 `connected` 显示 `accountLabel`；
+  `pending` 显示「等待授权」；`error` 显示 `lastErrorCode` 的安全中文文案；
+  无 connection（或 `revoked`）显示「未连接」。`GET` 返回 `503
+  CONNECTORS_DISABLED` 时页面显示「服务器未启用连接器」，不渲染成两张未连接卡片。
+- 连接流程：
+  1. `POST /api/v1/connectors`，body `{provider:id, slug:id}`；已存在时服务端返回
+     200 `created:false`，按幂等成功继续；
+  2. `POST /api/v1/connectors/{slug}/oauth/start` 取 `{url}`；
+  3. 用系统浏览器打开：优先 `@capacitor/browser` 的 `Browser.open`，非原生/无插件
+     回退 `window.open(url, "_blank")`，再回退 `location.assign`；
+  4. 本端只进入「等待授权」，不假装已连接；授权回调由服务端处理，客户端以
+     SSE `connector.changed` 或重新拉列表为准。
+- 从浏览器回到 App 时，Connectors 页面监听 `visibilitychange` / `focus` 主动刷新一次。
+- 重新授权复用同一流程；断开调用 `DELETE /api/v1/connectors/{slug}`，成功后以服务端
+  列表为准。
 - 刷新/重启后状态来自服务端，不来自客户端缓存。若服务端暂时不可达，
   页面显示错误与“重试”，不会把未知状态显示成已连接。
 - Gmail 本轮只读：UI 标注“只读”，只展示搜索/读取邮件的能力，不出现发送、
   删除或修改入口。
 
-> **临时契约**：Dev 1 的 Connector API 合同尚未落库，当前 endpoint 与字段形状
-> 固定在后端 `web/src/api/connectors.ts` 的注释中（`GET /connectors`、
-> `POST /connectors/{id}/connect|disconnect`、`POST /credential-requests/{id}`、
-> `POST /credential-requests/{id}/cancel`）。合同稳定后只替换这个文件，
-> 页面与状态逻辑不动。MSW 与 `mock-server.mjs` 按同一形状实现。
+### 7.2 凭据弹窗（仅 Mock）
 
-### 7.2 安全注入弹窗
-
-SSE 收到 `credential.request` 时，`AuthenticatedShell` 里的全局弹窗出现
-（桌面 Dialog / 手机底部 Sheet），显示 connector、tool、所需 scope 与倒计时：
+`credential.request` 生产上不由 OAuth 连接器产生；该弹窗只由
+`POST /api/v1/mock/credential-request` 触发，用于三端验收。客户端已删除对
+不存在的 `/api/v1/credential-requests/*` 的调用。真实事件 payload 为：
 
 ```json
 {
-  "requestId": "cred_...",
-  "connector": { "id": "github", "name": "GitHub" },
+  "connectionId": "conn_...",
+  "provider": "github",
+  "slug": "github",
   "tool": "github.create_issue_comment",
-  "scopes": ["repo"],
-  "expiresAt": 1760000000000,
-  "reason": "可选说明",
-  "accountHint": "可选账号标识"
+  "requestId": "cred_..."
 }
 ```
 
-- 兼容 `expiresAt` 为毫秒、秒或 ISO 字符串；缺失时用 `ttlSeconds`（默认 120 秒）。
-- 输入框 `type=password`、`autocomplete=off`，界面不回显；token 只在提交时作为
-  HTTPS body 发给 `POST /credential-requests/{id}`。
-- **不写 localStorage/sessionStorage、不写日志**；请求元数据只存在内存，
-  切后台再回来仍可继续（MVP 的前台恢复）。进程被杀后由服务端超时结束。
-- 支持提交、拒绝、取消；拒绝/取消/超时都会结束本次工具调用，
-  **客户端不自动重试**。超时后弹窗自动关闭并提示“不会自动重试”。
+- 弹窗显示 connector、tool 与 120 秒 mock 倒计时；输入框不回显。
+- 输入内容不提交到服务器、**不写 localStorage/sessionStorage、不写日志**；
+  关闭/拒绝/超时只清理内存状态。
 - 连接器状态变化（`connector.changed`）只用来失效列表查询，不信任事件里的 payload。
 
 ### 7.3 提示音
@@ -284,25 +285,27 @@ SSE 收到 `credential.request` 时，`AuthenticatedShell` 里的全局弹窗出
 
 ### 7.4 验收
 
-1. GitHub/Gmail 连接后刷新、重启壳层仍显示已连接（服务端状态）。
+1. GitHub/Gmail 授权后刷新、重启壳层仍显示已连接（服务端状态）。
 2. 断开后卡片变为未连接，相关工具不可用。
-3. Web / Tauri / Capacitor 都能收到 `credential.request` 并弹出同一个安全注入组件；
-   Android `https://localhost` 的 CORS/SSE 正常。
-4. 提交后 localStorage/sessionStorage 中搜不到输入过的 token，控制台也没有明文。
-5. 首次点击后能听到提示音；静音开关生效并在刷新后保持。
-6. 桌面居中 Dialog、手机底部 Sheet；拒绝/超时后弹窗关闭且没有自动重试。
+3. 点「连接」会打开系统浏览器；回到 App 后状态自动刷新。
+4. 服务端未启用连接器时显示「服务器未启用连接器」，不是「未连接」。
+5. Mock 入口仍能弹出凭据组件；组件不再向服务端提交任何内容，
+   localStorage/sessionStorage 中搜不到输入过的 token。
+6. 首次点击后能听到提示音；静音开关生效并在刷新后保持。
+7. 桌面居中 Dialog、手机底部 Sheet；拒绝/超时后弹窗关闭且没有自动重试。
 
 ## 8. Mock 模式（MSW）
 
 开发环境默认启用（`VITE_USE_MOCK=0` 可关闭），登录页会显示 mock 密码提示。
 
 - 覆盖：登录/登出/me、历史分页、发送、停止、模型列表、模型切换、SSE 事件流、
-  Connectors 列表/连接/断开、mock 凭据请求与提交/取消
+  Connectors 列表/create/oauth-start/delete、mock 凭据请求
 - 支持演示场景：
   - 手动选择 `GLM Mock` 时模拟失败，由主模型回答并带 `degraded=true`
   - 停止正在生成的回复得到 `aborted`
   - 刷新页面后 mock 状态保留在 `localStorage`（Connectors 的 mock 连接状态同样保留）
-  - 连接器详情里的「模拟凭据请求（Mock）」会通过 SSE 推送一条 `credential.request`
+  - 连接器详情里的「模拟凭据请求（Mock）」会通过 SSE 推送一条真实契约形状的
+    `credential.request`（`connectionId/provider/slug/tool/requestId`）
 - mock 的 Connector 状态存于 mock 服务端（浏览器 MSW 用 localStorage 模拟服务端持久化），
   不属于客户端 token 存储；真实后端接入后以服务端数据库为准。
 - 生产构建默认不包含 MSW：Vite 在 production 下把 mock 模块替换为

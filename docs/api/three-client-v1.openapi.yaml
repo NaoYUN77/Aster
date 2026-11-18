@@ -455,11 +455,15 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "503":
-          description: Connectors are disabled on this server.
+          description: Connectors are disabled on this server (`CONNECTORS_DISABLED`).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                disabled:
+                  value:
+                    error: { code: CONNECTORS_DISABLED, message: connectors are not enabled }
     post:
       tags: [connectors]
       operationId: createConnector
@@ -506,6 +510,52 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/connectors/{slug}:
+    delete:
+      tags: [connectors]
+      operationId: disconnectConnector
+      summary: Disconnect a connector and delete its stored credential
+      description: |
+        Deletes the encrypted OAuth credential and marks the connection `revoked` in
+        one transaction. The row and its slug remain, so
+        `POST /api/v1/connectors/{slug}/oauth/start` can authorize the same
+        connection again. Until it is re-authorized, tools of that provider refuse
+        to run with `409 CONNECTOR_NOT_CONNECTED`; the change is broadcast as
+        `connector.changed`. Repeating the call on an already revoked, pending or
+        error row is still `204`. A local `mcp_stdio` row is revoked the same way
+        and its server stops on the next boot.
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,47}$"
+      responses:
+        "204":
+          description: Disconnected; the response has no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No connection with this slug belongs to the owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                notFound:
+                  value:
+                    error: { code: CONNECTOR_NOT_FOUND, message: connector was not found }
+        "503":
+          description: Connectors are disabled on this server (`CONNECTORS_DISABLED`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                disabled:
+                  value:
+                    error: { code: CONNECTORS_DISABLED, message: connectors are not enabled }
   /api/v1/connectors/{slug}/oauth/start:
     post:
       tags: [connectors]
@@ -516,6 +566,19 @@ paths:
         state and PKCE verifier; the provider redirects the browser to the
         server callback. Access and refresh tokens stay on the server, encrypted
         with AES-256-GCM in connectors.sqlite.
+
+        The connection must exist first (`POST /api/v1/connectors`); an unknown
+        slug is `404 CONNECTOR_NOT_FOUND`. A revoked connection can start again.
+
+        Server-side secret files in the connector secret directory:
+        `github_client_id` / `github_client_secret` (GitHub) and
+        `google_client_id` / `google_client_secret` (Gmail), plus
+        `credential_master_key` for token encryption. The OAuth app's callback
+        URL must be
+        `{CONNECTOR_OAUTH_REDIRECT_BASE}/api/v1/connectors/oauth/callback`.
+        Missing files or an unset redirect base return
+        `CONNECTOR_SECRET_MISSING`, `CONNECTOR_NOT_CONFIGURED` or
+        `CONNECTOR_OAUTH_DISABLED` (`409`).
       parameters:
         - name: slug
           in: path

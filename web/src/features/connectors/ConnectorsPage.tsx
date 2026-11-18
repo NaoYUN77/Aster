@@ -1,8 +1,17 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Info, Settings, ShieldCheck } from "lucide-react";
-import type { ConnectorId } from "@/api/connectors";
-import { userFacingMessage } from "@/api/errors";
+import {
+  ArrowLeft,
+  Info,
+  Settings,
+  ShieldCheck,
+  Unplug,
+} from "lucide-react";
+import {
+  connectorErrorText,
+  type ConnectorId,
+} from "@/api/connectors";
+import { toApiError } from "@/api/errors";
 import { SoundToggle } from "@/components/SoundToggle";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,6 +29,22 @@ export function ConnectorsPage() {
   const connectors = mergeCatalog(query.data?.connectors ?? []);
   const selected = connectors.find((connector) => connector.id === selectedId) ?? null;
   const loading = query.isPending;
+  const apiError = query.error ? toApiError(query.error) : null;
+  const disabled = apiError?.code === "CONNECTORS_DISABLED";
+  const showCards = !disabled && !(query.isError && !query.data);
+
+  // 从系统浏览器授权完回到 App 时主动对齐一次服务端状态。
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") void query.refetch();
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [query.refetch]);
 
   return (
     <div className="min-h-full bg-background">
@@ -64,8 +89,14 @@ export function ConnectorsPage() {
 
         {query.isError && (
           <div className="flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2.5 text-xs text-destructive">
-            <Info className="mt-0.5 size-3.5 shrink-0" />
-            <span className="flex-1">{userFacingMessage(query.error)}</span>
+            {disabled ? (
+              <Unplug className="mt-0.5 size-3.5 shrink-0" />
+            ) : (
+              <Info className="mt-0.5 size-3.5 shrink-0" />
+            )}
+            <span className="flex-1">
+              {connectorErrorText(apiError?.code)}
+            </span>
             <Button
               variant="ghost"
               size="sm"
@@ -77,32 +108,34 @@ export function ConnectorsPage() {
           </div>
         )}
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          {loading
-            ? [0, 1].map((index) => (
-                <div
-                  key={index}
-                  className="rounded-xl border border-border bg-card p-4 shadow-sm"
-                >
-                  <div className="flex items-start gap-3">
-                    <Skeleton className="size-10 rounded-lg" />
-                    <div className="flex-1 space-y-2">
-                      <Skeleton className="h-4 w-24" />
-                      <Skeleton className="h-3 w-32" />
+        {showCards && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {loading
+              ? [0, 1].map((index) => (
+                  <div
+                    key={index}
+                    className="rounded-xl border border-border bg-card p-4 shadow-sm"
+                  >
+                    <div className="flex items-start gap-3">
+                      <Skeleton className="size-10 rounded-lg" />
+                      <div className="flex-1 space-y-2">
+                        <Skeleton className="h-4 w-24" />
+                        <Skeleton className="h-3 w-32" />
+                      </div>
                     </div>
+                    <Skeleton className="mt-4 h-5 w-20" />
                   </div>
-                  <Skeleton className="mt-4 h-5 w-20" />
-                </div>
-              ))
-            : connectors.map((connector) => (
-                <ConnectorCard
-                  key={connector.id}
-                  connector={connector}
-                  loading={query.isFetching && !query.isPending}
-                  onOpen={() => setSelectedId(connector.id)}
-                />
-              ))}
-        </div>
+                ))
+              : connectors.map((connector) => (
+                  <ConnectorCard
+                    key={connector.id}
+                    connector={connector}
+                    loading={query.isFetching && !query.isPending}
+                    onOpen={() => setSelectedId(connector.id)}
+                  />
+                ))}
+          </div>
+        )}
 
         <section className="rounded-xl border border-border bg-card p-4 text-[11px] leading-relaxed text-muted-foreground shadow-sm">
           <p>
@@ -114,7 +147,7 @@ export function ConnectorsPage() {
             相关工具会立即在三端失效。
           </p>
           <p className="mt-2">
-            没有独立 OAuth 标签页：授权在当前连接器卡片/详情内完成，状态由服务器推送或轮询刷新。
+            授权会在系统浏览器中完成；回到 App 后状态由服务器推送或重新查询刷新。
           </p>
         </section>
       </main>

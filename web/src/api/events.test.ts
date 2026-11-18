@@ -3,70 +3,49 @@ import { parseServerEvent } from "./events";
 
 const base = {
   requestId: "cred_1",
-  connector: { id: "github", name: "GitHub" },
+  connectionId: "conn_1",
+  provider: "github",
+  slug: "github",
   tool: "github.create_issue_comment",
-  scopes: ["repo"],
 };
 
 describe("parseServerEvent: credential.request", () => {
-  it("把秒级过期时间换算成毫秒", () => {
-    const parsed = parseServerEvent("credential.request", {
-      ...base,
-      expiresAt: 1_760_000_000,
-    });
-    expect(parsed.type).toBe("credential.request");
-    if (parsed.type !== "credential.request") return;
-    expect(parsed.request.expiresAt).toBe(1_760_000_000_000);
-    expect(parsed.request.connector).toEqual({ id: "github", name: "GitHub" });
-    expect(parsed.request.scopes).toEqual(["repo"]);
-    expect(parsed.request.reason).toBeNull();
-  });
-
-  it("接受毫秒时间戳与 ISO 字符串", () => {
-    const millis = Date.now() + 60_000;
-    const fromMillis = parseServerEvent("credential.request", {
-      ...base,
-      expiresAt: millis,
-    });
-    expect(fromMillis.type).toBe("credential.request");
-    if (fromMillis.type === "credential.request") {
-      expect(fromMillis.request.expiresAt).toBe(millis);
-    }
-
-    const iso = new Date(millis).toISOString();
-    const fromIso = parseServerEvent("credential.request", { ...base, expiresAt: iso });
-    expect(fromIso.type).toBe("credential.request");
-    if (fromIso.type === "credential.request") {
-      expect(fromIso.request.expiresAt).toBe(millis);
-    }
-  });
-
-  it("缺少过期时间时按 ttlSeconds 计算，默认 120 秒", () => {
+  it("按真实契约解析 provider/slug，并给出 120 秒 mock 倒计时", () => {
     const before = Date.now();
-    const parsed = parseServerEvent("credential.request", { ...base, ttlSeconds: 30 });
+    const parsed = parseServerEvent("credential.request", base);
     expect(parsed.type).toBe("credential.request");
     if (parsed.type !== "credential.request") return;
-    expect(parsed.request.expiresAt).toBeGreaterThanOrEqual(before + 30_000);
-    expect(parsed.request.expiresAt).toBeLessThanOrEqual(Date.now() + 30_000);
-
-    const fallback = parseServerEvent("credential.request", base);
-    expect(fallback.type).toBe("credential.request");
-    if (fallback.type !== "credential.request") return;
-    expect(fallback.request.expiresAt).toBeGreaterThanOrEqual(before + 119_000);
+    expect(parsed.request.requestId).toBe("cred_1");
+    expect(parsed.request.connector).toEqual({ id: "github", name: "GitHub" });
+    expect(parsed.request.tool).toBe("github.create_issue_comment");
+    expect(parsed.request.scopes).toEqual([]);
+    expect(parsed.request.reason).toBeNull();
+    expect(parsed.request.accountHint).toBeNull();
+    expect(parsed.request.expiresAt).toBeGreaterThanOrEqual(before + 119_000);
   });
 
-  it("缺少 connector 字段时给出兜底名称，畸形事件被忽略", () => {
+  it("gmail/pending provider 使用可读名称", () => {
     const parsed = parseServerEvent("credential.request", {
-      requestId: "cred_2",
+      ...base,
+      provider: "gmail",
+      slug: "gmail",
       tool: "gmail.search",
     });
     expect(parsed.type).toBe("credential.request");
     if (parsed.type === "credential.request") {
-      expect(parsed.request.connector.id).toBe("unknown");
-      expect(parsed.request.scopes).toEqual([]);
+      expect(parsed.request.connector).toEqual({ id: "gmail", name: "Gmail" });
     }
+  });
 
+  it("畸形事件被忽略", () => {
     expect(parseServerEvent("credential.request", { requestId: "x" }).type).toBe("ignored");
+    expect(
+      parseServerEvent("credential.request", {
+        requestId: "x",
+        provider: "github",
+        slug: "github",
+      }).type,
+    ).toBe("ignored");
     expect(parseServerEvent("credential.request", null).type).toBe("ignored");
   });
 

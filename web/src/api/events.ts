@@ -119,39 +119,26 @@ const modelChangedSchema = z.object({
 });
 
 /**
- * Connector 安全注入请求。合同未定，字段按最小集合解析：
- * 缺少 expiresAt 时用 ttlSeconds（默认 120 秒）换算成绝对时间。
+ * Connector 凭据请求。真实契约只携带 OAuth 连接身份和工具名：
+ * `{connectionId, provider, slug, tool, requestId}`。OAuth 连接器不会在
+ * 生产流程里产生该事件，弹窗只由 mock 入口触发；这里仍按契约解析，
+ * 缺失的展示字段用安全默认值补齐。
  */
 const credentialRequestSchema = z.object({
   requestId: z.string(),
-  connector: z
-    .object({ id: z.string().optional(), name: z.string().optional() })
-    .nullish(),
+  connectionId: z.string().optional(),
+  provider: z.string(),
+  slug: z.string(),
   tool: z.string(),
-  scopes: z.array(z.string()).optional(),
-  expiresAt: z.union([z.number(), z.string()]).nullish(),
-  ttlSeconds: z.number().nullish(),
-  reason: z.string().nullish(),
-  accountHint: z.string().nullish(),
 });
 
 /** Connector 连接状态变化；只用于让前端刷新列表，不信任 payload。 */
 const connectorChangedSchema = z.object({}).passthrough();
 
-function normalizeExpiry(value: unknown, ttlSeconds: number | null | undefined): number {
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-    // 兼容秒级与毫秒级时间戳。
-    return value < 1_000_000_000_000 ? value * 1000 : value;
-  }
-  if (typeof value === "string") {
-    const parsed = Date.parse(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  const ttl =
-    typeof ttlSeconds === "number" && Number.isFinite(ttlSeconds) && ttlSeconds > 0
-      ? ttlSeconds
-      : 120;
-  return Date.now() + ttl * 1000;
+function connectorDisplayName(provider: string): string {
+  if (provider === "github") return "GitHub";
+  if (provider === "gmail") return "Gmail";
+  return provider;
 }
 
 export type ParsedServerEvent =
@@ -297,14 +284,15 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
         request: {
           requestId: value.requestId,
           connector: {
-            id: value.connector?.id ?? "unknown",
-            name: value.connector?.name ?? "连接器",
+            id: value.provider,
+            name: connectorDisplayName(value.provider),
           },
           tool: value.tool,
-          scopes: value.scopes ?? [],
-          expiresAt: normalizeExpiry(value.expiresAt, value.ttlSeconds),
-          reason: value.reason ?? null,
-          accountHint: value.accountHint ?? null,
+          scopes: [],
+          // 契约不带过期时间；mock 弹窗沿用 120 秒展示倒计时。
+          expiresAt: Date.now() + 120_000,
+          reason: null,
+          accountHint: null,
         },
       };
     }

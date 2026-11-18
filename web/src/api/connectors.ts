@@ -1,26 +1,38 @@
 import { getApiConfig, notifyUnauthorized } from "./client";
-import { ApiError, errorBodyOf, statusError, toApiError } from "./errors";
+import {
+  ApiError,
+  ERROR_CODE_TEXT,
+  errorBodyOf,
+  statusError,
+  toApiError,
+} from "./errors";
+import type { components } from "./schema";
 
 /**
- * Connectors 的临时前端接口层。
+ * Connectors API（按 Dev 1 后端真实契约）。
  *
- * Dev 1 的 Connector API 合同尚未落库，这里先固定一组最小形状，
- * 供 UI 与 mock 使用；合同稳定后只需要替换本文件的 endpoint 与类型，
- * 页面与状态逻辑不动。路径约定：
+ * - GET    /api/v1/connectors
+ * - POST   /api/v1/connectors                        {provider, slug}
+ * - POST   /api/v1/connectors/{slug}/oauth/start     -> {url}
+ * - DELETE /api/v1/connectors/{slug}
  *
- * - GET  /api/v1/connectors
- * - POST /api/v1/connectors/{id}/connect
- * - POST /api/v1/connectors/{id}/disconnect
- * - POST /api/v1/credential-requests/{requestId}        body { token }
- * - POST /api/v1/credential-requests/{requestId}/cancel body { reason }
+ * OAuth 回调由服务端处理；客户端只负责创建连接、打开系统浏览器并等待
+ * `connector.changed` 或重新拉列表。连接 token 永远不进入客户端存储。
  *
- * 连接状态由服务端保存（一次授权、三端复用）；前端不持久化任何
- * Connector token / 账号密码，只缓存查询结果。
+ * credential.request 仅由 mock 入口触发。OAuth 连接器不会产生该事件，
+ * 本文件也不再调用不存在的 `/credential-requests/*`。
  */
+
+type ApiConnectorDefinition = components["schemas"]["ConnectorDefinition"];
+type ApiConnectorConnection = components["schemas"]["ConnectorConnection"];
+type ApiConnectorListResponse = components["schemas"]["ConnectorListResponse"];
+type ApiCreateConnectorResponse = components["schemas"]["CreateConnectorResponse"];
+type ApiOAuthStartResponse = components["schemas"]["OAuthStartResponse"];
+type ApiConnectorProvider = components["schemas"]["ConnectorProvider"];
 
 export type ConnectorId = "github" | "gmail";
 
-export type ConnectorStatus = "disconnected" | "connected" | "error";
+export type ConnectorStatus = "disconnected" | "pending" | "connected" | "error";
 
 export type ConnectorAccount = {
   /** 稳定的账号标识，例如 GitHub login 或邮箱。 */
@@ -53,7 +65,7 @@ export type CredentialRequest = {
   connector: { id: string; name: string };
   tool: string;
   scopes: string[];
-  /** epoch 毫秒；服务端只给 ttl 时由 events.ts 换算。 */
+  /** 仅 mock 触发；真实 OAuth 连接器不会产生该事件。 */
   expiresAt: number;
   reason: string | null;
   accountHint: string | null;
@@ -61,12 +73,16 @@ export type CredentialRequest = {
 
 export type CancelReason = "denied" | "cancelled" | "timeout";
 
+export type ConnectResult = { status: "pending" };
+
 /** 列表查询的根 key；SSE / 其他端变更时按前缀失效。 */
 export const CONNECTORS_QUERY_ROOT = "connectors";
 
 export function connectorsQueryKey(baseUrl: string) {
   return [CONNECTORS_QUERY_ROOT, baseUrl] as const;
 }
+
+const UI_PROVIDERS: ConnectorId[] = ["github", "gmail"];
 
 function timeoutSignal(ms: number): AbortSignal {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
@@ -124,75 +140,196 @@ async function connectorRequest<T>(
   return body as T;
 }
 
-function connectorOf(value: unknown): Connector | null {
-  if (typeof value !== "object" || value === null) return null;
-  const record = value as { connector?: unknown };
-  const candidate = record.connector ?? value;
-  if (typeof candidate !== "object" || candidate === null) return null;
-  const connector = candidate as Partial<Connector>;
-  if (typeof connector.id !== "string" || typeof connector.status !== "string") {
-    return null;
-  }
-  return candidate as Connector;
+/** 连接器错误只展示客户端安全文案，不回显后端英文 message。 */
+export function connectorErrorText(
+  code: string | null | undefined,
+  fallback = "连接器操作失败，请重试",
+): string {
+  if (code && ERROR_CODE_TEXT[code]) return ERROR_CODE_TEXT[code];
+  return fallback;
 }
 
-export type ConnectResult =
-  | { status: "connected"; connector: Connector }
-  | { status: "pending" };
+function connectionForProvider(
+  connections: ApiConnectorConnection[],
+  provider: ConnectorId,
+): ApiConnectorConnection | null {
+  return (
+    connections.find((item) => item.provider === provider && item.slug === provider) ??
+    connections.find((item) => item.provider === provider) ??
+    null
+  );
+}
+
+function mapStatus(status: ApiConnectorConnection["status"]): ConnectorStatus {
+  switch (status) {
+    case "connected":
+      return "connected";
+    case "pending":
+      return "pending";
+    case "error":
+      return "error";
+    case "revoked":
+    default:
+      return "disconnected";
+  }
+}
+
+function displayNameOf(
+  provider: ConnectorId,
+  definition: ApiConnectorDefinition | undefined,
+): string {
+  return definition?.displayName || (provider === "github" ? "GitHub" : "Gmail");
+}
+
+/**
+ * 把 `{providers, connections}` 映射成卡片模型。
+ * 同一个 provider 有多条连接时优先 slug===provider（客户端固定使用该 slug）。
+ */
+export function mapConnectorList(
+  response: ApiConnectorListResponse,
+): Connector[] {
+  const definitions = new Map<ApiConnectorProvider, ApiConnectorDefinition>();
+  for (const definition of response.providers) {
+    definitions.set(definition.provider, definition);
+  }
+
+  return UI_PROVIDERS.map((provider) => {
+    const definition = definitions.get(provider);
+    const connection = connectionForProvider(response.connections, provider);
+    const accountLabel = connection?.accountLabel?.trim() ?? "";
+
+    return {
+      id: provider,
+      name: displayNameOf(provider, definition),
+      description: "",
+      status: connection ? mapStatus(connection.status) : "disconnected",
+      account: accountLabel
+        ? { id: accountLabel, label: accountLabel }
+        : null,
+      scopes:
+        connection?.scopes ??
+        definition?.defaultScopes ??
+        [],
+      readOnly: provider === "gmail",
+      connectedAt: connection?.createdAt ?? null,
+      lastError: connection?.lastErrorCode
+        ? connectorErrorText(connection.lastErrorCode, "连接异常，请重新授权")
+        : null,
+    };
+  });
+}
 
 export async function listConnectors(): Promise<ConnectorsResponse> {
-  const data = await connectorRequest<ConnectorsResponse>("/api/v1/connectors");
+  const data = await connectorRequest<
+    ApiConnectorListResponse & { mock?: boolean }
+  >("/api/v1/connectors");
+  if (!data || !Array.isArray(data.providers) || !Array.isArray(data.connections)) {
+    throw new ApiError("INVALID_RESPONSE", "服务器返回了无法识别的连接器数据", 502);
+  }
   return {
-    connectors: Array.isArray(data?.connectors) ? data.connectors : [],
-    ...(data?.mock === true ? { mock: true } : {}),
+    connectors: mapConnectorList(data),
+    ...(data.mock === true ? { mock: true } : {}),
   };
 }
 
-export async function connectConnector(id: ConnectorId): Promise<ConnectResult> {
-  const data = await connectorRequest<unknown>(`/api/v1/connectors/${id}/connect`, {
+/** 幂等创建：已存在同一 provider/slug 时服务端返回 200 + created:false。 */
+export async function createConnector(
+  id: ConnectorId,
+): Promise<ApiCreateConnectorResponse> {
+  return connectorRequest<ApiCreateConnectorResponse>("/api/v1/connectors", {
     method: "POST",
+    body: JSON.stringify({ provider: id, slug: id }),
   });
-  const connector = connectorOf(data);
-  if (connector) return { status: "connected", connector };
+}
 
-  // 服务端需要走 OAuth 回调时可能先返回 pending；前端只等待，
-  // 不弹出独立 OAuth 窗口，连接完成由 `connector.changed` 通知。
-  const record = (data ?? {}) as { status?: unknown };
-  if (record.status === "pending" || record.status === "authorizing") {
-    return { status: "pending" };
+export async function startConnectorOAuth(
+  id: ConnectorId,
+): Promise<ApiOAuthStartResponse> {
+  return connectorRequest<ApiOAuthStartResponse>(
+    `/api/v1/connectors/${encodeURIComponent(id)}/oauth/start`,
+    { method: "POST" },
+  );
+}
+
+export async function deleteConnector(id: ConnectorId): Promise<void> {
+  await connectorRequest<undefined>(
+    `/api/v1/connectors/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+/**
+ * 先创建连接，再拿授权 URL，交给系统浏览器。
+ *
+ * 本端只进入 pending；是否真正连接以 `connector.changed` / 重新拉列表为准。
+ */
+export async function connectConnector(
+  id: ConnectorId,
+  openUrl: (url: string) => Promise<void> = openAuthorizationUrl,
+): Promise<ConnectResult> {
+  await createConnector(id);
+  const { url } = await startConnectorOAuth(id);
+  if (typeof url !== "string" || url.trim() === "") {
+    throw new ApiError("INVALID_RESPONSE", "服务器没有返回授权地址", 502);
   }
-
-  throw new ApiError("INVALID_RESPONSE", "服务器没有返回连接状态");
+  await openUrl(url);
+  return { status: "pending" };
 }
 
-export async function disconnectConnector(id: ConnectorId): Promise<void> {
-  await connectorRequest<unknown>(`/api/v1/connectors/${id}/disconnect`, {
-    method: "POST",
-  });
-}
-
-/** 明文 token 只在本函数内通过 HTTPS body 发给服务端，不落任何存储。 */
-export async function submitCredential(requestId: string, token: string): Promise<void> {
-  await connectorRequest<unknown>(
-    `/api/v1/credential-requests/${encodeURIComponent(requestId)}`,
-    { method: "POST", body: JSON.stringify({ token }) },
-  );
-}
-
-export async function cancelCredential(
-  requestId: string,
-  reason: CancelReason,
-): Promise<void> {
-  await connectorRequest<unknown>(
-    `/api/v1/credential-requests/${encodeURIComponent(requestId)}/cancel`,
-    { method: "POST", body: JSON.stringify({ reason }) },
-  );
-}
-
-/** 仅 mock：让本地服务端推送一条 credential.request，便于三端验收弹窗。 */
+/** 仅 mock：让本地 mock 服务端推送一条 credential.request，便于三端验收弹窗。 */
 export async function requestMockCredential(connectorId?: ConnectorId): Promise<void> {
   await connectorRequest<unknown>("/api/v1/mock/credential-request", {
     method: "POST",
     ...(connectorId ? { body: JSON.stringify({ connectorId }) } : {}),
   });
+}
+
+type BrowserModule = {
+  Browser: { open: (options: { url: string }) => Promise<void> };
+};
+
+/**
+ * 优先 Capacitor Browser（系统浏览器），Web 回退 window.open，
+ * 最后回退 location.assign。全部失败时给出中文错误，不暴露原始异常。
+ */
+export async function openAuthorizationUrl(url: string): Promise<void> {
+  const { Capacitor } = await import("@capacitor/core");
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const module = (await import("@capacitor/browser")) as BrowserModule;
+      await module.Browser.open({ url });
+      return;
+    } catch {
+      // 插件未安装/打开失败：继续走 Web 回退。
+    }
+  }
+
+  try {
+    if (typeof window !== "undefined" && typeof window.open === "function") {
+      // 不用 noopener 特性，否则部分浏览器即使打开成功也返回 null，
+      // 会误判为失败并跳走当前页。
+      const opened = window.open(url, "_blank");
+      if (opened) {
+        try {
+          opened.opener = null;
+        } catch {
+          /* cross-origin opener 可能不可写 */
+        }
+        return;
+      }
+    }
+  } catch {
+    // 弹窗被拦截：继续尝试当前页跳转。
+  }
+
+  try {
+    if (typeof window !== "undefined" && window.location) {
+      window.location.assign(url);
+      return;
+    }
+  } catch {
+    // fall through
+  }
+
+  throw new ApiError("BROWSER_UNAVAILABLE", "无法打开系统浏览器，请重试");
 }

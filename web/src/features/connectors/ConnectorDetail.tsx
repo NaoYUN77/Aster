@@ -43,8 +43,8 @@ function formatConnectedAt(value: string | null): string | null {
 /**
  * Connector 详情 / 授权面板。
  *
- * OAuth 在服务器侧完成：这里只发起 connect 并等待状态变化（SSE 或重新查询），
- * 不打开独立的 OAuth 页面/标签页。
+ * 点击连接后由 API 层创建连接并打开系统浏览器；OAuth 回调与 token
+ * 都由服务端处理。本端只进入等待授权，以 SSE 或重新查询确认最终状态。
  */
 export function ConnectorDetail({
   connector,
@@ -78,7 +78,9 @@ export function ConnectorDetail({
   const meta = connectorMeta(connector.id);
   const connected = connector.status === "connected";
   const busy = connect.isPending || disconnect.isPending;
-  const awaiting = connect.data?.status === "pending" && !connected;
+  const awaiting =
+    connector.status === "pending" ||
+    (connect.data?.status === "pending" && !connected);
   const connectedAt = formatConnectedAt(connector.connectedAt);
   const permissions = connector.scopes.length > 0 ? connector.scopes : meta?.permissions ?? [];
 
@@ -126,10 +128,24 @@ export function ConnectorDetail({
             </DialogDescription>
           </div>
           <Badge
-            variant={connected ? "success" : connector.status === "error" ? "destructive" : "outline"}
+            variant={
+              connected
+                ? "success"
+                : connector.status === "error"
+                  ? "destructive"
+                  : connector.status === "pending"
+                    ? "warning"
+                    : "outline"
+            }
             className="ml-auto shrink-0"
           >
-            {connected ? "已连接" : connector.status === "error" ? "连接异常" : "未连接"}
+            {connected
+              ? "已连接"
+              : connector.status === "error"
+                ? "连接异常"
+                : connector.status === "pending"
+                  ? "等待授权"
+                  : "未连接"}
           </Badge>
         </div>
 
@@ -193,7 +209,7 @@ export function ConnectorDetail({
             <div className="flex gap-2">
               <Button variant="outline" className="flex-1" onClick={handleConnect} disabled={busy}>
                 {connect.isPending ? <Spinner /> : <Link2 />}
-                {connect.isPending ? "等待授权…" : "重新授权"}
+                {connect.isPending ? "正在打开浏览器…" : "重新授权"}
               </Button>
               <Button
                 variant="destructive"
@@ -209,10 +225,12 @@ export function ConnectorDetail({
             <Button className="w-full" onClick={handleConnect} disabled={busy}>
               {connect.isPending ? <Spinner /> : <Link2 />}
               {connect.isPending
-                ? "等待授权…"
-                : connector.status === "error"
-                  ? "重新授权"
-                  : `连接 ${connector.name}`}
+                ? "正在打开浏览器…"
+                : connector.status === "pending"
+                  ? "继续授权"
+                  : connector.status === "error"
+                    ? "重新授权"
+                    : `连接 ${connector.name}`}
             </Button>
           )}
 
