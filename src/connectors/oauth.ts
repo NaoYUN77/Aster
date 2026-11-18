@@ -60,21 +60,21 @@ export class ConnectorOAuth {
     const redirectUri = this.redirectUri();
     const clientId = await this.#secrets.readText(spec.clientIdSecret);
     const state = randomBytes(32).toString("base64url");
-    const codeVerifier = randomBytes(32).toString("base64url");
-    const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+    // A provider without PKCE support must not receive code_challenge, and its exchange must not
+    // send code_verifier; an empty verifier is stored so the session shape stays the same.
+    const codeVerifier = spec.pkce ? randomBytes(32).toString("base64url") : "";
     const url = new URL(spec.authorizeUrl);
     url.searchParams.set("client_id", clientId);
     url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("response_type", "code");
-    url.searchParams.set("scope", connection.scopes.join(" "));
+    if (spec.sendScope !== false) url.searchParams.set("scope", connection.scopes.join(" "));
     url.searchParams.set("state", state);
-    url.searchParams.set("code_challenge", codeChallenge);
-    url.searchParams.set("code_challenge_method", "S256");
-    if (connection.provider === "gmail") {
-      // Offline access is what makes the connection survive a restart without a new browser flow.
-      url.searchParams.set("access_type", "offline");
-      url.searchParams.set("prompt", "consent");
-      url.searchParams.set("include_granted_scopes", "true");
+    if (spec.pkce) {
+      url.searchParams.set("code_challenge", createHash("sha256").update(codeVerifier).digest("base64url"));
+      url.searchParams.set("code_challenge_method", "S256");
+    }
+    for (const [name, value] of Object.entries(spec.authorizeParams ?? {})) {
+      url.searchParams.set(name, value);
     }
     return { url: url.toString(), state, codeVerifier, redirectUri };
   }
@@ -93,17 +93,32 @@ export class ConnectorOAuth {
       this.#secrets.readText(spec.clientIdSecret),
       this.#secrets.readText(spec.clientSecretSecret),
     ]);
-    const body = new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: session.redirectUri,
-      client_id: clientId,
-      client_secret: clientSecret,
-      code_verifier: session.codeVerifier,
-    });
+    let body: string;
+    let headers: Record<string, string>;
+    if (spec.tokenRequest === "basic-json") {
+      // Notion: Basic client authentication with a JSON body and no PKCE/scope fields.
+      headers = {
+        accept: "application/json",
+        "content-type": "application/json",
+        authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`, "utf8").toString("base64")}`,
+      };
+      body = JSON.stringify({ grant_type: "authorization_code", code, redirect_uri: session.redirectUri });
+    } else {
+      const form = new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: session.redirectUri,
+        client_id: clientId,
+        client_secret: clientSecret,
+      });
+      if (spec.pkce) form.set("code_verifier", session.codeVerifier);
+      if (spec.tokenScope !== undefined) form.set("scope", spec.tokenScope);
+      headers = { accept: "application/json", "content-type": "application/x-www-form-urlencoded" };
+      body = form.toString();
+    }
     const response = await this.#fetch(spec.tokenUrl, {
       method: "POST",
-      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+      headers,
       body,
       signal: AbortSignal.timeout(this.#config.httpTimeoutMs),
     });

@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { aadFor, decryptCredential, encryptCredential, parseMasterKey } from "../src/crypto";
 import { handleRequest } from "../src/handler";
-import type { Env } from "../src/types";
+import type { Env, Provider } from "../src/types";
 import { SECRET_WHITELIST, connectionInput, connectionSlug, providerName, secretName, storedTokens } from "../src/validate";
 
 function brokerCode(error: unknown): string | undefined {
@@ -96,6 +96,12 @@ test("the secret whitelist is exactly the documented set", () => {
     "github_client_secret",
     "google_client_id",
     "google_client_secret",
+    "outlook_client_id",
+    "outlook_client_secret",
+    "linear_client_id",
+    "linear_client_secret",
+    "notion_client_id",
+    "notion_client_secret",
     "deepseek_web_api_key",
     "exa_api_key",
   ]);
@@ -117,9 +123,10 @@ test("slugs and providers follow the documented grammar", () => {
   for (const slug of ["", "-acme", "_acme", "Acme", "acme.github", "a".repeat(49), "acme/other"]) {
     assert.throws(() => connectionSlug(slug), (error) => brokerCode(error) === "INVALID_SLUG");
   }
-  assert.equal(providerName("github"), "github");
-  assert.equal(providerName("gmail"), "gmail");
-  for (const provider of ["google", "GitHub", "", 1, null, undefined]) {
+  for (const provider of ["github", "gmail", "outlook", "linear", "notion", "google_calendar", "google_drive"]) {
+    assert.equal(providerName(provider), provider);
+  }
+  for (const provider of ["google", "GitHub", "", 1, null, undefined, "outlook_calendar"]) {
     assert.throws(() => providerName(provider), (error) => brokerCode(error) === "INVALID_PROVIDER");
   }
 });
@@ -208,12 +215,12 @@ test("stored token payloads must contain at least one usable token", () => {
 
 async function tokenCall(
   stored: Record<string, unknown>,
-  options: { readonly provider?: "github" | "gmail"; readonly now?: number } = {},
-): Promise<{ readonly response: Response; readonly refreshCalls: string[] }> {
+  options: { readonly provider?: Provider; readonly now?: number; readonly env?: Record<string, unknown> } = {},
+): Promise<{ readonly response: Response; readonly refreshCalls: { url: string; body: string }[] }> {
   const keyHex = randomBytes(32).toString("hex");
   const provider = options.provider ?? "github";
   const ciphertext = await encryptCredential(parseMasterKey(keyHex), JSON.stringify(stored), aadFor("acme"));
-  const refreshCalls: string[] = [];
+  const refreshCalls: { url: string; body: string }[] = [];
   const env = {
     BROKER_DEV_BYPASS: "1",
     credential_master_key: keyHex,
@@ -221,6 +228,13 @@ async function tokenCall(
     github_client_secret: "github-client-secret",
     google_client_id: "google-client-id",
     google_client_secret: "google-client-secret",
+    outlook_client_id: "outlook-client-id",
+    outlook_client_secret: "outlook-client-secret",
+    linear_client_id: "linear-client-id",
+    linear_client_secret: "linear-client-secret",
+    notion_client_id: "notion-client-id",
+    notion_client_secret: "notion-client-secret",
+    ...options.env,
     VAULT: {
       idFromName: (name: string) => name,
       get: () => ({
@@ -237,8 +251,8 @@ async function tokenCall(
     env,
     {
       now: () => options.now ?? Date.parse("2026-11-18T12:00:00.000Z"),
-      fetchImpl: async (input) => {
-        refreshCalls.push(String(input));
+      fetchImpl: async (input, init) => {
+        refreshCalls.push({ url: String(input), body: String(init?.body ?? "") });
         return new Response(JSON.stringify({ access_token: "refreshed-access", expires_in: 3600 }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -287,5 +301,73 @@ test("a google connection with a refresh token still refreshes an expired access
   assert.equal(body.accessToken, "refreshed-access");
   assert.equal(typeof body.expiresAt, "string");
   assert.equal(refreshCalls.length, 1);
-  assert.match(refreshCalls[0]!, /googleapis/);
+  assert.match(refreshCalls[0]!.url, /googleapis/);
+});
+
+test("an outlook refresh sends scope so Microsoft reissues a refresh token", async () => {
+  const { response, refreshCalls } = await tokenCall(
+    { refreshToken: "outlook-refresh", accessToken: "old", expiresAt: "2026-11-18T11:00:00.000Z" },
+    { provider: "outlook" },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(refreshCalls.length, 1);
+  assert.match(refreshCalls[0]!.url, /login\.microsoftonline\.com\/common\/oauth2\/v2\.0\/token/);
+  const form = new URLSearchParams(refreshCalls[0]!.body);
+  assert.equal(form.get("grant_type"), "refresh_token");
+  assert.equal(form.get("scope"), "offline_access Mail.Read User.Read");
+  assert.equal(form.get("client_id"), "outlook-client-id");
+});
+
+test("a linear refresh uses Linear's token endpoint and the documented form", async () => {
+  const { response, refreshCalls } = await tokenCall(
+    { refreshToken: "linear-refresh", accessToken: "old", expiresAt: "2026-11-18T11:00:00.000Z" },
+    { provider: "linear" },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(refreshCalls.length, 1);
+  assert.match(refreshCalls[0]!.url, /api\.linear\.app\/oauth\/token/);
+  const form = new URLSearchParams(refreshCalls[0]!.body);
+  assert.equal(form.get("grant_type"), "refresh_token");
+  assert.equal(form.get("refresh_token"), "linear-refresh");
+});
+
+test("google calendar and drive refresh through the Google endpoint with their scopes", async () => {
+  for (const [provider, scope] of [
+    ["google_calendar", "openid email https://www.googleapis.com/auth/calendar.readonly"],
+    ["google_drive", "openid email https://www.googleapis.com/auth/drive.readonly"],
+  ] as const) {
+    const { response, refreshCalls } = await tokenCall(
+      { refreshToken: "google-refresh", accessToken: "old", expiresAt: "2026-11-18T11:00:00.000Z" },
+      { provider },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(refreshCalls.length, 1);
+    assert.match(refreshCalls[0]!.url, /oauth2\.googleapis\.com\/token/);
+    assert.equal(new URLSearchParams(refreshCalls[0]!.body).get("scope"), scope);
+    assert.equal(new URLSearchParams(refreshCalls[0]!.body).get("client_id"), "google-client-id");
+  }
+});
+
+test("a notion token is returned as stored and never refreshed", async () => {
+  const { response, refreshCalls } = await tokenCall(
+    { refreshToken: null, accessToken: "notion-access", expiresAt: null },
+    { provider: "notion" },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { accessToken: "notion-access", expiresAt: null });
+  assert.deepEqual(refreshCalls, []);
+});
+
+test("a missing worker secret is a 503 for every non-github provider", async () => {
+  for (const provider of ["outlook", "linear", "google_drive"] as const) {
+    const prefix = provider === "google_drive" ? "google" : provider;
+    const { response, refreshCalls } = await tokenCall(
+      { refreshToken: "refresh", accessToken: "old", expiresAt: "2026-11-18T11:00:00.000Z" },
+      { provider, env: { [`${prefix}_client_id`]: undefined, [`${prefix}_client_secret`]: undefined } },
+    );
+    assert.equal(response.status, 503, provider);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "CONNECTOR_NOT_CONFIGURED");
+    assert.deepEqual(refreshCalls, [], "no upstream call when the client credentials are absent");
+  }
 });

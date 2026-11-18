@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -15,6 +15,8 @@ import test from "node:test";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url).href);
 const WRANGLER = join(ROOT, "node_modules/wrangler/bin/wrangler.js");
+// A dedicated, cleared state directory keeps every run starting from an empty vault.
+const STATE_DIR = join(ROOT, ".wrangler", "test-state");
 const STARTUP_TIMEOUT_MS = 120_000;
 
 type Spawned = { child: ChildProcess; output: () => string };
@@ -33,6 +35,7 @@ function freePort(): Promise<number> {
 }
 
 function startWrangler(port: number): Spawned {
+  rmSync(STATE_DIR, { recursive: true, force: true });
   let buffer = "";
   const child = spawn(process.execPath, [
     WRANGLER,
@@ -41,6 +44,7 @@ function startWrangler(port: number): Spawned {
     "--ip", "127.0.0.1",
     "--port", String(port),
     "--infer-origin-from-routes=false",
+    "--persist-to", STATE_DIR,
     "--show-interactive-dev-session=false",
     "--log-level", "error",
     "--var", "BROKER_DEV_BYPASS:1",
@@ -214,6 +218,67 @@ test("wrangler dev --local serves the broker API end to end", { timeout: 240_000
       assert.deepEqual(await json(response), { accessToken: "github-access-only-token", expiresAt: null });
       const deleted = await fetch(`${base}/v1/connections/github-only`, { method: "DELETE" });
       assert.equal(deleted.status, 204);
+    });
+
+    await t.test("outlook, linear and notion connections round-trip through the same API", async () => {
+      const put = async (slug: string, body: Record<string, unknown>) => fetch(`${base}/v1/connections/${slug}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const token = async (slug: string) => fetch(`${base}/v1/connections/${slug}/token`, { method: "POST" });
+
+      const outlook = await put("outlook-mail", {
+        provider: "outlook", accountLabel: "me@example.test", scopes: ["Mail.Read"],
+        refreshToken: "outlook-refresh", accessToken: "outlook-access", expiresAt: "2099-01-01T00:00:00Z",
+      });
+      assert.equal(outlook.status, 204);
+      const outlookToken = await token("outlook-mail");
+      assert.equal(outlookToken.status, 200);
+      assert.deepEqual(await json(outlookToken), { accessToken: "outlook-access", expiresAt: "2099-01-01T00:00:00.000Z" });
+
+      const linear = await put("linear-issues", {
+        provider: "linear", accountLabel: "dev", scopes: ["read"],
+        refreshToken: "linear-refresh", accessToken: "linear-access", expiresAt: "2099-01-01T00:00:00Z",
+      });
+      assert.equal(linear.status, 204);
+      const linearToken = await token("linear-issues");
+      assert.equal(linearToken.status, 200);
+      assert.deepEqual(await json(linearToken), { accessToken: "linear-access", expiresAt: "2099-01-01T00:00:00.000Z" });
+
+      // Notion has no refresh token and no expiry; the stored access token is served as-is.
+      const notion = await put("notion-wiki", {
+        provider: "notion", accountLabel: "workspace", scopes: [], accessToken: "notion-access",
+      });
+      assert.equal(notion.status, 204);
+      const notionToken = await token("notion-wiki");
+      assert.equal(notionToken.status, 200);
+      assert.deepEqual(await json(notionToken), { accessToken: "notion-access", expiresAt: null });
+
+      const listed = (await json(await fetch(`${base}/v1/connections`))) as { connections: Array<{ slug: string; provider: string }> };
+      const providers = new Map(listed.connections.map((entry) => [entry.slug, entry.provider]));
+      assert.equal(providers.get("outlook-mail"), "outlook");
+      assert.equal(providers.get("linear-issues"), "linear");
+      assert.equal(providers.get("notion-wiki"), "notion");
+      for (const slug of ["outlook-mail", "linear-issues", "notion-wiki"]) {
+        assert.equal((await fetch(`${base}/v1/connections/${slug}`, { method: "DELETE" })).status, 204);
+      }
+    });
+
+    await t.test("a provider without configured worker credentials is a 503 on refresh", async () => {
+      const put = await fetch(`${base}/v1/connections/linear-expired`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "linear", accountLabel: "dev", scopes: ["read"],
+          refreshToken: "linear-refresh", accessToken: "old", expiresAt: "2020-01-01T00:00:00Z",
+        }),
+      });
+      assert.equal(put.status, 204);
+      const response = await fetch(`${base}/v1/connections/linear-expired/token`, { method: "POST" });
+      assert.equal(response.status, 503);
+      assert.equal(((await json(response)) as { error: { code: string } }).error.code, "CONNECTOR_NOT_CONFIGURED");
+      assert.equal((await fetch(`${base}/v1/connections/linear-expired`, { method: "DELETE" })).status, 204);
     });
 
     await t.test("delete removes the connection and token lookups become 404", async () => {

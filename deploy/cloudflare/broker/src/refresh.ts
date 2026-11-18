@@ -20,6 +20,23 @@ export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promis
 const ENDPOINTS: Record<Provider, string> = {
   github: "https://github.com/login/oauth/access_token",
   gmail: "https://oauth2.googleapis.com/token",
+  outlook: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+  linear: "https://api.linear.app/oauth/token",
+  // Notion tokens do not expire and carry no refresh token; this entry is never reached.
+  notion: "https://api.notion.com/v1/oauth/token",
+  google_calendar: "https://oauth2.googleapis.com/token",
+  google_drive: "https://oauth2.googleapis.com/token",
+};
+
+/** Provider-specific refresh parameters. Microsoft only reissues a refresh token when offline_access is in scope. */
+const REFRESH_PARAMS: Readonly<Record<Provider, Readonly<Record<string, string>>>> = {
+  github: {},
+  gmail: {},
+  outlook: { scope: "offline_access Mail.Read User.Read" },
+  linear: {},
+  notion: {},
+  google_calendar: { scope: "openid email https://www.googleapis.com/auth/calendar.readonly" },
+  google_drive: { scope: "openid email https://www.googleapis.com/auth/drive.readonly" },
 };
 
 const REFRESH_SKEW_MS = 60_000;
@@ -51,6 +68,7 @@ export async function refreshAccessToken(
     refresh_token: refreshToken,
     grant_type: "refresh_token",
   });
+  for (const [name, value] of Object.entries(REFRESH_PARAMS[provider])) body.set(name, value);
   let response: Response;
   try {
     response = await fetchImpl(ENDPOINTS[provider], {

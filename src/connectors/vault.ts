@@ -4,7 +4,7 @@ import { decryptCredential, encryptCredential } from "./crypto.js";
 import { ConnectorError } from "./errors.js";
 import { boundedJson, credentialAad, expiresAtIso, specFor, tokenFromJson, type OAuthToken } from "./providers.js";
 import type { SecretProvider } from "./secrets.js";
-import type { ConnectorConnection, ConnectorStore } from "./store.js";
+import { isOAuthProvider, type ConnectorConnection, type ConnectorStore } from "./store.js";
 
 export type TokenVaultMeta = {
   readonly accountLabel: string;
@@ -137,7 +137,7 @@ export class BrokerTokenVault implements TokenVault {
   }
 
   async save(connection: ConnectorConnection, token: OAuthToken, meta: TokenVaultMeta): Promise<void> {
-    if (connection.provider !== "github" && connection.provider !== "gmail") {
+    if (!isOAuthProvider(connection.provider)) {
       throw new ConnectorError("CONNECTOR_INVALID_PROVIDER", "unsupported connector provider");
     }
     // GitHub OAuth apps return no refresh token. The field is omitted (never an empty string) so

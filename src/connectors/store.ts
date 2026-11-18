@@ -2,8 +2,24 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { ConnectorError } from "./errors.js";
 
-export const CONNECTOR_PROVIDERS = ["github", "gmail", "mcp_stdio"] as const;
+export const OAUTH_PROVIDERS = [
+  "github",
+  "gmail",
+  "outlook",
+  "linear",
+  "notion",
+  "google_calendar",
+  "google_drive",
+] as const;
+export type OAuthProvider = (typeof OAUTH_PROVIDERS)[number];
+
+export const CONNECTOR_PROVIDERS = [...OAUTH_PROVIDERS, "mcp_stdio"] as const;
 export type ConnectorProvider = (typeof CONNECTOR_PROVIDERS)[number];
+
+/** Providers whose tokens are obtained through a browser OAuth flow (everything except stdio). */
+export function isOAuthProvider(value: unknown): value is OAuthProvider {
+  return typeof value === "string" && (OAUTH_PROVIDERS as readonly string[]).includes(value);
+}
 export type ConnectorStatus = "pending" | "connected" | "error" | "revoked";
 
 export type ConnectorDefinition = {
@@ -60,6 +76,42 @@ const DEFINITIONS: readonly ConnectorDefinition[] = [
     transport: "oauth",
     defaultScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
     tools: ["connector_gmail_search_messages", "connector_gmail_get_message"],
+  },
+  {
+    provider: "outlook",
+    displayName: "Outlook (read-only)",
+    transport: "oauth",
+    defaultScopes: ["offline_access", "User.Read", "Mail.Read"],
+    tools: ["connector_outlook_list_messages", "connector_outlook_search_messages", "connector_outlook_get_message"],
+  },
+  {
+    provider: "linear",
+    displayName: "Linear (read-only)",
+    transport: "oauth",
+    defaultScopes: ["read"],
+    tools: ["connector_linear_list_issues", "connector_linear_search_issues", "connector_linear_get_issue"],
+  },
+  {
+    provider: "notion",
+    displayName: "Notion (read-only)",
+    transport: "oauth",
+    // Notion has no OAuth scope parameter; the integration's capabilities are chosen in Notion.
+    defaultScopes: [],
+    tools: ["connector_notion_search", "connector_notion_get_page"],
+  },
+  {
+    provider: "google_calendar",
+    displayName: "Google Calendar (read-only)",
+    transport: "oauth",
+    defaultScopes: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
+    tools: ["connector_google_calendar_list_events", "connector_google_calendar_get_event"],
+  },
+  {
+    provider: "google_drive",
+    displayName: "Google Drive (read-only)",
+    transport: "oauth",
+    defaultScopes: ["openid", "email", "https://www.googleapis.com/auth/drive.readonly"],
+    tools: ["connector_google_drive_search_files", "connector_google_drive_get_file"],
   },
   {
     provider: "mcp_stdio",
@@ -186,8 +238,12 @@ export class ConnectorStore {
       CREATE INDEX IF NOT EXISTS credentials_connection ON credentials(connection_id);
     `);
     const createdAt = this.#now().toISOString();
-    const insert = this.#db.prepare(`INSERT OR IGNORE INTO connector_definitions
-      (provider, display_name, transport, default_scopes, tools, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    // Upsert, not INSERT OR IGNORE: an existing database must pick up newly added providers (for
+    // example outlook/linear) and any corrected tool list without being deleted.
+    const insert = this.#db.prepare(`INSERT INTO connector_definitions
+      (provider, display_name, transport, default_scopes, tools, created_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider) DO UPDATE SET display_name = excluded.display_name,
+        transport = excluded.transport, default_scopes = excluded.default_scopes, tools = excluded.tools`);
     for (const definition of DEFINITIONS) {
       insert.run(
         definition.provider,

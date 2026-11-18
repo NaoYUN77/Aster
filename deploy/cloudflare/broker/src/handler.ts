@@ -175,8 +175,19 @@ async function issueToken(
   return jsonResponse({ accessToken: refreshed.accessToken, expiresAt: refreshed.expiresAt });
 }
 
+const SECRET_PREFIX: Readonly<Record<Provider, string>> = {
+  github: "github",
+  // All three Google providers share one OAuth client.
+  gmail: "google",
+  google_calendar: "google",
+  google_drive: "google",
+  outlook: "outlook",
+  linear: "linear",
+  notion: "notion",
+};
+
 function clientCredentials(env: Env, provider: Provider): { clientId: string; clientSecret: string } {
-  const prefix = provider === "gmail" ? "google" : "github";
+  const prefix = SECRET_PREFIX[provider];
   const clientId = secretValue(env, `${prefix}_client_id`);
   const clientSecret = secretValue(env, `${prefix}_client_secret`);
   if (clientId === undefined || clientSecret === undefined) {

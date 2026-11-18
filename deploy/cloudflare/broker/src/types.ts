@@ -1,6 +1,6 @@
 /** Shared broker types. This Worker never returns a token to a caller outside this list. */
 
-export type Provider = "github" | "gmail";
+export type Provider = "github" | "gmail" | "outlook" | "linear" | "notion" | "google_calendar" | "google_drive";
 
 export type ConnectionMetadata = {
   readonly slug: string;

@@ -102,9 +102,13 @@ function metadata(row: Row): ConnectionMetadata {
   };
 }
 
+const KNOWN_PROVIDERS = new Set<Provider>([
+  "github", "gmail", "outlook", "linear", "notion", "google_calendar", "google_drive",
+]);
+
 function provider(value: string): Provider {
-  // The Worker only writes github/gmail; anything else is corrupted storage, not a caller error.
-  return value === "gmail" ? "gmail" : "github";
+  // The Worker only writes known providers; anything else is corrupted storage, not a caller error.
+  return KNOWN_PROVIDERS.has(value as Provider) ? value as Provider : "github";
 }
 
 function scopes(value: string): string[] {

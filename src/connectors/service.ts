@@ -6,9 +6,20 @@ import { CredentialBroker, type CredentialBinding } from "./broker.js";
 import { ConnectorError, connectorCode } from "./errors.js";
 import { GmailClient } from "./gmail.js";
 import { GithubClient } from "./github.js";
+import { GoogleCalendarClient } from "./google-calendar.js";
+import { GoogleDriveClient } from "./google-drive.js";
+import { LinearClient } from "./linear.js";
+import { NotionClient } from "./notion.js";
 import type { ConnectorOAuth } from "./oauth.js";
+import { OutlookClient } from "./outlook.js";
 import { stdioWorkingDirectory, validateStdioConnector } from "./stdio.js";
-import type { ConnectorConnection, ConnectorDefinition, ConnectorProvider, ConnectorStore } from "./store.js";
+import {
+  isOAuthProvider,
+  type ConnectorConnection,
+  type ConnectorDefinition,
+  type ConnectorStore,
+  type OAuthProvider,
+} from "./store.js";
 import type { TokenVault } from "./vault.js";
 
 export type ConnectorServiceOptions = {
@@ -44,6 +55,11 @@ export class ConnectorService {
   readonly #broker = new CredentialBroker();
   readonly #github: GithubClient;
   readonly #gmail: GmailClient;
+  readonly #outlook: OutlookClient;
+  readonly #linear: LinearClient;
+  readonly #notion: NotionClient;
+  readonly #calendar: GoogleCalendarClient;
+  readonly #drive: GoogleDriveClient;
   readonly #log: (line: string) => void;
   readonly #now: () => Date;
 
@@ -60,6 +76,15 @@ export class ConnectorService {
     const fetchImpl = options.fetch ?? fetch;
     this.#github = new GithubClient({ fetch: fetchImpl, timeoutMs: options.config.httpTimeoutMs });
     this.#gmail = new GmailClient({ fetch: fetchImpl, timeoutMs: options.config.httpTimeoutMs });
+    this.#outlook = new OutlookClient({ fetch: fetchImpl, timeoutMs: options.config.httpTimeoutMs });
+    this.#linear = new LinearClient({ fetch: fetchImpl, timeoutMs: options.config.httpTimeoutMs });
+    this.#notion = new NotionClient({ fetch: fetchImpl, timeoutMs: options.config.httpTimeoutMs });
+    this.#calendar = new GoogleCalendarClient({
+      fetch: fetchImpl,
+      timeoutMs: options.config.httpTimeoutMs,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+    this.#drive = new GoogleDriveClient({ fetch: fetchImpl, timeoutMs: options.config.httpTimeoutMs });
   }
 
   list(): ConnectorList {
@@ -89,7 +114,7 @@ export class ConnectorService {
         args: command.args,
         cwd: stdioWorkingDirectory(this.#dataDir, input.slug),
       });
-    } else if (input.provider === "github" || input.provider === "gmail") {
+    } else if (isOAuthProvider(input.provider)) {
       result = this.#store.create({ ownerId: this.#ownerId, provider: input.provider, slug: input.slug });
     } else {
       throw new ConnectorError("CONNECTOR_INVALID_PROVIDER", "unsupported connector provider");
@@ -162,7 +187,7 @@ export class ConnectorService {
   async startOAuth(slug: string): Promise<{ readonly url: string }> {
     const connection = this.#store.get(this.#ownerId, slug);
     if (connection === undefined) throw new ConnectorError("CONNECTOR_NOT_FOUND", "connector was not found");
-    if (connection.provider !== "github" && connection.provider !== "gmail") {
+    if (!isOAuthProvider(connection.provider)) {
       throw new ConnectorError("CONNECTOR_INVALID_PROVIDER", "unsupported connector provider");
     }
     const started = await this.#oauth.start(connection);
@@ -252,12 +277,110 @@ export class ConnectorService {
       (connection, token) => this.#gmail.getMessage(token, input.id));
   }
 
+  async listOutlookMessages(
+    input: { readonly connection?: string; readonly maxResults?: number },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("outlook", input.connection, binding, "connector_outlook_list_messages",
+      (connection, token) => this.#outlook.listMessages(token, {
+        ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
+      }));
+  }
+
+  async searchOutlookMessages(
+    input: { readonly connection?: string; readonly query: string; readonly maxResults?: number },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("outlook", input.connection, binding, "connector_outlook_search_messages",
+      (connection, token) => this.#outlook.searchMessages(token, input.query, {
+        ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
+      }));
+  }
+
+  async getOutlookMessage(input: { readonly connection?: string; readonly id: string }, binding: CredentialBinding) {
+    return this.#withConnection("outlook", input.connection, binding, "connector_outlook_get_message",
+      (connection, token) => this.#outlook.getMessage(token, input.id));
+  }
+
+  async listLinearIssues(
+    input: { readonly connection?: string; readonly team?: string; readonly state?: string; readonly maxResults?: number },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("linear", input.connection, binding, "connector_linear_list_issues",
+      (connection, token) => this.#linear.listIssues(token, {
+        ...(input.team === undefined ? {} : { team: input.team }),
+        ...(input.state === undefined ? {} : { state: input.state }),
+        ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
+      }));
+  }
+
+  async searchLinearIssues(
+    input: { readonly connection?: string; readonly query: string; readonly maxResults?: number },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("linear", input.connection, binding, "connector_linear_search_issues",
+      (connection, token) => this.#linear.searchIssues(token, input.query, {
+        ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
+      }));
+  }
+
+  async getLinearIssue(input: { readonly connection?: string; readonly identifier: string }, binding: CredentialBinding) {
+    return this.#withConnection("linear", input.connection, binding, "connector_linear_get_issue",
+      (connection, token) => this.#linear.getIssue(token, input.identifier));
+  }
+
+  async searchNotion(
+    input: { readonly connection?: string; readonly query: string; readonly maxResults?: number },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("notion", input.connection, binding, "connector_notion_search",
+      (connection, token) => this.#notion.search(token, input.query, {
+        ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
+      }));
+  }
+
+  async getNotionPage(input: { readonly connection?: string; readonly pageId: string }, binding: CredentialBinding) {
+    return this.#withConnection("notion", input.connection, binding, "connector_notion_get_page",
+      (connection, token) => this.#notion.getPage(input.pageId, token));
+  }
+
+  async listCalendarEvents(
+    input: { readonly connection?: string; readonly days?: number; readonly maxResults?: number },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("google_calendar", input.connection, binding, "connector_google_calendar_list_events",
+      (connection, token) => this.#calendar.listEvents(token, {
+        ...(input.days === undefined ? {} : { days: input.days }),
+        ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
+      }));
+  }
+
+  async getCalendarEvent(input: { readonly connection?: string; readonly eventId: string }, binding: CredentialBinding) {
+    return this.#withConnection("google_calendar", input.connection, binding, "connector_google_calendar_get_event",
+      (connection, token) => this.#calendar.getEvent(token, input.eventId));
+  }
+
+  async searchDriveFiles(
+    input: { readonly connection?: string; readonly query: string; readonly maxResults?: number },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("google_drive", input.connection, binding, "connector_google_drive_search_files",
+      (connection, token) => this.#drive.searchFiles(token, input.query, {
+        ...(input.maxResults === undefined ? {} : { maxResults: input.maxResults }),
+      }));
+  }
+
+  async getDriveFile(input: { readonly connection?: string; readonly fileId: string }, binding: CredentialBinding) {
+    return this.#withConnection("google_drive", input.connection, binding, "connector_google_drive_get_file",
+      (connection, token) => this.#drive.getFile(token, input.fileId));
+  }
+
   close(): void {
     this.#broker.revokeAll();
   }
 
   async #withConnection<T>(
-    provider: "github" | "gmail",
+    provider: OAuthProvider,
     slug: string | undefined,
     binding: CredentialBinding,
     tool: string,
@@ -293,7 +416,7 @@ export class ConnectorService {
     }
   }
 
-  #pick(provider: "github" | "gmail", slug: string | undefined): ConnectorConnection {
+  #pick(provider: OAuthProvider, slug: string | undefined): ConnectorConnection {
     const connections = this.#store.list(this.#ownerId).filter((entry) => entry.provider === provider);
     if (slug !== undefined && slug !== "") {
       const found = connections.find((entry) => entry.slug === slug);

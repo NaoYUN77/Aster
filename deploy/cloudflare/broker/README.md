@@ -51,14 +51,17 @@ service token 校验通过后注入），否则 401 `BROKER_UNAUTHORIZED`。
 
 约定：
 
-- slug：`[a-z0-9][a-z0-9_-]{0,47}`；provider：`github` | `gmail`；违反时 400 `INVALID_SLUG` /
-  `INVALID_PROVIDER`。
+- slug：`[a-z0-9][a-z0-9_-]{0,47}`；provider：`github` | `gmail` | `outlook` | `linear` |
+  `notion` | `google_calendar` | `google_drive`；违反时 400 `INVALID_SLUG` / `INVALID_PROVIDER`。
 - 所有错误都是 `{error:{code,message}}`；上游（GitHub/Google）的响应体一律不透传、不记录。
 - token 刷新失败统一 401 `CONNECTOR_AUTH_EXPIRED`，调用方应提示用户重新授权。
 - 响应带 `cache-control: no-store`；`wrangler.toml` 关闭了 observability，Worker 也不打印请求或密钥内容。
 - 刷新返回新的 refresh token（GitHub 会轮换）时会写回 DO；Google 不返回则不覆盖。
 - 普通 GitHub OAuth App 不返回 refresh token：PUT 时省略该字段，broker 存 `null`，`POST /token`
   直接返回已存 access token，不会尝试刷新（无 access token 时 503 `CONNECTOR_NOT_CONFIGURED`）。
+  Notion 同理（token 长期有效、无 refresh token）。
+- Microsoft 刷新请求带 `scope=offline_access Mail.Read User.Read`；Google Calendar / Drive 刷新
+  分别带各自的只读 scope；Linear 用 `grant_type=refresh_token` + client_id/secret。
 
 ## 需要配置的 Workers Secrets
 
@@ -68,7 +71,10 @@ service token 校验通过后注入），否则 401 `BROKER_UNAUTHORIZED`。
 |---|---|
 | `credential_master_key` | AES-256-GCM 主密钥；64 位 hex、32 字节 base64/base64url 或正好 32 字节原文 |
 | `github_client_id` / `github_client_secret` | GitHub OAuth App 凭据，用于 refresh |
-| `google_client_id` / `google_client_secret` | Google OAuth 客户端凭据，用于 refresh |
+| `google_client_id` / `google_client_secret` | Google OAuth 客户端凭据，Gmail / Google Calendar / Google Drive 共用 |
+| `outlook_client_id` / `outlook_client_secret` | Microsoft Entra OAuth 客户端凭据，用于 refresh |
+| `linear_client_id` / `linear_client_secret` | Linear OAuth 应用凭据，用于 refresh |
+| `notion_client_id` / `notion_client_secret` | Notion OAuth 凭据（token 长期有效，不刷新） |
 | `deepseek_web_api_key` | 搜索/网页能力 key |
 | `exa_api_key` | Exa 搜索 key |
 

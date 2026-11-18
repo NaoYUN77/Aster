@@ -95,8 +95,8 @@ is broadcast as `model.changed` just like a button click.
   defaults, so a native shell deployment must list its exact origin there. The SSE response is
   written on a hijacked socket and therefore echoes `Access-Control-Allow-Origin` and
   `Vary: Origin` itself; an origin outside the allowlist gets no ACAO.
-- Connectors (GitHub/Gmail, read-only) are authorized once on the server and shared by every
-  client: create with `POST /connectors`, open the URL from `POST /connectors/{slug}/oauth/start`,
+- Connectors (GitHub, Gmail, Outlook, Linear, Notion, Google Calendar and Google Drive, all
+  read-only) are authorized once on the server and shared by every client: create with `POST /connectors`, open the URL from `POST /connectors/{slug}/oauth/start`,
   and poll `GET /connectors` (or listen for `connector.changed`). Tokens never reach a client.
   `credential.request` means a tool needs authorization; it carries only the slug/provider/tool.
   Gmail has no send/delete/modify tools.
@@ -106,8 +106,10 @@ is broadcast as `model.changed` just like a button click.
   `oauth/start` reconnects the same connection. Repeating the DELETE is `204`; an unknown slug is
   `404 CONNECTOR_NOT_FOUND`; connectors off is `503 CONNECTORS_DISABLED`.
 - Server-side OAuth secrets live in the connector secret directory: `github_client_id`,
-  `github_client_secret`, `google_client_id`, `google_client_secret`, and
-  `credential_master_key` (32 bytes, used for AES-256-GCM). The OAuth app's callback URL is
+  `github_client_secret`, `google_client_id`, `google_client_secret` (shared by Gmail, Google
+  Calendar and Google Drive), `outlook_client_id`, `outlook_client_secret`, `linear_client_id`,
+  `linear_client_secret`, `notion_client_id`, `notion_client_secret`, and `credential_master_key`
+  (32 bytes, used for AES-256-GCM). The OAuth app's callback URL is
   `{CONNECTOR_OAUTH_REDIRECT_BASE}/api/v1/connectors/oauth/callback`; missing secrets or an unset
   redirect base are `409 CONNECTOR_SECRET_MISSING` / `CONNECTOR_NOT_CONFIGURED` /
   `CONNECTOR_OAUTH_DISABLED`.
@@ -134,7 +136,13 @@ is broadcast as `model.changed` just like a button click.
   directory under `DATA_DIR`; treat enabling one as a high-risk admin action.
 - Connector tools are `connector_list`, `connector_github_list_repositories`,
   `connector_github_list_issues`, `connector_github_get_issue`,
-  `connector_gmail_search_messages`, `connector_gmail_get_message`.
+  `connector_gmail_search_messages`, `connector_gmail_get_message`,
+  `connector_outlook_list_messages`, `connector_outlook_search_messages`,
+  `connector_outlook_get_message`, `connector_linear_list_issues`,
+  `connector_linear_search_issues`, `connector_linear_get_issue`, `connector_notion_search`,
+  `connector_notion_get_page`, `connector_google_calendar_list_events`,
+  `connector_google_calendar_get_event`, `connector_google_drive_search_files`,
+  `connector_google_drive_get_file`.
 - Errors use `{ "error": { "code", "message" } }`; display `message`, branch on `code`.
 
 ## Error codes

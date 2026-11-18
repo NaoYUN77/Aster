@@ -8,6 +8,12 @@ export const SECRET_WHITELIST = [
   "github_client_secret",
   "google_client_id",
   "google_client_secret",
+  "outlook_client_id",
+  "outlook_client_secret",
+  "linear_client_id",
+  "linear_client_secret",
+  "notion_client_id",
+  "notion_client_secret",
   "deepseek_web_api_key",
   "exa_api_key",
 ] as const;
@@ -15,7 +21,15 @@ export const SECRET_WHITELIST = [
 export type SecretName = (typeof SECRET_WHITELIST)[number];
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,47}$/;
-const PROVIDERS: readonly Provider[] = ["github", "gmail"];
+const PROVIDERS: readonly Provider[] = [
+  "github",
+  "gmail",
+  "outlook",
+  "linear",
+  "notion",
+  "google_calendar",
+  "google_drive",
+];
 
 export function isSecretName(name: string): name is SecretName {
   return (SECRET_WHITELIST as readonly string[]).includes(name);
@@ -37,7 +51,7 @@ export function connectionSlug(value: string): string {
 
 export function providerName(value: unknown): Provider {
   if (typeof value !== "string" || !(PROVIDERS as readonly string[]).includes(value)) {
-    throw new BrokerError(400, "INVALID_PROVIDER", "provider must be github or gmail");
+    throw new BrokerError(400, "INVALID_PROVIDER", "provider must be github, gmail, outlook, linear, notion, google_calendar or google_drive");
   }
   return value as Provider;
 }

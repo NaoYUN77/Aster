@@ -19,6 +19,25 @@ export async function connectorJson(
   init: RequestInit,
   options: ConnectorFetchOptions,
 ): Promise<unknown> {
+  const response = await connectorResponse(url, init, options);
+  const text = await boundedText(response);
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "connector upstream returned invalid JSON");
+  }
+}
+
+/** Bounded plain-text request, used for Google Docs export; the body is never binary. */
+export async function connectorText(
+  url: string,
+  init: RequestInit,
+  options: ConnectorFetchOptions,
+): Promise<string> {
+  return boundedText(await connectorResponse(url, init, options));
+}
+
+async function connectorResponse(url: string, init: RequestInit, options: ConnectorFetchOptions): Promise<Response> {
   const timeout = AbortSignal.timeout(options.timeoutMs);
   const signal = options.signal === undefined ? timeout : AbortSignal.any([options.signal, timeout]);
   let response: Response;
@@ -41,15 +60,15 @@ export async function connectorJson(
     if (response.status === 429) throw new ConnectorError("CONNECTOR_RATE_LIMITED", "connector upstream rate limit reached");
     throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "connector upstream is unavailable");
   }
+  return response;
+}
+
+async function boundedText(response: Response): Promise<string> {
   const text = await response.text();
   if (Buffer.byteLength(text, "utf8") > MAX_RESPONSE_BYTES) {
     throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "connector upstream response was too large");
   }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "connector upstream returned invalid JSON");
-  }
+  return text;
 }
 
 /** Small header lookup that does not care about provider header casing. */
