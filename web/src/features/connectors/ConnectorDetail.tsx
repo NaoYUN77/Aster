@@ -21,6 +21,7 @@ import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { connectorMeta } from "./catalog";
+import { isAwaitingAuthorization } from "./connector-awaiting";
 import {
   useConnectConnector,
   useDisconnectConnector,
@@ -78,9 +79,20 @@ export function ConnectorDetail({
   const meta = connectorMeta(connector.id);
   const connected = connector.status === "connected";
   const busy = connect.isPending || disconnect.isPending;
-  const awaiting =
-    connector.status === "pending" ||
-    (connect.data?.status === "pending" && !connected);
+  // 只认本轮针对这个连接器的授权结果，避免上一次尝试的 data/error 串台。
+  const thisAttempt =
+    connect.variables === connector.id ? connect.data : undefined;
+  const attemptFailed =
+    connect.variables === connector.id && connect.isError;
+  const attemptInFlight =
+    connect.variables === connector.id && connect.isPending;
+  const awaiting = isAwaitingAuthorization({
+    connectorStatus: connector.status,
+    attempt: thisAttempt,
+    attemptFailed,
+    attemptInFlight,
+  });
+  const manualAuthUrl = thisAttempt?.manualAuthUrl ?? null;
   const connectedAt = formatConnectedAt(connector.connectedAt);
   const permissions = connector.scopes.length > 0 ? connector.scopes : meta?.permissions ?? [];
 
@@ -181,9 +193,9 @@ export function ConnectorDetail({
           </p>
         )}
 
-        {connect.data?.manualAuthUrl && !connected && (
+        {manualAuthUrl && !connected && (
           <a
-            href={connect.data.manualAuthUrl}
+            href={manualAuthUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="mt-2 inline-block text-[11px] font-medium text-primary underline underline-offset-2"
@@ -220,7 +232,7 @@ export function ConnectorDetail({
             <div className="flex gap-2">
               <Button variant="outline" className="flex-1" onClick={handleConnect} disabled={busy}>
                 {connect.isPending ? <Spinner /> : <Link2 />}
-                {connect.isPending ? "正在打开浏览器…" : "重新授权"}
+                {connect.isPending ? "正在连接…" : "重新授权"}
               </Button>
               <Button
                 variant="destructive"
@@ -236,7 +248,7 @@ export function ConnectorDetail({
             <Button className="w-full" onClick={handleConnect} disabled={busy}>
               {connect.isPending ? <Spinner /> : <Link2 />}
               {connect.isPending
-                ? "正在打开浏览器…"
+                ? "正在连接…"
                 : connector.status === "pending"
                   ? "继续授权"
                   : connector.status === "error"

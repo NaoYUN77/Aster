@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  ConnectorConnectError,
   connectConnector,
   connectorErrorText,
   connectorsQueryKey,
@@ -14,6 +15,7 @@ import { toApiError } from "@/api/errors";
 import { playCue } from "@/lib/sound";
 import { useConnectionStore } from "@/store/connection";
 import { connectorName } from "./catalog";
+import { discardFailedConnector } from "./connector-refresh";
 
 export function useConnectors() {
   const baseUrl = useConnectionStore((state) => state.baseUrl);
@@ -42,7 +44,19 @@ export function useConnectConnector() {
   const baseUrl = useConnectionStore((state) => state.baseUrl);
 
   return useMutation<ConnectResult, unknown, ConnectorId>({
-    mutationFn: (id) => connectConnector(id),
+    mutationFn: async (id) => {
+      try {
+        return await connectConnector(id);
+      } catch (error) {
+        // 失败不会产生可用的授权 URL：只清理由本次流程建出来的 pending 行，
+        // 保证弹窗/卡片不会停在“等待授权”。已有连接不删；清理期间
+        // mutation 保持 pending，避免用户立刻重试时 DELETE 误删新连接。
+        if (error instanceof ConnectorConnectError && error.cleanupPending) {
+          await discardFailedConnector(queryClient, baseUrl, id);
+        }
+        throw error;
+      }
+    },
     onSuccess: (result, id) => {
       // 只进入等待授权；是否已连接以 connector.changed / 重新拉列表为准。
       if (result.manualAuthUrl) {

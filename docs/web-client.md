@@ -248,6 +248,10 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
   4. 本端只进入「等待授权」，不假装已连接；授权回调由服务端处理，客户端以
      SSE `connector.changed` 或重新拉列表为准。授权页留在浏览器里，
      客户端不关闭、不跳转、不接管浏览器。
+  5. `POST /connectors` 成功但 `POST /oauth/start` 失败时，客户端 best-effort
+     `DELETE /connectors/{slug}` 清掉本次建出的 pending 行并刷新列表；
+     清理失败不覆盖原始错误。界面不会再显示「已发起授权」，卡片回到「未连接」。
+     已连接的旧连接不会被误删。
 - 从浏览器切回 App 时，Capacitor 端监听 `App` 的 `appStateChange`
   （`isActive: true`）重新拉取列表；Web / Tauri 由 Connectors 页面的
   `visibilitychange` / `focus` 刷新，三端都另有 SSE `connector.changed` 兜底。

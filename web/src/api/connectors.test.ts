@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { components } from "./schema";
 import {
+  ConnectorConnectError,
   connectConnector,
   connectorErrorText,
   createConnector,
@@ -285,9 +286,13 @@ describe("connectConnector", () => {
     );
     const opener = vi.fn(async () => "opened" as const);
 
-    await expect(connectConnector("github", opener)).rejects.toBeInstanceOf(
-      ApiError,
-    );
+    const error = (await connectConnector("github", opener).catch(
+      (caught: unknown) => caught,
+    )) as ConnectorConnectError;
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toBeInstanceOf(ConnectorConnectError);
+    expect(error.cleanupPending).toBe(false);
     expect(opener).not.toHaveBeenCalled();
     expect(connectorErrorText("CONNECTOR_NOT_CONFIGURED")).toBe(
       "服务器未配置 OAuth 凭据",
@@ -298,6 +303,76 @@ describe("connectConnector", () => {
     expect(connectorErrorText("CONNECTOR_OAUTH_STATE_INVALID")).toBe(
       "授权已过期，请重试",
     );
+  });
+
+  it("新建 pending 后 oauth/start 失败：标记需要清理，错误码保留", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            connection: connection({ provider: "gmail", status: "pending" }),
+            created: true,
+          },
+          201,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: "SECRETS_UNAVAILABLE",
+              message: "secret store unavailable",
+            },
+          },
+          500,
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const opener = vi.fn(async () => "opened" as const);
+
+    const error = (await connectConnector("gmail", opener).catch(
+      (caught: unknown) => caught,
+    )) as ConnectorConnectError;
+
+    expect(error).toBeInstanceOf(ConnectorConnectError);
+    expect(error.cleanupPending).toBe(true);
+    expect(error.code).toBe("SECRETS_UNAVAILABLE");
+    expect(connectorErrorText(error.code)).toBe(
+      "服务器暂时连不上凭据服务，请稍后重试",
+    );
+    expect(opener).not.toHaveBeenCalled();
+  });
+
+  it("已有 connected 连接时失败不标记清理，避免误删可用连接", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          connection: connection({ provider: "github", status: "connected" }),
+          created: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: "SECRETS_UNAVAILABLE",
+              message: "secret store unavailable",
+            },
+          },
+          500,
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const opener = vi.fn(async () => "opened" as const);
+    const error = (await connectConnector("github", opener).catch(
+      (caught: unknown) => caught,
+    )) as ConnectorConnectError;
+
+    expect(error).toBeInstanceOf(ConnectorConnectError);
+    expect(error.cleanupPending).toBe(false);
   });
 });
 
@@ -328,5 +403,32 @@ describe("createConnector / deleteConnector", () => {
       "https://aster.test/api/v1/connectors/github",
     );
     expect(fetchMock.mock.calls[1]![1]).toMatchObject({ method: "DELETE" });
+  });
+});
+
+describe("connectorErrorText", () => {
+  it("覆盖凭据服务相关的真实错误码", () => {
+    expect(connectorErrorText("SECRETS_UNAVAILABLE")).toBe(
+      "服务器暂时连不上凭据服务，请稍后重试",
+    );
+    expect(connectorErrorText("CONNECTOR_SECRET_UNREADABLE")).toBe(
+      "服务器无法读取凭据配置",
+    );
+    expect(connectorErrorText("CONNECTOR_MASTER_KEY_INVALID")).toBe(
+      "服务器凭据密钥配置有误",
+    );
+  });
+
+  it("未配置/缺少 OAuth 凭据保持原文案", () => {
+    expect(connectorErrorText("CONNECTOR_NOT_CONFIGURED")).toBe(
+      "服务器未配置 OAuth 凭据",
+    );
+    expect(connectorErrorText("CONNECTOR_SECRET_MISSING")).toBe(
+      "服务器未配置 OAuth 凭据",
+    );
+  });
+
+  it("未知错误码使用兜底文案", () => {
+    expect(connectorErrorText("SOMETHING_NEW")).toBe("连接器操作失败，请重试");
   });
 });

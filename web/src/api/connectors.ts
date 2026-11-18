@@ -83,6 +83,26 @@ export type ConnectResult = {
   manualAuthUrl: string | null;
 };
 
+/**
+ * 授权启动失败时保留原始错误码，并标明是否需要在客户端清理 pending 行。
+ *
+ * 继承 ApiError，`toApiError` 会原样返回，错误码文案不受影响。
+ */
+export class ConnectorConnectError extends ApiError {
+  readonly cleanupPending: boolean;
+
+  constructor(cause: ApiError, cleanupPending: boolean) {
+    super(
+      cause.code,
+      cause.message,
+      cause.status,
+      cause.requestStatus ? { requestStatus: cause.requestStatus } : {},
+    );
+    this.name = "ConnectorConnectError";
+    this.cleanupPending = cleanupPending;
+  }
+}
+
 /** 列表查询的根 key；SSE / 其他端变更时按前缀失效。 */
 export const CONNECTORS_QUERY_ROOT = "connectors";
 
@@ -276,16 +296,28 @@ export async function connectConnector(
   id: ConnectorId,
   openUrl: (url: string) => Promise<OpenAuthOutcome> = openAuthUrl,
 ): Promise<ConnectResult> {
-  await createConnector(id);
-  const { url } = await startConnectorOAuth(id);
-  if (typeof url !== "string" || url.trim() === "") {
-    throw new ApiError("INVALID_RESPONSE", "服务器没有返回授权地址", 502);
+  let cleanupPending = false;
+
+  try {
+    const created = await createConnector(id);
+    // 只清理由本次流程建出来的行；已连接的旧连接失败时绝不能删。
+    const status = created.connection?.status;
+    cleanupPending =
+      created.created === true ||
+      (status !== undefined && status !== "connected");
+
+    const { url } = await startConnectorOAuth(id);
+    if (typeof url !== "string" || url.trim() === "") {
+      throw new ApiError("INVALID_RESPONSE", "服务器没有返回授权地址", 502);
+    }
+    const outcome = await openUrl(url);
+    return {
+      status: "pending",
+      manualAuthUrl: outcome === "manual" ? url : null,
+    };
+  } catch (error) {
+    throw new ConnectorConnectError(toApiError(error), cleanupPending);
   }
-  const outcome = await openUrl(url);
-  return {
-    status: "pending",
-    manualAuthUrl: outcome === "manual" ? url : null,
-  };
 }
 
 /** 仅 mock：让本地 mock 服务端推送一条 credential.request，便于三端验收弹窗。 */
