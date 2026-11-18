@@ -115,6 +115,8 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 
 - 初始拉最近 30 条；上滚用 `before=<entry cursor>` 加载更早，保持滚动位置。
 - 发送使用 `clientMessageId`（UUID）；202 后显示“排队中”，SSE 推进到“正在回复/完成”。
+- SSE `request.queued/running` 可能先于 POST `/api/v1/messages` 的响应到达；
+  响应落地时按本地已到达的状态回填，不能把 running/done 覆盖回 queued。
 - 去重：历史与 SSE live 同 id 合并时保留 `requestId` / `clientMessageId`（历史文本优先）；
   本地乐观 user 消息只与服务器 **user** 消息按 `clientMessageId` 或 `requestId` 去重，
   不按文本、也不用 assistant 的 `requestId` 猜。`$model` 命令没有 durable user entry，

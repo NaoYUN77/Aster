@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { abortRequest, sendMessage, steerRequest } from "@/api/client";
 import { errorText, toApiError, userFacingMessage } from "@/api/errors";
 import type { DisplayMessage } from "./use-display-messages";
-import { useChatStore } from "@/store/chat";
+import { useChatStore, type OutgoingStatus } from "@/store/chat";
 
 export function useSendMessage() {
   const addOutgoing = useChatStore((state) => state.addOutgoing);
@@ -61,13 +61,37 @@ export function useSendMessage() {
 
       try {
         const result = await sendMessage({ clientMessageId, text: trimmed });
+        // SSE queued/running 与 POST 响应几乎同刻到达，事件可能先落地；
+        // 此时不能无条件把状态写回 queued，否则会一直显示“排队中”直到 done。
+        const current = useChatStore.getState();
+        const local = current.outgoing.find(
+          (item) => item.clientMessageId === clientMessageId,
+        );
+        let status: OutgoingStatus = "queued";
+        if (
+          local?.status === "done" ||
+          local?.status === "failed" ||
+          local?.status === "aborted"
+        ) {
+          status = local.status;
+        } else if (
+          local?.status === "running" ||
+          (current.activeRequestId === result.requestId &&
+            current.activeStatus === "running")
+        ) {
+          status = "running";
+        }
+
         updateOutgoing(clientMessageId, {
           requestId: result.requestId,
-          status: "queued",
+          status,
         });
-        const current = useChatStore.getState();
-        if (!current.activeRequestId) {
-          current.setActive(result.requestId, "queued", clientMessageId);
+        // 已经 done/failed/aborted 的请求不能因为晚到的 POST 响应被重新激活。
+        if (
+          !current.activeRequestId &&
+          (status === "queued" || status === "running")
+        ) {
+          current.setActive(result.requestId, status, clientMessageId);
         }
         return true;
       } catch (error) {

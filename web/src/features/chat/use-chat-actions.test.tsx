@@ -138,4 +138,53 @@ describe("useSendMessage 非运行状态保持原语义", () => {
     expect(state.activeRequestId).toBe("req1");
     expect(state.activeStatus).toBe("queued");
   });
+
+  it("POST 响应晚于 running 事件时不把状态覆盖回排队中", async () => {
+    let resolveSend!: (value: { requestId: string; status: "queued" }) => void;
+    mockedSend.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      }),
+    );
+
+    const pending = captureSend()("新消息");
+    const clientMessageId = useChatStore.getState().outgoing[0]!.clientMessageId;
+
+    // 模拟 SSE request.queued + request.running 先于 POST 响应到达。
+    const state = useChatStore.getState();
+    state.updateOutgoing(clientMessageId, {
+      requestId: "req1",
+      status: "running",
+    });
+    state.setActive("req1", "running", clientMessageId);
+
+    resolveSend({ requestId: "req1", status: "queued" });
+    await expect(pending).resolves.toBe(true);
+
+    expect(useChatStore.getState().outgoing[0]!.status).toBe("running");
+    expect(useChatStore.getState().activeStatus).toBe("running");
+  });
+
+  it("POST 响应晚于 done 事件时保留最终状态", async () => {
+    let resolveSend!: (value: { requestId: string; status: "queued" }) => void;
+    mockedSend.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      }),
+    );
+
+    const pending = captureSend()("新消息");
+    const clientMessageId = useChatStore.getState().outgoing[0]!.clientMessageId;
+    useChatStore.getState().updateOutgoing(clientMessageId, {
+      requestId: "req1",
+      status: "done",
+    });
+
+    resolveSend({ requestId: "req1", status: "queued" });
+    await expect(pending).resolves.toBe(true);
+
+    expect(useChatStore.getState().outgoing[0]!.status).toBe("done");
+    // 晚到的 POST 响应不能把已完成请求重新设为 active。
+    expect(useChatStore.getState().activeRequestId).toBeNull();
+  });
 });
