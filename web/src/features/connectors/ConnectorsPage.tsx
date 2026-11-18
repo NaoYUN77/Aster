@@ -19,12 +19,33 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { mergeCatalog } from "./catalog";
 import { ConnectorCard } from "./ConnectorCard";
 import { ConnectorDetail } from "./ConnectorDetail";
-import { useConnectors } from "./use-connectors";
+import {
+  useCancelConnectorAuthorization,
+  useConnectConnector,
+  useConnectors,
+  useDisconnectConnector,
+} from "./use-connectors";
 
 export function ConnectorsPage() {
   const navigate = useNavigate();
   const query = useConnectors();
+  const connectMutation = useConnectConnector();
+  const disconnectMutation = useDisconnectConnector();
+  const cancelMutation = useCancelConnectorAuthorization();
   const [selectedId, setSelectedId] = useState<ConnectorId | null>(null);
+
+  const handleConnect = (id: ConnectorId) => {
+    if (connectMutation.isPending) return;
+    connectMutation.mutate(id);
+  };
+  const handleDisconnect = (id: ConnectorId) => {
+    if (disconnectMutation.isPending) return;
+    disconnectMutation.mutate(id);
+  };
+  const handleCancel = (id: ConnectorId) => {
+    if (cancelMutation.isPending) return;
+    cancelMutation.mutate(id);
+  };
 
   const connectors = mergeCatalog(query.data?.connectors ?? []);
   const selected = connectors.find((connector) => connector.id === selectedId) ?? null;
@@ -130,7 +151,26 @@ export function ConnectorsPage() {
                   <ConnectorCard
                     key={connector.id}
                     connector={connector}
-                    loading={query.isFetching && !query.isPending}
+                    manualAuthUrl={
+                      connectMutation.variables === connector.id
+                        ? (connectMutation.data?.manualAuthUrl ?? null)
+                        : null
+                    }
+                    connecting={
+                      connectMutation.isPending &&
+                      connectMutation.variables === connector.id
+                    }
+                    disconnecting={
+                      disconnectMutation.isPending &&
+                      disconnectMutation.variables === connector.id
+                    }
+                    cancelling={
+                      cancelMutation.isPending &&
+                      cancelMutation.variables === connector.id
+                    }
+                    onConnect={() => handleConnect(connector.id)}
+                    onDisconnect={() => handleDisconnect(connector.id)}
+                    onCancel={() => handleCancel(connector.id)}
                     onOpen={() => setSelectedId(connector.id)}
                   />
                 ))}

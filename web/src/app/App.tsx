@@ -7,6 +7,7 @@ import { useChatEvents } from "@/features/chat/use-chat-events";
 import { LoginPage } from "@/features/auth/LoginPage";
 import { ConnectorsPage } from "@/features/connectors/ConnectorsPage";
 import { CredentialRequestDialog } from "@/features/connectors/CredentialRequestDialog";
+import { useConnectorResumeRefresh } from "@/features/connectors/use-connector-resume";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { SetupPage } from "@/features/settings/SetupPage";
 import { platform } from "@/lib/platform";
@@ -82,6 +83,7 @@ function RequireAuth() {
 /** 登录后常驻：SSE 与安全注入弹窗在聊天/设置/连接器页之间保持。 */
 function AuthenticatedShell() {
   useChatEvents();
+  useConnectorResumeRefresh();
 
   useEffect(() => {
     void useSoundStore.getState().hydrate();

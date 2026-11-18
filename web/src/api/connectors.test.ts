@@ -202,10 +202,11 @@ describe("connectConnector", () => {
         jsonResponse({ url: "https://github.com/login/oauth/authorize?state=x" }),
       );
     vi.stubGlobal("fetch", fetchMock);
-    const opener = vi.fn(async () => {});
+    const opener = vi.fn(async () => "opened" as const);
 
     await expect(connectConnector("github", opener)).resolves.toEqual({
       status: "pending",
+      manualAuthUrl: null,
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -238,12 +239,33 @@ describe("connectConnector", () => {
       )
       .mockResolvedValueOnce(jsonResponse({ url: "https://accounts.google.com/o/oauth2" }));
     vi.stubGlobal("fetch", fetchMock);
-    const opener = vi.fn(async () => {});
+    const opener = vi.fn(async () => "opened" as const);
 
     await connectConnector("gmail", opener);
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(opener).toHaveBeenCalledWith("https://accounts.google.com/o/oauth2");
+  });
+
+  it("Web 需要手动兜底时保留授权 URL 供 UI 手动打开", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          connection: connection({ provider: "github" }),
+          created: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ url: "https://github.com/login/oauth/authorize?state=x" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const opener = vi.fn(async () => "manual" as const);
+
+    await expect(connectConnector("github", opener)).resolves.toEqual({
+      status: "pending",
+      manualAuthUrl: "https://github.com/login/oauth/authorize?state=x",
+    });
   });
 
   it("create 409 时不再启动 OAuth，也不打开浏览器", async () => {
@@ -261,7 +283,7 @@ describe("connectConnector", () => {
         ),
       ),
     );
-    const opener = vi.fn(async () => {});
+    const opener = vi.fn(async () => "opened" as const);
 
     await expect(connectConnector("github", opener)).rejects.toBeInstanceOf(
       ApiError,

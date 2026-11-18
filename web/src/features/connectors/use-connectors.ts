@@ -43,11 +43,17 @@ export function useConnectConnector() {
 
   return useMutation<ConnectResult, unknown, ConnectorId>({
     mutationFn: (id) => connectConnector(id),
-    onSuccess: (_result, id) => {
+    onSuccess: (result, id) => {
       // 只进入等待授权；是否已连接以 connector.changed / 重新拉列表为准。
-      toast.info(`${connectorName(id)} 授权页已打开`, {
-        description: "在浏览器完成授权后回到 App，状态会自动刷新",
-      });
+      if (result.manualAuthUrl) {
+        toast.info(`${connectorName(id)} 已请求打开授权页`, {
+          description: "若浏览器没有自动打开，请点击卡片上的「打开授权页」",
+        });
+      } else {
+        toast.info(`${connectorName(id)} 授权页已打开`, {
+          description: "在浏览器完成授权后回到 App，状态会自动刷新",
+        });
+      }
       void queryClient.invalidateQueries({
         queryKey: connectorsQueryKey(baseUrl),
       });
@@ -70,6 +76,26 @@ export function useDisconnectConnector() {
       toast.success(`${connectorName(id)} 已断开`, {
         description: "相关工具将不再可用，三端同时失效",
       });
+      void queryClient.invalidateQueries({
+        queryKey: connectorsQueryKey(baseUrl),
+      });
+    },
+    onError: (error) => {
+      playCue("error");
+      toastFailure(error);
+    },
+  });
+}
+
+/** 等待授权时取消：DELETE 同一 slug，服务端把这条连接标成 revoked。 */
+export function useCancelConnectorAuthorization() {
+  const queryClient = useQueryClient();
+  const baseUrl = useConnectionStore((state) => state.baseUrl);
+
+  return useMutation<void, unknown, ConnectorId>({
+    mutationFn: (id) => deleteConnector(id),
+    onSuccess: (_result, id) => {
+      toast.info(`${connectorName(id)} 已取消授权`);
       void queryClient.invalidateQueries({
         queryKey: connectorsQueryKey(baseUrl),
       });

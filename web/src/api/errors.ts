@@ -144,7 +144,6 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   CONNECTOR_SECRET_MISSING: "服务器未配置 OAuth 凭据",
   CONNECTOR_OAUTH_STATE_INVALID: "授权已过期，请重试",
   OAUTH_FAILED: "授权失败，请重试",
-  BROWSER_UNAVAILABLE: "无法打开系统浏览器，请重试",
   CREDENTIAL_NOT_FOUND: "凭据请求不存在或已结束",
   CREDENTIAL_NOT_PENDING: "凭据请求已结束",
   CREDENTIAL_EXPIRED: "凭据请求已超时，请重新发起",

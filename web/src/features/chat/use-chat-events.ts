@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { getQueue } from "@/api/client";
 import { CONNECTORS_QUERY_ROOT } from "@/api/connectors";
+import { refreshConnectorsFromServer } from "@/features/connectors/connector-refresh";
 import { parseServerEvent } from "@/api/events";
 import { errorText, toApiError } from "@/api/errors";
 import { subscribeEvents, type ServerEvent } from "@/api/sse";
@@ -221,10 +222,9 @@ export function useChatEvents(): void {
         }
 
         case "connector.changed": {
-          // 连接状态以服务端为准：任一端授权/断开后，本端重新拉取列表。
-          void queryClient.invalidateQueries({
-            queryKey: [CONNECTORS_QUERY_ROOT],
-          });
+          // 连接状态以服务端为准：任一端授权/断开后，本端重新拉取列表；
+          // 不对系统浏览器做任何操作。
+          void refreshConnectorsFromServer(queryClient, baseUrl);
           break;
         }
 

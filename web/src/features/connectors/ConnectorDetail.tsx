@@ -181,6 +181,17 @@ export function ConnectorDetail({
           </p>
         )}
 
+        {connect.data?.manualAuthUrl && !connected && (
+          <a
+            href={connect.data.manualAuthUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 inline-block text-[11px] font-medium text-primary underline underline-offset-2"
+          >
+            打开授权页
+          </a>
+        )}
+
         <div className="mt-4">
           <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
             <ShieldCheck className="size-3.5" />

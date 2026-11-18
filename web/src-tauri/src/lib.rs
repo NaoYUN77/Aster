@@ -3,6 +3,8 @@ pub fn run() {
   tauri::Builder::default()
     // Token 与服务器地址存放在 Tauri store（settings.json），不写普通明文配置。
     .plugin(tauri_plugin_store::Builder::new().build())
+    // 授权页交给系统默认浏览器；授权结束后不做任何关闭/跳转操作。
+    .plugin(tauri_plugin_opener::init())
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

@@ -1,3 +1,7 @@
+import {
+  openAuthUrl,
+  type OpenAuthOutcome,
+} from "@/lib/open-auth-url";
 import { getApiConfig, notifyUnauthorized } from "./client";
 import {
   ApiError,
@@ -73,7 +77,11 @@ export type CredentialRequest = {
 
 export type CancelReason = "denied" | "cancelled" | "timeout";
 
-export type ConnectResult = { status: "pending" };
+export type ConnectResult = {
+  status: "pending";
+  /** Web 端保留授权地址作为手动兜底，UI 渲染可点击的「打开授权页」。 */
+  manualAuthUrl: string | null;
+};
 
 /** 列表查询的根 key；SSE / 其他端变更时按前缀失效。 */
 export const CONNECTORS_QUERY_ROOT = "connectors";
@@ -259,21 +267,25 @@ export async function deleteConnector(id: ConnectorId): Promise<void> {
 }
 
 /**
- * 先创建连接，再拿授权 URL，交给系统浏览器。
+ * 先创建连接，再拿授权 URL，交给 `openAuthUrl` 用设备默认浏览器打开。
  *
  * 本端只进入 pending；是否真正连接以 `connector.changed` / 重新拉列表为准。
+ * Web 端返回 `manualAuthUrl` 作为兜底链接，绝不当前页跳转。
  */
 export async function connectConnector(
   id: ConnectorId,
-  openUrl: (url: string) => Promise<void> = openAuthorizationUrl,
+  openUrl: (url: string) => Promise<OpenAuthOutcome> = openAuthUrl,
 ): Promise<ConnectResult> {
   await createConnector(id);
   const { url } = await startConnectorOAuth(id);
   if (typeof url !== "string" || url.trim() === "") {
     throw new ApiError("INVALID_RESPONSE", "服务器没有返回授权地址", 502);
   }
-  await openUrl(url);
-  return { status: "pending" };
+  const outcome = await openUrl(url);
+  return {
+    status: "pending",
+    manualAuthUrl: outcome === "manual" ? url : null,
+  };
 }
 
 /** 仅 mock：让本地 mock 服务端推送一条 credential.request，便于三端验收弹窗。 */
@@ -282,54 +294,4 @@ export async function requestMockCredential(connectorId?: ConnectorId): Promise<
     method: "POST",
     ...(connectorId ? { body: JSON.stringify({ connectorId }) } : {}),
   });
-}
-
-type BrowserModule = {
-  Browser: { open: (options: { url: string }) => Promise<void> };
-};
-
-/**
- * 优先 Capacitor Browser（系统浏览器），Web 回退 window.open，
- * 最后回退 location.assign。全部失败时给出中文错误，不暴露原始异常。
- */
-export async function openAuthorizationUrl(url: string): Promise<void> {
-  const { Capacitor } = await import("@capacitor/core");
-  if (Capacitor.isNativePlatform()) {
-    try {
-      const module = (await import("@capacitor/browser")) as BrowserModule;
-      await module.Browser.open({ url });
-      return;
-    } catch {
-      // 插件未安装/打开失败：继续走 Web 回退。
-    }
-  }
-
-  try {
-    if (typeof window !== "undefined" && typeof window.open === "function") {
-      // 不用 noopener 特性，否则部分浏览器即使打开成功也返回 null，
-      // 会误判为失败并跳走当前页。
-      const opened = window.open(url, "_blank");
-      if (opened) {
-        try {
-          opened.opener = null;
-        } catch {
-          /* cross-origin opener 可能不可写 */
-        }
-        return;
-      }
-    }
-  } catch {
-    // 弹窗被拦截：继续尝试当前页跳转。
-  }
-
-  try {
-    if (typeof window !== "undefined" && window.location) {
-      window.location.assign(url);
-      return;
-    }
-  } catch {
-    // fall through
-  }
-
-  throw new ApiError("BROWSER_UNAVAILABLE", "无法打开系统浏览器，请重试");
 }

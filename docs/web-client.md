@@ -239,11 +239,22 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
   1. `POST /api/v1/connectors`，body `{provider:id, slug:id}`；已存在时服务端返回
      200 `created:false`，按幂等成功继续；
   2. `POST /api/v1/connectors/{slug}/oauth/start` 取 `{url}`；
-  3. 用系统浏览器打开：优先 `@capacitor/browser` 的 `Browser.open`，非原生/无插件
-     回退 `window.open(url, "_blank")`，再回退 `location.assign`；
+  3. 统一走 `openAuthUrl(url)`，用各平台自己的默认浏览器：
+     - Tauri：`@tauri-apps/plugin-opener`（动态 import，浏览器构建不加载）；
+     - Capacitor：`@capacitor/browser` 的 Custom Tabs，Android 跟随默认浏览器；
+     - Web：`window.open(url, "_blank", "noopener,noreferrer")` 开新标签页，
+       绝不当前页跳转。带 `noopener` 时返回值为 null，无法判断是否被拦截，
+       因此等待授权的卡片始终同时提供「打开授权页」手动链接；
   4. 本端只进入「等待授权」，不假装已连接；授权回调由服务端处理，客户端以
-     SSE `connector.changed` 或重新拉列表为准。
-- 从浏览器回到 App 时，Connectors 页面监听 `visibilitychange` / `focus` 主动刷新一次。
+     SSE `connector.changed` 或重新拉列表为准。授权页留在浏览器里，
+     客户端不关闭、不跳转、不接管浏览器。
+- 从浏览器切回 App 时，Capacitor 端监听 `App` 的 `appStateChange`
+  （`isActive: true`）重新拉取列表；Web / Tauri 由 Connectors 页面的
+  `visibilitychange` / `focus` 刷新，三端都另有 SSE `connector.changed` 兜底。
+  **不会程序化关闭系统浏览器**，也不使用深链 / 自定义 scheme 强制把用户拉回 App：
+  授权页是否关闭由用户决定。
+- 卡片四态：`disconnected` 灰色「连接」、`pending` 黄色「等待授权…」+「取消」、
+  `connected` 绿色显示 `accountLabel` +「断开」、`error` 红色错误文案 +「重试」。
 - 重新授权复用同一流程；断开调用 `DELETE /api/v1/connectors/{slug}`，成功后以服务端
   列表为准。
 - 刷新/重启后状态来自服务端，不来自客户端缓存。若服务端暂时不可达，
@@ -287,7 +298,7 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 
 1. GitHub/Gmail 授权后刷新、重启壳层仍显示已连接（服务端状态）。
 2. 断开后卡片变为未连接，相关工具不可用。
-3. 点「连接」会打开系统浏览器；回到 App 后状态自动刷新。
+3. 点「连接」会打开系统浏览器；用户切回 App 时状态自动刷新，浏览器不会被 App 关闭。
 4. 服务端未启用连接器时显示「服务器未启用连接器」，不是「未连接」。
 5. Mock 入口仍能弹出凭据组件；组件不再向服务端提交任何内容，
    localStorage/sessionStorage 中搜不到输入过的 token。
