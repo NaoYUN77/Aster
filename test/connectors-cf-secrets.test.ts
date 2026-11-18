@@ -142,6 +142,41 @@ test("every broker failure is SECRETS_UNAVAILABLE and never reveals the value", 
   }
 });
 
+test("a broker secret that is not configured maps to CONNECTOR_NOT_CONFIGURED", async () => {
+  const cases: { status: number; code: string }[] = [
+    { status: 500, code: "SECRET_NOT_CONFIGURED" },
+    { status: 404, code: "SECRET_NOT_ALLOWED" },
+  ];
+  for (const item of cases) {
+    const { fetchImpl } = fakeBroker(() =>
+      json({ error: { code: item.code, message: "secret is not configured on the broker" } }, item.status));
+    const provider = new CfSecretProvider({ client: client(fetchImpl) });
+    await assert.rejects(provider.read("google_client_secret"), (error) => {
+      assert.equal(codeOf(error), "CONNECTOR_NOT_CONFIGURED");
+      assert.ok((error as Error).message.includes("google_client_secret"), "the logical name is safe to report");
+      return true;
+    });
+  }
+});
+
+test("a broker outage, Access rejection or malformed error body stays SECRETS_UNAVAILABLE", async () => {
+  const handlers: ((url: string, init: RequestInit) => Response | Promise<Response>)[] = [
+    () => json({ error: { code: "BROKER_UNAUTHORIZED", message: "no" } }, 403),
+    () => new Response("internal broker error", { status: 500 }),
+    () => new Response("<html>Cloudflare Access</html>", { status: 403 }),
+    () => json({ error: { code: "SECRET_NOT_CONFIGURED" } }, 200),
+    () => json({ error: { code: "SOMETHING_ELSE", message: "x" } }, 500),
+  ];
+  for (const handler of handlers) {
+    const { fetchImpl } = fakeBroker(handler);
+    const provider = new CfSecretProvider({ client: client(fetchImpl) });
+    await assert.rejects(provider.read("google_client_secret"), (error) => {
+      assert.equal(codeOf(error), "SECRETS_UNAVAILABLE");
+      return true;
+    });
+  }
+});
+
 test("an empty secret and an invalid master key are named errors, not fallbacks", async () => {
   const { fetchImpl } = fakeBroker((url) => url.endsWith("credential_master_key")
     ? json({ name: "credential_master_key", value: "too-short" })

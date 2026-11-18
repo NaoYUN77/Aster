@@ -270,6 +270,9 @@ test("connector routes create, list, start OAuth and complete the public callbac
     },
     async startOAuth(slug: string) {
       calls.push(`start:${slug}`);
+      if (slug === "unconfigured") {
+        throw new ConnectorError("CONNECTOR_NOT_CONFIGURED", "connector secret is not configured on the broker: google_client_secret");
+      }
       return { url: "https://github.com/login/oauth/authorize?state=server-state" };
     },
     async completeOAuth(state: string, code: string) {
@@ -314,6 +317,15 @@ test("connector routes create, list, start OAuth and complete the public callbac
     });
     assert.equal(started.statusCode, 200);
     assert.match(started.json<{ url: string }>().url, /^https:\/\/github\.com\/login\/oauth\/authorize/);
+
+    // A secret the broker says is not configured is a 409 the client can explain, not a 500.
+    const unconfigured = await server.app.inject({
+      method: "POST", url: "/api/v1/connectors/unconfigured/oauth/start", headers,
+    });
+    assert.equal(unconfigured.statusCode, 409);
+    const unconfiguredBody = unconfigured.json<{ error: { code: string; message: string } }>();
+    assert.equal(unconfiguredBody.error.code, "CONNECTOR_NOT_CONFIGURED");
+    assert.match(unconfiguredBody.error.message, /google_client_secret/);
 
     // The provider redirects a browser without our Bearer token; a valid one-time state is enough.
     const callback = await server.app.inject({
@@ -371,6 +383,7 @@ test("connector routes create, list, start OAuth and complete the public callbac
       "create:mcp_stdio:local:node",
       "list",
       "start:work",
+      "start:unconfigured",
       "complete:good-state:code-1",
       "complete:good-state:code-1",
       "complete:bad-state:code-1",
