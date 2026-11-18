@@ -232,6 +232,9 @@ paths:
         `requestId` that is not the running request answers `409
         REQUEST_NOT_ACTIVE`, which protects a late steer from landing on a
         newer request.
+
+        Known v1 limitation: a steer that starts one more run does not run
+        Memory's per-request prepare/after-request hooks for that run.
       parameters:
         - name: requestId
           in: path
