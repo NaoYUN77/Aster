@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { getQueue } from "@/api/client";
 import { CONNECTORS_QUERY_ROOT } from "@/api/connectors";
 import { parseServerEvent } from "@/api/events";
 import { errorText, toApiError } from "@/api/errors";
@@ -13,6 +14,7 @@ import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
 import { useConnectionStore } from "@/store/connection";
 import { useCredentialStore } from "@/store/credential";
+import { reduceQueue } from "./queue-state";
 
 /**
  * 连接 /api/v1/events 并把事件写进本地聊天状态。
@@ -35,6 +37,21 @@ export function useChatEvents(): void {
     const timers = new Set<number>();
     let openedOnce = false;
     let unauthorizedNotified = false;
+    // snapshot.queue / queue.changed 比兜底 GET 新；兜底结果不能反过来覆盖它们。
+    let snapshotQueueSeen = false;
+    let queueEventSeen = false;
+
+    const refreshQueue = () => {
+      void getQueue()
+        .then(({ items }) => {
+          if (!snapshotQueueSeen && !queueEventSeen) {
+            useChatStore.getState().setQueue(items);
+          }
+        })
+        .catch(() => {
+          // 旧服务端没有队列接口时静默降级，SSE 事件仍会驱动本地队列。
+        });
+    };
 
     const historyKey = ["messages", baseUrl] as const;
     const modelKey = modelsQueryKey(baseUrl);
@@ -73,6 +90,16 @@ export function useChatEvents(): void {
           } else {
             chat.setActive(null, null, null);
           }
+          if (event.queue !== undefined) {
+            snapshotQueueSeen = true;
+            chat.setQueue(event.queue);
+          }
+          break;
+        }
+
+        case "queue.changed": {
+          queueEventSeen = true;
+          chat.setQueue(event.items);
           break;
         }
 
@@ -90,6 +117,7 @@ export function useChatEvents(): void {
 
         case "request.running": {
           const state = useChatStore.getState();
+          state.setQueue(reduceQueue(state.queue, event));
           const outgoing = state.outgoing.find(
             (item) => item.requestId === event.requestId,
           );
@@ -131,7 +159,19 @@ export function useChatEvents(): void {
 
         case "request.aborted": {
           const state = useChatStore.getState();
-          state.updateByRequestId(event.requestId, { status: "aborted" });
+          const queued =
+            state.queue.find((item) => item.requestId === event.requestId) ??
+            state.outgoing.find(
+              (item) =>
+                item.requestId === event.requestId && item.status === "queued",
+            );
+          state.setQueue(reduceQueue(state.queue, event));
+          if (queued) {
+            // 取消排队中的消息：整条从会话里消失，不留下“已停止”气泡。
+            state.removeOutgoing(queued.clientMessageId);
+          } else {
+            state.updateByRequestId(event.requestId, { status: "aborted" });
+          }
           if (state.activeRequestId === event.requestId) {
             state.setActive(null, null, null);
           }
@@ -217,6 +257,9 @@ export function useChatEvents(): void {
       onState: setSseState,
       onEvent: handle,
       onOpen: () => {
+        snapshotQueueSeen = false;
+        queueEventSeen = false;
+        refreshQueue();
         if (openedOnce) {
           void queryClient.invalidateQueries({ queryKey: historyKey });
           void queryClient.invalidateQueries({ queryKey: modelKey });

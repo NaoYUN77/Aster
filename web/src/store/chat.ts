@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { SseState } from "@/api/sse";
-import type { ModelUsage, UiMessage } from "@/api/types";
+import type { ModelUsage, QueuedRequest, UiMessage } from "@/api/types";
 
 export type OutgoingStatus = "sending" | "queued" | "running" | "done" | "failed" | "aborted";
 
@@ -24,6 +24,7 @@ export type RequestFailure = {
 type ChatState = {
   outgoing: OutgoingMessage[];
   live: Record<string, UiMessage>;
+  queue: QueuedRequest[];
   usage: Record<string, ModelUsage>;
   failures: Record<string, RequestFailure>;
   activeRequestId: string | null;
@@ -43,6 +44,8 @@ type ChatState = {
     clientMessageId?: string | null,
   ) => void;
   addLiveMessage: (message: UiMessage) => void;
+  setQueue: (queue: QueuedRequest[]) => void;
+  removeQueued: (requestId: string) => void;
   setUsage: (messageId: string, usage: ModelUsage) => void;
   setFailure: (requestId: string, failure: RequestFailure) => void;
   setSseState: (state: SseState) => void;
@@ -60,6 +63,7 @@ function newClientMessageId(): string {
 const initial = {
   outgoing: [] as OutgoingMessage[],
   live: {} as Record<string, UiMessage>,
+  queue: [] as QueuedRequest[],
   usage: {} as Record<string, ModelUsage>,
   failures: {} as Record<string, RequestFailure>,
   activeRequestId: null,
@@ -123,6 +127,16 @@ export const useChatStore = create<ChatState>((set) => ({
 
   addLiveMessage: (message) => {
     set((state) => ({ live: { ...state.live, [message.id]: message } }));
+  },
+
+  setQueue: (queue) => {
+    set({ queue });
+  },
+
+  removeQueued: (requestId) => {
+    set((state) => ({
+      queue: state.queue.filter((item) => item.requestId !== requestId),
+    }));
   },
 
   setUsage: (messageId, usage) => {

@@ -35,10 +35,13 @@ web/                     Vite + React + TS 应用（唯一 UI 代码）
 ## 3. API 契约
 
 - 正式契约由 Dev 1 维护：`docs/api/three-client-v1.openapi.yaml`。
-- 当前契约已同步 Dev 1 steer 实现（`300a463` / 远程 `3b084c9`），`UiMessage`
-  保留可选 `clientMessageId`，并新增：
+- 当前契约已同步 Dev 1 队列契约 `17e0ae9`（steer 基线 `300a463` / 远程 `3b084c9`）：
   - `POST /api/v1/requests/{requestId}/steer`（`SteerRequest` / `SteerResponse`）
-  - SSE `request.steered` / `steer.done`
+  - `GET /api/v1/queue`（仅 queued，FIFO）
+  - `POST /api/v1/requests/{requestId}/promote`（有 running 时 `mode=steered`，
+    否则 `mode=started`；行状态可变为 `promoted`）
+  - SSE `request.steered` / `steer.done` / `queue.changed`，`snapshot` 增加 `queue`
+  - `UiMessage` 保留可选 `clientMessageId`
 - 契约变更后从 Dev 1 的分支同步同路径文件，再重新生成：
 
 ```bash
@@ -60,9 +63,9 @@ npm run gen:api
 `EventSource` 不能带 `Authorization`，客户端使用 `fetch` + `ReadableStream` 手写解析：
 `web/src/api/sse.ts`。支持：
 
-- `snapshot` / `request.queued` / `request.running` / `request.done` /
+- `snapshot`（含 `queue`）/ `request.queued` / `request.running` / `request.done` /
   `request.failed` / `request.aborted` / `request.steered` / `steer.done` /
-  `model.changed`
+  `queue.changed` / `model.changed`
 - `connector.changed`：失效 Connectors 查询，跨端同步连接状态
 - `credential.request`：打开全局安全注入弹窗（见第 7 节）
 - `: heartbeat` 注释与 `heartbeat` 事件
@@ -114,7 +117,8 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 ## 5. 聊天行为
 
 - 初始拉最近 30 条；上滚用 `before=<entry cursor>` 加载更早，保持滚动位置。
-- 发送使用 `clientMessageId`（UUID）；202 后显示“排队中”，SSE 推进到“正在回复/完成”。
+- 发送使用 `clientMessageId`（UUID）；202 后进入输入框上方的队列面板，
+  SSE 推进到“正在回复/完成”后进入会话。
 - SSE `request.queued/running` 可能先于 POST `/api/v1/messages` 的响应到达；
   响应落地时按本地已到达的状态回填，不能把 running/done 覆盖回 queued。
 - 去重：历史与 SSE live 同 id 合并时保留 `requestId` / `clientMessageId`（历史文本优先）；
@@ -157,6 +161,33 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
     并重新拉历史；不清理 `activeRequestId`。
   - 历史刷新后，live 临时 user 行若其 `requestId` 已出现在服务器 history 的
     user 行里，则让位给 durable 行，避免刷新后出现两条插话气泡。
+
+### 5.2 队列面板与「排队 / 立即插入」
+
+- 队列来源：`GET /api/v1/queue` 与 SSE `snapshot.queue` / `queue.changed`；
+  连接和重连时额外 `GET /api/v1/queue` 兜底，但 snapshot/queue.changed 优先，
+  兜底结果不能覆盖更新的事件。
+- `queue.changed` 整体替换本地队列；`request.running` / `request.aborted` 按
+  `requestId` 移除对应行。
+- 队列面板位于输入框上方，`queue.length > 0` 时才渲染：
+  - 每行显示单行截断文本（`title` 全文）、时间、「排队中」；
+  - 「立即插入」仅 `activeStatus === "running"` 可点，否则禁用并提示
+    「当前没有运行中的回复」；
+  - 「取消」复用 `POST /api/v1/requests/{id}/abort`，成功后从队列和本地气泡移除。
+- 点击「立即插入」调用 `POST /api/v1/requests/{id}/promote`：
+  - 202 `mode=steered`：移除队列行，本端 outgoing 标记 `steer/requestId=steerId/done`，
+    toast「已插入本轮」；
+  - 202 `mode=started`：移除队列行，toast「已开始执行」；
+  - 409 `QUEUE_ITEM_NOT_QUEUED`：重拉队列并提示「该消息已开始或已结束」；
+  - 其他错误：保留队列行并 toast。
+- queued 的普通消息不再显示为会话气泡，只显示在队列面板；轮到执行后进入会话。
+- Composer：
+  - 运行中且有输入：停止 +「排队」+「立即插入」；
+  - Enter = 排队，Ctrl/⌘+Enter = 立即插入，Shift+Enter = 换行；
+  - 提示「正在回复，Enter 排队，Ctrl/⌘+Enter 立即插入」；
+  - 排队中/空闲：单个「发送」；排队中仍可继续入队，队列面板里的「立即插入」禁用。
+- 本端发送成功后乐观加入队列，随后被 `queue.changed` 整体替换，按
+  `requestId/clientMessageId` 去重，不会出现两行。
 
 ## 6. 模型选择器（三端同一组件）
 
@@ -353,7 +384,7 @@ cd android && ./gradlew assembleDebug
 ```bash
 cd web
 npm run typecheck
-npm test             # vitest：消息去重/合并、steer 发送路径、SSE 事件解析
+npm test             # vitest：消息去重、队列/promote、steer 发送路径、SSE 事件解析
 npm run build        # 生产构建（不含 mock）
 ```
 

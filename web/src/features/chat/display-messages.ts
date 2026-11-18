@@ -155,6 +155,10 @@ export function buildDisplayMessages(
   }
 
   for (const item of outgoing) {
+    // 排队中的普通消息显示在输入框上方的队列面板，不重复出现在会话里。
+    // 正在发送的插话仍属于本轮上下文，保留气泡。
+    if (item.status === "queued" && item.steer !== true) continue;
+
     // 只与服务器 user 消息去重；不能按文本或 assistant 的 requestId 猜。
     const matched =
       (item.clientMessageId !== "" && serverUserClientIds.has(item.clientMessageId)) ||

@@ -89,6 +89,45 @@ const steerMessage = {
   tool: null,
 };
 
+describe("parseServerEvent: queue", () => {
+  const queue = [
+    {
+      requestId: "req1",
+      clientMessageId: "c1",
+      text: "排队消息",
+      createdAt: 1_760_000_000_000,
+    },
+  ];
+
+  it("snapshot 解析 queue，缺省时不带该字段", () => {
+    const withQueue = parseServerEvent("snapshot", {
+      activeRequest: null,
+      queue,
+      modelVersion: 2,
+    });
+    expect(withQueue.type).toBe("snapshot");
+    if (withQueue.type !== "snapshot") return;
+    expect(withQueue.queue).toEqual(queue);
+
+    const withoutQueue = parseServerEvent("snapshot", { activeRequest: null });
+    expect(withoutQueue.type).toBe("snapshot");
+    if (withoutQueue.type !== "snapshot") return;
+    expect(withoutQueue.queue).toBeUndefined();
+  });
+
+  it("queue.changed 解析完整 items", () => {
+    const parsed = parseServerEvent("queue.changed", { items: queue });
+    expect(parsed).toEqual({ type: "queue.changed", items: queue });
+  });
+
+  it("畸形 queue 事件被忽略", () => {
+    expect(parseServerEvent("queue.changed", { items: [{ requestId: "x" }] }).type).toBe(
+      "ignored",
+    );
+    expect(parseServerEvent("queue.changed", null).type).toBe("ignored");
+  });
+});
+
 describe("parseServerEvent: steer", () => {
   it("解析 request.steered", () => {
     const parsed = parseServerEvent("request.steered", {

@@ -4,7 +4,13 @@ import { useChatStore } from "@/store/chat";
 import { ChatHeader } from "./ChatHeader";
 import { Composer } from "./Composer";
 import { MessageList } from "./MessageList";
-import { useRetryMessage, useSendMessage, useStopRequest } from "./use-chat-actions";
+import { QueuePanel } from "./QueuePanel";
+import {
+  useQueueActions,
+  useRetryMessage,
+  useSendMessage,
+  useStopRequest,
+} from "./use-chat-actions";
 import { useDisplayMessages } from "./use-display-messages";
 import { flattenHistory, useHistoryQuery } from "./use-history";
 
@@ -16,10 +22,12 @@ export function ChatPage() {
 
   const activeStatus = useChatStore((state) => state.activeStatus);
   const sseState = useChatStore((state) => state.sseState);
+  const queue = useChatStore((state) => state.queue);
 
   const send = useSendMessage();
   const stop = useStopRequest();
   const retry = useRetryMessage();
+  const { promote, cancel } = useQueueActions();
 
   const current = models.data?.current;
   const activeModelLabel = current ? current.name || current.label : undefined;
@@ -43,6 +51,12 @@ export function ChatPage() {
           onRetryMessage={(message) => void retry(message)}
         />
       </main>
+      <QueuePanel
+        items={queue}
+        activeStatus={activeStatus}
+        onPromote={promote}
+        onCancel={cancel}
+      />
       <Composer
         onSend={send}
         onStop={() => void stop()}

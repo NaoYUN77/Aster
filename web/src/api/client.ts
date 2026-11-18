@@ -8,6 +8,8 @@ import type {
   MessagePage,
   ModelsResponse,
   ModelSelectResponse,
+  PromoteResponse,
+  QueueResponse,
   SteerResponse,
 } from "./types";
 
@@ -136,6 +138,28 @@ export async function logout(): Promise<void> {
 export async function me(): Promise<MeResponse> {
   return unwrap<MeResponse>(
     api().GET("/api/v1/auth/me", { signal: timeout(10_000) }) as Promise<FetchResult<MeResponse>>,
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 队列                                                                */
+/* ------------------------------------------------------------------ */
+
+export async function getQueue(): Promise<QueueResponse> {
+  return unwrap<QueueResponse>(
+    api().GET("/api/v1/queue", {
+      signal: timeout(15_000),
+    }) as Promise<FetchResult<QueueResponse>>,
+  );
+}
+
+/** 把一条 queued 消息插入当前 run；没有运行中请求时由服务端直接开始执行。 */
+export async function promoteRequest(requestId: string): Promise<PromoteResponse> {
+  return unwrap<PromoteResponse>(
+    api().POST("/api/v1/requests/{requestId}/promote", {
+      params: { path: { requestId } },
+      signal: timeout(20_000),
+    }) as Promise<FetchResult<PromoteResponse>>,
   );
 }
 

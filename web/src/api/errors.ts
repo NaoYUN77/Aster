@@ -82,6 +82,7 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   INVALID_CREDENTIALS: "密码错误",
   PAYLOAD_TOO_LARGE: "请求内容太大",
   REQUEST_NOT_FOUND: "请求不存在",
+  QUEUE_ITEM_NOT_QUEUED: "消息已不在队列中",
   REQUEST_NOT_ACTIVE: "请求已结束",
   NO_ACTIVE_REQUEST: "当前没有正在回复的请求",
   UNHEALTHY: "服务器健康检查未通过",

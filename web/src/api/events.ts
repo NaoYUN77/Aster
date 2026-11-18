@@ -1,6 +1,12 @@
 import { z } from "zod";
 import type { CredentialRequest } from "./connectors";
-import type { ModelKind, ModelRef, ModelUsage, UiMessage } from "./types";
+import type {
+  ModelKind,
+  ModelRef,
+  ModelUsage,
+  QueuedRequest,
+  UiMessage,
+} from "./types";
 
 /** 目录里的模型条目（ModelEntry）：provider/id/name/label。 */
 const modelEntrySchema = z.object({
@@ -47,6 +53,13 @@ const uiMessageSchema = z.object({
     .nullish(),
 });
 
+const queuedRequestSchema = z.object({
+  requestId: z.string(),
+  clientMessageId: z.string(),
+  text: z.string(),
+  createdAt: z.number(),
+});
+
 const snapshotSchema = z.object({
   activeRequest: z
     .object({
@@ -55,7 +68,12 @@ const snapshotSchema = z.object({
       clientMessageId: z.string().optional(),
     })
     .nullish(),
+  queue: z.array(queuedRequestSchema).optional(),
   modelVersion: z.number().optional(),
+});
+
+const queueChangedSchema = z.object({
+  items: z.array(queuedRequestSchema),
 });
 
 const queuedSchema = z.object({
@@ -145,7 +163,9 @@ export type ParsedServerEvent =
         clientMessageId?: string;
       } | null;
       modelVersion?: number;
+      queue?: QueuedRequest[];
     }
+  | { type: "queue.changed"; items: QueuedRequest[] }
   | { type: "request.queued"; requestId: string; clientMessageId: string }
   | { type: "request.running"; requestId: string }
   | { type: "request.done"; requestId: string; message: UiMessage; usage: ModelUsage }
@@ -190,7 +210,13 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
         ...(parsed.data.modelVersion !== undefined
           ? { modelVersion: parsed.data.modelVersion }
           : {}),
+        ...(parsed.data.queue !== undefined ? { queue: parsed.data.queue } : {}),
       };
+    }
+    case "queue.changed": {
+      const parsed = queueChangedSchema.safeParse(data);
+      if (!parsed.success) return { type: "ignored", event };
+      return { type: "queue.changed", items: parsed.data.items };
     }
     case "request.queued": {
       const parsed = queuedSchema.safeParse(data);

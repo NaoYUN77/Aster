@@ -106,6 +106,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List queued messages in worker order
+         * @description Returns `web_requests` rows with status `queued`, in the same order the
+         *     worker claims them (`created_at`, then insertion order). A row that was
+         *     promoted has left the queue and is not returned. This is a single-owner,
+         *     single-conversation adapter, so the queue is not paginated; at most 100
+         *     items are returned.
+         */
+        get: operations["listQueue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/requests/{requestId}/abort": {
         parameters: {
             query?: never;
@@ -164,6 +188,42 @@ export interface paths {
          *     Memory's per-request prepare/after-request hooks for that run.
          */
         post: operations["steerRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/requests/{requestId}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a queued message now or inject it into the running request
+         * @description Removes one queued message from the FIFO and makes it take effect
+         *     immediately.
+         *
+         *     If a request is running, the promoted text joins that same agent run
+         *     through the existing steer path, with durable id
+         *     `steer:<clientMessageId>`, and the queue row becomes `promoted`.
+         *     If nothing is running, the row becomes `running` at once, ahead of older
+         *     queued messages, and starts a new run.
+         *
+         *     The decision is idempotent: promoting an already-promoted row returns the
+         *     same `mode: steered` and `steerId` without injecting anything again. If
+         *     the run finishes between the decision and the injection, the server
+         *     starts the message immediately instead of rejecting it.
+         *
+         *     `409 QUEUE_ITEM_NOT_QUEUED` means the row is no longer queued (it is
+         *     running, done, failed or aborted); the client should refresh
+         *     `GET /api/v1/queue`. A malformed `requestId` is `400`.
+         */
+        post: operations["promoteQueuedRequest"];
         delete?: never;
         options?: never;
         head?: never;
@@ -359,7 +419,33 @@ export interface components {
             text: string;
         };
         /** @enum {string} */
-        RequestStatus: "queued" | "running" | "done" | "failed" | "aborted";
+        RequestStatus: "queued" | "running" | "promoted" | "done" | "failed" | "aborted";
+        QueuedRequest: {
+            requestId: string;
+            clientMessageId: string;
+            text: string;
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            createdAt: number;
+        };
+        QueueResponse: {
+            /** @description Queued messages in worker claim order, oldest first. */
+            items: components["schemas"]["QueuedRequest"][];
+        };
+        PromoteResponse: {
+            /** @description The promoted queue row. */
+            requestId: string;
+            /**
+             * @description `steered`: injected into the request that was already running.
+             *     `started`: no request was running, so this message started one.
+             * @enum {string}
+             */
+            mode: "steered" | "started";
+            /** @description Present when `mode` is `steered`; `steer:<clientMessageId>`. */
+            steerId?: string;
+        };
         SubmitMessageResponse: {
             requestId: string;
             status: components["schemas"]["RequestStatus"];
@@ -528,6 +614,8 @@ export interface components {
                 activeRequest: components["schemas"]["ActiveRequest"] | null;
                 /** @description Monotonic selection version; changes on every applied model change. */
                 modelVersion: number;
+                /** @description The pending queue at connection time, same shape and order as `GET /api/v1/queue`. */
+                queue: components["schemas"]["QueuedRequest"][];
             };
         } | {
             /** @constant */
@@ -535,6 +623,18 @@ export interface components {
             data: {
                 requestId: string;
                 clientMessageId: string;
+            };
+        } | {
+            /** @constant */
+            event: "queue.changed";
+            /**
+             * @description The full pending queue after an enqueue, a worker claim (queued
+             *     to running), a successful promote, or an abort of a queued row.
+             *     Clients replace their queue list with `items`; `promoted` rows
+             *     are not included.
+             */
+            data: {
+                items: components["schemas"]["QueuedRequest"][];
             };
         } | {
             /** @constant */
@@ -871,6 +971,27 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
+    listQueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pending queue, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueueResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
     abortRequest: {
         parameters: {
             query?: never;
@@ -931,6 +1052,39 @@ export interface operations {
             400: components["responses"]["InvalidRequest"];
             401: components["responses"]["Unauthorized"];
             /** @description No running request, or the path request is not the running one. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    promoteQueuedRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The message was injected into the run or started immediately. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromoteResponse"];
+                };
+            };
+            400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description The row left the queue before it could be promoted. */
             409: {
                 headers: {
                     [name: string]: unknown;

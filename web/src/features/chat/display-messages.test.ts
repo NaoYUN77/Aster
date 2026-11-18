@@ -459,3 +459,43 @@ describe("buildDisplayMessages 插话", () => {
     expect(result[0]!.steer).toBe(true);
   });
 });
+
+describe("buildDisplayMessages 队列", () => {
+  it("queued 普通消息显示在队列面板，不重复出现在会话里", () => {
+    const result = buildDisplayMessages(
+      [],
+      state({
+        outgoing: [
+          outgoing({
+            clientMessageId: "c1",
+            requestId: "req1",
+            text: "排队消息",
+            status: "queued",
+          }),
+        ],
+      }),
+    );
+
+    expect(result).toHaveLength(0);
+  });
+
+  it("仍在发送中的插话气泡保留", () => {
+    const result = buildDisplayMessages(
+      [],
+      state({
+        outgoing: [
+          outgoing({
+            clientMessageId: "c1",
+            requestId: "steer:c1",
+            text: "插话消息",
+            status: "sending",
+            steer: true,
+          }),
+        ],
+      }),
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.steer).toBe(true);
+  });
+});

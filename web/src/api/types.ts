@@ -28,6 +28,15 @@ export type ModelUsage = components["schemas"]["ModelUsage"];
 /** POST /api/v1/requests/{requestId}/steer 的 202 响应。 */
 export type SteerResponse = components["schemas"]["SteerResponse"];
 
+/** GET /api/v1/queue 的一条 queued 请求（FIFO）。 */
+export type QueuedRequest = components["schemas"]["QueuedRequest"];
+
+/** GET /api/v1/queue 的响应。 */
+export type QueueResponse = components["schemas"]["QueueResponse"];
+
+/** POST /api/v1/requests/{requestId}/promote 的 202 响应。 */
+export type PromoteResponse = components["schemas"]["PromoteResponse"];
+
 export const EMPTY_MODEL_KIND_LABEL: Record<ModelKind, string> = {
   primary: "主模型",
   manual: "手动指定",
