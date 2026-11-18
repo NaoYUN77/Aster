@@ -197,6 +197,25 @@ test("wrangler dev --local serves the broker API end to end", { timeout: 240_000
       });
     });
 
+    await t.test("a github-shaped connection without refreshToken returns its stored access token", async () => {
+      const put = await fetch(`${base}/v1/connections/github-only`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "github",
+          accountLabel: "octocat",
+          scopes: [],
+          accessToken: "github-access-only-token",
+        }),
+      });
+      assert.equal(put.status, 204);
+      const response = await fetch(`${base}/v1/connections/github-only/token`, { method: "POST" });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await json(response), { accessToken: "github-access-only-token", expiresAt: null });
+      const deleted = await fetch(`${base}/v1/connections/github-only`, { method: "DELETE" });
+      assert.equal(deleted.status, 204);
+    });
+
     await t.test("delete removes the connection and token lookups become 404", async () => {
       const deleted = await fetch(`${base}/v1/connections/acme`, { method: "DELETE" });
       assert.equal(deleted.status, 204);

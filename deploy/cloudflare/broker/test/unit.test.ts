@@ -3,6 +3,8 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import test from "node:test";
 
 import { aadFor, decryptCredential, encryptCredential, parseMasterKey } from "../src/crypto";
+import { handleRequest } from "../src/handler";
+import type { Env } from "../src/types";
 import { SECRET_WHITELIST, connectionInput, connectionSlug, providerName, secretName, storedTokens } from "../src/validate";
 
 function brokerCode(error: unknown): string | undefined {
@@ -143,6 +145,29 @@ test("connection bodies are validated without echoing token values", () => {
   const minimal = connectionInput({ provider: "gmail", accountLabel: "me", scopes: [], refreshToken: "r" });
   assert.deepEqual(minimal.tokens, { refreshToken: "r" });
 
+  // GitHub OAuth apps return only an access token; the refresh token must be optional.
+  const github = connectionInput({
+    provider: "github",
+    accountLabel: "octocat",
+    scopes: [],
+    accessToken: "acc3ss",
+  });
+  assert.deepEqual(github.tokens, { refreshToken: null, accessToken: "acc3ss" });
+  const accessOnly = connectionInput({
+    provider: "github",
+    accountLabel: "octocat",
+    scopes: [],
+    accessToken: "acc3ss",
+    expiresAt: null,
+  });
+  assert.deepEqual(accessOnly.tokens, { refreshToken: null, accessToken: "acc3ss", expiresAt: null });
+
+  assert.throws(
+    () => connectionInput({ provider: "github", accountLabel: "octocat", scopes: [] }),
+    (error) => brokerCode(error) === "INVALID_BODY",
+    "a body with neither token is rejected",
+  );
+
   const cases: unknown[] = [
     null,
     [],
@@ -164,14 +189,103 @@ test("connection bodies are validated without echoing token values", () => {
   }
 });
 
-test("stored token payloads must contain a refresh token", () => {
+test("stored token payloads must contain at least one usable token", () => {
   assert.deepEqual(storedTokens({ refreshToken: "r", accessToken: "a", expiresAt: "2030-01-01T00:00:00.000Z" }), {
     refreshToken: "r",
     accessToken: "a",
     expiresAt: "2030-01-01T00:00:00.000Z",
   });
   assert.deepEqual(storedTokens({ refreshToken: "r", accessToken: "" }), { refreshToken: "r", expiresAt: null });
-  for (const bad of [null, [], {}, { refreshToken: "" }, { refreshToken: 1 }]) {
+  assert.deepEqual(storedTokens({ refreshToken: null, accessToken: "a" }), { refreshToken: null, accessToken: "a", expiresAt: null });
+  assert.deepEqual(storedTokens({ accessToken: "a" }), { refreshToken: null, accessToken: "a", expiresAt: null });
+  // No token at all is a served 503, not a malformed payload.
+  assert.deepEqual(storedTokens({}), { refreshToken: null, expiresAt: null });
+  assert.deepEqual(storedTokens({ refreshToken: null }), { refreshToken: null, expiresAt: null });
+  for (const bad of [null, [], { refreshToken: "" }, { refreshToken: 1 }]) {
     assert.throws(() => storedTokens(bad), (error) => brokerCode(error) === "CONNECTOR_CREDENTIAL_UNREADABLE");
   }
+});
+
+async function tokenCall(
+  stored: Record<string, unknown>,
+  options: { readonly provider?: "github" | "gmail"; readonly now?: number } = {},
+): Promise<{ readonly response: Response; readonly refreshCalls: string[] }> {
+  const keyHex = randomBytes(32).toString("hex");
+  const provider = options.provider ?? "github";
+  const ciphertext = await encryptCredential(parseMasterKey(keyHex), JSON.stringify(stored), aadFor("acme"));
+  const refreshCalls: string[] = [];
+  const env = {
+    BROKER_DEV_BYPASS: "1",
+    credential_master_key: keyHex,
+    github_client_id: "github-client-id",
+    github_client_secret: "github-client-secret",
+    google_client_id: "google-client-id",
+    google_client_secret: "google-client-secret",
+    VAULT: {
+      idFromName: (name: string) => name,
+      get: () => ({
+        list: async () => [],
+        put: async () => {},
+        get: async () => ({ ciphertext, expiresAt: null, provider }),
+        updateTokens: async () => true,
+        remove: async () => {},
+      }),
+    },
+  } as unknown as Env;
+  const response = await handleRequest(
+    new Request("http://127.0.0.1/v1/connections/acme/token", { method: "POST" }),
+    env,
+    {
+      now: () => options.now ?? Date.parse("2026-11-18T12:00:00.000Z"),
+      fetchImpl: async (input) => {
+        refreshCalls.push(String(input));
+        return new Response(JSON.stringify({ access_token: "refreshed-access", expires_in: 3600 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+  );
+  return { response, refreshCalls };
+}
+
+test("a github connection without a refresh token returns its access token and never refreshes", async () => {
+  const { response, refreshCalls } = await tokenCall({
+    refreshToken: null,
+    accessToken: "github-access",
+    expiresAt: null,
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { accessToken: "github-access", expiresAt: null });
+  assert.deepEqual(refreshCalls, []);
+});
+
+test("a connection with no token at all is a 503, not a refresh attempt", async () => {
+  const { response, refreshCalls } = await tokenCall({ refreshToken: null });
+  assert.equal(response.status, 503);
+  assert.equal(((await response.json()) as { error: { code: string } }).error.code, "CONNECTOR_NOT_CONFIGURED");
+  assert.deepEqual(refreshCalls, []);
+});
+
+test("a non-expiring access token is served without refreshing even with a refresh token present", async () => {
+  const { response, refreshCalls } = await tokenCall(
+    { refreshToken: "google-refresh", accessToken: "google-access", expiresAt: null },
+    { provider: "gmail" },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { accessToken: "google-access", expiresAt: null });
+  assert.deepEqual(refreshCalls, []);
+});
+
+test("a google connection with a refresh token still refreshes an expired access token", async () => {
+  const { response, refreshCalls } = await tokenCall(
+    { refreshToken: "google-refresh", accessToken: "old-access", expiresAt: "2026-11-18T11:00:00.000Z" },
+    { provider: "gmail" },
+  );
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as Record<string, unknown>;
+  assert.equal(body.accessToken, "refreshed-access");
+  assert.equal(typeof body.expiresAt, "string");
+  assert.equal(refreshCalls.length, 1);
+  assert.match(refreshCalls[0]!, /googleapis/);
 });

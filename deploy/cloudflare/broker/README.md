@@ -45,8 +45,8 @@ service token 校验通过后注入），否则 401 `BROKER_UNAUTHORIZED`。
 | GET | `/v1/health` | `{ok:true, version}`，不需要鉴权，仅用于探活 |
 | GET | `/v1/secrets/:name` | 白名单内的名字返回 `{name, value}`；否则 404 `SECRET_NOT_ALLOWED` |
 | GET | `/v1/connections` | `{connections:[{slug, provider, accountLabel, scopes, expiresAt, updatedAt}]}`，仅元数据 |
-| PUT | `/v1/connections/:slug` | body `{provider, accountLabel, scopes, refreshToken, accessToken?, expiresAt?}` → 204 |
-| POST | `/v1/connections/:slug/token` | `{accessToken, expiresAt}`；access token 缺失/过期时用 refresh token 刷新并写回 |
+| PUT | `/v1/connections/:slug` | body `{provider, accountLabel, scopes, refreshToken?, accessToken?, expiresAt?}`，两者至少一个 → 204 |
+| POST | `/v1/connections/:slug/token` | `{accessToken, expiresAt}`；无 refresh token 时直接返回已存 access token，有 refresh token 且 access token 缺失/过期时才刷新并写回 |
 | DELETE | `/v1/connections/:slug` | 删除记录 → 204（幂等，不存在也返回 204） |
 
 约定：
@@ -57,6 +57,8 @@ service token 校验通过后注入），否则 401 `BROKER_UNAUTHORIZED`。
 - token 刷新失败统一 401 `CONNECTOR_AUTH_EXPIRED`，调用方应提示用户重新授权。
 - 响应带 `cache-control: no-store`；`wrangler.toml` 关闭了 observability，Worker 也不打印请求或密钥内容。
 - 刷新返回新的 refresh token（GitHub 会轮换）时会写回 DO；Google 不返回则不覆盖。
+- 普通 GitHub OAuth App 不返回 refresh token：PUT 时省略该字段，broker 存 `null`，`POST /token`
+  直接返回已存 access token，不会尝试刷新（无 access token 时 503 `CONNECTOR_NOT_CONFIGURED`）。
 
 ## 需要配置的 Workers Secrets
 

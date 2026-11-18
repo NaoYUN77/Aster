@@ -140,12 +140,11 @@ export class BrokerTokenVault implements TokenVault {
     if (connection.provider !== "github" && connection.provider !== "gmail") {
       throw new ConnectorError("CONNECTOR_INVALID_PROVIDER", "unsupported connector provider");
     }
-    if (token.refresh_token === undefined || token.refresh_token === "") {
-      throw new ConnectorError(
-        "CONNECTOR_OAUTH_EXCHANGE_FAILED",
-        "the provider did not return a refresh token required by the secret broker",
-      );
-    }
+    // GitHub OAuth apps return no refresh token. The field is omitted (never an empty string) so
+    // the broker stores null and serves the access token back without trying to refresh.
+    const refreshToken = token.refresh_token === undefined || token.refresh_token === ""
+      ? undefined
+      : token.refresh_token;
     const response = await this.#client.request(`/v1/connections/${encodeURIComponent(connection.slug)}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -153,7 +152,7 @@ export class BrokerTokenVault implements TokenVault {
         provider: connection.provider,
         accountLabel: meta.accountLabel,
         scopes: [...meta.scopes],
-        refreshToken: token.refresh_token,
+        ...(refreshToken === undefined ? {} : { refreshToken }),
         accessToken: token.access_token,
         expiresAt: expiresAtIso(token),
       }),

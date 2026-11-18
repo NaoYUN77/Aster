@@ -92,13 +92,36 @@ test("save writes the documented PUT body and seeds the in-memory cache", async 
   assert.equal(later.length, 1, "only the save request was sent");
 });
 
-test("save refuses connections the broker cannot accept", async () => {
+test("save omits refreshToken for a github connection that has none", async () => {
+  const { fetchImpl, calls } = fakeBroker(() => new Response(null, { status: 204 }));
+  const vault = new BrokerTokenVault({ client: client(fetchImpl), now: () => NOW });
+  await vault.save(
+    connection(),
+    { access_token: "gho_access_only" },
+    { accountLabel: "octocat", scopes: ["repo"] },
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.method, "PUT");
+  const body = JSON.parse(String(calls[0]!.init.body)) as Record<string, unknown>;
+  assert.equal("refreshToken" in body, false, "the field is omitted, never an empty string");
+  assert.equal(body.accessToken, "gho_access_only");
+  assert.equal(body.expiresAt, null);
+});
+
+test("a github access-only connection round-trips through the broker unchanged", async () => {
+  const { fetchImpl } = fakeBroker((url, init) => {
+    if (init.method === "PUT") return new Response(null, { status: 204 });
+    if (url.endsWith("/token")) return json({ accessToken: "gho_access_only", expiresAt: null });
+    throw new Error(`unexpected ${init.method ?? "GET"} ${url}`);
+  });
+  const vault = new BrokerTokenVault({ client: client(fetchImpl), now: () => NOW });
+  await vault.save(connection(), { access_token: "gho_access_only" }, { accountLabel: "octocat", scopes: [] });
+  assert.equal(await vault.accessToken(connection()), "gho_access_only");
+});
+
+test("save refuses providers the broker cannot accept", async () => {
   const { fetchImpl, calls } = fakeBroker(() => new Response(null, { status: 204 }));
   const vault = new BrokerTokenVault({ client: client(fetchImpl) });
-  await assert.rejects(
-    vault.save(connection(), { access_token: "only-access" }, { accountLabel: "x", scopes: [] }),
-    { code: "CONNECTOR_OAUTH_EXCHANGE_FAILED" },
-  );
   await assert.rejects(
     vault.save(connection({ provider: "mcp_stdio" }), token(), { accountLabel: "x", scopes: [] }),
     { code: "CONNECTOR_INVALID_PROVIDER" },

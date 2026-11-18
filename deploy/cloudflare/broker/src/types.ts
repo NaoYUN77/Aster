@@ -38,8 +38,9 @@ export type VaultRpc = {
   remove(slug: string): Promise<void>;
 };
 
+/** `refreshToken` is null for providers that do not issue one (plain GitHub OAuth apps). */
 export type StoredTokens = {
-  readonly refreshToken: string;
+  readonly refreshToken: string | null;
   readonly accessToken?: string;
   readonly expiresAt?: string | null;
 };

@@ -141,6 +141,15 @@ async function issueToken(
   }
   const tokens = storedTokens(parsed);
 
+  // A connection without a refresh token (plain GitHub OAuth app) can only hand back the token it
+  // stored; refreshing would require credentials that do not exist for it.
+  if (tokens.refreshToken === null) {
+    if (tokens.accessToken === undefined) {
+      throw new BrokerError(503, "CONNECTOR_NOT_CONFIGURED", "connector has no stored access token; reconnect the provider");
+    }
+    return jsonResponse({ accessToken: tokens.accessToken, expiresAt: tokens.expiresAt ?? null });
+  }
+
   if (!needsRefresh(tokens.accessToken, tokens.expiresAt, now())) {
     return jsonResponse({ accessToken: tokens.accessToken, expiresAt: tokens.expiresAt ?? null });
   }

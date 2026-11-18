@@ -58,8 +58,12 @@ export function connectionInput(body: unknown): ConnectionInput {
   const provider = providerName(record.provider);
   const accountLabel = text(record.accountLabel, "accountLabel", 256);
   const scopes = stringList(record.scopes, "scopes");
-  const refreshToken = text(record.refreshToken, "refreshToken", 4096);
+  // GitHub OAuth apps only return an access token; a missing refresh token is stored as null.
+  const refreshToken = optionalText(record.refreshToken, "refreshToken", 4096) ?? null;
   const accessToken = optionalText(record.accessToken, "accessToken", 4096);
+  if (refreshToken === null && accessToken === undefined) {
+    throw new BrokerError(400, "INVALID_BODY", "refreshToken or accessToken is required");
+  }
   const expiresAt = optionalTimestamp(record.expiresAt, "expiresAt");
   return {
     provider,
@@ -74,12 +78,17 @@ export function connectionInput(body: unknown): ConnectionInput {
 }
 
 export function storedTokens(value: unknown): StoredTokens {
-  if (typeof value !== "object" || value === null) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new BrokerError(500, "CONNECTOR_CREDENTIAL_UNREADABLE", "stored connector credential is malformed");
   }
   const record = value as Record<string, unknown>;
-  const refreshToken = record.refreshToken;
-  if (typeof refreshToken !== "string" || refreshToken === "") {
+  const rawRefreshToken = record.refreshToken;
+  let refreshToken: string | null;
+  if (rawRefreshToken === undefined || rawRefreshToken === null) {
+    refreshToken = null;
+  } else if (typeof rawRefreshToken === "string" && rawRefreshToken !== "") {
+    refreshToken = rawRefreshToken;
+  } else {
     throw new BrokerError(500, "CONNECTOR_CREDENTIAL_UNREADABLE", "stored connector credential is malformed");
   }
   const accessToken = typeof record.accessToken === "string" && record.accessToken !== ""
