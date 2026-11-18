@@ -32,9 +32,8 @@ type ApiConnectorConnection = components["schemas"]["ConnectorConnection"];
 type ApiConnectorListResponse = components["schemas"]["ConnectorListResponse"];
 type ApiCreateConnectorResponse = components["schemas"]["CreateConnectorResponse"];
 type ApiOAuthStartResponse = components["schemas"]["OAuthStartResponse"];
-type ApiConnectorProvider = components["schemas"]["ConnectorProvider"];
 
-export type ConnectorId = "github" | "gmail";
+export type ConnectorId = "github" | "gmail" | "outlook" | "linear";
 
 export type ConnectorStatus = "disconnected" | "pending" | "connected" | "error";
 
@@ -110,7 +109,10 @@ export function connectorsQueryKey(baseUrl: string) {
   return [CONNECTORS_QUERY_ROOT, baseUrl] as const;
 }
 
-const UI_PROVIDERS: ConnectorId[] = ["github", "gmail"];
+const UI_PROVIDERS: ConnectorId[] = ["github", "gmail", "outlook", "linear"];
+
+/** 本轮只读的 provider；UI 不展示发送/删除/修改入口。 */
+const READ_ONLY_PROVIDERS = new Set<ConnectorId>(["gmail", "outlook", "linear"]);
 
 function timeoutSignal(ms: number): AbortSignal {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
@@ -202,11 +204,18 @@ function mapStatus(status: ApiConnectorConnection["status"]): ConnectorStatus {
   }
 }
 
+const DISPLAY_NAMES: Record<ConnectorId, string> = {
+  github: "GitHub",
+  gmail: "Gmail",
+  outlook: "Outlook",
+  linear: "Linear",
+};
+
 function displayNameOf(
   provider: ConnectorId,
   definition: ApiConnectorDefinition | undefined,
 ): string {
-  return definition?.displayName || (provider === "github" ? "GitHub" : "Gmail");
+  return definition?.displayName || DISPLAY_NAMES[provider];
 }
 
 /**
@@ -216,7 +225,8 @@ function displayNameOf(
 export function mapConnectorList(
   response: ApiConnectorListResponse,
 ): Connector[] {
-  const definitions = new Map<ApiConnectorProvider, ApiConnectorDefinition>();
+  // 用 string 作 key：新 provider 可能先于 OpenAPI 重新生成上线。
+  const definitions = new Map<string, ApiConnectorDefinition>();
   for (const definition of response.providers) {
     definitions.set(definition.provider, definition);
   }
@@ -238,7 +248,7 @@ export function mapConnectorList(
         connection?.scopes ??
         definition?.defaultScopes ??
         [],
-      readOnly: provider === "gmail",
+      readOnly: READ_ONLY_PROVIDERS.has(provider),
       connectedAt: connection?.createdAt ?? null,
       lastError: connection?.lastErrorCode
         ? connectorErrorText(connection.lastErrorCode, "连接异常，请重新授权")

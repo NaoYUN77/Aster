@@ -33,7 +33,7 @@ export type MockConnectorStatus = "pending" | "connected" | "error" | "revoked";
 /** 与后端 `ConnectorConnection` 同形；mock 也只暴露这些安全字段。 */
 export type MockConnectorConnection = {
   id: string;
-  provider: "github" | "gmail";
+  provider: "github" | "gmail" | "outlook" | "linear";
   slug: string;
   status: MockConnectorStatus;
   accountLabel: string | null;
@@ -75,6 +75,34 @@ const CONNECTOR_DEFS = [
     description: "本轮 Gmail 仅提供只读能力：搜索和读取邮件，不会发送或删除。",
     readOnly: true,
     accountLabel: "aster.demo@gmail.com",
+  },
+  {
+    provider: "outlook",
+    displayName: "Outlook",
+    transport: "oauth",
+    defaultScopes: ["offline_access", "User.Read", "Mail.Read"],
+    tools: [
+      "connector_outlook_list_messages",
+      "connector_outlook_search_messages",
+      "connector_outlook_get_message",
+    ],
+    description: "本轮 Outlook 仅提供只读能力：搜索和读取邮件，不会发送或删除。",
+    readOnly: true,
+    accountLabel: "aster.demo@outlook.com",
+  },
+  {
+    provider: "linear",
+    displayName: "Linear",
+    transport: "oauth",
+    defaultScopes: ["read"],
+    tools: [
+      "connector_linear_list_issues",
+      "connector_linear_search_issues",
+      "connector_linear_get_issue",
+    ],
+    description: "本轮 Linear 仅提供只读能力：浏览团队与 Issue，不会创建或修改。",
+    readOnly: true,
+    accountLabel: "aster.demo@linear.app",
   },
 ] as const;
 
@@ -126,7 +154,10 @@ function load(): MockState {
             item !== null &&
             typeof item === "object" &&
             item.slug === slug &&
-            (item.provider === "github" || item.provider === "gmail") &&
+            (item.provider === "github" ||
+              item.provider === "gmail" ||
+              item.provider === "outlook" ||
+              item.provider === "linear") &&
             typeof item.status === "string"
           );
         }),
@@ -632,7 +663,11 @@ export function mockRequestCredential(
   const connection = state.connectors[def.provider];
   const requestId = makeId("cred");
   const tool =
-    def.provider === "gmail" ? "gmail.search" : "github.create_issue_comment";
+    def.provider === "gmail" || def.provider === "outlook"
+      ? `${def.provider}.search`
+      : def.provider === "linear"
+        ? "linear.search_issues"
+        : "github.create_issue_comment";
   emit("credential.request", {
     connectionId: connection?.id ?? `mock_${def.provider}`,
     provider: def.provider,

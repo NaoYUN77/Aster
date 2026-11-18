@@ -217,10 +217,10 @@ export function ConnectorDetail({
               </li>
             ))}
           </ul>
-          {connector.readOnly && (
+          {connector.readOnly && meta?.readOnlyNotice && (
             <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-muted-foreground">
               <Lock className="mt-0.5 size-3 shrink-0" />
-              Gmail 本轮只读：不会发送、删除或修改你的邮件。
+              {meta.readOnlyNotice}
             </p>
           )}
         </div>

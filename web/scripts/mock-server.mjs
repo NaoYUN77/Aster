@@ -49,6 +49,20 @@ const CONNECTORS = [
     description: "本轮 Gmail 仅提供只读能力：搜索和读取邮件，不会发送或删除。",
     accountLabel: "aster.demo@gmail.com",
   },
+  {
+    provider: "outlook", displayName: "Outlook", transport: "oauth", readOnly: true,
+    defaultScopes: ["offline_access", "User.Read", "Mail.Read"],
+    tools: ["connector_outlook_list_messages", "connector_outlook_search_messages", "connector_outlook_get_message"],
+    description: "本轮 Outlook 仅提供只读能力：搜索和读取邮件，不会发送或删除。",
+    accountLabel: "aster.demo@outlook.com",
+  },
+  {
+    provider: "linear", displayName: "Linear", transport: "oauth", readOnly: true,
+    defaultScopes: ["read"],
+    tools: ["connector_linear_list_issues", "connector_linear_search_issues", "connector_linear_get_issue"],
+    description: "本轮 Linear 仅提供只读能力：浏览团队与 Issue，不会创建或修改。",
+    accountLabel: "aster.demo@linear.app",
+  },
 ];
 
 const connectorDef = (provider) => CONNECTORS.find((item) => item.provider === provider) ?? null;
@@ -293,7 +307,12 @@ function requestCredential(connectorId = "github") {
 
   const connection = state.connectors[def.provider];
   const requestId = makeId("cred");
-  const tool = def.provider === "gmail" ? "gmail.search" : "github.create_issue_comment";
+  const tool =
+    def.provider === "gmail" || def.provider === "outlook"
+      ? `${def.provider}.search`
+      : def.provider === "linear"
+        ? "linear.search_issues"
+        : "github.create_issue_comment";
   emit("credential.request", {
     connectionId: connection?.id ?? `mock_${def.provider}`,
     provider: def.provider,

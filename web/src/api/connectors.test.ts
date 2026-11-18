@@ -8,6 +8,7 @@ import {
   deleteConnector,
   listConnectors,
   mapConnectorList,
+  type ConnectorId,
 } from "./connectors";
 import { configureApi } from "./client";
 import { ApiError } from "./errors";
@@ -15,12 +16,19 @@ import { ApiError } from "./errors";
 type ConnectorListResponse = components["schemas"]["ConnectorListResponse"];
 type ConnectorConnection = components["schemas"]["ConnectorConnection"];
 
+const PROVIDER_NAMES: Record<ConnectorId, string> = {
+  github: "GitHub",
+  gmail: "Gmail",
+  outlook: "Outlook",
+  linear: "Linear",
+};
+
 const provider = (
-  name: "github" | "gmail",
+  name: ConnectorId,
   scopes: string[],
 ): components["schemas"]["ConnectorDefinition"] => ({
   provider: name,
-  displayName: name === "github" ? "GitHub" : "Gmail",
+  displayName: PROVIDER_NAMES[name],
   transport: "oauth",
   defaultScopes: scopes,
   tools: [`${name}.read`],
@@ -79,7 +87,12 @@ describe("mapConnectorList", () => {
     };
 
     const mapped = mapConnectorList(response);
-    expect(mapped.map((item) => item.id)).toEqual(["github", "gmail"]);
+    expect(mapped.map((item) => item.id)).toEqual([
+      "github",
+      "gmail",
+      "outlook",
+      "linear",
+    ]);
     expect(mapped[0]).toMatchObject({
       status: "connected",
       account: { id: "octocat", label: "octocat" },
@@ -90,6 +103,44 @@ describe("mapConnectorList", () => {
       status: "pending",
       account: null,
       scopes: [],
+      readOnly: true,
+    });
+  });
+
+  it("Outlook / Linear 映射 connected 与 accountLabel", () => {
+    const mapped = mapConnectorList({
+      providers: [
+        provider("outlook", ["Mail.Read"]),
+        { ...provider("linear", ["read"]), displayName: "Linear (read-only)" },
+      ],
+      connections: [
+        connection({
+          provider: "outlook",
+          status: "connected",
+          accountLabel: "a@outlook.com",
+          scopes: ["Mail.Read"],
+        }),
+        connection({
+          provider: "linear",
+          status: "connected",
+          accountLabel: "aster",
+          scopes: ["read"],
+        }),
+      ],
+    });
+
+    expect(mapped[2]).toMatchObject({
+      id: "outlook",
+      name: "Outlook",
+      status: "connected",
+      account: { id: "a@outlook.com", label: "a@outlook.com" },
+      readOnly: true,
+    });
+    expect(mapped[3]).toMatchObject({
+      id: "linear",
+      name: "Linear (read-only)",
+      status: "connected",
+      account: { id: "aster", label: "aster" },
       readOnly: true,
     });
   });
@@ -129,9 +180,11 @@ describe("mapConnectorList", () => {
       ],
     });
 
-    expect(mapped).toHaveLength(2);
-    expect(mapped[0]!.status).toBe("disconnected");
-    expect(mapped[1]!.status).toBe("disconnected");
+    // 只展示四个可管理的 provider；mcp_stdio 不展示。
+    expect(mapped).toHaveLength(4);
+    expect(mapped.every((item) => item.status === "disconnected")).toBe(true);
+    expect(mapped[2]).toMatchObject({ id: "outlook", readOnly: true });
+    expect(mapped[3]).toMatchObject({ id: "linear", readOnly: true });
   });
 });
 

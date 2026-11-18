@@ -36,6 +36,8 @@ describe("mock connectors 真实契约", () => {
     expect(response.providers.map((item) => item.provider)).toEqual([
       "github",
       "gmail",
+      "outlook",
+      "linear",
     ]);
     expect(response.connections).toEqual([]);
     expect(response.mock).toBe(true);
