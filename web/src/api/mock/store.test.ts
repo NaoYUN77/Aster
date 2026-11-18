@@ -38,6 +38,9 @@ describe("mock connectors 真实契约", () => {
       "gmail",
       "outlook",
       "linear",
+      "notion",
+      "google_calendar",
+      "google_drive",
     ]);
     expect(response.connections).toEqual([]);
     expect(response.mock).toBe(true);

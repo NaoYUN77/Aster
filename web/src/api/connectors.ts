@@ -33,7 +33,14 @@ type ApiConnectorListResponse = components["schemas"]["ConnectorListResponse"];
 type ApiCreateConnectorResponse = components["schemas"]["CreateConnectorResponse"];
 type ApiOAuthStartResponse = components["schemas"]["OAuthStartResponse"];
 
-export type ConnectorId = "github" | "gmail" | "outlook" | "linear";
+export type ConnectorId =
+  | "github"
+  | "gmail"
+  | "outlook"
+  | "linear"
+  | "notion"
+  | "google_calendar"
+  | "google_drive";
 
 export type ConnectorStatus = "disconnected" | "pending" | "connected" | "error";
 
@@ -109,10 +116,25 @@ export function connectorsQueryKey(baseUrl: string) {
   return [CONNECTORS_QUERY_ROOT, baseUrl] as const;
 }
 
-const UI_PROVIDERS: ConnectorId[] = ["github", "gmail", "outlook", "linear"];
+const UI_PROVIDERS: ConnectorId[] = [
+  "github",
+  "gmail",
+  "outlook",
+  "linear",
+  "notion",
+  "google_calendar",
+  "google_drive",
+];
 
 /** 本轮只读的 provider；UI 不展示发送/删除/修改入口。 */
-const READ_ONLY_PROVIDERS = new Set<ConnectorId>(["gmail", "outlook", "linear"]);
+const READ_ONLY_PROVIDERS = new Set<ConnectorId>([
+  "gmail",
+  "outlook",
+  "linear",
+  "notion",
+  "google_calendar",
+  "google_drive",
+]);
 
 function timeoutSignal(ms: number): AbortSignal {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
@@ -209,6 +231,9 @@ const DISPLAY_NAMES: Record<ConnectorId, string> = {
   gmail: "Gmail",
   outlook: "Outlook",
   linear: "Linear",
+  notion: "Notion",
+  google_calendar: "Google Calendar",
+  google_drive: "Google Drive",
 };
 
 function displayNameOf(

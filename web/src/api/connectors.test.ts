@@ -21,6 +21,9 @@ const PROVIDER_NAMES: Record<ConnectorId, string> = {
   gmail: "Gmail",
   outlook: "Outlook",
   linear: "Linear",
+  notion: "Notion",
+  google_calendar: "Google Calendar",
+  google_drive: "Google Drive",
 };
 
 const provider = (
@@ -92,6 +95,9 @@ describe("mapConnectorList", () => {
       "gmail",
       "outlook",
       "linear",
+      "notion",
+      "google_calendar",
+      "google_drive",
     ]);
     expect(mapped[0]).toMatchObject({
       status: "connected",
@@ -145,6 +151,57 @@ describe("mapConnectorList", () => {
     });
   });
 
+  it("Notion / Calendar / Drive 映射 connected 与只读标记", () => {
+    const mapped = mapConnectorList({
+      providers: [
+        provider("notion", []),
+        provider("google_calendar", ["calendar.readonly"]),
+        provider("google_drive", ["drive.readonly"]),
+      ],
+      connections: [
+        connection({
+          provider: "notion",
+          status: "connected",
+          accountLabel: "Aster Workspace",
+        }),
+        connection({
+          provider: "google_calendar",
+          status: "connected",
+          accountLabel: "a@b.c",
+        }),
+        connection({
+          provider: "google_drive",
+          status: "connected",
+          accountLabel: "a@b.c",
+        }),
+      ],
+    });
+
+    expect(mapped.slice(4)).toMatchObject([
+      {
+        id: "notion",
+        name: "Notion",
+        status: "connected",
+        account: { label: "Aster Workspace" },
+        readOnly: true,
+      },
+      {
+        id: "google_calendar",
+        name: "Google Calendar",
+        status: "connected",
+        account: { label: "a@b.c" },
+        readOnly: true,
+      },
+      {
+        id: "google_drive",
+        name: "Google Drive",
+        status: "connected",
+        account: { label: "a@b.c" },
+        readOnly: true,
+      },
+    ]);
+  });
+
   it("没有 connection 时是未连接，lastErrorCode 使用安全中文文案", () => {
     const mapped = mapConnectorList({
       providers: [provider("github", ["repo"])],
@@ -180,11 +237,14 @@ describe("mapConnectorList", () => {
       ],
     });
 
-    // 只展示四个可管理的 provider；mcp_stdio 不展示。
-    expect(mapped).toHaveLength(4);
+    // 只展示七个可管理的 provider；mcp_stdio 不展示。
+    expect(mapped).toHaveLength(7);
     expect(mapped.every((item) => item.status === "disconnected")).toBe(true);
     expect(mapped[2]).toMatchObject({ id: "outlook", readOnly: true });
     expect(mapped[3]).toMatchObject({ id: "linear", readOnly: true });
+    expect(mapped[4]).toMatchObject({ id: "notion", readOnly: true });
+    expect(mapped[5]).toMatchObject({ id: "google_calendar", readOnly: true });
+    expect(mapped[6]).toMatchObject({ id: "google_drive", readOnly: true });
   });
 });
 

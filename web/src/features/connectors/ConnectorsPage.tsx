@@ -76,7 +76,7 @@ export function ConnectorsPage() {
           </Button>
           <h1 className="text-base font-semibold">连接器</h1>
           <Badge variant="outline" className="ml-1">
-            4 个连接器
+            7 个连接器
           </Badge>
           <div className="ml-auto flex items-center gap-1">
             <SoundToggle />
@@ -183,9 +183,9 @@ export function ConnectorsPage() {
             按需加载，这里只管理连接状态。
           </p>
           <p className="mt-2">
-            Gmail 与 Outlook 本轮只读，只提供搜索和读取邮件的工具；Linear 同样只读，
-            只提供浏览和搜索 Issue 的工具。以上均不提供发送、删除或修改入口。断开连接后，
-            相关工具会立即在三端失效。
+            Gmail 与 Outlook 只读邮件，Linear 只读 Issue，Notion 只读页面与数据库，
+            Google Calendar / Drive 只读日历与文件。以上均不提供写入、发送、删除或修改入口。
+            断开连接后，相关工具会立即在三端失效。
           </p>
           <p className="mt-2">
             授权会在系统浏览器中完成；回到 App 后状态由服务器推送或重新查询刷新。

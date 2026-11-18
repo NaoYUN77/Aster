@@ -606,7 +606,7 @@ export interface components {
             degraded: boolean;
         };
         /** @enum {string} */
-        ConnectorProvider: "github" | "gmail" | "outlook" | "linear" | "mcp_stdio";
+        ConnectorProvider: "github" | "gmail" | "outlook" | "linear" | "notion" | "google_calendar" | "google_drive" | "mcp_stdio";
         /** @enum {string} */
         ConnectorStatus: "pending" | "connected" | "error" | "revoked";
         ConnectorDefinition: {

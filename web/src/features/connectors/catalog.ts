@@ -1,6 +1,9 @@
 import gmailIcon from "@/assets/connectors/gmail.svg";
 import githubIcon from "@/assets/connectors/github.svg";
+import googleCalendarIcon from "@/assets/connectors/google-calendar.svg";
+import googleDriveIcon from "@/assets/connectors/google-drive.svg";
 import linearIcon from "@/assets/connectors/linear.svg";
+import notionIcon from "@/assets/connectors/notion.svg";
 import outlookIcon from "@/assets/connectors/outlook.svg";
 import type { Connector, ConnectorId } from "@/api/connectors";
 
@@ -62,6 +65,39 @@ export const CONNECTOR_CATALOG: ConnectorMeta[] = [
     readOnly: true,
     readOnlyNotice: "Linear 本轮只读：不会创建、修改或删除 Issue。",
     permissions: ["读取团队与 Issue", "按关键字搜索 Issue"],
+  },
+  {
+    id: "notion",
+    name: "Notion",
+    icon: notionIcon,
+    tagline: "只读页面与数据库",
+    description:
+      "本轮 Notion 仅提供只读能力：搜索页面与数据库并读取页面内容。不会创建、修改或删除任何内容。",
+    readOnly: true,
+    readOnlyNotice: "Notion 本轮只读：不会创建、修改或删除页面与数据库。",
+    permissions: ["搜索页面/数据库", "读取页面内容"],
+  },
+  {
+    id: "google_calendar",
+    name: "Google Calendar",
+    icon: googleCalendarIcon,
+    tagline: "只读日历事件",
+    description:
+      "本轮 Google Calendar 仅提供只读能力：读取日历与事件。不会创建、修改或删除事件。",
+    readOnly: true,
+    readOnlyNotice: "Google Calendar 本轮只读：不会创建、修改或删除事件。",
+    permissions: ["读取日历与事件"],
+  },
+  {
+    id: "google_drive",
+    name: "Google Drive",
+    icon: googleDriveIcon,
+    tagline: "只读文件检索",
+    description:
+      "本轮 Google Drive 仅提供只读能力：搜索文件并读取 Google 文档正文。不会上传、修改或删除文件。",
+    readOnly: true,
+    readOnlyNotice: "Google Drive 本轮只读：不会上传、修改或删除文件。",
+    permissions: ["搜索文件", "读取 Google 文档正文"],
   },
 ];
 

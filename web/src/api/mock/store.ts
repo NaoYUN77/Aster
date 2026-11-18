@@ -33,7 +33,14 @@ export type MockConnectorStatus = "pending" | "connected" | "error" | "revoked";
 /** 与后端 `ConnectorConnection` 同形；mock 也只暴露这些安全字段。 */
 export type MockConnectorConnection = {
   id: string;
-  provider: "github" | "gmail" | "outlook" | "linear";
+  provider:
+    | "github"
+    | "gmail"
+    | "outlook"
+    | "linear"
+    | "notion"
+    | "google_calendar"
+    | "google_drive";
   slug: string;
   status: MockConnectorStatus;
   accountLabel: string | null;
@@ -104,6 +111,50 @@ const CONNECTOR_DEFS = [
     readOnly: true,
     accountLabel: "aster.demo@linear.app",
   },
+  {
+    provider: "notion",
+    displayName: "Notion",
+    transport: "oauth",
+    defaultScopes: [],
+    tools: ["connector_notion_search", "connector_notion_get_page"],
+    description: "本轮 Notion 仅提供只读能力：搜索页面/数据库并读取页面内容。",
+    readOnly: true,
+    accountLabel: "Aster Workspace",
+  },
+  {
+    provider: "google_calendar",
+    displayName: "Google Calendar",
+    transport: "oauth",
+    defaultScopes: [
+      "openid",
+      "email",
+      "https://www.googleapis.com/auth/calendar.readonly",
+    ],
+    tools: [
+      "connector_google_calendar_list_events",
+      "connector_google_calendar_get_event",
+    ],
+    description: "本轮 Google Calendar 仅提供只读能力：读取日历与事件。",
+    readOnly: true,
+    accountLabel: "aster.demo@gmail.com",
+  },
+  {
+    provider: "google_drive",
+    displayName: "Google Drive",
+    transport: "oauth",
+    defaultScopes: [
+      "openid",
+      "email",
+      "https://www.googleapis.com/auth/drive.readonly",
+    ],
+    tools: [
+      "connector_google_drive_search_files",
+      "connector_google_drive_get_file",
+    ],
+    description: "本轮 Google Drive 仅提供只读能力：搜索文件并读取文档正文。",
+    readOnly: true,
+    accountLabel: "aster.demo@gmail.com",
+  },
 ] as const;
 
 function connectorDef(provider: string) {
@@ -157,7 +208,10 @@ function load(): MockState {
             (item.provider === "github" ||
               item.provider === "gmail" ||
               item.provider === "outlook" ||
-              item.provider === "linear") &&
+              item.provider === "linear" ||
+              item.provider === "notion" ||
+              item.provider === "google_calendar" ||
+              item.provider === "google_drive") &&
             typeof item.status === "string"
           );
         }),
@@ -663,11 +717,11 @@ export function mockRequestCredential(
   const connection = state.connectors[def.provider];
   const requestId = makeId("cred");
   const tool =
-    def.provider === "gmail" || def.provider === "outlook"
-      ? `${def.provider}.search`
+    def.provider === "github"
+      ? "github.create_issue_comment"
       : def.provider === "linear"
         ? "linear.search_issues"
-        : "github.create_issue_comment";
+        : `${def.provider}.search`;
   emit("credential.request", {
     connectionId: connection?.id ?? `mock_${def.provider}`,
     provider: def.provider,
