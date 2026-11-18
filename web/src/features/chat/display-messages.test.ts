@@ -268,7 +268,7 @@ describe("buildDisplayMessages 去重", () => {
     expect(result[0]!.tool).toEqual({ name: "current_time", status: "done" });
   });
 
-  it("空文本 assistant 且没有 tool 时仍被过滤，避免空气泡", () => {
+  it("空文本 assistant 且 tool 为 null 时仍被过滤，避免空气泡", () => {
     const history = [
       message({
         id: "empty-1",
@@ -280,6 +280,18 @@ describe("buildDisplayMessages 去重", () => {
     ];
 
     expect(buildDisplayMessages(history, state())).toHaveLength(0);
+  });
+
+  it("空文本 assistant 完全缺少 tool 字段时仍被过滤（旧服务端/省略字段）", () => {
+    const withoutTool: Partial<UiMessage> = message({
+      id: "empty-2",
+      role: "assistant",
+      text: "",
+      status: "complete",
+    });
+    delete withoutTool.tool;
+
+    expect(buildDisplayMessages([withoutTool as UiMessage], state())).toHaveLength(0);
   });
 
   it("断线重连/刷新后历史与 live 重复 assistant 不产生第二条", () => {

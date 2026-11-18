@@ -89,7 +89,7 @@ export function buildDisplayMessages(
       message.role === "assistant" &&
       message.text.trim() === "" &&
       message.status !== "failed" &&
-      message.tool === null
+      !message.tool
     ) {
       continue;
     }
