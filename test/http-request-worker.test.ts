@@ -6,7 +6,7 @@ import test from "node:test";
 import type { EventHub } from "../src/http/events.js";
 import { WebRequestStore } from "../src/http/store.js";
 import { RequestWorker } from "../src/http/worker.js";
-import { fakeAgent, fixtureSelection, message, waitFor } from "./http-testkit.js";
+import { fakeAgent, fixtureSelection, message, steerHandle, waitFor } from "./http-testkit.js";
 
 function recordingHub(): { hub: EventHub; events: { event: string; data: unknown }[] } {
   const events: { event: string; data: unknown }[] = [];
@@ -206,7 +206,7 @@ test("steer is accepted only for the running request, broadcasts once and report
       },
       steer: async (request) => {
         steerCalls.push(request.requestId);
-        return { steerId: request.requestId, done: settled.promise };
+        return steerHandle(request.requestId, settled.promise);
       },
     }),
   });
@@ -356,7 +356,7 @@ test("promoting a queued message while running injects it into that run and is i
       },
       steer: async (request) => {
         steerCalls.push({ requestId: request.requestId, text: request.text });
-        return { steerId: request.requestId, done: new Promise(() => {}) };
+        return steerHandle(request.requestId, new Promise(() => {}));
       },
     }),
   });
@@ -466,20 +466,20 @@ test("promote refuses rows that already left the queue and reports a missing id"
     agent: fakeAgent({ service: fixture.service, reply: async () => "unused" }),
   });
   try {
-    assert.deepEqual(await worker.promote("req_AAAAAAAAAAAAAAAA"), { ok: false, reason: "not_queued" });
+    assert.deepEqual(await worker.promote("req_AAAAAAAAAAAAAAAA"), { ok: false, reason: "not_queued", requestStatus: null });
 
     const running = store.enqueue("client-running", "running");
     store.claimNext();
-    assert.deepEqual(await worker.promote(running.row.request_id), { ok: false, reason: "not_queued" });
+    assert.deepEqual(await worker.promote(running.row.request_id), { ok: false, reason: "not_queued", requestStatus: "running" });
 
     const aborted = store.enqueue("client-aborted", "aborted");
     store.markAborted(aborted.row.request_id);
-    assert.deepEqual(await worker.promote(aborted.row.request_id), { ok: false, reason: "not_queued" });
+    assert.deepEqual(await worker.promote(aborted.row.request_id), { ok: false, reason: "not_queued", requestStatus: "aborted" });
 
     const done = store.enqueue("client-done", "done");
     store.claimNext();
     store.markDone(done.row.request_id, "answer", { requested: null, actual: null, kind: null, degraded: false });
-    assert.deepEqual(await worker.promote(done.row.request_id), { ok: false, reason: "not_queued" });
+    assert.deepEqual(await worker.promote(done.row.request_id), { ok: false, reason: "not_queued", requestStatus: "done" });
   } finally {
     await worker.stop();
     store.close();
@@ -565,6 +565,185 @@ test("promote starts the message when the run goes idle before the injection lan
     assert.equal(maxConcurrent, 1);
     assert.ok(events.some((event) => event.event === "queue.changed"));
   } finally {
+    await worker.stop();
+    store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("abort immediately followed by promote never strands a promoted row (20 iterations)", async () => {
+  const fixture = await fixtureSelection();
+  const directory = await mkdtemp(join(tmpdir(), "aster-worker-abort-promote-"));
+  const store = new WebRequestStore(join(directory, "web.sqlite"));
+  const { hub } = recordingHub();
+  const releases = new Map<string, () => void>();
+  const replies: string[] = [];
+  const worker = new RequestWorker({
+    store,
+    hub,
+    ownerId: "owner",
+    agent: fakeAgent({
+      service: fixture.service,
+      reply: (request, signal) => new Promise<string>((resolve, reject) => {
+        replies.push(request.text);
+        releases.set(request.requestId, () => resolve(`answer:${request.text}`));
+        signal.addEventListener("abort", () => {
+          reject(Object.assign(new Error("aborted"), { code: "ABORTED" }));
+        }, { once: true });
+      }),
+    }),
+  });
+  try {
+    worker.start();
+    for (let index = 0; index < 20; index += 1) {
+      const base = store.enqueue(`race-base-${index}`, "base");
+      worker.notify();
+      await waitFor(() => store.get(base.row.request_id)?.status === "running");
+      const target = store.enqueue(`race-target-${index}`, `target-${index}`);
+
+      assert.deepEqual(worker.abort(base.row.request_id), { ok: true });
+      const promoted = await worker.promote(target.row.request_id);
+
+      if (promoted.ok) {
+        assert.equal(promoted.mode, "started", "an aborted run must not take the steer path");
+        await waitFor(() => releases.has(target.row.request_id));
+        releases.get(target.row.request_id)!();
+      } else {
+        assert.equal(promoted.reason, "not_queued");
+        assert.equal(promoted.requestStatus, "running", "a claimed row reports its new status");
+        await waitFor(() => releases.has(target.row.request_id));
+        releases.get(target.row.request_id)!();
+      }
+
+      await waitFor(() => store.get(target.row.request_id)?.status === "done");
+      assert.notEqual(store.get(target.row.request_id)?.status, "promoted");
+      assert.equal(store.get(base.row.request_id)?.status, "aborted");
+    }
+    assert.equal(replies.filter((text) => text === "base").length, 20);
+    assert.equal(replies.filter((text) => text.startsWith("target-")).length, 20);
+  } finally {
+    await worker.stop();
+    store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a steer that settles without an answer returns its promoted row to the queue and runs it", async () => {
+  const fixture = await fixtureSelection();
+  const directory = await mkdtemp(join(tmpdir(), "aster-worker-steer-unanswered-"));
+  const store = new WebRequestStore(join(directory, "web.sqlite"));
+  const { hub, events } = recordingHub();
+  const baseGate = Promise.withResolvers<void>();
+  const replies: string[] = [];
+  const worker = new RequestWorker({
+    store,
+    hub,
+    ownerId: "owner",
+    agent: fakeAgent({
+      service: fixture.service,
+      reply: (request, signal) => {
+        replies.push(request.text);
+        if (request.text !== "base") return Promise.resolve(`answer:${request.text}`);
+        return new Promise<string>((_resolve, reject) => {
+          baseGate.promise.catch(() => {});
+          signal.addEventListener("abort", () => {
+            reject(Object.assign(new Error("aborted"), { code: "ABORTED" }));
+          }, { once: true });
+        });
+      },
+      steer: async (request) => steerHandle(request.requestId, Promise.resolve(undefined), {
+        status: async () => "queued",
+        abort: async () => "aborted",
+      }),
+    }),
+  });
+  try {
+    const base = store.enqueue("client-base", "base");
+    const target = store.enqueue("client-target", "target text");
+    worker.start();
+    worker.notify();
+    await waitFor(() => store.get(base.row.request_id)?.status === "running");
+
+    const promoted = await worker.promote(target.row.request_id);
+    assert.deepEqual(promoted, { ok: true, mode: "steered", steerId: "steer:client-target" });
+
+    // The unanswered steer must not leave the row promoted.
+    await waitFor(() => store.get(target.row.request_id)?.status === "queued");
+    assert.ok(events.some((event) => event.event === "queue.changed"
+      && (event.data as { items: { clientMessageId: string }[] }).items
+        .some((item) => item.clientMessageId === "client-target")));
+
+    worker.abort(base.row.request_id);
+    await waitFor(() => store.get(target.row.request_id)?.status === "done");
+    assert.equal(store.get(target.row.request_id)?.status, "done");
+    assert.ok(replies.includes("target text"));
+  } finally {
+    baseGate.resolve();
+    await worker.stop();
+    store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("aborting withdraws a still-queued steer and requeues its promoted row", async () => {
+  const fixture = await fixtureSelection();
+  const directory = await mkdtemp(join(tmpdir(), "aster-worker-steer-withdraw-"));
+  const store = new WebRequestStore(join(directory, "web.sqlite"));
+  const { hub } = recordingHub();
+  const done = Promise.withResolvers<import("../src/http/projection.js").UiMessage | undefined>();
+  const targetGate = Promise.withResolvers<void>();
+  let steerStatus: "queued" | "placed" | "done" | "unanswered" = "queued";
+  const replies: string[] = [];
+  const worker = new RequestWorker({
+    store,
+    hub,
+    ownerId: "owner",
+    agent: fakeAgent({
+      service: fixture.service,
+      reply: (request, signal) => {
+        replies.push(request.text);
+        if (request.text !== "base") {
+          return targetGate.promise.then(() => `answer:${request.text}`);
+        }
+        return new Promise<string>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            reject(Object.assign(new Error("aborted"), { code: "ABORTED" }));
+          }, { once: true });
+        });
+      },
+      steer: async (request) => steerHandle(request.requestId, done.promise, {
+        status: async () => steerStatus,
+        abort: async () => {
+          steerStatus = "unanswered";
+          done.resolve(undefined);
+          return "aborted";
+        },
+      }),
+    }),
+  });
+  try {
+    const base = store.enqueue("client-base", "base");
+    const target = store.enqueue("client-target", "target text");
+    worker.start();
+    worker.notify();
+    await waitFor(() => store.get(base.row.request_id)?.status === "running");
+
+    assert.deepEqual(await worker.promote(target.row.request_id),
+      { ok: true, mode: "steered", steerId: "steer:client-target" });
+    assert.equal(store.get(target.row.request_id)?.status, "promoted");
+
+    assert.deepEqual(worker.abort(base.row.request_id), { ok: true });
+    // The row was requeued and the worker claimed it, which is why it is running again.
+    await waitFor(() => store.get(target.row.request_id)?.status === "running");
+    assert.equal(steerStatus, "unanswered");
+    targetGate.resolve();
+    await waitFor(() => store.get(target.row.request_id)?.status === "done");
+    assert.ok(replies.includes("target text"));
+  } finally {
+    targetGate.resolve();
     await worker.stop();
     store.close();
     await rm(fixture.directory, { recursive: true, force: true });

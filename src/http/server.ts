@@ -293,7 +293,13 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     }
     const result = await worker.promote(requestId);
     if (!result.ok) {
-      return reply.code(409).send(errorBody("QUEUE_ITEM_NOT_QUEUED", "消息已不在队列中，请刷新队列"));
+      return reply.code(409).send({
+        error: {
+          code: "QUEUE_ITEM_NOT_QUEUED",
+          message: "消息已不在队列中，请刷新队列",
+          requestStatus: result.requestStatus,
+        },
+      });
     }
     return reply.code(202).send(result.mode === "steered"
       ? { requestId, mode: "steered", steerId: result.steerId }

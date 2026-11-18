@@ -77,9 +77,15 @@ is broadcast as `model.changed` just like a button click.
   nothing is running it starts immediately ahead of older queued rows (`202 { mode: "started" }`)
   and broadcasts `request.running`. The row becomes `promoted`, or `running` when it starts.
   Promoting an already-promoted row replays the same `steerId` without injecting again. A row that
-  is running/done/failed/aborted returns `409 QUEUE_ITEM_NOT_QUEUED`; refresh the queue. A malformed
-  `requestId` returns `400 INVALID_REQUEST`. If the run ends between the decision and the
-  injection, the server starts the message instead of failing.
+  is running/done/failed/aborted returns `409 QUEUE_ITEM_NOT_QUEUED` with
+  `error.requestStatus` (`running`, `done`, `failed`, `aborted`, or `null` when unknown); use it to
+  say "已开始执行" for `running` instead of re-adding the message. A malformed `requestId` returns
+  `400 INVALID_REQUEST`.
+- A run that is aborting is not a steer target: if the controller is aborted or the row is no
+  longer `running`, promote waits for the current run to settle and then starts the message
+  (`mode: "started"`). If the steer's durable submission is later withdrawn without an answer
+  (abort), the promoted row returns to `queued`, `queue.changed` is broadcast, and the worker runs
+  it as a normal request. A promote therefore never leaves a message in `promoted` with no run.
 - `text` over 32000 characters returns `400 TEXT_TOO_LONG` with a user-facing message; branch on
   the code rather than on status 400 alone.
 - CORS allows `Authorization`, `Content-Type`, and `Cache-Control`. Defaults include

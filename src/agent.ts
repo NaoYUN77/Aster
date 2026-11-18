@@ -1036,7 +1036,16 @@ export async function openAgent(
        * run therefore has no per-request memory projection either; v1 accepts this limitation
        * rather than inventing a second request identity.
        */
-      async steer(request: TextRequest): Promise<{ readonly steerId: string; readonly done: Promise<UiMessage | undefined> }> {
+      async steer(request: TextRequest): Promise<{
+        readonly steerId: string;
+        readonly done: Promise<UiMessage | undefined>;
+        /** Durable submission state, bound to this agent's context. */
+        readonly submission: {
+          status(): Promise<"queued" | "placed" | "done" | "unanswered">;
+          /** Withdraw the steer if it has not been placed in the run's inbox yet. */
+          abort(): Promise<"aborted" | "already_placed" | "settled">;
+        };
+      }> {
         const steerId = request.requestId;
         const routed = await route(request);
         if (routed.notice !== undefined) {
@@ -1077,7 +1086,14 @@ export async function openAgent(
             return undefined;
           }
         })();
-        return { steerId, done };
+        return {
+          steerId,
+          done,
+          submission: {
+            status: async () => (await submission.status(context)).status,
+            abort: () => submission.abort(context),
+          },
+        };
       },
       /**
        * A host-initiated run for a standing task. The request id is derived from the routine and the

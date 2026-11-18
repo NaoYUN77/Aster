@@ -12,7 +12,7 @@ import { RequestWorker } from "../src/http/worker.js";
 import type { HistoryPage } from "../src/http/projection.js";
 import { ConnectorError } from "../src/connectors/errors.js";
 import type { ConnectorService } from "../src/connectors/service.js";
-import { fakeAgent, fixtureSelection, message, waitFor } from "./http-testkit.js";
+import { fakeAgent, fixtureSelection, message, steerHandle, waitFor } from "./http-testkit.js";
 
 const PASSWORD = "integration-password";
 
@@ -20,7 +20,14 @@ async function startServer(options: {
   withSse?: boolean;
   connectors?: ConnectorService;
   reply?: (request: { requestId: string; text: string }, signal: AbortSignal) => Promise<string>;
-  steer?: (request: { requestId: string; text: string }) => Promise<{ steerId: string; done: Promise<import("../src/http/projection.js").UiMessage | undefined> }>;
+  steer?: (request: { requestId: string; text: string }) => Promise<{
+    steerId: string;
+    done: Promise<import("../src/http/projection.js").UiMessage | undefined>;
+    submission: {
+      status(): Promise<"queued" | "placed" | "done" | "unanswered">;
+      abort(): Promise<"aborted" | "already_placed" | "settled">;
+    };
+  }>;
 } = {}) {
   const fixture = await fixtureSelection();
   const directory = await mkdtemp(join(tmpdir(), "aster-http-server-"));
@@ -506,7 +513,7 @@ test("steer route: 202 while running, 409 for idle or a stale path, 400 for inva
     },
     steer: async (request) => {
       if (!running) throw Object.assign(new Error("idle"), { code: "NO_ACTIVE_REQUEST" });
-      return { steerId: request.requestId, done: Promise.resolve(message({ id: "77", text: "steer answer" })) };
+      return steerHandle(request.requestId, Promise.resolve(message({ id: "77", text: "steer answer" })));
     },
   });
   try {
@@ -629,7 +636,7 @@ test("promote route steers while running, validates the path and rejects rows ou
     steer: async (request) => {
       steerCalls.push(request.requestId);
       if (runningId === undefined) throw Object.assign(new Error("idle"), { code: "NO_ACTIVE_REQUEST" });
-      return { steerId: request.requestId, done: new Promise(() => {}) };
+      return steerHandle(request.requestId, new Promise(() => {}));
     },
   });
   try {
@@ -672,14 +679,31 @@ test("promote route steers while running, validates the path and rejects rows ou
 
     const running = await promote(original.row.request_id);
     assert.equal(running.statusCode, 409);
-    assert.equal(running.json<{ error: { code: string } }>().error.code, "QUEUE_ITEM_NOT_QUEUED");
+    assert.deepEqual(running.json(), {
+      error: {
+        code: "QUEUE_ITEM_NOT_QUEUED",
+        message: "消息已不在队列中，请刷新队列",
+        requestStatus: "running",
+      },
+    });
 
     const missing = await promote("req_AAAAAAAAAAAAAAAA");
     assert.equal(missing.statusCode, 409);
     assert.equal(missing.json<{ error: { code: string } }>().error.code, "QUEUE_ITEM_NOT_QUEUED");
+    assert.equal(missing.json<{ error: { requestStatus: string | null } }>().error.requestStatus, null);
+
+    const aborted = server.store.enqueue("client-aborted", "aborted");
+    server.store.markAborted(aborted.row.request_id);
+    const abortedReply = await promote(aborted.row.request_id);
+    assert.equal(abortedReply.statusCode, 409);
+    assert.equal(abortedReply.json<{ error: { requestStatus: string | null } }>().error.requestStatus, "aborted");
 
     gate.resolve();
     await waitFor(() => server.store.get(original.row.request_id)?.status === "done");
+
+    const finished = await promote(original.row.request_id);
+    assert.equal(finished.statusCode, 409);
+    assert.equal(finished.json<{ error: { requestStatus: string | null } }>().error.requestStatus, "done");
   } finally {
     await server.close();
   }
@@ -723,7 +747,7 @@ test("SSE snapshot and queue.changed keep the pending queue in sync across enque
       serverRef.runningId = undefined;
       return "answer";
     },
-    steer: async (request) => ({ steerId: request.requestId, done: steerDone }),
+    steer: async (request) => steerHandle(request.requestId, steerDone),
   });
   const serverRef = { runningId: undefined as string | undefined };
   const controller = new AbortController();

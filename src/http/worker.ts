@@ -3,7 +3,7 @@ import type { EventHub } from "./events.js";
 import type { AgentGate } from "./agent-gate.js";
 import type { ModelSelectionService } from "../model-control.js";
 import type { TextRequest } from "../messages.js";
-import type { RequestModelInfo, WebRequestRow, WebRequestStore } from "./store.js";
+import type { RequestModelInfo, WebRequestRow, WebRequestStatus, WebRequestStore } from "./store.js";
 
 /**
  * One FIFO worker for the single-owner conversation.
@@ -13,13 +13,23 @@ import type { RequestModelInfo, WebRequestRow, WebRequestStore } from "./store.j
  * Progress is broadcast over SSE; the final text stays in the durable transcript.
  */
 
+export type SteerSubmission = {
+  status(): Promise<"queued" | "placed" | "done" | "unanswered">;
+  abort(): Promise<"aborted" | "already_placed" | "settled">;
+};
+
 export type WebAgent = {
   reply(request: TextRequest, signal: AbortSignal): Promise<string>;
   /**
    * Join the running durable run. `done` settles with the projected assistant message, if any;
-   * the worker tracks it in the background and never awaits it on shutdown.
+   * the worker tracks it in the background and never awaits it on shutdown. `submission` is the
+   * durable handle the worker needs to requeue a promoted row when the steer is withdrawn.
    */
-  steer(request: TextRequest): Promise<{ readonly steerId: string; readonly done: Promise<UiMessage | undefined> }>;
+  steer(request: TextRequest): Promise<{
+    readonly steerId: string;
+    readonly done: Promise<UiMessage | undefined>;
+    readonly submission: SteerSubmission;
+  }>;
   abort(): Promise<void>;
   history(options?: { readonly before?: string; readonly limit?: number }): Promise<HistoryPage>;
   modelService: ModelSelectionService;
@@ -40,12 +50,25 @@ export type RequestWorkerOptions = {
 export type PromoteResult =
   | { readonly ok: true; readonly mode: "steered"; readonly steerId: string }
   | { readonly ok: true; readonly mode: "started" }
-  | { readonly ok: false; readonly reason: "not_queued" };
+  | {
+    readonly ok: false;
+    readonly reason: "not_queued";
+    /** Current web status of the row, or null when it no longer exists. */
+    readonly requestStatus: WebRequestStatus | null;
+  };
 
 type ActiveRun = {
   readonly requestId: string;
   readonly controller: AbortController;
   readonly done: Promise<void>;
+};
+
+/** A steer admitted into a run, kept until it settles so abort can requeue a promoted row. */
+type PendingSteer = {
+  readonly steerId: string;
+  readonly requestId: string;
+  readonly queueRequestId: string | undefined;
+  readonly submission: SteerSubmission;
 };
 
 type LoopOutcome = { kind: "busy"; done: Promise<void> } | { kind: "idle" } | { kind: "started" };
@@ -90,6 +113,8 @@ export class RequestWorker {
   private transition: Promise<unknown> = Promise.resolve();
   /** Steer ids admitted by this process, so an HTTP retry does not broadcast the same user row twice. */
   private readonly admittedSteers = new Set<string>();
+  /** Steers that have not settled yet, keyed by steer id. Abort uses this to withdraw queued ones. */
+  private readonly pendingSteers = new Map<string, PendingSteer>();
 
   constructor(options: RequestWorkerOptions) {
     this.store = options.store;
@@ -276,9 +301,16 @@ export class RequestWorker {
     requestId: string,
     clientMessageId: string,
     text: string,
+    /** The queue row this steer came from; if the steer is withdrawn, that row returns to the queue. */
+    queueRequestId?: string,
   ): Promise<{ ok: true; steerId: string } | { ok: false; reason: "no_active_request" | "not_active" }> {
-    const running = this.running?.requestId;
-    if (running !== undefined && running !== requestId) return { ok: false, reason: "not_active" };
+    const active = this.running;
+    if (active !== undefined && active.requestId !== requestId) return { ok: false, reason: "not_active" };
+    if (active !== undefined
+      && (active.controller.signal.aborted || this.store.get(requestId)?.status !== "running")) {
+      // The run is aborting or has already settled; accepting a steer now would never be answered.
+      return { ok: false, reason: "no_active_request" };
+    }
     const steerId = `steer:${clientMessageId}`;
     let result: Awaited<ReturnType<WebAgent["steer"]>>;
     try {
@@ -292,6 +324,12 @@ export class RequestWorker {
       if (errorCodeOf(error) === "NO_ACTIVE_REQUEST") return { ok: false, reason: "no_active_request" };
       throw error;
     }
+    this.pendingSteers.set(result.steerId, {
+      steerId: result.steerId,
+      requestId,
+      queueRequestId,
+      submission: result.submission,
+    });
     // A replay of an already-admitted steer returns the same durable submission; do not show the
     // user message twice. Clients also dedupe by steerId, which covers a replay after a restart.
     if (!this.admittedSteers.has(result.steerId)) {
@@ -309,11 +347,49 @@ export class RequestWorker {
     // Background only: a late steer can start one more run, and this is the event that carries its
     // answer. Shutdown never waits on it, and a settle failure is a log line, not a request failure.
     void result.done.then((message) => {
-      if (message !== undefined) this.hub.broadcast("steer.done", { requestId, steerId: result.steerId, message });
+      this.pendingSteers.delete(result.steerId);
+      if (message !== undefined) {
+        this.hub.broadcast("steer.done", { requestId, steerId: result.steerId, message });
+      } else {
+        // Withdrawn (abort) or otherwise answered with nothing: never leave the queue row dangling.
+        this.requeuePromoted(queueRequestId);
+      }
     }).catch((error: unknown) => {
+      this.pendingSteers.delete(result.steerId);
       this.log(`Steer ${result.steerId} completion failed: ${errorCodeOf(error)}`);
     });
     return { ok: true, steerId: result.steerId };
+  }
+
+  /** Put a promoted row back into the queue when its steer can no longer be answered. */
+  private requeuePromoted(requestId: string | undefined): void {
+    if (requestId === undefined) return;
+    const row = this.store.get(requestId);
+    if (row?.status !== "promoted") return;
+    this.store.revertPromoted(requestId);
+    this.broadcastQueue();
+    this.notify();
+  }
+
+  /** Abort queued steers of a stopped run so the promoted rows can be claimed again. */
+  private async withdrawPendingSteers(runId: string): Promise<void> {
+    for (const steer of [...this.pendingSteers.values()]) {
+      if (steer.requestId !== runId) continue;
+      let status: Awaited<ReturnType<SteerSubmission["status"]>>;
+      try {
+        status = await steer.submission.status();
+      } catch (error) {
+        this.log(`Steer ${steer.steerId} status failed: ${errorCodeOf(error)}`);
+        continue;
+      }
+      if (status !== "queued") continue;
+      try {
+        const outcome = await steer.submission.abort();
+        if (outcome === "aborted") this.requeuePromoted(steer.queueRequestId);
+      } catch (error) {
+        this.log(`Steer ${steer.steerId} withdrawal failed: ${errorCodeOf(error)}`);
+      }
+    }
   }
 
   /**
@@ -327,41 +403,55 @@ export class RequestWorker {
   async promote(requestId: string): Promise<PromoteResult> {
     return this.serialize(async (): Promise<PromoteResult> => {
       const row = this.store.get(requestId);
-      if (row === undefined) return { ok: false, reason: "not_queued" };
+      if (row === undefined) return { ok: false, reason: "not_queued", requestStatus: null };
       const steerId = `steer:${row.client_message_id}`;
       if (row.status === "promoted") return { ok: true, mode: "steered", steerId };
-      if (row.status !== "queued") return { ok: false, reason: "not_queued" };
+      if (row.status !== "queued") {
+        return { ok: false, reason: "not_queued", requestStatus: row.status };
+      }
 
       const running = this.running;
-      if (running !== undefined) {
+      // An aborted run in teardown is not a steer target: its durable inbox is being withdrawn.
+      const steerable = running !== undefined
+        && !running.controller.signal.aborted
+        && this.store.get(running.requestId)?.status === "running";
+      if (running !== undefined && !steerable) {
+        // Let the aborted run settle before this message takes the single run slot.
+        await running.done;
+      }
+
+      if (running !== undefined && steerable) {
         if (!this.store.markPromoted(requestId)) {
           // The worker claimed it under us (or it settled); report what actually happened.
           const fresh = this.store.get(requestId);
           this.broadcastQueue();
           return fresh?.status === "promoted"
             ? { ok: true, mode: "steered", steerId }
-            : { ok: false, reason: "not_queued" };
+            : { ok: false, reason: "not_queued", requestStatus: fresh?.status ?? null };
         }
         this.broadcastQueue();
-        let steered: Awaited<ReturnType<RequestWorker["steer"]>>;
-        try {
-          steered = await this.steer(running.requestId, row.client_message_id, row.text);
-        } catch (error) {
-          // Nothing joined the run; put the row back so a retry can try again.
-          this.store.revertPromoted(requestId);
-          this.broadcastQueue();
-          throw error;
+        // Abort can land between the decision and the injection; re-check before touching the run.
+        if (!running.controller.signal.aborted && this.store.get(running.requestId)?.status === "running") {
+          let steered: Awaited<ReturnType<RequestWorker["steer"]>>;
+          try {
+            steered = await this.steer(running.requestId, row.client_message_id, row.text, requestId);
+          } catch (error) {
+            // Nothing joined the run; put the row back so a retry can try again.
+            this.store.revertPromoted(requestId);
+            this.broadcastQueue();
+            throw error;
+          }
+          if (steered.ok) return { ok: true, mode: "steered", steerId: steered.steerId };
         }
-        if (steered.ok) return { ok: true, mode: "steered", steerId: steered.steerId };
-        // The durable run went idle between the check and the injection. Wait for the web slot to
-        // clear (its execute may still be settling) and then start this message instead.
+        // The run was aborted or went idle between the check and the injection. Wait for the web
+        // slot to clear (its execute may still be settling) and then start this message instead.
         await running.done;
       }
 
       const started = this.store.startSpecific(requestId);
       if (started === undefined) {
         this.broadcastQueue();
-        return { ok: false, reason: "not_queued" };
+        return { ok: false, reason: "not_queued", requestStatus: this.store.get(requestId)?.status ?? null };
       }
       this.broadcastQueue();
       this.beginRun(started);
@@ -382,6 +472,10 @@ export class RequestWorker {
     if (result.previous === "queued") this.broadcastQueue();
     if (result.previous === "running" && this.running?.requestId === requestId) {
       this.running.controller.abort();
+      // A steer still queued in the inbox would otherwise settle unanswered and strand its row.
+      void this.withdrawPendingSteers(requestId).catch((error: unknown) => {
+        this.log(`pending steer withdrawal failed: ${errorCodeOf(error)}`);
+      });
       // The durable run must stop too; the wait alone does not cancel it.
       void this.agent.abort().catch((error: unknown) => {
         this.log(`agent.abort() failed: ${error instanceof Error ? error.message : String(error)}`);
