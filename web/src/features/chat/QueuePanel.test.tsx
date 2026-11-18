@@ -19,11 +19,13 @@ function item(
 function render(
   items: QueuedRequest[],
   activeStatus: "queued" | "running" | null = "running",
+  promoting: string[] = [],
 ) {
   return renderToStaticMarkup(
     <QueuePanel
       items={items}
       activeStatus={activeStatus}
+      promoting={promoting}
       onPromote={noop}
       onCancel={noop}
     />,
@@ -62,5 +64,13 @@ describe("QueuePanel", () => {
       expect(html).toContain('disabled=""');
       expect(html).toContain("立即插入");
     }
+  });
+
+  it("promoting 中的行显示 loading 并禁用两个操作", () => {
+    const html = render([item({ requestId: "req1" })], "running", ["req1"]);
+
+    expect(html).toContain("立即插入");
+    // 立即插入与取消都带 disabled。
+    expect(html.match(/disabled=""/g)).toHaveLength(2);
   });
 });

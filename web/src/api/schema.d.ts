@@ -219,9 +219,18 @@ export interface paths {
          *     the run finishes between the decision and the injection, the server
          *     starts the message immediately instead of rejecting it.
          *
+         *     An aborted run whose teardown is still in flight is not a steer target:
+         *     the server waits for it to settle and then starts the message
+         *     (`mode: "started"`). If the steer's durable submission is withdrawn
+         *     without an answer, the row returns to `queued` and the worker runs it as
+         *     a normal request, so a promote never leaves a message without a run.
+         *
          *     `409 QUEUE_ITEM_NOT_QUEUED` means the row is no longer queued (it is
          *     running, done, failed or aborted); the client should refresh
-         *     `GET /api/v1/queue`. A malformed `requestId` is `400`.
+         *     `GET /api/v1/queue`. The error carries `requestStatus` with that status,
+         *     or `null` when the row is unknown, so a client can show "已开始执行" for
+         *     `running` instead of re-adding the message. A malformed `requestId` is
+         *     `400`.
          */
         post: operations["promoteQueuedRequest"];
         delete?: never;
@@ -761,6 +770,13 @@ export interface components {
         };
         ErrorResponse: {
             error: {
+                /**
+                 * @description Present on `409 QUEUE_ITEM_NOT_QUEUED`: the web request's current
+                 *     status, or `null` when the request row is unknown. `running` means
+                 *     the worker already claimed the message and it is executing.
+                 * @enum {string|null}
+                 */
+                requestStatus?: "running" | "done" | "failed" | "aborted" | null;
                 /**
                  * @description Stable machine-readable code. Auth/transport codes: INVALID_REQUEST,
                  *     TEXT_TOO_LONG, UNAUTHORIZED, RATE_LIMITED, REQUEST_NOT_FOUND,

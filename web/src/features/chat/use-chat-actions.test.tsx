@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { ApiError } from "@/api/errors";
@@ -47,13 +48,19 @@ function captureSend(): (text: string, mode?: SendMode) => Promise<boolean> {
   return captured;
 }
 
-function captureQueueActions(): ReturnType<typeof useQueueActions> {
+function captureQueueActions(
+  client = new QueryClient(),
+): ReturnType<typeof useQueueActions> {
   let captured: ReturnType<typeof useQueueActions> | undefined;
   function Harness() {
     captured = useQueueActions();
     return null;
   }
-  renderToStaticMarkup(<Harness />);
+  renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <Harness />
+    </QueryClientProvider>,
+  );
   if (!captured) throw new Error("useQueueActions not captured");
   return captured;
 }
@@ -288,18 +295,82 @@ describe("useQueueActions", () => {
     expect(toast.success).toHaveBeenCalledWith("已插入本轮");
   });
 
-  it("promote 返回 started 时移除队列行，不伪造插话标记", async () => {
+  it("promote 返回 started 时按普通发送进入 running，不伪造插话标记", async () => {
     const item = seedQueueItem();
     mockedPromote.mockResolvedValue({ requestId: "req1", mode: "started" });
 
     await captureQueueActions().promote(item);
 
-    expect(useChatStore.getState().queue).toHaveLength(0);
-    expect(useChatStore.getState().outgoing[0]!.steer).toBeFalsy();
+    const state = useChatStore.getState();
+    expect(state.queue).toHaveLength(0);
+    expect(state.outgoing[0]!.requestId).toBe("req1");
+    expect(state.outgoing[0]!.status).toBe("running");
+    expect(state.outgoing[0]!.steer).toBeFalsy();
+    expect(state.activeRequestId).toBe("req1");
+    expect(state.activeStatus).toBe("running");
     expect(toast.success).toHaveBeenCalledWith("已开始执行");
   });
 
-  it("409 QUEUE_ITEM_NOT_QUEUED 刷新队列并提示", async () => {
+  it("409 running 时刷新队列与历史，并提示已开始执行", async () => {
+    const item = seedQueueItem();
+    mockedPromote.mockRejectedValue(
+      new ApiError("QUEUE_ITEM_NOT_QUEUED", "消息已不在队列", 409, {
+        requestStatus: "running",
+      }),
+    );
+    mockedGetQueue.mockResolvedValue({ items: [] });
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    await captureQueueActions(client).promote(item);
+
+    expect(mockedGetQueue).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["messages"] });
+    const state = useChatStore.getState();
+    expect(state.queue).toHaveLength(0);
+    expect(state.outgoing[0]!.status).toBe("running");
+    expect(state.outgoing[0]!.steer).toBe(false);
+    expect(state.activeRequestId).toBe("req1");
+    expect(toast.info).toHaveBeenCalledWith("该消息已开始执行");
+  });
+
+  it.each(["done", "failed"] as const)(
+    "409 requestStatus=%s 时提示已结束并保留最终状态",
+    async (requestStatus) => {
+      const item = seedQueueItem();
+      mockedPromote.mockRejectedValue(
+        new ApiError("QUEUE_ITEM_NOT_QUEUED", "消息已不在队列", 409, {
+          requestStatus,
+        }),
+      );
+      mockedGetQueue.mockResolvedValue({ items: [] });
+
+      await captureQueueActions().promote(item);
+
+      expect(useChatStore.getState().queue).toHaveLength(0);
+      expect(useChatStore.getState().outgoing[0]!.status).toBe(requestStatus);
+      expect(useChatStore.getState().outgoing[0]!.steer).toBe(false);
+      expect(toast.info).toHaveBeenCalledWith("该消息已结束");
+    },
+  );
+
+  it("409 aborted 时提示已取消并移除本地气泡", async () => {
+    const item = seedQueueItem();
+    mockedPromote.mockRejectedValue(
+      new ApiError("QUEUE_ITEM_NOT_QUEUED", "消息已不在队列", 409, {
+        requestStatus: "aborted",
+      }),
+    );
+    mockedGetQueue.mockResolvedValue({ items: [] });
+
+    await captureQueueActions().promote(item);
+
+    expect(useChatStore.getState().queue).toHaveLength(0);
+    expect(useChatStore.getState().outgoing).toHaveLength(0);
+    expect(toast.info).toHaveBeenCalledWith("该消息已取消");
+  });
+
+  it("409 缺少 requestStatus 时刷新但不使用笼统文案", async () => {
     const item = seedQueueItem();
     mockedPromote.mockRejectedValue(
       new ApiError("QUEUE_ITEM_NOT_QUEUED", "消息已不在队列", 409),
@@ -310,7 +381,8 @@ describe("useQueueActions", () => {
 
     expect(mockedGetQueue).toHaveBeenCalledTimes(1);
     expect(useChatStore.getState().queue).toHaveLength(0);
-    expect(toast.info).toHaveBeenCalledWith("该消息已开始或已结束");
+    expect(toast.info).toHaveBeenCalledWith("队列已更新");
+    expect(toast.info).not.toHaveBeenCalledWith("该消息已不在队列中");
   });
 
   it("其他 promote 错误保留队列行并 toast", async () => {

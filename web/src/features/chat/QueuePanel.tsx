@@ -8,6 +8,8 @@ import { formatTime } from "@/lib/time";
 type QueuePanelProps = {
   items: QueuedRequest[];
   activeStatus: "queued" | "running" | null;
+  /** 服务端队列快照尚未确认的 promote 行（来自 store，queue.changed 时清除）。 */
+  promoting: string[];
   onPromote: (item: QueuedRequest) => Promise<void>;
   onCancel: (item: QueuedRequest) => Promise<void>;
 };
@@ -19,25 +21,23 @@ type QueuePanelProps = {
 export function QueuePanel({
   items,
   activeStatus,
+  promoting,
   onPromote,
   onCancel,
 }: QueuePanelProps) {
-  const [pending, setPending] = useState<{
-    requestId: string;
-    action: "promote" | "cancel";
-  } | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   if (items.length === 0) return null;
 
   const canPromote = activeStatus === "running";
 
-  const run = async (item: QueuedRequest, action: "promote" | "cancel") => {
-    if (pending) return;
-    setPending({ requestId: item.requestId, action });
+  const runCancel = async (item: QueuedRequest) => {
+    if (cancellingId) return;
+    setCancellingId(item.requestId);
     try {
-      await (action === "promote" ? onPromote(item) : onCancel(item));
+      await onCancel(item);
     } finally {
-      setPending(null);
+      setCancellingId(null);
     }
   };
 
@@ -53,7 +53,9 @@ export function QueuePanel({
         </div>
         <ul className="max-h-40 space-y-1 overflow-y-auto">
           {items.map((item) => {
-            const busy = pending?.requestId === item.requestId;
+            const promotingThis = promoting.includes(item.requestId);
+            const cancelling = cancellingId === item.requestId;
+            const busy = promotingThis || cancelling;
             return (
               <li
                 key={item.requestId}
@@ -86,11 +88,9 @@ export function QueuePanel({
                           ? "立即插入当前对话"
                           : "当前没有运行中的回复"
                       }
-                      onClick={() => void run(item, "promote")}
+                      onClick={() => void onPromote(item)}
                     >
-                      {busy && pending.action === "promote" && (
-                        <Spinner className="size-3" />
-                      )}
+                      {promotingThis && <Spinner className="size-3" />}
                       立即插入
                     </Button>
                     <Button
@@ -99,11 +99,9 @@ export function QueuePanel({
                       variant="ghost"
                       className="h-7 px-2 text-[11px] text-muted-foreground"
                       disabled={busy}
-                      onClick={() => void run(item, "cancel")}
+                      onClick={() => void runCancel(item)}
                     >
-                      {busy && pending.action === "cancel" && (
-                        <Spinner className="size-3" />
-                      )}
+                      {cancelling && <Spinner className="size-3" />}
                       取消
                     </Button>
                   </div>

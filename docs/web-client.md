@@ -35,11 +35,13 @@ web/                     Vite + React + TS 应用（唯一 UI 代码）
 ## 3. API 契约
 
 - 正式契约由 Dev 1 维护：`docs/api/three-client-v1.openapi.yaml`。
-- 当前契约已同步 Dev 1 队列契约 `17e0ae9`（steer 基线 `300a463` / 远程 `3b084c9`）：
+- 当前契约已同步 Dev 1 队列契约 `86e70f1`（steer 基线 `300a463` / 远程 `3b084c9`）：
   - `POST /api/v1/requests/{requestId}/steer`（`SteerRequest` / `SteerResponse`）
   - `GET /api/v1/queue`（仅 queued，FIFO）
   - `POST /api/v1/requests/{requestId}/promote`（有 running 时 `mode=steered`，
     否则 `mode=started`；行状态可变为 `promoted`）
+  - `409 QUEUE_ITEM_NOT_QUEUED` 的 `error.requestStatus` 为
+    `running/done/failed/aborted/null`
   - SSE `request.steered` / `steer.done` / `queue.changed`，`snapshot` 增加 `queue`
   - `UiMessage` 保留可选 `clientMessageId`
 - 契约变更后从 Dev 1 的分支同步同路径文件，再重新生成：
@@ -177,9 +179,19 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
 - 点击「立即插入」调用 `POST /api/v1/requests/{id}/promote`：
   - 202 `mode=steered`：移除队列行，本端 outgoing 标记 `steer/requestId=steerId/done`，
     toast「已插入本轮」；
-  - 202 `mode=started`：移除队列行，toast「已开始执行」；
-  - 409 `QUEUE_ITEM_NOT_QUEUED`：重拉队列并提示「该消息已开始或已结束」；
+  - 202 `mode=started`：按普通发送成功处理——移除队列行，outgoing 置为
+    `running/requestId=该行 requestId` 并成为 active，不显示插话标记，
+    toast「已开始执行」；
+  - 409 `QUEUE_ITEM_NOT_QUEUED`：重拉队列与历史，按 `error.requestStatus` 提示：
+    `running`「该消息已开始执行」、`done/failed`「该消息已结束」、
+    `aborted`「该消息已取消」、缺失/`null`「队列已更新」；
   - 其他错误：保留队列行并 toast。
+- promote loading 存在 store 的 `promoting` 集合；`snapshot.queue` /
+  `queue.changed` / 兜底 `GET /queue` 到达即清空，队列行状态以服务端快照为准。
+- 回退对账：若 `queue.changed` 重新出现同一 `clientMessageId`，而本端该
+  outgoing 已被标记为 `steer=true` 或 `requestId=steer:*`，则改回
+  `steer=false`、`status=queued`、`requestId=该行 requestId`，重新显示在队列面板，
+  不再显示「插话 · 本轮」。
 - queued 的普通消息不再显示为会话气泡，只显示在队列面板；轮到执行后进入会话。
 - Composer：
   - 运行中且有输入：停止 +「排队」+「立即插入」；

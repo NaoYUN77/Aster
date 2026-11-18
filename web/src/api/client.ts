@@ -1,6 +1,12 @@
 import createClient from "openapi-fetch";
 import type { paths } from "./schema";
-import { ApiError, errorBodyOf, statusError, toApiError } from "./errors";
+import {
+  ApiError,
+  errorBodyOf,
+  requestStatusOf,
+  statusError,
+  toApiError,
+} from "./errors";
 import type {
   HealthResponse,
   LoginResponse,
@@ -83,7 +89,10 @@ async function unwrap<T>(
 
   const body = errorBodyOf(error);
   if (body) {
-    throw new ApiError(body.code, body.message, response.status);
+    const requestStatus = requestStatusOf(error);
+    throw new ApiError(body.code, body.message, response.status, {
+      ...(requestStatus !== null ? { requestStatus } : {}),
+    });
   }
   throw statusError(response.status);
 }

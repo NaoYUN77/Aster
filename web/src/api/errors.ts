@@ -1,15 +1,27 @@
 import type { ErrorBody } from "./types";
 
+export type ApiErrorDetails = {
+  /** 409 QUEUE_ITEM_NOT_QUEUED 时服务端给出的该行最新状态。 */
+  requestStatus?: string;
+};
+
 /** 统一的前端错误：只保留安全文案与服务端错误码，不展示堆栈。 */
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
+  readonly requestStatus?: string;
 
-  constructor(code: string, message: string, status = 0) {
+  constructor(
+    code: string,
+    message: string,
+    status = 0,
+    details: ApiErrorDetails = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
+    this.requestStatus = details.requestStatus;
   }
 }
 
@@ -52,10 +64,30 @@ export function isErrorBody(value: unknown): value is ErrorBody {
   return errorBodyOf(value) !== null;
 }
 
+/**
+ * 读取错误体里的 `requestStatus`。兼容契约的
+ * `{error:{code,message,requestStatus}}` 与扁平 `{code,message,requestStatus}`。
+ */
+export function requestStatusOf(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as { error?: unknown; requestStatus?: unknown };
+  const envelope =
+    typeof record.error === "object" && record.error !== null
+      ? (record.error as { requestStatus?: unknown })
+      : undefined;
+  const status = envelope?.requestStatus ?? record.requestStatus;
+  return typeof status === "string" && status !== "" ? status : null;
+}
+
 export function toApiError(error: unknown, status = 0): ApiError {
   if (error instanceof ApiError) return error;
   const body = errorBodyOf(error);
-  if (body) return new ApiError(body.code, body.message, status);
+  if (body) {
+    const requestStatus = requestStatusOf(error);
+    return new ApiError(body.code, body.message, status, {
+      ...(requestStatus !== null ? { requestStatus } : {}),
+    });
+  }
   if (error instanceof DOMException && error.name === "AbortError") {
     return new ApiError("TIMEOUT", "请求超时，请重试", status);
   }

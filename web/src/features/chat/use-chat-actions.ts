@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { abortRequest, getQueue, promoteRequest, sendMessage, steerRequest } from "@/api/client";
 import { errorText, toApiError, userFacingMessage } from "@/api/errors";
@@ -147,13 +148,21 @@ export function useStopRequest() {
 }
 
 export function useQueueActions() {
+  const queryClient = useQueryClient();
+
   const refresh = useCallback(async () => {
-    const { items } = await getQueue();
-    useChatStore.getState().setQueue(items);
-  }, []);
+    try {
+      const { items } = await getQueue();
+      useChatStore.getState().setQueueFromServer(items);
+    } catch {
+      // 队列接口失败时仍刷新历史；下一次 queue.changed 会纠正队列。
+    }
+    await queryClient.invalidateQueries({ queryKey: ["messages"] });
+  }, [queryClient]);
 
   const promote = useCallback(
     async (item: QueuedRequest) => {
+      useChatStore.getState().markPromoting(item.requestId);
       try {
         const result = await promoteRequest(item.requestId);
         const state = useChatStore.getState();
@@ -168,20 +177,54 @@ export function useQueueActions() {
           });
           toast.success("已插入本轮");
         } else {
+          // 没有运行中的回复：服务端直接开始执行，按普通发送成功处理。
+          state.updateOutgoing(item.clientMessageId, {
+            requestId: result.requestId,
+            status: "running",
+            steer: false,
+          });
+          state.setActive(result.requestId, "running", item.clientMessageId);
           toast.success("已开始执行");
         }
       } catch (error) {
         const apiError = toApiError(error);
+        const state = useChatStore.getState();
         if (apiError.code === "QUEUE_ITEM_NOT_QUEUED") {
-          // 已被其他端领取/插入/取消：重拉队列，以服务端为准。
-          try {
-            await refresh();
-          } catch {
-            // 保留原有队列，下一次 queue.changed 会纠正。
+          // 已被其他端领取/插入/取消：重拉队列与历史，以服务端为准。
+          state.clearPromoting(item.requestId);
+          await refresh();
+
+          const requestStatus = apiError.requestStatus;
+          const latest = useChatStore.getState();
+          if (requestStatus === "running") {
+            latest.updateOutgoing(item.clientMessageId, {
+              requestId: item.requestId,
+              status: "running",
+              steer: false,
+            });
+            latest.setActive(item.requestId, "running", item.clientMessageId);
+          } else if (requestStatus === "done" || requestStatus === "failed") {
+            latest.updateOutgoing(item.clientMessageId, {
+              requestId: item.requestId,
+              status: requestStatus,
+              steer: false,
+            });
+          } else if (requestStatus === "aborted") {
+            latest.removeOutgoing(item.clientMessageId);
           }
-          toast.info("该消息已开始或已结束");
+
+          toast.info(
+            requestStatus === "running"
+              ? "该消息已开始执行"
+              : requestStatus === "done" || requestStatus === "failed"
+                ? "该消息已结束"
+                : requestStatus === "aborted"
+                  ? "该消息已取消"
+                  : "队列已更新",
+          );
           return;
         }
+        state.clearPromoting(item.requestId);
         toast.error(errorText(apiError.code, apiError.message));
       }
     },
@@ -202,11 +245,7 @@ export function useQueueActions() {
           apiError.code === "REQUEST_NOT_ACTIVE" ||
           apiError.code === "REQUEST_NOT_FOUND"
         ) {
-          try {
-            await refresh();
-          } catch {
-            // 下一次 queue.changed 会纠正。
-          }
+          await refresh();
           toast.info("该消息已开始或已结束");
           return;
         }

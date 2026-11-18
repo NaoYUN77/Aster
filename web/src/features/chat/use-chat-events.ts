@@ -45,7 +45,7 @@ export function useChatEvents(): void {
       void getQueue()
         .then(({ items }) => {
           if (!snapshotQueueSeen && !queueEventSeen) {
-            useChatStore.getState().setQueue(items);
+            useChatStore.getState().setQueueFromServer(items);
           }
         })
         .catch(() => {
@@ -92,14 +92,16 @@ export function useChatEvents(): void {
           }
           if (event.queue !== undefined) {
             snapshotQueueSeen = true;
-            chat.setQueue(event.queue);
+            chat.setQueueFromServer(event.queue);
           }
           break;
         }
 
         case "queue.changed": {
           queueEventSeen = true;
-          chat.setQueue(event.items);
+          // 服务端队列是权威快照：既清掉 promote loading，也在这里把
+          // 被 abort/promote 竞争退回排队的插话复原为普通 queued。
+          chat.setQueueFromServer(event.items);
           break;
         }
 
@@ -118,6 +120,7 @@ export function useChatEvents(): void {
         case "request.running": {
           const state = useChatStore.getState();
           state.setQueue(reduceQueue(state.queue, event));
+          state.clearPromoting(event.requestId);
           const outgoing = state.outgoing.find(
             (item) => item.requestId === event.requestId,
           );
@@ -166,6 +169,7 @@ export function useChatEvents(): void {
                 item.requestId === event.requestId && item.status === "queued",
             );
           state.setQueue(reduceQueue(state.queue, event));
+          state.clearPromoting(event.requestId);
           if (queued) {
             // 取消排队中的消息：整条从会话里消失，不留下“已停止”气泡。
             state.removeOutgoing(queued.clientMessageId);

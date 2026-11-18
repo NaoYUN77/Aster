@@ -23,6 +23,7 @@ export function ChatPage() {
   const activeStatus = useChatStore((state) => state.activeStatus);
   const sseState = useChatStore((state) => state.sseState);
   const queue = useChatStore((state) => state.queue);
+  const promoting = useChatStore((state) => state.promoting);
 
   const send = useSendMessage();
   const stop = useStopRequest();
@@ -54,6 +55,7 @@ export function ChatPage() {
       <QueuePanel
         items={queue}
         activeStatus={activeStatus}
+        promoting={promoting}
         onPromote={promote}
         onCancel={cancel}
       />

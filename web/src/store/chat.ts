@@ -25,6 +25,8 @@ type ChatState = {
   outgoing: OutgoingMessage[];
   live: Record<string, UiMessage>;
   queue: QueuedRequest[];
+  /** 正在请求「立即插入」、等待服务端队列快照确认的行。 */
+  promoting: string[];
   usage: Record<string, ModelUsage>;
   failures: Record<string, RequestFailure>;
   activeRequestId: string | null;
@@ -44,8 +46,16 @@ type ChatState = {
     clientMessageId?: string | null,
   ) => void;
   addLiveMessage: (message: UiMessage) => void;
+  /** 本端乐观追加一行（发送成功后立刻显示）。 */
   setQueue: (queue: QueuedRequest[]) => void;
+  /**
+   * 服务端队列快照（snapshot.queue / queue.changed / GET /queue）。
+   * 以快照为准清掉 promoting，并把被服务端退回排队的插话 outgoing 改回 queued。
+   */
+  setQueueFromServer: (queue: QueuedRequest[]) => void;
   removeQueued: (requestId: string) => void;
+  markPromoting: (requestId: string) => void;
+  clearPromoting: (requestId?: string) => void;
   setUsage: (messageId: string, usage: ModelUsage) => void;
   setFailure: (requestId: string, failure: RequestFailure) => void;
   setSseState: (state: SseState) => void;
@@ -64,6 +74,7 @@ const initial = {
   outgoing: [] as OutgoingMessage[],
   live: {} as Record<string, UiMessage>,
   queue: [] as QueuedRequest[],
+  promoting: [] as string[],
   usage: {} as Record<string, ModelUsage>,
   failures: {} as Record<string, RequestFailure>,
   activeRequestId: null,
@@ -133,9 +144,55 @@ export const useChatStore = create<ChatState>((set) => ({
     set({ queue });
   },
 
+  setQueueFromServer: (queue) => {
+    set((state) => {
+      const queuedByClientId = new Map(
+        queue.map((item) => [item.clientMessageId, item]),
+      );
+      return {
+        queue,
+        promoting: [],
+        outgoing: state.outgoing.map((item) => {
+          const queued = queuedByClientId.get(item.clientMessageId);
+          if (!queued) return item;
+          // promote 曾把这条标记成本轮插话，但服务端最终把它退回队列
+          // （abort/promote 竞争）。以服务端为准复原成普通排队消息。
+          const wasSteered =
+            item.steer === true || item.requestId?.startsWith("steer:") === true;
+          if (!wasSteered) return item;
+          return {
+            ...item,
+            requestId: queued.requestId,
+            steer: false,
+            status: "queued" as const,
+            errorCode: null,
+            errorMessage: null,
+          };
+        }),
+      };
+    });
+  },
+
   removeQueued: (requestId) => {
     set((state) => ({
       queue: state.queue.filter((item) => item.requestId !== requestId),
+    }));
+  },
+
+  markPromoting: (requestId) => {
+    set((state) => ({
+      promoting: state.promoting.includes(requestId)
+        ? state.promoting
+        : [...state.promoting, requestId],
+    }));
+  },
+
+  clearPromoting: (requestId) => {
+    set((state) => ({
+      promoting:
+        requestId === undefined
+          ? []
+          : state.promoting.filter((id) => id !== requestId),
     }));
   },
 
