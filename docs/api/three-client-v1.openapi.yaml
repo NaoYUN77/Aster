@@ -209,6 +209,65 @@ paths:
                 notActive:
                   value:
                     error: { code: REQUEST_NOT_ACTIVE, message: 请求已结束 }
+  /api/v1/requests/{requestId}/steer:
+    post:
+      tags: [messages]
+      operationId: steerRequest
+      summary: Inject text into the currently running request
+      description: |
+        Steer, not queue: when `requestId` is the request that is running now,
+        `text` joins that same agent run and is seen by the model at its next
+        tool boundary. It does not create a `web_requests` row and does not
+        produce a separate `request.done`; the original request's final answer
+        covers it. If the steer arrives after the last tool boundary, the
+        durable runtime starts one more run, and the answer is broadcast as
+        `steer.done`.
+
+        Idempotent per `clientMessageId`: a replay returns the same `steerId`
+        and injects nothing new. The durable submission id is
+        `steer:<clientMessageId>`.
+
+        With no running request the server answers `409 NO_ACTIVE_REQUEST` and
+        the client falls back to a normal `POST /api/v1/messages`. A path
+        `requestId` that is not the running request answers `409
+        REQUEST_NOT_ACTIVE`, which protects a late steer from landing on a
+        newer request.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SteerRequest"
+      responses:
+        "202":
+          description: Steer admitted (new or idempotent replay).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SteerResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: No running request, or the path request is not the running one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                idle:
+                  value:
+                    error: { code: NO_ACTIVE_REQUEST, message: 没有正在运行的请求 }
+                notActive:
+                  value:
+                    error: { code: REQUEST_NOT_ACTIVE, message: 请求不是当前运行的请求 }
   /api/v1/models:
     get:
       tags: [models]
@@ -568,6 +627,34 @@ components:
         expiresAt:
           type: string
           format: date-time
+    SteerRequest:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId, text]
+      properties:
+        clientMessageId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Client-generated idempotency key; the steer id becomes `steer:<clientMessageId>`.
+        text:
+          type: string
+          minLength: 1
+          maxLength: 32000
+    SteerResponse:
+      type: object
+      additionalProperties: false
+      required: [steerId, requestId, status]
+      properties:
+        steerId:
+          type: string
+          description: "`steer:<clientMessageId>`; stable across replays."
+        requestId:
+          type: string
+          description: The running request the steer joined.
+        status:
+          type: string
+          enum: [accepted]
     SubmitMessageRequest:
       type: object
       additionalProperties: false
@@ -995,6 +1082,48 @@ components:
               required: [requestId]
               properties:
                 requestId: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: request.steered }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId, steerId, clientMessageId, text, createdAt]
+              description: |
+                A steer was admitted into the running request. `requestId` is the
+                original running request; other clients show this text as the
+                owner's message. A replay of the same `clientMessageId` carries
+                the same `steerId`, so clients should dedupe by it.
+              properties:
+                requestId: { type: string }
+                steerId: { type: string }
+                clientMessageId: { type: string }
+                text: { type: string }
+                createdAt:
+                  type: integer
+                  description: Unix epoch milliseconds.
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: steer.done }
+            data:
+              type: object
+              additionalProperties: false
+              required: [requestId, steerId, message]
+              description: |
+                The steer's submission settled and produced an assistant answer.
+                If the original run consumed the steer, `message.id` is the
+                original answer, so a client that already applied `request.done`
+                can dedupe by message id. If the steer started one more run, this
+                is the only event carrying that answer.
+              properties:
+                requestId: { type: string }
+                steerId: { type: string }
+                message:
+                  $ref: "#/components/schemas/UiMessage"
         - type: object
           additionalProperties: false
           required: [event, data]

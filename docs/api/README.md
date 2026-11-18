@@ -15,6 +15,7 @@ through this contract first.
 | POST | `/api/v1/messages` | bearer | enqueue text (idempotent per `clientMessageId`) |
 | GET | `/api/v1/messages` | bearer | durable transcript page |
 | POST | `/api/v1/requests/{requestId}/abort` | bearer | stop queued/running request |
+| POST | `/api/v1/requests/{requestId}/steer` | bearer | inject text into the running request |
 | GET | `/api/v1/models` | bearer | live catalog + current selection |
 | POST | `/api/v1/models/select` | bearer | manual selection / back to primary |
 | GET | `/api/v1/events` | bearer | SSE (fetch + ReadableStream, not EventSource) |
@@ -49,6 +50,21 @@ is broadcast as `model.changed` just like a button click.
 - After `abort`, the stopped input remains in history but is omitted from the next model context;
   the next answer does not answer it again. A stop before any visible token leaves no empty
   assistant message.
+- `steer` is not a queued message: while `requestId` is running, its text joins the same run and
+  the model sees it at the next tool boundary. It creates no `web_requests` row and no separate
+  `request.done`; the original answer covers it. A successful admission broadcasts
+  `request.steered` (envelope `requestId` is the original request, `steerId` is
+  `steer:<clientMessageId>`; dedupe replays by `steerId`). If the steer lands after the last tool
+  boundary, the runtime starts one more run and `steer.done` carries that projected answer; when
+  the original run consumed the steer, `steer.done.message.id` is the original answer, so dedupe
+  by message id.
+- Steer needs a running request: with none, the route returns `409 NO_ACTIVE_REQUEST` and the
+  client falls back to `POST /messages`. A path `requestId` that is not the running one returns
+  `409 REQUEST_NOT_ACTIVE`. A stopped run leaves the steer's user row in history but, like the
+  original input, it is excluded from the next model context.
+- Known v1 limitation: a steer that starts an extra run does not run Memory's per-request
+  projection/after-request hooks for that run; it is part of the current request's context, not a
+  new memory request.
 - `text` over 32000 characters returns `400 TEXT_TOO_LONG` with a user-facing message; branch on
   the code rather than on status 400 alone.
 - CORS allows `Authorization`, `Content-Type`, and `Cache-Control`. Defaults include
@@ -74,7 +90,7 @@ is broadcast as `model.changed` just like a button click.
 ## Error codes
 
 Transport/auth: `INVALID_REQUEST`, `TEXT_TOO_LONG` (text over 32000 characters; message says so),
-`UNAUTHORIZED`, `RATE_LIMITED`, `REQUEST_NOT_FOUND`, `REQUEST_NOT_ACTIVE`,
+`UNAUTHORIZED`, `RATE_LIMITED`, `REQUEST_NOT_FOUND`, `REQUEST_NOT_ACTIVE`, `NO_ACTIVE_REQUEST`,
 `PAYLOAD_TOO_LARGE`, `INTERNAL_ERROR`, `NOT_FOUND`.
 
 Model selection: `MODEL_NOT_FOUND`, `MODEL_OUT_OF_SCOPE`, `MODEL_SWITCH_DISABLED`,
