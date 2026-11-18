@@ -86,3 +86,29 @@ test("OAuth state is one-time and expires; credentials are upserted per connecti
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("disconnect drops the credential and revokes the row without deleting it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "aster-connector-disconnect-"));
+  const store = new ConnectorStore(join(directory, "connectors.sqlite"));
+  try {
+    const { connection } = store.create({ ownerId: "owner", provider: "github", slug: "work" });
+    store.saveCredential(connection.id, { ciphertext: "cipher", expiresAt: null });
+    store.setConnected(connection.id, { accountLabel: "octocat", scopes: ["read:user"] });
+
+    assert.equal(store.disconnect(connection.id), true);
+    const revoked = store.get("owner", "work");
+    assert.ok(revoked, "the row stays so the slug can be authorized again");
+    assert.equal(revoked.status, "revoked");
+    assert.equal(revoked.accountLabel, "octocat");
+    assert.equal(store.credential(connection.id), undefined);
+    assert.equal(store.list("owner").length, 1);
+
+    // Repeating is harmless; a missing row reports false.
+    assert.equal(store.disconnect(connection.id), true);
+    assert.equal(store.get("owner", "work")?.status, "revoked");
+    assert.equal(store.disconnect("missing-id"), false);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

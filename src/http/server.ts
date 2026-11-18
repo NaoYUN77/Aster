@@ -127,7 +127,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       if (origin === undefined || origin === "") return callback(null, true);
       callback(null, config.allowedOrigins.includes(origin));
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Authorization", "Content-Type", "Cache-Control"],
     maxAge: 600,
   });
@@ -382,6 +382,19 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
         connection: connectorView(result.connection),
         created: result.created,
       });
+    } catch (error) {
+      return connectorReply(error, reply);
+    }
+  });
+
+  app.delete("/api/v1/connectors/:slug", async (request, reply) => {
+    if (options.connectors === undefined) {
+      return reply.code(503).send(errorBody("CONNECTORS_DISABLED", "connectors are not enabled"));
+    }
+    const { slug } = request.params as { slug: string };
+    try {
+      options.connectors.disconnect(slug);
+      return reply.code(204).send();
     } catch (error) {
       return connectorReply(error, reply);
     }

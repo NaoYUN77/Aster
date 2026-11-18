@@ -204,3 +204,86 @@ test("local stdio connectors are allowlisted, private and never inherit the host
     await env.close();
   }
 });
+
+test("disconnect removes the credential, revokes the connection and disables its tools", async () => {
+  const calls: string[] = [];
+  const fake = (async (input) => {
+    calls.push(String(input));
+    throw new Error(`unexpected upstream call: ${String(input)}`);
+  }) as typeof fetch;
+  const env = await setup(fake);
+  try {
+    const github = env.store.create({ ownerId: "owner", provider: "github", slug: "work" }).connection;
+    env.connect(github, "github-token-value");
+    assert.notEqual(env.store.credential(github.id), undefined);
+
+    env.service.disconnect("work");
+    const revoked = env.store.get("owner", "work")!;
+    assert.equal(revoked.status, "revoked");
+    assert.equal(revoked.lastErrorCode, null);
+    assert.equal(env.store.credential(github.id), undefined);
+    const changed = env.events.filter((event) => event.event === "connector.changed").at(-1);
+    assert.deepEqual((changed?.data as { connection: { status: string; slug: string } }).connection, {
+      id: github.id,
+      provider: "github",
+      slug: "work",
+      status: "revoked",
+      accountLabel: "octocat",
+      scopes: ["read:user"],
+    });
+
+    // A disconnected connector refuses tools without calling the provider.
+    const binding = { connectionId: "", tool: "", requestId: "req-1", ownerId: "owner" };
+    await assert.rejects(env.service.listRepositories({}, binding), { code: "CONNECTOR_NOT_CONNECTED" });
+    assert.deepEqual(calls, []);
+
+    // Repeating the disconnect stays a no-op with the same revoked state.
+    env.service.disconnect("work");
+    assert.equal(env.store.get("owner", "work")?.status, "revoked");
+
+    assert.throws(() => env.service.disconnect("missing"), { code: "CONNECTOR_NOT_FOUND" });
+  } finally {
+    await env.close();
+  }
+});
+
+test("a revoked connection can be authorized again and its tools work with the new token", async () => {
+  const requests: { url: string; authorization: string }[] = [];
+  const fake = (async (input, init) => {
+    const url = String(input);
+    requests.push({ url, authorization: new Headers(init?.headers).get("authorization") ?? "" });
+    if (url.startsWith("https://github.com/login/oauth/access_token")) {
+      return json({ access_token: "reauthorized-token", scope: "read:user", token_type: "bearer" });
+    }
+    if (url === "https://api.github.com/user") return json({ login: "octocat" });
+    if (url.startsWith("https://api.github.com/user/repos")) {
+      return json([{
+        full_name: "octocat/hello", name: "hello", description: "demo", language: "TypeScript",
+        html_url: "https://github.com/octocat/hello", updated_at: "2026-11-17T00:00:00Z",
+      }]);
+    }
+    throw new Error(`unexpected ${url}`);
+  }) as typeof fetch;
+  const env = await setup(fake);
+  try {
+    const github = env.store.create({ ownerId: "owner", provider: "github", slug: "work" }).connection;
+    env.connect(github, "old-token");
+    env.service.disconnect("work");
+    assert.equal(env.store.get("owner", "work")?.status, "revoked");
+
+    const { url } = await env.service.startOAuth("work");
+    const state = new URL(url).searchParams.get("state");
+    assert.ok(state, "oauth start still issues a state for a revoked row");
+    const connected = await env.service.completeOAuth(state, "code-2");
+    assert.equal(connected.status, "connected");
+    assert.equal(connected.accountLabel, "octocat");
+
+    const binding = { connectionId: "", tool: "", requestId: "req-2", ownerId: "owner" };
+    const repos = await env.service.listRepositories({}, binding);
+    assert.equal(repos[0]?.fullName, "octocat/hello");
+    assert.ok(requests.some((request) => request.url.startsWith("https://api.github.com/user/repos")
+      && request.authorization === "Bearer reauthorized-token"));
+  } finally {
+    await env.close();
+  }
+});

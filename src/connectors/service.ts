@@ -135,6 +135,20 @@ export class ConnectorService {
     return servers;
   }
 
+  /**
+   * Remove the stored credential and mark the connection revoked. The row (and its slug) stays so
+   * the same connection can be authorized again; until then tools of that provider refuse to run.
+   * Repeating the call is harmless.
+   */
+  disconnect(slug: string): void {
+    const connection = this.#store.get(this.#ownerId, slug);
+    if (connection === undefined) throw new ConnectorError("CONNECTOR_NOT_FOUND", "connector was not found");
+    if (!this.#store.disconnect(connection.id)) {
+      throw new ConnectorError("CONNECTOR_NOT_FOUND", "connector was not found");
+    }
+    this.#changed(this.#store.getById(connection.id) ?? connection);
+  }
+
   async startOAuth(slug: string): Promise<{ readonly url: string }> {
     const connection = this.#store.get(this.#ownerId, slug);
     if (connection === undefined) throw new ConnectorError("CONNECTOR_NOT_FOUND", "connector was not found");

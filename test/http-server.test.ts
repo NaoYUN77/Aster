@@ -260,6 +260,10 @@ test("connector routes create, list, start OAuth and complete the public callbac
       calls.push(`create:${String(input.provider)}:${String(input.slug)}:${String(input.command)}`);
       return { connection, created: true };
     },
+    disconnect(slug: string) {
+      calls.push(`disconnect:${slug}`);
+      if (slug === "missing") throw new ConnectorError("CONNECTOR_NOT_FOUND", "connector was not found");
+    },
     async startOAuth(slug: string) {
       calls.push(`start:${slug}`);
       return { url: "https://github.com/login/oauth/authorize?state=server-state" };
@@ -324,6 +328,26 @@ test("connector routes create, list, start OAuth and complete the public callbac
       method: "GET", url: "/api/v1/connectors/oauth/callback?error=access_denied&state=good-state",
     });
     assert.equal(denied.statusCode, 400);
+
+    const disconnected = await server.app.inject({
+      method: "DELETE", url: "/api/v1/connectors/work", headers,
+    });
+    assert.equal(disconnected.statusCode, 204);
+    assert.equal(disconnected.body, "");
+
+    const missing = await server.app.inject({
+      method: "DELETE", url: "/api/v1/connectors/missing", headers,
+    });
+    assert.equal(missing.statusCode, 404);
+    assert.equal(missing.json<{ error: { code: string } }>().error.code, "CONNECTOR_NOT_FOUND");
+
+    const preflight = await server.app.inject({
+      method: "OPTIONS", url: "/api/v1/connectors/work",
+      headers: { origin: "http://localhost:5173", "access-control-request-method": "DELETE" },
+    });
+    assert.equal(preflight.statusCode, 204);
+    assert.match(preflight.headers["access-control-allow-methods"] ?? "", /DELETE/);
+
     assert.deepEqual(calls, [
       "create:github:work:undefined",
       "create:mcp_stdio:local:node",
@@ -331,6 +355,8 @@ test("connector routes create, list, start OAuth and complete the public callbac
       "start:work",
       "complete:good-state:code-1",
       "complete:bad-state:code-1",
+      "disconnect:work",
+      "disconnect:missing",
     ]);
   } finally {
     await server.close();
@@ -346,6 +372,12 @@ test("connector routes report disabled when the feature is off", async () => {
     });
     assert.equal(response.statusCode, 503);
     assert.equal(response.json<{ error: { code: string } }>().error.code, "CONNECTORS_DISABLED");
+
+    const disconnect = await server.app.inject({
+      method: "DELETE", url: "/api/v1/connectors/work", headers: server.auth(token),
+    });
+    assert.equal(disconnect.statusCode, 503);
+    assert.equal(disconnect.json<{ error: { code: string } }>().error.code, "CONNECTORS_DISABLED");
   } finally {
     await server.close();
   }

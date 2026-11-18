@@ -340,6 +340,25 @@ export class ConnectorStore {
     });
   }
 
+  /**
+   * Revoke one connection: drop its encrypted credential and mark it `revoked` in one transaction,
+   * so a crash cannot leave a row claiming `connected` without a token. Keeps the row and its tool
+   * scopes so re-authorizing the same slug works and the audit trail survives.
+   */
+  disconnect(id: string): boolean {
+    return this.transaction(() => {
+      const row = this.getById(id);
+      if (row === undefined) return false;
+      this.#db.prepare("DELETE FROM credentials WHERE connection_id = ?").run(id);
+      this.audit(id, "credential.deleted");
+      this.#db.prepare(
+        "UPDATE connections SET status = 'revoked', last_error_code = NULL, updated_at = ? WHERE id = ?",
+      ).run(this.#now().toISOString(), id);
+      this.audit(id, "connection.revoked");
+      return true;
+    });
+  }
+
   setStatus(id: string, status: ConnectorStatus, errorCode?: string): void {
     this.#db.prepare("UPDATE connections SET status = ?, last_error_code = ?, updated_at = ? WHERE id = ?").run(
       status, errorCode ?? null, this.#now().toISOString(), id,
