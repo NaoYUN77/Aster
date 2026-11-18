@@ -7,6 +7,8 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { openAgent } from "../src/agent.js";
 import { buildAgentOptions } from "../src/agent-options.js";
+import { openConnectors } from "../src/connectors/index.js";
+import { createConnectorExtension } from "../src/connectors/tools.js";
 import { readConfig } from "../src/config.js";
 import { ReminderStore } from "../src/reminders.js";
 import { createRoutinesExtension } from "../src/routines/tools.js";
@@ -42,6 +44,13 @@ test("the web host composition exposes reminders, watches, routines and skills",
   await mkdir(join(skillsDir, "demo"), { recursive: true });
   await writeFile(join(skillsDir, "demo", "SKILL.md"), "---\nname: demo\ndescription: demo skill\n---\nbody\n");
   const skills = await SkillIndex.scan(skillsDir);
+  const connectors = openConnectors({
+    dataDir: directory,
+    ownerId: "owner",
+    config: config.connectors!,
+  });
+  assert.ok(connectors !== undefined);
+  const connectorTools = createConnectorExtension(connectors.service, "owner");
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
     const faux = fauxProvider({ provider: "openai" });
@@ -58,6 +67,7 @@ test("the web host composition exposes reminders, watches, routines and skills",
       extraExtensions: [
         ...(watchers.extension === undefined ? [] : [watchers.extension]),
         routines,
+        connectorTools,
       ],
       skills,
     }));
@@ -68,12 +78,14 @@ test("the web host composition exposes reminders, watches, routines and skills",
       text: "hello",
     }, new AbortController().signal), "ok");
     for (const name of ["reminder_create", "reminder_list", "watch_create", "watch_list",
-      "routine_create", "routine_list", "skill_list"]) {
+      "routine_create", "routine_list", "skill_list", "connector_list",
+      "connector_github_list_repositories", "connector_gmail_search_messages"]) {
       assert.ok(toolNames.includes(name), `${name} is registered (${toolNames.join(",")})`);
     }
     assert.ok(toolNames.length > 9, `expected more than 9 tools, saw ${toolNames.length}`);
   } finally {
     await app?.close();
+    connectors?.close();
     watchStore.close();
     routinesStore.close();
     reminders.close();

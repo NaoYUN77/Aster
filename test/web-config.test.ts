@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ConfigurationError, readConfig, readWebConfig } from "../src/config.js";
+import { ConfigurationError, readConfig, readConnectorsConfig, readWebConfig } from "../src/config.js";
 
 const WEB_ENV = {
   CHANNEL: "web",
@@ -50,4 +50,18 @@ test("telegram and slack still require their own identity and credentials", () =
     () => readConfig({ ...WEB_ENV, CHANNEL: "slack" }),
     /SLACK_OWNER_ID/,
   );
+});
+
+test("connector config defaults to on with local secret files and no stdio commands", () => {
+  const config = readConnectorsConfig({});
+  assert.equal(config.enabled, true);
+  assert.equal(config.secretDir, "/run/secrets/aster-connectors");
+  assert.deepEqual(config.stdioAllowlist, []);
+  assert.equal(readConnectorsConfig({ CONNECTORS_ENABLED: "0" }).enabled, false);
+  assert.equal(readConnectorsConfig({ CONNECTOR_STDIO_ALLOWLIST: "node,/usr/bin/echo" })
+    .stdioAllowlist.join(","), "node,/usr/bin/echo");
+  // A relative path would make the basename match ambiguous.
+  assert.throws(() => readConnectorsConfig({ CONNECTOR_STDIO_ALLOWLIST: "bin/node" }), ConfigurationError);
+  assert.throws(() => readConnectorsConfig({ CONNECTOR_STDIO_ALLOWLIST: "node;rm -rf /" }), ConfigurationError);
+  assert.throws(() => readConnectorsConfig({ CONNECTORS_ENABLED: "yes" }), ConfigurationError);
 });

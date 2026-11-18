@@ -11,7 +11,7 @@ import { resolveProviderConfigPath, type MemoryConfig, type readConfig } from ".
 import { ConfigurationError, errorCode, StateError } from "./errors.js";
 import { connectMcp, type McpHost } from "./mcp.js";
 import { createSkillsExtension, type SkillIndex, type SkillSummary } from "./skills.js";
-import { readMcpConfig } from "./mcp-config.js";
+import { readMcpConfig, type McpServerConfig } from "./mcp-config.js";
 import type { TextRequest } from "./messages.js";
 import {
   FORK_CLOSED_NOTICE,
@@ -178,6 +178,8 @@ function memoryStartupError(error: unknown): unknown {
 export type OpenAgentOptions = {
   /** Already-connected MCP host; the agent owns and closes it. Startup config is skipped. */
   readonly mcp?: McpHost;
+  /** Host-managed MCP servers (for example local stdio connectors) added to the configured file. */
+  readonly mcpServers?: readonly McpServerConfig[];
   /** Stops MCP connection attempts during shutdown. */
   readonly signal?: AbortSignal;
   /** Trusted host policy for this instance and all its recovered/nested calls. Defaults to owner. */
@@ -447,7 +449,7 @@ export async function openAgent(
       })
     : undefined;
   if (memory) for (const extension of memory.extensions()) registry.install(extension);
-  const mcp = options.mcp ?? await openMcpHost(config, registry, options.signal);
+  const mcp = options.mcp ?? await openMcpHost(config, registry, options.signal, options.mcpServers);
   const unsubscribeMcp = mcp.subscribeAvailability((server, state) => registry.setMcpAvailability(server, state));
   const mcpExtensions = orderedMcpExtensions(mcp.extensions);
   for (const extension of mcpExtensions) registry.install(extension);
@@ -1101,15 +1103,24 @@ async function openMcpHost(
   config: ReturnType<typeof readConfig>,
   registry: ReturnType<typeof createToolRegistry>,
   signal: AbortSignal | undefined,
+  extraServers: readonly McpServerConfig[] | undefined,
 ): Promise<McpHost> {
   const read = await readMcpConfig(config.mcpConfigPath, config.mcpConfigExplicit);
   for (const warning of read.warnings) console.error(`MCP config: ${warning}`);
   if (read.error !== undefined) {
     if (config.mcpConfigExplicit) throw new ConfigurationError(read.error);
-    console.error(`MCP disabled (MCP_CONFIG_INVALID): ${read.error}`);
+    console.error(`MCP file disabled (MCP_CONFIG_INVALID): ${read.error}`);
+  }
+  // Host-managed servers (local stdio connectors) are additive and keep their file-defined peers.
+  // A file server owns its name; a connector with the same name is skipped rather than shadowing it.
+  const fileServers = read.error === undefined ? read.config?.servers ?? [] : [];
+  const fileNames = new Set(fileServers.map((server) => server.name));
+  const servers = [...fileServers, ...(extraServers ?? []).filter((server) => !fileNames.has(server.name))];
+  if (servers.length === 0 && read.error !== undefined) {
     return { extensions: [], subscribeAvailability: () => () => {}, close: async () => {} };
   }
-  return connectMcp(read.config, {
+  const merged = servers.length === 0 ? read.config : { ...read.config, servers };
+  return connectMcp(merged, {
     dataDir: config.dataDir,
     reserved: new Set(registry.snapshot().tools().map(({ tool }) => tool.name)),
     ...(signal === undefined ? {} : { signal }),

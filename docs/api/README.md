@@ -57,6 +57,18 @@ is broadcast as `model.changed` just like a button click.
   defaults, so a native shell deployment must list its exact origin there. The SSE response is
   written on a hijacked socket and therefore echoes `Access-Control-Allow-Origin` and
   `Vary: Origin` itself; an origin outside the allowlist gets no ACAO.
+- Connectors (GitHub/Gmail, read-only) are authorized once on the server and shared by every
+  client: create with `POST /connectors`, open the URL from `POST /connectors/{slug}/oauth/start`,
+  and poll `GET /connectors` (or listen for `connector.changed`). Tokens never reach a client.
+  `credential.request` means a tool needs authorization; it carries only the slug/provider/tool.
+  Gmail has no send/delete/modify tools.
+- Local stdio MCP connectors (`provider: "mcp_stdio"`, with `command`/`args`) are created through
+  the same route but start only on the next server boot, after the command is re-checked against
+  `CONNECTOR_STDIO_ALLOWLIST`. They run a host binary with `inheritEnv: false` and a private working
+  directory under `DATA_DIR`; treat enabling one as a high-risk admin action.
+- Connector tools are `connector_list`, `connector_github_list_repositories`,
+  `connector_github_list_issues`, `connector_github_get_issue`,
+  `connector_gmail_search_messages`, `connector_gmail_get_message`.
 - Errors use `{ "error": { "code", "message" } }`; display `message`, branch on `code`.
 
 ## Error codes
@@ -67,6 +79,14 @@ Transport/auth: `INVALID_REQUEST`, `TEXT_TOO_LONG` (text over 32000 characters; 
 
 Model selection: `MODEL_NOT_FOUND`, `MODEL_OUT_OF_SCOPE`, `MODEL_SWITCH_DISABLED`,
 `SELECTION_WRITE_FAILED`.
+
+Connectors: `CONNECTOR_NOT_FOUND`, `CONNECTOR_ALREADY_EXISTS`, `CONNECTOR_INVALID_PROVIDER`,
+`CONNECTOR_INVALID_SLUG`, `CONNECTOR_INVALID_INPUT`, `CONNECTOR_NOT_CONNECTED`,
+`CONNECTOR_OAUTH_DISABLED`, `CONNECTOR_OAUTH_STATE_INVALID`, `CONNECTOR_OAUTH_EXCHANGE_FAILED`,
+`CONNECTOR_SECRET_MISSING`, `CONNECTOR_SECRET_UNREADABLE`, `CONNECTOR_MASTER_KEY_INVALID`,
+`CONNECTOR_CREDENTIAL_UNREADABLE`, `CONNECTOR_AUTH_EXPIRED`, `CONNECTOR_SCOPE_DENIED`,
+`CONNECTOR_RATE_LIMITED`, `CONNECTOR_UPSTREAM_UNAVAILABLE`, `CONNECTOR_UPSTREAM_NOT_FOUND`,
+`CONNECTORS_DISABLED`. Messages are fixed and safe; never display or log a token.
 
 Request failures (`request.failed`): `MODEL_UNAVAILABLE`, `MODEL_INCOMPATIBLE`, `AGENT_TIMEOUT`,
 `AGENT_UNANSWERED`, `AGENT_TRUNCATED`, `EMPTY_REPLY`, `AGENT_LOOP_DETECTED`,

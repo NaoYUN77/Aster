@@ -10,11 +10,13 @@ import { createWebServer } from "../src/http/server.js";
 import { WebRequestStore } from "../src/http/store.js";
 import { RequestWorker } from "../src/http/worker.js";
 import type { HistoryPage } from "../src/http/projection.js";
+import { ConnectorError } from "../src/connectors/errors.js";
+import type { ConnectorService } from "../src/connectors/service.js";
 import { fakeAgent, fixtureSelection, message, waitFor } from "./http-testkit.js";
 
 const PASSWORD = "integration-password";
 
-async function startServer(options: { withSse?: boolean } = {}) {
+async function startServer(options: { withSse?: boolean; connectors?: ConnectorService } = {}) {
   const fixture = await fixtureSelection();
   const directory = await mkdtemp(join(tmpdir(), "aster-http-server-"));
   const store = new WebRequestStore(join(directory, "web.sqlite"));
@@ -61,6 +63,7 @@ async function startServer(options: { withSse?: boolean } = {}) {
     agent,
     modelService: fixture.service,
     modelVersion: () => modelVersion,
+    ...(options.connectors === undefined ? {} : { connectors: options.connectors }),
     log: () => {},
   });
   const url = await app.listen({ port: 0, host: "127.0.0.1" });
@@ -210,6 +213,126 @@ test("GET /messages links durable user and assistant rows to requestId and clien
       assert.equal(entry.requestId, requestId);
       assert.equal(entry.clientMessageId, "history-link");
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test("connector routes create, list, start OAuth and complete the public callback safely", async () => {
+  const connection = {
+    id: "connection-1",
+    provider: "github" as const,
+    slug: "work",
+    ownerId: "owner",
+    status: "connected" as const,
+    accountLabel: "octocat",
+    scopes: ["read:user"],
+    createdAt: "2026-11-18T00:00:00.000Z",
+    updatedAt: "2026-11-18T00:00:01.000Z",
+    lastErrorCode: null,
+  };
+  const calls: string[] = [];
+  const connectors = {
+    list() {
+      calls.push("list");
+      return {
+        definitions: [{
+          provider: "github", displayName: "GitHub", transport: "oauth" as const,
+          defaultScopes: ["read:user"], tools: ["connector_github_list_repositories"],
+        }],
+        connections: [connection],
+      };
+    },
+    create(input: { provider: unknown; slug: unknown; command?: unknown; args?: unknown }) {
+      calls.push(`create:${String(input.provider)}:${String(input.slug)}:${String(input.command)}`);
+      return { connection, created: true };
+    },
+    async startOAuth(slug: string) {
+      calls.push(`start:${slug}`);
+      return { url: "https://github.com/login/oauth/authorize?state=server-state" };
+    },
+    async completeOAuth(state: string, code: string) {
+      calls.push(`complete:${state}:${code}`);
+      if (state !== "good-state") throw new ConnectorError("CONNECTOR_OAUTH_STATE_INVALID", "OAuth state is invalid or has expired");
+      return connection;
+    },
+  } as unknown as ConnectorService;
+  const server = await startServer({ connectors });
+  try {
+    assert.equal((await server.app.inject({ method: "GET", url: "/api/v1/connectors" })).statusCode, 401);
+    const { token } = (await server.login()).json<{ token: string }>();
+    const headers = server.auth(token);
+
+    const created = await server.app.inject({
+      method: "POST", url: "/api/v1/connectors", headers,
+      payload: { provider: "github", slug: "work" },
+    });
+    assert.equal(created.statusCode, 201);
+    {
+      const body = created.json<{ created: boolean; connection: { slug: string; status: string } }>();
+      assert.equal(body.created, true);
+      assert.equal(body.connection.slug, "work");
+      assert.equal(body.connection.status, "connected");
+    }
+
+    // Local stdio connectors carry their command and args through the same route.
+    const local = await server.app.inject({
+      method: "POST", url: "/api/v1/connectors", headers,
+      payload: { provider: "mcp_stdio", slug: "local", command: "node", args: ["server.js"] },
+    });
+    assert.equal(local.statusCode, 201);
+    assert.ok(calls.includes("create:mcp_stdio:local:node"));
+
+    const listed = await server.app.inject({ method: "GET", url: "/api/v1/connectors", headers });
+    assert.equal(listed.statusCode, 200);
+    assert.equal(listed.json<{ connections: { slug: string }[] }>().connections[0]?.slug, "work");
+    assert.equal(listed.json<{ providers: { provider: string }[] }>().providers[0]?.provider, "github");
+
+    const started = await server.app.inject({
+      method: "POST", url: "/api/v1/connectors/work/oauth/start", headers,
+    });
+    assert.equal(started.statusCode, 200);
+    assert.match(started.json<{ url: string }>().url, /^https:\/\/github\.com\/login\/oauth\/authorize/);
+
+    // The provider redirects a browser without our Bearer token; a valid one-time state is enough.
+    const callback = await server.app.inject({
+      method: "GET", url: "/api/v1/connectors/oauth/callback?state=good-state&code=code-1",
+    });
+    assert.equal(callback.statusCode, 200);
+    assert.match(callback.headers["content-type"] ?? "", /text\/html/);
+    assert.match(callback.body, /授权成功/);
+
+    const replay = await server.app.inject({
+      method: "GET", url: "/api/v1/connectors/oauth/callback?state=bad-state&code=code-1",
+    });
+    assert.equal(replay.statusCode, 400);
+    assert.match(replay.body, /CONNECTOR_OAUTH_STATE_INVALID/);
+    const denied = await server.app.inject({
+      method: "GET", url: "/api/v1/connectors/oauth/callback?error=access_denied&state=good-state",
+    });
+    assert.equal(denied.statusCode, 400);
+    assert.deepEqual(calls, [
+      "create:github:work:undefined",
+      "create:mcp_stdio:local:node",
+      "list",
+      "start:work",
+      "complete:good-state:code-1",
+      "complete:bad-state:code-1",
+    ]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("connector routes report disabled when the feature is off", async () => {
+  const server = await startServer();
+  try {
+    const { token } = (await server.login()).json<{ token: string }>();
+    const response = await server.app.inject({
+      method: "GET", url: "/api/v1/connectors", headers: server.auth(token),
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json<{ error: { code: string } }>().error.code, "CONNECTORS_DISABLED");
   } finally {
     await server.close();
   }

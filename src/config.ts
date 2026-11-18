@@ -213,7 +213,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     // honored rather than silently replaced by defaults when the agent is composed.
     memory: readMemoryConfig(env),
     // Only a web deployment reads WEB_*; an unused variable in a Telegram deployment stays inert.
-    ...(channelKind === "web" ? { web: readWebConfig(env) } : {}),
+    ...(channelKind === "web" ? { web: readWebConfig(env), connectors: readConnectorsConfig(env) } : {}),
   };
 }
 
@@ -373,8 +373,9 @@ export function readStyleConfig(env: NodeJS.ProcessEnv = process.env): StyleConf
 }
 
 /**
- * Event tracking (WATCHERS_*). Off by default: no outbound request is made while no watcher exists,
- * and every malformed bound fails startup rather than being discovered at the first check.
+ * Event tracking (WATCHERS_*). On by default, matching `.env.example`: no outbound request is made
+ * while no watcher exists. `WATCHERS_ENABLED=0` disables the loop entirely. Every malformed bound
+ * fails startup rather than being discovered at the first check.
  */
 export function readWatchersConfig(env: NodeJS.ProcessEnv = process.env): WatchersConfig {
   const enabledRaw = env.WATCHERS_ENABLED?.trim();
@@ -605,6 +606,67 @@ export function readWebConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
     sessionTtlDays: boundedInteger(env, "WEB_SESSION_TTL_DAYS", 30, 1, 3_650),
     staticDir: env.WEB_STATIC_DIR?.trim() || "web/dist",
     trustProxy: rawTrustProxy === "1",
+  };
+}
+
+/** Connector MVP settings. Secrets themselves are read from files, never from this environment. */
+export type ConnectorsConfig = {
+  readonly enabled: boolean;
+  /** Directory of read-only secret files (`github_client_id`, `credential_master_key`, ...). */
+  readonly secretDir: string;
+  /** Public origin the OAuth provider redirects to; the callback path is appended. */
+  readonly redirectBaseUrl?: string;
+  readonly httpTimeoutMs: number;
+  readonly oauthStateTtlMs: number;
+  readonly leaseTtlMs: number;
+  /** Commands allowed for a local `mcp_stdio` connector; empty denies every command. */
+  readonly stdioAllowlist: readonly string[];
+};
+
+export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): ConnectorsConfig {
+  const enabledRaw = env.CONNECTORS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("CONNECTORS_ENABLED must be 0 or 1");
+  }
+  const secretDir = env.ASTER_CONNECTOR_SECRET_DIR?.trim() || "/run/secrets/aster-connectors";
+  if (secretDir.length > 4_096 || secretDir.includes("\0")) {
+    throw new ConfigurationError("ASTER_CONNECTOR_SECRET_DIR is not a valid directory");
+  }
+  const redirectRaw = env.CONNECTOR_OAUTH_REDIRECT_BASE?.trim();
+  if (redirectRaw !== undefined && redirectRaw !== "") {
+    let parsed: URL;
+    try {
+      parsed = new URL(redirectRaw);
+    } catch {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an absolute http(s) URL");
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an absolute http(s) URL");
+    }
+    if (parsed.search !== "" || parsed.hash !== "" || (parsed.pathname !== "/" && parsed.pathname !== "")) {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an origin without a path");
+    }
+  }
+  const allowlist = (env.CONNECTOR_STDIO_ALLOWLIST ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+  for (const command of allowlist) {
+    // A relative path would make the basename match ambiguous; only a bare name or absolute path.
+    const bareName = /^[A-Za-z0-9._-]{1,256}$/.test(command);
+    const absolutePath = command.startsWith("/") && /^[A-Za-z0-9._/-]{1,256}$/.test(command);
+    if (!bareName && !absolutePath) {
+      throw new ConfigurationError("CONNECTOR_STDIO_ALLOWLIST must list bare command names or absolute paths");
+    }
+  }
+  return {
+    enabled: enabledRaw !== "0",
+    secretDir,
+    ...(redirectRaw === undefined || redirectRaw === "" ? {} : { redirectBaseUrl: redirectRaw.replace(/\/+$/, "") }),
+    httpTimeoutMs: boundedInteger(env, "CONNECTOR_HTTP_TIMEOUT_MS", 15_000, 1_000, 120_000),
+    oauthStateTtlMs: boundedInteger(env, "CONNECTOR_OAUTH_STATE_TTL_MS", 600_000, 60_000, 3_600_000),
+    leaseTtlMs: boundedInteger(env, "CONNECTOR_LEASE_TTL_MS", 30_000, 1_000, 300_000),
+    stdioAllowlist: [...new Set(allowlist)],
   };
 }
 

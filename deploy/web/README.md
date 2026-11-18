@@ -50,6 +50,47 @@ curl -N http://127.0.0.1:8787/api/v1/events -H "authorization: Bearer $TOKEN"
 
 SSE must arrive incrementally through Caddy (`flush_interval -1`, no `encode` on the stream).
 
+## Connectors (GitHub / Gmail, read-only)
+
+Operation owns the OAuth apps and the secret files; the server owns the tokens. One browser
+authorization is shared by Web, Tauri and Capacitor — clients never store connector tokens.
+
+Secret files live in `ASTER_CONNECTOR_SECRET_DIR` (default `/run/secrets/aster-connectors`), mode
+`0444` for Docker secrets or `0400` for a bind mount:
+
+| File | Purpose |
+| --- | --- |
+| `credential_master_key` | 32 bytes as 64 hex chars, base64, or raw. AES-256-GCM key for token encryption. |
+| `github_client_id` / `github_client_secret` | GitHub OAuth App. |
+| `google_client_id` / `google_client_secret` | Google OAuth client. Scope is `gmail.readonly`. |
+
+Register `<CONNECTOR_OAUTH_REDIRECT_BASE>/api/v1/connectors/oauth/callback` as the redirect URI in
+both OAuth apps. Never put these values in `.env`, the repo, SQLite, a log or a chat message.
+Losing `credential_master_key` means every stored connector needs reauthorization.
+
+The API is small:
+
+```bash
+POST /api/v1/connectors                       {"provider":"github","slug":"work"}
+POST /api/v1/connectors/work/oauth/start      -> {"url":"https://github.com/login/oauth/authorize?..."}
+GET  /api/v1/connectors                       -> providers + connections (never tokens)
+GET  /api/v1/connectors/oauth/callback        provider redirect target; one-time state
+```
+
+Local stdio MCP connectors use `{"provider":"mcp_stdio","slug":"local","command":"node","args":[...]}`.
+`command` must be listed in `CONNECTOR_STDIO_ALLOWLIST` (empty denies all); the process starts on the
+next boot and runs in `<DATA_DIR>/connectors/stdio/<slug>`. `inheritEnv=false` means it receives only
+the MCP transport's minimal allowlist (PATH, HOME, locale, proxy) — never provider keys, the connector
+secret directory or `.env` values.
+**High risk:** an allowlisted binary is arbitrary host code — list only binaries you would run
+manually.
+
+Model tools are read-only: `connector_list`, `connector_github_list_repositories`,
+`connector_github_list_issues`, `connector_github_get_issue`,
+`connector_gmail_search_messages`, `connector_gmail_get_message`. Gmail send/delete/modify is not
+implemented. `credential.request` on SSE asks a client to start the OAuth flow for a slug; it never
+contains a credential.
+
 ## Production isolation checklist
 
 - [ ] Compose project is `aster-web`, not `aster` / `personal-agent`.

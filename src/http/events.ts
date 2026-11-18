@@ -14,6 +14,8 @@ export type SseEventName =
   | "request.aborted"
   | "model.changed"
   | "host.message"
+  | "connector.changed"
+  | "credential.request"
   | "heartbeat";
 
 type Client = { readonly id: number; readonly res: ServerResponse };

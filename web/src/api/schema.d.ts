@@ -175,6 +175,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/connectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List connector providers and this owner's connections
+         * @description Server-side connection state shared by Web, Tauri and Capacitor. No
+         *     token, refresh token, client secret or file path is ever returned.
+         */
+        get: operations["listConnectors"];
+        put?: never;
+        /**
+         * Create a GitHub, Gmail or local stdio connection
+         * @description Creates a server-side connection identity. GitHub and Gmail start
+         *     `pending`; the owner then calls `POST /connectors/{slug}/oauth/start` and
+         *     completes the browser flow once. Every client sees the same connection
+         *     afterwards. `mcp_stdio` requires `command` (allowlisted server-side) and
+         *     is `connected` immediately, but its MCP server starts with the next
+         *     process boot. Local connectors run host binaries: treat as high risk.
+         */
+        post: operations["createConnector"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connectors/{slug}/oauth/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start server-side OAuth for one connection
+         * @description Returns the provider authorization URL. The server stores a one-time
+         *     state and PKCE verifier; the provider redirects the browser to the
+         *     server callback. Access and refresh tokens stay on the server, encrypted
+         *     with AES-256-GCM in connectors.sqlite.
+         */
+        post: operations["startConnectorOAuth"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connectors/oauth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * OAuth provider callback (no Bearer token)
+         * @description The provider redirects the browser here. The one-time `state` row is the
+         *     capability; replayed, expired or unknown state is refused. The response
+         *     is a small HTML page and never includes a token.
+         */
+        get: operations["connectorOAuthCallback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -187,10 +262,11 @@ export interface paths {
          * @description Uses the same `Authorization: Bearer` header as every other endpoint, so
          *     clients must consume it with `fetch` + `ReadableStream`, not
          *     `EventSource`. The stream opens with a `snapshot` event, sends an SSE
-         *     comment heartbeat every 15 seconds, and broadcasts request, model and
-         *     `host.message` events to every connected client. No event replay is
-         *     provided: on reconnect a client re-reads history (host notifications are
-         *     durable `role: system` rows) and uses the new snapshot.
+         *     comment heartbeat every 15 seconds, and broadcasts request, model,
+         *     `host.message`, `connector.changed` and `credential.request` events to
+         *     every connected client. No event replay is provided: on reconnect a
+         *     client re-reads history (host notifications are durable `role: system`
+         *     rows), the connector list and the new snapshot.
          */
         get: operations["subscribeEvents"];
         put?: never;
@@ -342,6 +418,56 @@ export interface components {
             /** @description True only when a manual selection was unavailable and another model answered. */
             degraded: boolean;
         };
+        /** @enum {string} */
+        ConnectorProvider: "github" | "gmail" | "mcp_stdio";
+        /** @enum {string} */
+        ConnectorStatus: "pending" | "connected" | "error" | "revoked";
+        ConnectorDefinition: {
+            provider: components["schemas"]["ConnectorProvider"];
+            displayName: string;
+            /** @enum {string} */
+            transport: "oauth" | "stdio";
+            defaultScopes: string[];
+            /** @description Read-only model tool names this provider can expose. */
+            tools: string[];
+        };
+        ConnectorConnection: {
+            /** @description Stable internal connection id; slugs are only unique per owner. */
+            id: string;
+            provider: components["schemas"]["ConnectorProvider"];
+            slug: string;
+            status: components["schemas"]["ConnectorStatus"];
+            /** @description GitHub login or Gmail address; never a token. */
+            accountLabel: string | null;
+            scopes: string[];
+            createdAt: string;
+            updatedAt: string;
+            lastErrorCode: string | null;
+        };
+        ConnectorListResponse: {
+            providers: components["schemas"]["ConnectorDefinition"][];
+            connections: components["schemas"]["ConnectorConnection"][];
+        };
+        CreateConnectorRequest: {
+            /** @enum {string} */
+            provider: "github" | "gmail" | "mcp_stdio";
+            slug: string;
+            /**
+             * @description `mcp_stdio` only. Must be named in the server's CONNECTOR_STDIO_ALLOWLIST;
+             *     it is never run through a shell.
+             */
+            command?: string;
+            /** @description `mcp_stdio` only. Passed as argv entries, never shell-expanded. */
+            args?: string[];
+        };
+        CreateConnectorResponse: {
+            connection: components["schemas"]["ConnectorConnection"];
+            created: boolean;
+        };
+        OAuthStartResponse: {
+            /** Format: uri */
+            url: string;
+        };
         /** @description Discriminated by the SSE `event:` name. `data` is JSON. */
         SseEvent: {
             /** @constant */
@@ -397,6 +523,34 @@ export interface components {
              */
             data: {
                 message: components["schemas"]["UiMessage"];
+            };
+        } | {
+            /** @constant */
+            event: "connector.changed";
+            data: {
+                connection: {
+                    id: string;
+                    provider: components["schemas"]["ConnectorProvider"];
+                    slug: string;
+                    status: components["schemas"]["ConnectorStatus"];
+                    accountLabel: string | null;
+                    scopes: string[];
+                };
+            };
+        } | {
+            /** @constant */
+            event: "credential.request";
+            /**
+             * @description A tool needed a connection that is not authorized. No credential
+             *     or capability is included; the client should start the server-side
+             *     OAuth flow for this slug.
+             */
+            data: {
+                connectionId: string;
+                provider: components["schemas"]["ConnectorProvider"];
+                slug: string;
+                tool: string;
+                requestId: string;
             };
         } | {
             /** @constant */
@@ -745,6 +899,183 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listConnectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Provider definitions and owner-scoped connections. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorListResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Connectors are disabled on this server. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    createConnector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateConnectorRequest"];
+            };
+        };
+        responses: {
+            /** @description Idempotent replay of the same provider and slug. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateConnectorResponse"];
+                };
+            };
+            /** @description Connection created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateConnectorResponse"];
+                };
+            };
+            400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description The slug belongs to another provider, or connector secrets are missing. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Connectors are disabled on this server. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    startConnectorOAuth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authorization URL to open in a browser. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthStartResponse"];
+                };
+            };
+            400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description OAuth redirect base URL or client secrets are not configured. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Connectors are disabled on this server. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    connectorOAuthCallback: {
+        parameters: {
+            query?: {
+                code?: string;
+                state?: string;
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authorization completed; the connection is usable by every client. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description State invalid/expired or authorization denied. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Provider token exchange failed; the connection is marked `error`. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Connectors are disabled on this server. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
                 };
             };
         };
