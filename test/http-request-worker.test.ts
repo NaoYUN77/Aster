@@ -6,7 +6,7 @@ import test from "node:test";
 import type { EventHub } from "../src/http/events.js";
 import { WebRequestStore } from "../src/http/store.js";
 import { RequestWorker } from "../src/http/worker.js";
-import { fakeAgent, fixtureSelection, waitFor } from "./http-testkit.js";
+import { fakeAgent, fixtureSelection, message, waitFor } from "./http-testkit.js";
 
 function recordingHub(): { hub: EventHub; events: { event: string; data: unknown }[] } {
   const events: { event: string; data: unknown }[] = [];
@@ -182,6 +182,104 @@ test("a request left running by a crash is failed as PROCESS_INTERRUPTED on rest
       second.close();
     }
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("steer is accepted only for the running request, broadcasts once and reports its settled answer", async () => {
+  const fixture = await fixtureSelection();
+  const directory = await mkdtemp(join(tmpdir(), "aster-worker-steer-"));
+  const store = new WebRequestStore(join(directory, "web.sqlite"));
+  const { hub, events } = recordingHub();
+  const gate = Promise.withResolvers<void>();
+  const settled = Promise.withResolvers<import("../src/http/projection.js").UiMessage | undefined>();
+  const steerCalls: string[] = [];
+  const worker = new RequestWorker({
+    store,
+    hub,
+    ownerId: "owner",
+    agent: fakeAgent({
+      service: fixture.service,
+      reply: async () => {
+        await gate.promise;
+        return "original answer";
+      },
+      steer: async (request) => {
+        steerCalls.push(request.requestId);
+        return { steerId: request.requestId, done: settled.promise };
+      },
+    }),
+  });
+  try {
+    const { row } = store.enqueue("client-original", "original");
+    worker.start();
+    worker.notify();
+    await waitFor(() => store.get(row.request_id)?.status === "running");
+
+    assert.deepEqual(await worker.steer("another-request", "client-steer", "steer text"),
+      { ok: false, reason: "not_active" });
+    assert.equal(steerCalls.length, 0);
+
+    assert.deepEqual(await worker.steer(row.request_id, "client-steer", "steer text"),
+      { ok: true, steerId: "steer:client-steer" });
+    const steered = events.filter((event) => event.event === "request.steered");
+    assert.equal(steered.length, 1);
+    assert.deepEqual(steered[0]?.data, {
+      requestId: row.request_id,
+      steerId: "steer:client-steer",
+      clientMessageId: "client-steer",
+      text: "steer text",
+      createdAt: (steered[0]?.data as { createdAt: number }).createdAt,
+    });
+    const createdAt = (steered[0]?.data as { createdAt?: unknown } | undefined)?.createdAt;
+    assert.equal(typeof createdAt, "number");
+    assert.ok((createdAt as number) > 0);
+
+    // A retry of the same admission gets the same id and must not show the user row twice.
+    assert.deepEqual(await worker.steer(row.request_id, "client-steer", "steer text"),
+      { ok: true, steerId: "steer:client-steer" });
+    assert.equal(events.filter((event) => event.event === "request.steered").length, 1);
+
+    const answer = message({ id: "steer-answer", text: "steer answer" });
+    settled.resolve(answer);
+    await waitFor(() => events.some((event) => event.event === "steer.done"));
+    assert.deepEqual(events.find((event) => event.event === "steer.done")?.data, {
+      requestId: row.request_id,
+      steerId: "steer:client-steer",
+      message: answer,
+    });
+
+    gate.resolve();
+    await waitFor(() => store.get(row.request_id)?.status === "done");
+  } finally {
+    await worker.stop();
+    store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("steering with no running request is refused without touching the queue", async () => {
+  const fixture = await fixtureSelection();
+  const directory = await mkdtemp(join(tmpdir(), "aster-worker-steer-idle-"));
+  const store = new WebRequestStore(join(directory, "web.sqlite"));
+  const { hub, events } = recordingHub();
+  const worker = new RequestWorker({
+    store,
+    hub,
+    ownerId: "owner",
+    agent: fakeAgent({ service: fixture.service, reply: async () => "unused" }),
+  });
+  try {
+    worker.start();
+    assert.deepEqual(await worker.steer("request-any", "client-steer", "too late"),
+      { ok: false, reason: "no_active_request" });
+    assert.equal(store.active(), undefined);
+    assert.equal(events.length, 0);
+  } finally {
+    await worker.stop();
+    store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
     await rm(directory, { recursive: true, force: true });
   }
 });

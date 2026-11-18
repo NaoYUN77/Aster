@@ -12,6 +12,8 @@ export type SseEventName =
   | "request.done"
   | "request.failed"
   | "request.aborted"
+  | "request.steered"
+  | "steer.done"
   | "model.changed"
   | "host.message"
   | "connector.changed"

@@ -15,6 +15,11 @@ import type { RequestModelInfo, WebRequestRow, WebRequestStore } from "./store.j
 
 export type WebAgent = {
   reply(request: TextRequest, signal: AbortSignal): Promise<string>;
+  /**
+   * Join the running durable run. `done` settles with the projected assistant message, if any;
+   * the worker tracks it in the background and never awaits it on shutdown.
+   */
+  steer(request: TextRequest): Promise<{ readonly steerId: string; readonly done: Promise<UiMessage | undefined> }>;
   abort(): Promise<void>;
   history(options?: { readonly before?: string; readonly limit?: number }): Promise<HistoryPage>;
   modelService: ModelSelectionService;
@@ -68,6 +73,8 @@ export class RequestWorker {
   private loopPromise: Promise<void> | undefined;
   private running: { requestId: string; controller: AbortController } | undefined;
   private cleanupTimer: NodeJS.Timeout | undefined;
+  /** Steer ids admitted by this process, so an HTTP retry does not broadcast the same user row twice. */
+  private readonly admittedSteers = new Set<string>();
 
   constructor(options: RequestWorkerOptions) {
     this.store = options.store;
@@ -204,6 +211,56 @@ export class RequestWorker {
     if (result.found && result.previous === "running") {
       this.hub.broadcast("request.aborted", { requestId });
     }
+  }
+
+  /**
+   * Inject text into the running request. Unlike `reply`, this never queues a new web request: the
+   * durable submission joins the current run. The path id protects a late steer from landing on a
+   * newer request; without a running request we still call the agent so an idempotent replay of a
+   * known steer succeeds, and a genuinely new steer is refused with NO_ACTIVE_REQUEST.
+   */
+  async steer(
+    requestId: string,
+    clientMessageId: string,
+    text: string,
+  ): Promise<{ ok: true; steerId: string } | { ok: false; reason: "no_active_request" | "not_active" }> {
+    const running = this.running?.requestId;
+    if (running !== undefined && running !== requestId) return { ok: false, reason: "not_active" };
+    const steerId = `steer:${clientMessageId}`;
+    let result: Awaited<ReturnType<WebAgent["steer"]>>;
+    try {
+      result = await this.agent.steer({
+        requestId: steerId,
+        conversationId: "owner",
+        senderId: this.ownerId,
+        text,
+      });
+    } catch (error) {
+      if (errorCodeOf(error) === "NO_ACTIVE_REQUEST") return { ok: false, reason: "no_active_request" };
+      throw error;
+    }
+    // A replay of an already-admitted steer returns the same durable submission; do not show the
+    // user message twice. Clients also dedupe by steerId, which covers a replay after a restart.
+    if (!this.admittedSteers.has(result.steerId)) {
+      if (this.admittedSteers.size >= 1_000) this.admittedSteers.clear();
+      this.admittedSteers.add(result.steerId);
+      this.hub.broadcast("request.steered", {
+        requestId,
+        steerId: result.steerId,
+        clientMessageId,
+        text,
+        createdAt: Date.now(),
+      });
+    }
+    this.log(`Steer ${result.steerId} admitted to request ${requestId} (${text.length} chars)`);
+    // Background only: a late steer can start one more run, and this is the event that carries its
+    // answer. Shutdown never waits on it, and a settle failure is a log line, not a request failure.
+    void result.done.then((message) => {
+      if (message !== undefined) this.hub.broadcast("steer.done", { requestId, steerId: result.steerId, message });
+    }).catch((error: unknown) => {
+      this.log(`Steer ${result.steerId} completion failed: ${errorCodeOf(error)}`);
+    });
+    return { ok: true, steerId: result.steerId };
   }
 
   /**

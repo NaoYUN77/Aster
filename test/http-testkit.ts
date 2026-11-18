@@ -51,12 +51,16 @@ export function message(overrides: Partial<UiMessage> = {}): UiMessage {
 
 export function fakeAgent(options: {
   reply: (request: { requestId: string; text: string }, signal: AbortSignal) => Promise<string>;
+  steer?: (request: { requestId: string; text: string }) => Promise<{ steerId: string; done: Promise<UiMessage | undefined> }>;
   history?: (options?: { before?: string; limit?: number }) => Promise<HistoryPage>;
   service: WebAgent["modelService"];
   abort?: () => Promise<void>;
 }): WebAgent {
   return {
     reply: (request, signal) => options.reply(request, signal),
+    steer: options.steer ?? (async (request) => {
+      throw Object.assign(new Error(`No request is running for ${request.requestId}`), { code: "NO_ACTIVE_REQUEST" });
+    }),
     abort: options.abort ?? (async () => {}),
     history: options.history ?? (async () => ({ messages: [], nextCursor: null, hasMore: false })),
     modelService: options.service,

@@ -257,6 +257,29 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     return { requestId, status: "aborted" };
   });
 
+  app.post("/api/v1/requests/:requestId/steer", async (request, reply) => {
+    const { requestId } = request.params as { requestId: string };
+    const body = request.body as { clientMessageId?: unknown; text?: unknown } | undefined;
+    const clientMessageId = body?.clientMessageId;
+    const text = body?.text;
+    if (typeof clientMessageId !== "string" || clientMessageId.length < 1 || clientMessageId.length > 200) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "请求参数不合法"));
+    }
+    if (typeof text !== "string" || text.trim() === "") {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "请求参数不合法"));
+    }
+    if (text.length > 32_000) {
+      return reply.code(400).send(errorBody("TEXT_TOO_LONG", "消息过长，最多 32000 个字符"));
+    }
+    const result = await worker.steer(requestId, clientMessageId, text);
+    if (!result.ok) {
+      return result.reason === "no_active_request"
+        ? reply.code(409).send(errorBody("NO_ACTIVE_REQUEST", "没有正在运行的请求"))
+        : reply.code(409).send(errorBody("REQUEST_NOT_ACTIVE", "请求不是当前运行的请求"));
+    }
+    return reply.code(202).send({ steerId: result.steerId, requestId, status: "accepted" });
+  });
+
   // ---------------------------------------------------------------- models
   app.get("/api/v1/models", async () => modelService.catalog());
 

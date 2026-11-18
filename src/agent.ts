@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { AgentDoc, AssistantEntry, Harness, ResetEntry, SessionFailed, ToolResultEntry, UserEntry, type Conversation, type ConversationId, type Cursor, type EntryId, type Extension, type Storage, type Submission } from "@earendil-works/pi-durable";
+import { AgentDoc, AssistantEntry, ConversationIdle, Harness, ResetEntry, SessionFailed, ToolResultEntry, UserEntry, type Conversation, type ConversationId, type Cursor, type EntryId, type Extension, type Storage, type Submission } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -1024,6 +1024,60 @@ export async function openAgent(
           }
         }
         return text;
+      },
+      /**
+       * Inject text into the run that is already active. This is not a queued request: durable
+       * admits it with `whenBusy: "steer"`/`whenIdle: "reject"` so it joins the current run and the
+       * model reads it at the next tool boundary. An idle conversation refuses it with
+       * `NO_ACTIVE_REQUEST` (except for an idempotent replay of a known steer request id).
+       *
+       * A steer belongs to the current request's context, so it deliberately skips the memory
+       * prepare/after-request hooks. If a late steer makes durable start one more run, that extra
+       * run therefore has no per-request memory projection either; v1 accepts this limitation
+       * rather than inventing a second request identity.
+       */
+      async steer(request: TextRequest): Promise<{ readonly steerId: string; readonly done: Promise<UiMessage | undefined> }> {
+        const steerId = request.requestId;
+        const routed = await route(request);
+        if (routed.notice !== undefined) {
+          throw Object.assign(new Error("Steering is not available in a closed thread"), { code: "NO_ACTIVE_REQUEST" });
+        }
+        let submission: Submission;
+        try {
+          submission = await routed.conversation.submit({
+            type: "input",
+            content: request.text,
+            requestId: steerId,
+            whenBusy: "steer",
+            whenIdle: "reject",
+          }, context);
+        } catch (error) {
+          if (error instanceof ConversationIdle) {
+            throw Object.assign(new Error("No request is running"), { code: "NO_ACTIVE_REQUEST" });
+          }
+          throw error;
+        }
+        // Read the answer by its durable entry id instead of matching text: when the run consumed
+        // this steer, the answer is the original one and clients dedupe it by message id.
+        const done = (async (): Promise<UiMessage | undefined> => {
+          try {
+            const settled = await submission.wait(context);
+            if (settled.status !== "done") return undefined;
+            const page = await routed.conversation.entries({
+              order: "ascending",
+              minEntryId: settled.answer,
+              maxEntryId: settled.answer,
+            }, 1, undefined, context);
+            const entry = page.items[0];
+            return entry === undefined ? undefined : projectEntry(entry);
+          } catch (error) {
+            // The worker tracks this promise in the background; a settle failure must not take the
+            // process or the request down, and only the id (never the text) is logged.
+            console.error(`Steer ${steerId} did not settle: ${errorCode(error)}`);
+            return undefined;
+          }
+        })();
+        return { steerId, done };
       },
       /**
        * A host-initiated run for a standing task. The request id is derived from the routine and the

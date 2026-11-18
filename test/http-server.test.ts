@@ -16,7 +16,12 @@ import { fakeAgent, fixtureSelection, message, waitFor } from "./http-testkit.js
 
 const PASSWORD = "integration-password";
 
-async function startServer(options: { withSse?: boolean; connectors?: ConnectorService } = {}) {
+async function startServer(options: {
+  withSse?: boolean;
+  connectors?: ConnectorService;
+  reply?: (request: { requestId: string; text: string }, signal: AbortSignal) => Promise<string>;
+  steer?: (request: { requestId: string; text: string }) => Promise<{ steerId: string; done: Promise<import("../src/http/projection.js").UiMessage | undefined> }>;
+} = {}) {
   const fixture = await fixtureSelection();
   const directory = await mkdtemp(join(tmpdir(), "aster-http-server-"));
   const store = new WebRequestStore(join(directory, "web.sqlite"));
@@ -46,7 +51,8 @@ async function startServer(options: { withSse?: boolean; connectors?: ConnectorS
   };
   const agent = fakeAgent({
     service: fixture.service,
-    reply: async (request) => `reply:${request.text}`,
+    reply: options.reply ?? (async (request) => `reply:${request.text}`),
+    ...(options.steer === undefined ? {} : { steer: options.steer }),
     history: async () => historyPage,
   });
   const worker = new RequestWorker({ store, hub, ownerId: "owner", agent });
@@ -483,6 +489,67 @@ test("hijacked SSE keeps CORS: allowed shell origin echoes ACAO, others do not",
     const sameOrigin = await open();
     assert.equal(sameOrigin.headers.get("access-control-allow-origin"), null);
     await sameOrigin.body?.cancel();
+  } finally {
+    await server.close();
+  }
+});
+
+test("steer route: 202 while running, 409 for idle or a stale path, 400 for invalid bodies", async () => {
+  const gate = Promise.withResolvers<void>();
+  let running = false;
+  const server = await startServer({
+    reply: async () => {
+      running = true;
+      await gate.promise;
+      running = false;
+      return "original answer";
+    },
+    steer: async (request) => {
+      if (!running) throw Object.assign(new Error("idle"), { code: "NO_ACTIVE_REQUEST" });
+      return { steerId: request.requestId, done: Promise.resolve(message({ id: "77", text: "steer answer" })) };
+    },
+  });
+  try {
+    const { token } = (await server.login()).json<{ token: string }>();
+    const headers = server.auth(token);
+    const steer = (requestId: string, payload: object): Promise<import("light-my-request").Response> =>
+      server.app.inject({
+        method: "POST", url: `/api/v1/requests/${requestId}/steer`, headers, payload,
+      }) as Promise<import("light-my-request").Response>;
+
+    const idle = await steer("request-any", { clientMessageId: "steer-1", text: "too early" });
+    assert.equal(idle.statusCode, 409);
+    assert.equal(idle.json<{ error: { code: string } }>().error.code, "NO_ACTIVE_REQUEST");
+
+    const { row } = server.store.enqueue("client-original", "original question");
+    server.worker.notify();
+    await waitFor(() => server.store.get(row.request_id)?.status === "running");
+
+    const accepted = await steer(row.request_id, { clientMessageId: "steer-1", text: "look again" });
+    assert.equal(accepted.statusCode, 202);
+    assert.deepEqual(accepted.json(), {
+      steerId: "steer:steer-1",
+      requestId: row.request_id,
+      status: "accepted",
+    });
+
+    const stale = await steer("request-other", { clientMessageId: "steer-2", text: "wrong request" });
+    assert.equal(stale.statusCode, 409);
+    assert.equal(stale.json<{ error: { code: string } }>().error.code, "REQUEST_NOT_ACTIVE");
+
+    const tooLong = await steer(row.request_id, { clientMessageId: "steer-3", text: "x".repeat(32_001) });
+    assert.equal(tooLong.statusCode, 400);
+    assert.equal(tooLong.json<{ error: { code: string } }>().error.code, "TEXT_TOO_LONG");
+
+    const invalid = await steer(row.request_id, { clientMessageId: "", text: "hi" });
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(invalid.json<{ error: { code: string } }>().error.code, "INVALID_REQUEST");
+
+    gate.resolve();
+    await waitFor(() => server.store.get(row.request_id)?.status === "done");
+    const late = await steer(row.request_id, { clientMessageId: "steer-4", text: "too late" });
+    assert.equal(late.statusCode, 409);
+    assert.equal(late.json<{ error: { code: string } }>().error.code, "NO_ACTIVE_REQUEST");
   } finally {
     await server.close();
   }
