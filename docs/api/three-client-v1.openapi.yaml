@@ -170,6 +170,26 @@ paths:
           $ref: "#/components/responses/InvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/v1/queue:
+    get:
+      tags: [messages]
+      operationId: listQueue
+      summary: List queued messages in worker order
+      description: |
+        Returns `web_requests` rows with status `queued`, in the same order the
+        worker claims them (`created_at`, then insertion order). A row that was
+        promoted has left the queue and is not returned. This is a single-owner,
+        single-conversation adapter, so the queue is not paginated; at most 100
+        items are returned.
+      responses:
+        "200":
+          description: The pending queue, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /api/v1/requests/{requestId}/abort:
     post:
       tags: [messages]
@@ -271,6 +291,56 @@ paths:
                 notActive:
                   value:
                     error: { code: REQUEST_NOT_ACTIVE, message: 请求不是当前运行的请求 }
+  /api/v1/requests/{requestId}/promote:
+    post:
+      tags: [messages]
+      operationId: promoteQueuedRequest
+      summary: Run a queued message now or inject it into the running request
+      description: |
+        Removes one queued message from the FIFO and makes it take effect
+        immediately.
+
+        If a request is running, the promoted text joins that same agent run
+        through the existing steer path, with durable id
+        `steer:<clientMessageId>`, and the queue row becomes `promoted`.
+        If nothing is running, the row becomes `running` at once, ahead of older
+        queued messages, and starts a new run.
+
+        The decision is idempotent: promoting an already-promoted row returns the
+        same `mode: steered` and `steerId` without injecting anything again. If
+        the run finishes between the decision and the injection, the server
+        starts the message immediately instead of rejecting it.
+
+        `409 QUEUE_ITEM_NOT_QUEUED` means the row is no longer queued (it is
+        running, done, failed or aborted); the client should refresh
+        `GET /api/v1/queue`. A malformed `requestId` is `400`.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: The message was injected into the run or started immediately.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromoteResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: The row left the queue before it could be promoted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                notQueued:
+                  value:
+                    error: { code: QUEUE_ITEM_NOT_QUEUED, message: 消息已不在队列中，请刷新队列 }
   /api/v1/models:
     get:
       tags: [models]
@@ -674,7 +744,50 @@ components:
           maxLength: 32000
     RequestStatus:
       type: string
-      enum: [queued, running, done, failed, aborted]
+      enum: [queued, running, promoted, done, failed, aborted]
+    QueuedRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, clientMessageId, text, createdAt]
+      properties:
+        requestId:
+          type: string
+        clientMessageId:
+          type: string
+        text:
+          type: string
+        createdAt:
+          type: integer
+          format: int64
+          description: Unix epoch milliseconds.
+    QueueResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          description: Queued messages in worker claim order, oldest first.
+          items:
+            $ref: "#/components/schemas/QueuedRequest"
+    PromoteResponse:
+      type: object
+      additionalProperties: false
+      required: [requestId, mode]
+      properties:
+        requestId:
+          type: string
+          description: The promoted queue row.
+        mode:
+          type: string
+          enum: [steered, started]
+          description: |
+            `steered`: injected into the request that was already running.
+            `started`: no request was running, so this message started one.
+        steerId:
+          type: string
+          description: "Present when `mode` is `steered`; `steer:<clientMessageId>`."
     SubmitMessageResponse:
       type: object
       additionalProperties: false
@@ -1011,7 +1124,7 @@ components:
             data:
               type: object
               additionalProperties: false
-              required: [activeRequest, modelVersion]
+              required: [activeRequest, modelVersion, queue]
               properties:
                 activeRequest:
                   oneOf:
@@ -1020,6 +1133,12 @@ components:
                 modelVersion:
                   type: integer
                   description: Monotonic selection version; changes on every applied model change.
+                queue:
+                  type: array
+                  maxItems: 100
+                  description: The pending queue at connection time, same shape and order as `GET /api/v1/queue`.
+                  items:
+                    $ref: "#/components/schemas/QueuedRequest"
         - type: object
           additionalProperties: false
           required: [event, data]
@@ -1032,6 +1151,26 @@ components:
               properties:
                 requestId: { type: string }
                 clientMessageId: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: { type: string, const: queue.changed }
+            data:
+              type: object
+              additionalProperties: false
+              required: [items]
+              description: |
+                The full pending queue after an enqueue, a worker claim (queued
+                to running), a successful promote, or an abort of a queued row.
+                Clients replace their queue list with `items`; `promoted` rows
+                are not included.
+              properties:
+                items:
+                  type: array
+                  maxItems: 100
+                  items:
+                    $ref: "#/components/schemas/QueuedRequest"
         - type: object
           additionalProperties: false
           required: [event, data]
