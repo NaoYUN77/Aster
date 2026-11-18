@@ -18,6 +18,7 @@ through this contract first.
 | POST | `/api/v1/requests/{requestId}/abort` | bearer | stop queued/running request |
 | POST | `/api/v1/requests/{requestId}/steer` | bearer | inject text into the running request |
 | POST | `/api/v1/requests/{requestId}/promote` | bearer | run a queued message now (steer or start) |
+| DELETE | `/api/v1/connectors/{slug}` | bearer | disconnect; delete stored credential |
 | GET | `/api/v1/models` | bearer | live catalog + current selection |
 | POST | `/api/v1/models/select` | bearer | manual selection / back to primary |
 | GET | `/api/v1/events` | bearer | SSE (fetch + ReadableStream, not EventSource) |
@@ -99,6 +100,17 @@ is broadcast as `model.changed` just like a button click.
   and poll `GET /connectors` (or listen for `connector.changed`). Tokens never reach a client.
   `credential.request` means a tool needs authorization; it carries only the slug/provider/tool.
   Gmail has no send/delete/modify tools.
+- `DELETE /api/v1/connectors/{slug}` deletes the encrypted credential and marks the row `revoked`
+  in one transaction, then broadcasts `connector.changed`; its tools return
+  `CONNECTOR_NOT_CONNECTED` until it is authorized again. The row and slug stay, so a fresh
+  `oauth/start` reconnects the same connection. Repeating the DELETE is `204`; an unknown slug is
+  `404 CONNECTOR_NOT_FOUND`; connectors off is `503 CONNECTORS_DISABLED`.
+- Server-side OAuth secrets live in the connector secret directory: `github_client_id`,
+  `github_client_secret`, `google_client_id`, `google_client_secret`, and
+  `credential_master_key` (32 bytes, used for AES-256-GCM). The OAuth app's callback URL is
+  `{CONNECTOR_OAUTH_REDIRECT_BASE}/api/v1/connectors/oauth/callback`; missing secrets or an unset
+  redirect base are `409 CONNECTOR_SECRET_MISSING` / `CONNECTOR_NOT_CONFIGURED` /
+  `CONNECTOR_OAUTH_DISABLED`.
 - Local stdio MCP connectors (`provider: "mcp_stdio"`, with `command`/`args`) are created through
   the same route but start only on the next server boot, after the command is re-checked against
   `CONNECTOR_STDIO_ALLOWLIST`. They run a host binary with `inheritEnv: false` and a private working
@@ -120,7 +132,7 @@ Model selection: `MODEL_NOT_FOUND`, `MODEL_OUT_OF_SCOPE`, `MODEL_SWITCH_DISABLED
 Connectors: `CONNECTOR_NOT_FOUND`, `CONNECTOR_ALREADY_EXISTS`, `CONNECTOR_INVALID_PROVIDER`,
 `CONNECTOR_INVALID_SLUG`, `CONNECTOR_INVALID_INPUT`, `CONNECTOR_NOT_CONNECTED`,
 `CONNECTOR_OAUTH_DISABLED`, `CONNECTOR_OAUTH_STATE_INVALID`, `CONNECTOR_OAUTH_EXCHANGE_FAILED`,
-`CONNECTOR_SECRET_MISSING`, `CONNECTOR_SECRET_UNREADABLE`, `CONNECTOR_MASTER_KEY_INVALID`,
+`CONNECTOR_NOT_CONFIGURED`, `CONNECTOR_SECRET_MISSING`, `CONNECTOR_SECRET_UNREADABLE`, `CONNECTOR_MASTER_KEY_INVALID`,
 `CONNECTOR_CREDENTIAL_UNREADABLE`, `CONNECTOR_AUTH_EXPIRED`, `CONNECTOR_SCOPE_DENIED`,
 `CONNECTOR_RATE_LIMITED`, `CONNECTOR_UPSTREAM_UNAVAILABLE`, `CONNECTOR_UPSTREAM_NOT_FOUND`,
 `CONNECTORS_DISABLED`. Messages are fixed and safe; never display or log a token.
