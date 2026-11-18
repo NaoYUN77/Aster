@@ -251,6 +251,37 @@ describe("buildDisplayMessages 去重", () => {
     expect(aborted[0]!.status).toBe("aborted");
   });
 
+  it("空文本 assistant 带 tool 时保留工具消息", () => {
+    const history = [
+      message({
+        id: "tool-1",
+        role: "assistant",
+        text: "",
+        status: "complete",
+        tool: { name: "current_time", status: "done" },
+      }),
+    ];
+    const result = buildDisplayMessages(history, state());
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.role).toBe("assistant");
+    expect(result[0]!.tool).toEqual({ name: "current_time", status: "done" });
+  });
+
+  it("空文本 assistant 且没有 tool 时仍被过滤，避免空气泡", () => {
+    const history = [
+      message({
+        id: "empty-1",
+        role: "assistant",
+        text: "",
+        status: "complete",
+        tool: null,
+      }),
+    ];
+
+    expect(buildDisplayMessages(history, state())).toHaveLength(0);
+  });
+
   it("断线重连/刷新后历史与 live 重复 assistant 不产生第二条", () => {
     const history = [
       message({ id: "u1", role: "user", text: "hi", requestId: "req1", clientMessageId: "c1" }),

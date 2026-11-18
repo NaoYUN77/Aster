@@ -41,10 +41,13 @@ export function MessageItem({
   message: DisplayMessage;
   onRetry: (message: DisplayMessage) => void;
 }) {
+  // 工具元数据优先于 role：后端把工具结果投影成
+  // `role:"assistant", text:"", tool:{...}`，不能当普通空气泡渲染。
+  if (message.tool) {
+    return <ToolRow name={message.tool.name} status={message.tool.status} />;
+  }
+
   if (message.role === "system") {
-    if (message.tool) {
-      return <ToolRow name={message.tool.name} status={message.tool.status} />;
-    }
     if (message.text.trim() === "") return null;
     return (
       <p className="my-2 text-center text-xs text-muted-foreground">{message.text}</p>

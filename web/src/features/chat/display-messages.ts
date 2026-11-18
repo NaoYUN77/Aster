@@ -83,11 +83,13 @@ export function buildDisplayMessages(
 
   for (const message of byId.values()) {
     // 停止/中断时服务端可能留下空的 assistant 占位，不渲染空气泡；
-    // 失败消息仍需显示错误文案。
+    // 失败消息仍需显示错误文案。带 tool 元数据的空 assistant 是工具调用，
+    // 必须保留给 ToolRow 渲染。
     if (
       message.role === "assistant" &&
       message.text.trim() === "" &&
-      message.status !== "failed"
+      message.status !== "failed" &&
+      message.tool === null
     ) {
       continue;
     }
