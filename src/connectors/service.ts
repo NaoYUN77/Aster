@@ -9,16 +9,19 @@ import { GithubClient } from "./github.js";
 import type { ConnectorOAuth } from "./oauth.js";
 import { stdioWorkingDirectory, validateStdioConnector } from "./stdio.js";
 import type { ConnectorConnection, ConnectorDefinition, ConnectorProvider, ConnectorStore } from "./store.js";
+import type { TokenVault } from "./vault.js";
 
 export type ConnectorServiceOptions = {
   readonly store: ConnectorStore;
   readonly oauth: ConnectorOAuth;
+  readonly vault: TokenVault;
   readonly config: ConnectorsConfig;
   readonly ownerId: string;
   readonly dataDir: string;
   readonly hub?: EventHub;
   readonly fetch?: typeof fetch;
   readonly log?: (line: string) => void;
+  readonly now?: () => Date;
 };
 
 export type ConnectorList = {
@@ -33,6 +36,7 @@ export type ConnectorList = {
 export class ConnectorService {
   readonly #store: ConnectorStore;
   readonly #oauth: ConnectorOAuth;
+  readonly #vault: TokenVault;
   readonly #config: ConnectorsConfig;
   readonly #ownerId: string;
   readonly #dataDir: string;
@@ -41,15 +45,18 @@ export class ConnectorService {
   readonly #github: GithubClient;
   readonly #gmail: GmailClient;
   readonly #log: (line: string) => void;
+  readonly #now: () => Date;
 
   constructor(options: ConnectorServiceOptions) {
     this.#store = options.store;
     this.#oauth = options.oauth;
+    this.#vault = options.vault;
     this.#config = options.config;
     this.#ownerId = options.ownerId;
     this.#dataDir = options.dataDir;
     this.#hub = options.hub;
     this.#log = options.log ?? ((line) => console.error(line));
+    this.#now = options.now ?? (() => new Date());
     const fetchImpl = options.fetch ?? fetch;
     this.#github = new GithubClient({ fetch: fetchImpl, timeoutMs: options.config.httpTimeoutMs });
     this.#gmail = new GmailClient({ fetch: fetchImpl, timeoutMs: options.config.httpTimeoutMs });
@@ -140,9 +147,12 @@ export class ConnectorService {
    * the same connection can be authorized again; until then tools of that provider refuse to run.
    * Repeating the call is harmless.
    */
-  disconnect(slug: string): void {
+  async disconnect(slug: string): Promise<void> {
     const connection = this.#store.get(this.#ownerId, slug);
     if (connection === undefined) throw new ConnectorError("CONNECTOR_NOT_FOUND", "connector was not found");
+    // Clear the vault first: if the broker is unreachable, keep the local row connected rather
+    // than revoking here while a usable token remains in the broker.
+    await this.#vault.remove(connection);
     if (!this.#store.disconnect(connection.id)) {
       throw new ConnectorError("CONNECTOR_NOT_FOUND", "connector was not found");
     }
@@ -155,13 +165,52 @@ export class ConnectorService {
     if (connection.provider !== "github" && connection.provider !== "gmail") {
       throw new ConnectorError("CONNECTOR_INVALID_PROVIDER", "unsupported connector provider");
     }
-    return this.#oauth.start(connection);
+    const started = await this.#oauth.start(connection);
+    this.#store.createOAuthSession({
+      state: started.state,
+      connectionId: connection.id,
+      ownerId: connection.ownerId,
+      provider: connection.provider,
+      codeVerifier: started.codeVerifier,
+      redirectUri: started.redirectUri,
+      scopes: connection.scopes,
+      expiresAt: new Date(this.#now().getTime() + this.#config.oauthStateTtlMs).toISOString(),
+    });
+    return { url: started.url };
   }
 
   async completeOAuth(state: string, code: string): Promise<ConnectorConnection> {
-    const connection = await this.#oauth.complete(state, code);
-    this.#changed(connection);
-    return connection;
+    if (state === "" || code === "" || state.length > 512 || code.length > 4_096) {
+      throw stateInvalid();
+    }
+    const session = this.#store.consumeOAuthSession(state);
+    if (session === undefined) throw stateInvalid();
+    const connection = this.#store.getById(session.connectionId);
+    if (connection === undefined || connection.provider !== session.provider) throw stateInvalid();
+    try {
+      const result = await this.#oauth.exchange(connection, session, code);
+      await this.#vault.save(connection, result.token, {
+        accountLabel: result.accountLabel,
+        scopes: result.scopes,
+      });
+      const connected = this.#store.setConnected(connection.id, {
+        accountLabel: result.accountLabel,
+        scopes: result.scopes,
+      });
+      this.#changed(connected);
+      return connected;
+    } catch (error) {
+      const codeName = error instanceof ConnectorError ? error.code : connectorCode(error);
+      this.#store.setStatus(connection.id, "error", codeName);
+      this.#store.audit(connection.id, "oauth.exchange_failed", codeName);
+      if (error instanceof ConnectorError) throw error;
+      throw new ConnectorError("CONNECTOR_OAUTH_EXCHANGE_FAILED", "OAuth token exchange failed");
+    }
+  }
+
+  /** The optional app URL for the OAuth success page; undefined means the page stays put. */
+  get oauthReturnUrl(): string | undefined {
+    return this.#config.oauthReturnUrl;
   }
 
   async listRepositories(input: { readonly connection?: string; readonly perPage?: number }, binding: CredentialBinding) {
@@ -221,7 +270,7 @@ export class ConnectorService {
     }
     let token: string;
     try {
-      token = await this.#oauth.accessToken(connection);
+      token = await this.#vault.accessToken(connection);
     } catch (error) {
       if (error instanceof ConnectorError && error.code === "CONNECTOR_NOT_CONNECTED") {
         this.#requestCredential(connection, tool, binding);
@@ -283,4 +332,8 @@ export class ConnectorService {
       },
     });
   }
+}
+
+function stateInvalid(): ConnectorError {
+  return new ConnectorError("CONNECTOR_OAUTH_STATE_INVALID", "OAuth state is invalid or has expired");
 }

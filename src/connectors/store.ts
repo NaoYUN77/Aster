@@ -389,6 +389,23 @@ export class ConnectorStore {
     this.audit(connectionId, "credential.deleted");
   }
 
+  /** Every OAuth credential still held locally, for the one-shot migration to the broker. */
+  credentialRows(): { readonly connection: ConnectorConnection; readonly ciphertext: string }[] {
+    const rows = this.#db.prepare(
+      `SELECT c.*, cr.ciphertext AS credential_ciphertext
+         FROM connections c JOIN credentials cr ON cr.connection_id = c.id AND cr.kind = 'oauth_token'
+        ORDER BY c.created_at, c.rowid`,
+    ).all() as (ConnectionRow & { credential_ciphertext: string })[];
+    return rows.map((row) => ({ connection: connection(row), ciphertext: row.credential_ciphertext }));
+  }
+
+  /** Removes a credential after it was copied elsewhere; the connection row and status stay. */
+  clearCredential(connectionId: string): boolean {
+    const changed = this.#db.prepare("DELETE FROM credentials WHERE connection_id = ?").run(connectionId);
+    if (changed.changes > 0) this.audit(connectionId, "credential.migrated");
+    return changed.changes > 0;
+  }
+
   createOAuthSession(session: OAuthSession): void {
     this.#db.prepare(`INSERT INTO oauth_sessions
       (state, connection_id, owner_id, provider, code_verifier, redirect_uri, scopes, created_at, expires_at)

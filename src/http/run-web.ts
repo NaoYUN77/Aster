@@ -134,6 +134,14 @@ export async function runWebMode(
           config: config.connectors,
           hub,
         });
+    // A one-shot, opt-in copy of local ciphertext into the broker; failures abort startup and leave
+    // the local rows untouched. Only counts are logged.
+    if (connectors !== undefined && config.connectors?.migrateCredentials === true) {
+      const migration = await connectors.migrateCredentials();
+      console.info(
+        `Connector credential migration: ${migration.migrated}/${migration.total} moved to the secret broker`,
+      );
+    }
     const connectorExtension = connectors === undefined ? undefined : createConnectorExtension(connectors.service, ownerId);
     // Local stdio connectors are host-managed MCP servers: persisted rows are re-validated against the
     // allowlist and started here, on boot, not per client request.

@@ -65,3 +65,73 @@ test("connector config defaults to on with local secret files and no stdio comma
   assert.throws(() => readConnectorsConfig({ CONNECTOR_STDIO_ALLOWLIST: "node;rm -rf /" }), ConfigurationError);
   assert.throws(() => readConnectorsConfig({ CONNECTORS_ENABLED: "yes" }), ConfigurationError);
 });
+
+test("connector secret backend defaults to file and never needs broker settings", () => {
+  const config = readConnectorsConfig({});
+  assert.equal(config.secretBackend, "file");
+  assert.equal(config.broker, undefined);
+  assert.equal(config.oauthReturnUrl, undefined, "the OAuth page does not redirect by default");
+  assert.equal(config.migrateCredentials, false);
+  assert.throws(() => readConnectorsConfig({ ASTER_SECRET_BACKEND: "vault" }), ConfigurationError);
+});
+
+test("cf mode requires an https broker URL and an Access service token", () => {
+  assert.throws(() => readConnectorsConfig({ ASTER_SECRET_BACKEND: "cf" }), /ASTER_SECRET_BROKER_URL/);
+  assert.throws(
+    () => readConnectorsConfig({
+      ASTER_SECRET_BACKEND: "cf",
+      ASTER_SECRET_BROKER_URL: "http://secrets.example.test",
+      ASTER_CF_ACCESS_CLIENT_ID: "id",
+      ASTER_CF_ACCESS_CLIENT_SECRET: "secret",
+    }),
+    /https/,
+  );
+  assert.throws(
+    () => readConnectorsConfig({ ASTER_SECRET_BACKEND: "cf", ASTER_SECRET_BROKER_URL: "https://secrets.example.test" }),
+    /ASTER_CF_ACCESS_TOKEN_FILE/,
+  );
+  assert.throws(
+    () => readConnectorsConfig({
+      ASTER_SECRET_BACKEND: "cf",
+      ASTER_SECRET_BROKER_URL: "https://secrets.example.test",
+      ASTER_CF_ACCESS_CLIENT_ID: "id",
+    }),
+    /ASTER_CF_ACCESS_CLIENT_ID/,
+  );
+
+  const config = readConnectorsConfig({
+    ASTER_SECRET_BACKEND: "cf",
+    ASTER_SECRET_BROKER_URL: "https://secrets.example.test",
+    ASTER_CF_ACCESS_CLIENT_ID: "id",
+    ASTER_CF_ACCESS_CLIENT_SECRET: "secret",
+  });
+  assert.equal(config.secretBackend, "cf");
+  assert.deepEqual(config.broker, { url: "https://secrets.example.test", accessClientId: "id", accessClientSecret: "secret" });
+
+  const fileConfig = readConnectorsConfig({
+    ASTER_SECRET_BACKEND: "cf",
+    ASTER_SECRET_BROKER_URL: "http://127.0.0.1:8787",
+    ASTER_CF_ACCESS_TOKEN_FILE: "/run/secrets/cf-access-token",
+  });
+  assert.equal(fileConfig.broker?.accessTokenFile, "/run/secrets/cf-access-token");
+});
+
+test("the OAuth return URL is optional and the migration flag requires cf mode", () => {
+  assert.equal(readConnectorsConfig({ CONNECTOR_OAUTH_RETURN_URL: "" }).oauthReturnUrl, undefined);
+  assert.equal(
+    readConnectorsConfig({ CONNECTOR_OAUTH_RETURN_URL: "aster://oauth/done" }).oauthReturnUrl,
+    "aster://oauth/done",
+  );
+  assert.throws(() => readConnectorsConfig({ CONNECTOR_OAUTH_RETURN_URL: "not a url" }), /CONNECTOR_OAUTH_RETURN_URL/);
+  assert.throws(() => readConnectorsConfig({ CONNECTOR_OAUTH_RETURN_URL: "javascript:alert(1)" }), /CONNECTOR_OAUTH_RETURN_URL/);
+  assert.throws(() => readConnectorsConfig({ ASTER_CONNECTOR_MIGRATE: "1" }), /ASTER_CONNECTOR_MIGRATE/);
+  assert.equal(
+    readConnectorsConfig({
+      ASTER_SECRET_BACKEND: "cf",
+      ASTER_SECRET_BROKER_URL: "https://secrets.example.test",
+      ASTER_CF_ACCESS_TOKEN_FILE: "/run/secrets/cf-access-token",
+      ASTER_CONNECTOR_MIGRATE: "1",
+    }).migrateCredentials,
+    true,
+  );
+});

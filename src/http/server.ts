@@ -86,13 +86,36 @@ function connectorReply(error: unknown, reply: FastifyReply) {
   return reply.code(connectorStatus(code)).send(errorBody(code, message));
 }
 
-function htmlPage(title: string, detail: string): string {
-  const escape = (value: string) => value.replace(/[&<>"']/g, (character) => ({
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[character] ?? character);
+}
+
+function htmlPage(title: string, detail: string): string {
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`
-    + `<title>${escape(title)}</title><body style="font-family:system-ui,sans-serif;padding:2rem;line-height:1.6">`
-    + `<h1>${escape(title)}</h1><p>${escape(detail)}</p></body></html>`;
+    + `<title>${escapeHtml(title)}</title><body style="font-family:system-ui,sans-serif;padding:2rem;line-height:1.6">`
+    + `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p></body></html>`;
+}
+
+/**
+ * The OAuth success page. By default it simply stays in the browser. Only when the operator sets
+ * `CONNECTOR_OAUTH_RETURN_URL` does it offer — and automatically follow — the app URL; the URL
+ * carries the slug and status only, never a token.
+ */
+function oauthSuccessPage(returnUrl: string | undefined, slug: string, provider: string): string {
+  const detail = `${provider} 连接已保存，可以关闭此页面并返回 Aster。`;
+  if (returnUrl === undefined) return htmlPage("授权成功", detail);
+  const target = new URL(returnUrl);
+  target.searchParams.set("slug", slug);
+  target.searchParams.set("status", "connected");
+  const href = escapeHtml(target.toString());
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<meta http-equiv="refresh" content="0;url=${href}">`
+    + `<title>授权成功</title><body style="font-family:system-ui,sans-serif;padding:2rem;line-height:1.6">`
+    + `<h1>授权成功</h1><p>${escapeHtml(detail)}</p>`
+    + `<p><a href="${href}" style="display:inline-block;padding:.6rem 1rem;border-radius:.5rem;background:#2563eb;color:#fff;text-decoration:none">返回 Aster</a></p>`
+    + `</body></html>`;
 }
 
 /** Shape of the `req_...` ids the store generates; a malformed path is a client error, not a 404 hunt. */
@@ -393,7 +416,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     }
     const { slug } = request.params as { slug: string };
     try {
-      options.connectors.disconnect(slug);
+      await options.connectors.disconnect(slug);
       return reply.code(204).send();
     } catch (error) {
       return connectorReply(error, reply);
@@ -428,7 +451,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     }
     try {
       const connection = await options.connectors.completeOAuth(query.state, query.code);
-      return reply.send(htmlPage("授权成功", `${connection.provider} 连接已保存，可以关闭此页面并返回 Aster。`));
+      return reply.send(oauthSuccessPage(options.connectors.oauthReturnUrl, connection.slug, connection.provider));
     } catch (error) {
       const code = connectorCode(error);
       log(`Connector callback failed (${code})`);

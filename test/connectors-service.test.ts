@@ -10,6 +10,7 @@ import { ConnectorOAuth } from "../src/connectors/oauth.js";
 import { FileSecretProvider } from "../src/connectors/secrets.js";
 import { ConnectorService } from "../src/connectors/service.js";
 import { ConnectorStore, type ConnectorConnection } from "../src/connectors/store.js";
+import { LocalTokenVault } from "../src/connectors/vault.js";
 
 const KEY = "22".repeat(32);
 const NOW = Date.parse("2026-11-18T00:00:00.000Z");
@@ -29,9 +30,16 @@ async function setup(fetchImpl: typeof fetch) {
     CONNECTOR_STDIO_ALLOWLIST: "node,/usr/bin/echo",
   });
   const store = new ConnectorStore(join(directory, "connectors.sqlite"), { now: () => new Date(NOW) });
+  const secrets = new FileSecretProvider(secretDir);
   const oauth = new ConnectorOAuth({
+    secrets,
+    config,
+    fetch: fetchImpl,
+    now: () => new Date(NOW),
+  });
+  const vault = new LocalTokenVault({
     store,
-    secrets: new FileSecretProvider(secretDir),
+    secrets,
     config,
     fetch: fetchImpl,
     now: () => new Date(NOW),
@@ -41,7 +49,8 @@ async function setup(fetchImpl: typeof fetch) {
     broadcast(event: string, data: unknown) { events.push({ event, data }); },
   } as unknown as EventHub;
   const service = new ConnectorService({
-    store, oauth, config, ownerId: "owner", dataDir: directory, hub, fetch: fetchImpl, log: () => {},
+    store, oauth, vault, config, ownerId: "owner", dataDir: directory, hub, fetch: fetchImpl, log: () => {},
+    now: () => new Date(NOW),
   });
   return {
     directory, store, service, events,
@@ -217,7 +226,7 @@ test("disconnect removes the credential, revokes the connection and disables its
     env.connect(github, "github-token-value");
     assert.notEqual(env.store.credential(github.id), undefined);
 
-    env.service.disconnect("work");
+    await env.service.disconnect("work");
     const revoked = env.store.get("owner", "work")!;
     assert.equal(revoked.status, "revoked");
     assert.equal(revoked.lastErrorCode, null);
@@ -238,10 +247,10 @@ test("disconnect removes the credential, revokes the connection and disables its
     assert.deepEqual(calls, []);
 
     // Repeating the disconnect stays a no-op with the same revoked state.
-    env.service.disconnect("work");
+    await env.service.disconnect("work");
     assert.equal(env.store.get("owner", "work")?.status, "revoked");
 
-    assert.throws(() => env.service.disconnect("missing"), { code: "CONNECTOR_NOT_FOUND" });
+    await assert.rejects(env.service.disconnect("missing"), { code: "CONNECTOR_NOT_FOUND" });
   } finally {
     await env.close();
   }
@@ -268,7 +277,7 @@ test("a revoked connection can be authorized again and its tools work with the n
   try {
     const github = env.store.create({ ownerId: "owner", provider: "github", slug: "work" }).connection;
     env.connect(github, "old-token");
-    env.service.disconnect("work");
+    await env.service.disconnect("work");
     assert.equal(env.store.get("owner", "work")?.status, "revoked");
 
     const { url } = await env.service.startOAuth("work");

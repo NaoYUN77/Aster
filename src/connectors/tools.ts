@@ -52,6 +52,31 @@ function success(value: unknown, details: Record<string, string | number | boole
 }
 
 /**
+ * What the model is told about connectors before every request. Rendered per request (not once at
+ * startup), so an OAuth completion, disconnect or error is visible on the next turn. It contains
+ * only metadata the service already exposes: slug, provider, status, account label and tool names.
+ */
+export function connectorStatusText(service: ConnectorService): string {
+  let view: ReturnType<ConnectorService["list"]>;
+  try {
+    view = service.list();
+  } catch {
+    return "连接器状态暂不可用。";
+  }
+  if (view.connections.length === 0) return "暂无已授权连接。";
+  const toolsByProvider = new Map(view.definitions.map((definition) => [definition.provider, definition.tools]));
+  const lines = view.connections.map((connection) => {
+    const head = `${connection.slug} (${connection.provider}, ${connection.status}`
+      + `${connection.accountLabel === null ? "" : `, ${connection.accountLabel}`})`;
+    if (connection.status !== "connected") return `- ${head}：工具暂不可用，需要在客户端重新授权`;
+    const tools = toolsByProvider.get(connection.provider) ?? [];
+    if (tools.length === 0) return `- ${head}：已连接（无内置工具）`;
+    return `- ${head}：可用工具 ${tools.join(", ")}`;
+  });
+  return ["已授权连接：", ...lines].join("\n");
+}
+
+/**
  * Model-facing connector tools. Credentials never appear in arguments, results, details or errors:
  * every call resolves a connection by owner-scoped slug and the service injects the token upstream.
  */
@@ -198,5 +223,10 @@ export function createConnectorExtension(service: ConnectorService, ownerId: str
   return defineExtension({
     name: "connectors",
     tools: [list, repositories, issues, issue, search, message],
+    // Refreshed before every model request by the harness, so a status change needs no restart.
+    sections: [{
+      key: "connectors",
+      render: () => connectorStatusText(service),
+    }],
   });
 }

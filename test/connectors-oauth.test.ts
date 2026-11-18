@@ -6,7 +6,9 @@ import test from "node:test";
 import { readConnectorsConfig } from "../src/config.js";
 import { ConnectorOAuth } from "../src/connectors/oauth.js";
 import { FileSecretProvider } from "../src/connectors/secrets.js";
+import { ConnectorService } from "../src/connectors/service.js";
 import { ConnectorStore } from "../src/connectors/store.js";
+import { LocalTokenVault } from "../src/connectors/vault.js";
 
 const KEY = "11".repeat(32);
 
@@ -26,21 +28,34 @@ async function setup(options: { readonly omitClientId?: boolean; readonly fetch?
     CONNECTOR_OAUTH_REDIRECT_BASE: "https://aster.example",
   });
   const store = new ConnectorStore(join(directory, "connectors.sqlite"), { now: () => now });
+  const secrets = new FileSecretProvider(secretDir);
   const oauth = new ConnectorOAuth({
-    store,
-    secrets: new FileSecretProvider(secretDir),
+    secrets,
     config,
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     now: () => now,
+  });
+  const vault = new LocalTokenVault({
+    store,
+    secrets,
+    config,
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    now: () => now,
+  });
+  const service = new ConnectorService({
+    store, oauth, vault, config, ownerId: "owner", dataDir: directory, now: () => now, log: () => {},
   });
   return {
     directory,
     secretDir,
     store,
     oauth,
+    vault,
+    service,
     config,
     advance(ms: number) { now = new Date(now.getTime() + ms); },
     async close() {
+      service.close();
       store.close();
       await rm(directory, { recursive: true, force: true });
     },
@@ -67,8 +82,8 @@ test("GitHub OAuth start uses PKCE and state, and complete stores only ciphertex
   }) as typeof fetch;
   const env = await setup({ fetch: fake });
   try {
-    const { connection } = env.store.create({ ownerId: "owner", provider: "github", slug: "work" });
-    const started = await env.oauth.start(connection);
+    env.store.create({ ownerId: "owner", provider: "github", slug: "work" });
+    const started = await env.service.startOAuth("work");
     const url = new URL(started.url);
     assert.equal(url.origin + url.pathname, "https://github.com/login/oauth/authorize");
     assert.equal(url.searchParams.get("client_id"), "github-client");
@@ -78,18 +93,18 @@ test("GitHub OAuth start uses PKCE and state, and complete stores only ciphertex
     const state = url.searchParams.get("state");
     assert.ok(state !== null);
 
-    const connected = await env.oauth.complete(state, "code-1");
+    const connected = await env.service.completeOAuth(state, "code-1");
     assert.equal(connected.status, "connected");
     assert.equal(connected.accountLabel, "octocat");
     assert.deepEqual(connected.scopes, ["read:user"]);
-    const stored = env.store.credential(connection.id);
+    const stored = env.store.credential(connected.id);
     assert.ok(stored !== undefined);
     assert.equal(stored.ciphertext.includes("gh-access-token"), false);
     const rawFile = await readFile(join(env.directory, "connectors.sqlite"));
     assert.equal(rawFile.toString("utf8").includes("gh-access-token"), false, "the token is not plaintext in SQLite");
     assert.equal(calls.some((call) => call.url === "https://api.github.com/user" && call.authorization === "Bearer gh-access-token"), true);
-    assert.equal(await env.oauth.accessToken(env.store.get("owner", "work")!), "gh-access-token");
-    await assert.rejects(env.oauth.complete(state, "code-1"), { code: "CONNECTOR_OAUTH_STATE_INVALID" });
+    assert.equal(await env.vault.accessToken(env.store.get("owner", "work")!), "gh-access-token");
+    await assert.rejects(env.service.completeOAuth(state, "code-1"), { code: "CONNECTOR_OAUTH_STATE_INVALID" });
   } finally {
     await env.close();
   }
@@ -106,15 +121,15 @@ test("a stored connection still works after reopening the database", async () =>
   }) as typeof fetch;
   const env = await setup({ fetch: fake });
   try {
-    const { connection } = env.store.create({ ownerId: "owner", provider: "github", slug: "work" });
-    const started = await env.oauth.start(connection);
+    env.store.create({ ownerId: "owner", provider: "github", slug: "work" });
+    const started = await env.service.startOAuth("work");
     const state = new URL(started.url).searchParams.get("state")!;
-    await env.oauth.complete(state, "code-1");
+    await env.service.completeOAuth(state, "code-1");
     env.store.close();
 
     const reopened = new ConnectorStore(join(env.directory, "connectors.sqlite"));
     try {
-      const oauth = new ConnectorOAuth({
+      const vault = new LocalTokenVault({
         store: reopened,
         secrets: new FileSecretProvider(env.secretDir),
         config: env.config,
@@ -124,7 +139,7 @@ test("a stored connection still works after reopening the database", async () =>
       });
       const loaded = reopened.get("owner", "work")!;
       assert.equal(loaded.status, "connected");
-      assert.equal(await oauth.accessToken(loaded), "restart-token");
+      assert.equal(await vault.accessToken(loaded), "restart-token");
     } finally {
       reopened.close();
     }
@@ -150,12 +165,12 @@ test("an expired access token refreshes and the refreshed token is what goes ups
     return json({}, 500);
   }) as typeof fetch });
   try {
-    const { connection } = env.store.create({ ownerId: "owner", provider: "github", slug: "work" });
-    const started = await env.oauth.start(connection);
-    await env.oauth.complete(new URL(started.url).searchParams.get("state")!, "code-1");
-    assert.equal(await env.oauth.accessToken(env.store.get("owner", "work")!), "old-token");
+    env.store.create({ ownerId: "owner", provider: "github", slug: "work" });
+    const started = await env.service.startOAuth("work");
+    await env.service.completeOAuth(new URL(started.url).searchParams.get("state")!, "code-1");
+    assert.equal(await env.vault.accessToken(env.store.get("owner", "work")!), "old-token");
     env.advance(61_000);
-    assert.equal(await env.oauth.accessToken(env.store.get("owner", "work")!), "fresh-token");
+    assert.equal(await env.vault.accessToken(env.store.get("owner", "work")!), "fresh-token");
     assert.equal(refreshCalls, 1);
   } finally {
     await env.close();
@@ -165,8 +180,8 @@ test("an expired access token refreshes and the refreshed token is what goes ups
 test("missing client credentials and failed exchanges are safe errors", async () => {
   const missing = await setup({ omitClientId: true });
   try {
-    const { connection } = missing.store.create({ ownerId: "owner", provider: "github", slug: "work" });
-    await assert.rejects(missing.oauth.start(connection), (error: unknown) => {
+    missing.store.create({ ownerId: "owner", provider: "github", slug: "work" });
+    await assert.rejects(missing.service.startOAuth("work"), (error: unknown) => {
       assert.equal((error as { code?: string }).code, "CONNECTOR_SECRET_MISSING");
       assert.equal((error as Error).message.includes("github-secret"), false);
       return true;
@@ -181,10 +196,10 @@ test("missing client credentials and failed exchanges are safe errors", async ()
       : json({}, 500)) as typeof fetch,
   });
   try {
-    const { connection } = failing.store.create({ ownerId: "owner", provider: "github", slug: "work" });
-    const started = await failing.oauth.start(connection);
+    failing.store.create({ ownerId: "owner", provider: "github", slug: "work" });
+    const started = await failing.service.startOAuth("work");
     await assert.rejects(
-      failing.oauth.complete(new URL(started.url).searchParams.get("state")!, "bad"),
+      failing.service.completeOAuth(new URL(started.url).searchParams.get("state")!, "bad"),
       { code: "CONNECTOR_OAUTH_EXCHANGE_FAILED" },
     );
     assert.equal(failing.store.get("owner", "work")?.status, "error");

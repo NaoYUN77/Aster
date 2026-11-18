@@ -609,19 +609,117 @@ export function readWebConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
   };
 }
 
-/** Connector MVP settings. Secrets themselves are read from files, never from this environment. */
+export type SecretBackend = "file" | "cf";
+
+/** Cloudflare Worker secret broker access: URL plus the Cloudflare Access service token. */
+export type SecretBrokerConfig = {
+  readonly url: string;
+  readonly accessClientId?: string;
+  readonly accessClientSecret?: string;
+  /** Two-line file (client id, client secret); takes precedence over the two env values. */
+  readonly accessTokenFile?: string;
+};
+
+/** Connector MVP settings. Secret values come from the file directory or the CF broker. */
 export type ConnectorsConfig = {
   readonly enabled: boolean;
-  /** Directory of read-only secret files (`github_client_id`, `credential_master_key`, ...). */
+  /** Directory of read-only secret files, used only when `secretBackend` is `file`. */
   readonly secretDir: string;
+  /** Where connector secrets and OAuth tokens live; `file` (default) or `cf`. */
+  readonly secretBackend: SecretBackend;
+  readonly broker?: SecretBrokerConfig;
   /** Public origin the OAuth provider redirects to; the callback path is appended. */
   readonly redirectBaseUrl?: string;
+  /**
+   * Optional app URL shown on the OAuth success page. When set, the page offers a button and a
+   * meta refresh to it; when unset (the default) the page stays in the browser.
+   */
+  readonly oauthReturnUrl?: string;
+  /** One-shot migration of local ciphertext into the broker at startup. */
+  readonly migrateCredentials: boolean;
   readonly httpTimeoutMs: number;
   readonly oauthStateTtlMs: number;
   readonly leaseTtlMs: number;
   /** Commands allowed for a local `mcp_stdio` connector; empty denies every command. */
   readonly stdioAllowlist: readonly string[];
 };
+
+function readSecretBackend(env: NodeJS.ProcessEnv): SecretBackend {
+  const raw = env.ASTER_SECRET_BACKEND?.trim();
+  if (raw === undefined || raw === "") return "file";
+  if (raw !== "file" && raw !== "cf") {
+    throw new ConfigurationError("ASTER_SECRET_BACKEND must be file or cf");
+  }
+  return raw;
+}
+
+function readSecretBroker(env: NodeJS.ProcessEnv): SecretBrokerConfig {
+  const raw = env.ASTER_SECRET_BROKER_URL?.trim();
+  if (raw === undefined || raw === "") {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL is required when ASTER_SECRET_BACKEND=cf");
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an absolute http(s) URL");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an absolute http(s) URL");
+  }
+  // Host secrets and tokens must not travel in clear text; loopback is the local test exception.
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+  if (url.protocol === "http:" && !loopback) {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must use https outside loopback");
+  }
+  if (url.search !== "" || url.hash !== "" || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an origin without a path");
+  }
+  const accessTokenFile = env.ASTER_CF_ACCESS_TOKEN_FILE?.trim() || undefined;
+  if (accessTokenFile !== undefined && (accessTokenFile.length > 4_096 || accessTokenFile.includes("\0"))) {
+    throw new ConfigurationError("ASTER_CF_ACCESS_TOKEN_FILE is not a valid path");
+  }
+  const accessClientId = env.ASTER_CF_ACCESS_CLIENT_ID?.trim() || undefined;
+  const accessClientSecret = env.ASTER_CF_ACCESS_CLIENT_SECRET?.trim() || undefined;
+  for (const [key, value] of [
+    ["ASTER_CF_ACCESS_CLIENT_ID", accessClientId],
+    ["ASTER_CF_ACCESS_CLIENT_SECRET", accessClientSecret],
+  ] as const) {
+    if (value !== undefined && value.length > 4_096) {
+      throw new ConfigurationError(`${key} is too long`);
+    }
+  }
+  if (accessTokenFile === undefined && (accessClientId === undefined || accessClientSecret === undefined)) {
+    throw new ConfigurationError(
+      "ASTER_CF_ACCESS_TOKEN_FILE or both ASTER_CF_ACCESS_CLIENT_ID and ASTER_CF_ACCESS_CLIENT_SECRET are required when ASTER_SECRET_BACKEND=cf",
+    );
+  }
+  return {
+    url: url.origin,
+    ...(accessClientId === undefined ? {} : { accessClientId }),
+    ...(accessClientSecret === undefined ? {} : { accessClientSecret }),
+    ...(accessTokenFile === undefined ? {} : { accessTokenFile }),
+  };
+}
+
+function readOAuthReturnUrl(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.CONNECTOR_OAUTH_RETURN_URL?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  if (raw.length > 2_048) throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL is too long");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must be an absolute URL");
+  }
+  if (!["aster:", "http:", "https:"].includes(url.protocol)) {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must use aster:, http: or https:");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must not contain credentials");
+  }
+  return url.toString();
+}
 
 export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): ConnectorsConfig {
   const enabledRaw = env.CONNECTORS_ENABLED?.trim();
@@ -647,6 +745,17 @@ export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): Conn
       throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an origin without a path");
     }
   }
+  const secretBackend = readSecretBackend(env);
+  const broker = secretBackend === "cf" ? readSecretBroker(env) : undefined;
+  const oauthReturnUrl = readOAuthReturnUrl(env);
+  const migrateRaw = env.ASTER_CONNECTOR_MIGRATE?.trim();
+  if (migrateRaw !== undefined && migrateRaw !== "" && migrateRaw !== "0" && migrateRaw !== "1") {
+    throw new ConfigurationError("ASTER_CONNECTOR_MIGRATE must be 0 or 1");
+  }
+  const migrateCredentials = migrateRaw === "1";
+  if (migrateCredentials && secretBackend !== "cf") {
+    throw new ConfigurationError("ASTER_CONNECTOR_MIGRATE requires ASTER_SECRET_BACKEND=cf");
+  }
   const allowlist = (env.CONNECTOR_STDIO_ALLOWLIST ?? "")
     .split(",")
     .map((value) => value.trim())
@@ -662,7 +771,11 @@ export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): Conn
   return {
     enabled: enabledRaw !== "0",
     secretDir,
+    secretBackend,
+    ...(broker === undefined ? {} : { broker }),
     ...(redirectRaw === undefined || redirectRaw === "" ? {} : { redirectBaseUrl: redirectRaw.replace(/\/+$/, "") }),
+    ...(oauthReturnUrl === undefined ? {} : { oauthReturnUrl }),
+    migrateCredentials,
     httpTimeoutMs: boundedInteger(env, "CONNECTOR_HTTP_TIMEOUT_MS", 15_000, 1_000, 120_000),
     oauthStateTtlMs: boundedInteger(env, "CONNECTOR_OAUTH_STATE_TTL_MS", 600_000, 60_000, 3_600_000),
     leaseTtlMs: boundedInteger(env, "CONNECTOR_LEASE_TTL_MS", 30_000, 1_000, 300_000),

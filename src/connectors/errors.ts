@@ -15,6 +15,7 @@ const SAFE_MESSAGES: Readonly<Record<string, string>> = {
   CONNECTOR_INVALID_PROVIDER: "unsupported connector provider",
   CONNECTOR_INVALID_SLUG: "slug must be 1-48 characters of lowercase letters, digits, '-' or '_'",
   CONNECTOR_NOT_CONFIGURED: "connector secrets are not configured on the server",
+  SECRETS_UNAVAILABLE: "connector secrets are unavailable",
   CONNECTOR_SECRET_MISSING: "a required connector secret file is missing",
   CONNECTOR_SECRET_UNREADABLE: "a required connector secret file cannot be read",
   CONNECTOR_MASTER_KEY_INVALID: "credential_master_key must encode exactly 32 bytes",

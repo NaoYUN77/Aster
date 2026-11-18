@@ -245,7 +245,11 @@ test("connector routes create, list, start OAuth and complete the public callbac
     lastErrorCode: null,
   };
   const calls: string[] = [];
+  let returnUrlTarget: string | undefined;
   const connectors = {
+    get oauthReturnUrl() {
+      return returnUrlTarget;
+    },
     list() {
       calls.push("list");
       return {
@@ -318,6 +322,20 @@ test("connector routes create, list, start OAuth and complete the public callbac
     assert.equal(callback.statusCode, 200);
     assert.match(callback.headers["content-type"] ?? "", /text\/html/);
     assert.match(callback.body, /授权成功/);
+    // No CONNECTOR_OAUTH_RETURN_URL: the page stays in the browser.
+    assert.equal(callback.body.includes("http-equiv=\"refresh\""), false);
+
+    returnUrlTarget = "aster://oauth/done";
+    const redirected = await server.app.inject({
+      method: "GET", url: "/api/v1/connectors/oauth/callback?state=good-state&code=code-1",
+    });
+    assert.equal(redirected.statusCode, 200);
+    assert.match(redirected.body, /http-equiv="refresh" content="0;url=aster:\/\/oauth\/done\?slug=work&amp;status=connected"/);
+    assert.match(redirected.body, />返回 Aster</);
+    // The return URL and the page carry only the slug and status, never a token.
+    assert.equal(redirected.body.includes("access_token"), false);
+    assert.equal(redirected.body.includes("refresh_token"), false);
+    returnUrlTarget = undefined;
 
     const replay = await server.app.inject({
       method: "GET", url: "/api/v1/connectors/oauth/callback?state=bad-state&code=code-1",
@@ -353,6 +371,7 @@ test("connector routes create, list, start OAuth and complete the public callbac
       "create:mcp_stdio:local:node",
       "list",
       "start:work",
+      "complete:good-state:code-1",
       "complete:good-state:code-1",
       "complete:bad-state:code-1",
       "disconnect:work",

@@ -111,6 +111,23 @@ is broadcast as `model.changed` just like a button click.
   `{CONNECTOR_OAUTH_REDIRECT_BASE}/api/v1/connectors/oauth/callback`; missing secrets or an unset
   redirect base are `409 CONNECTOR_SECRET_MISSING` / `CONNECTOR_NOT_CONFIGURED` /
   `CONNECTOR_OAUTH_DISABLED`.
+- `ASTER_SECRET_BACKEND` chooses where those secrets live: `file` (default, the directory above)
+  or `cf` (a Cloudflare Workers broker). `cf` requires `ASTER_SECRET_BROKER_URL` (an https origin,
+  no path) plus a Cloudflare Access service token, given either as
+  `ASTER_CF_ACCESS_CLIENT_ID` + `ASTER_CF_ACCESS_CLIENT_SECRET` or as a two-line
+  `ASTER_CF_ACCESS_TOKEN_FILE` (client id on line 1, client secret on line 2; it wins over the
+  env pair). Broker reads are cached for 5 minutes; an unreachable or unauthorized broker is
+  `503 SECRETS_UNAVAILABLE` and never falls back to local files. In `cf` mode OAuth tokens are
+  stored in the broker and no `credential_master_key` is needed. `ASTER_CONNECTOR_MIGRATE=1`
+  (accepted only with `cf`) copies existing local credentials to the broker at startup and deletes
+  each local ciphertext only after its upload succeeds; logs report counts, never values.
+- `CONNECTOR_OAUTH_RETURN_URL` is optional. Empty (the default) keeps the success page in the
+  browser. When set (an `aster:`, `http:` or `https:` URL), the success page additionally offers a
+  meta-refresh link and a button to that URL with `?slug=<slug>&status=connected`; no token is
+  ever placed in the URL.
+- Each agent turn includes a short connector status block (slug, provider, status, account label,
+  tool names) so the model knows which connector tools are usable; `connector_list` remains the
+  authoritative query, and the block contains no token, secret or OAuth code.
 - Local stdio MCP connectors (`provider: "mcp_stdio"`, with `command`/`args`) are created through
   the same route but start only on the next server boot, after the command is re-checked against
   `CONNECTOR_STDIO_ALLOWLIST`. They run a host binary with `inheritEnv: false` and a private working
@@ -135,7 +152,8 @@ Connectors: `CONNECTOR_NOT_FOUND`, `CONNECTOR_ALREADY_EXISTS`, `CONNECTOR_INVALI
 `CONNECTOR_NOT_CONFIGURED`, `CONNECTOR_SECRET_MISSING`, `CONNECTOR_SECRET_UNREADABLE`, `CONNECTOR_MASTER_KEY_INVALID`,
 `CONNECTOR_CREDENTIAL_UNREADABLE`, `CONNECTOR_AUTH_EXPIRED`, `CONNECTOR_SCOPE_DENIED`,
 `CONNECTOR_RATE_LIMITED`, `CONNECTOR_UPSTREAM_UNAVAILABLE`, `CONNECTOR_UPSTREAM_NOT_FOUND`,
-`CONNECTORS_DISABLED`. Messages are fixed and safe; never display or log a token.
+`SECRETS_UNAVAILABLE`, `CONNECTORS_DISABLED`. Messages are fixed and safe; never display or log a
+token.
 
 Request failures (`request.failed`): `MODEL_UNAVAILABLE`, `MODEL_INCOMPATIBLE`, `AGENT_TIMEOUT`,
 `AGENT_UNANSWERED`, `AGENT_TRUNCATED`, `EMPTY_REPLY`, `AGENT_LOOP_DETECTED`,
