@@ -180,6 +180,35 @@ test("a hung broker is abandoned after the timeout and startup continues", async
   });
 });
 
+test("a timeout above the cap is clamped, so an unreachable broker costs at most 3s at startup", async () => {
+  await withDir(async (dir) => {
+    const logs: string[] = [];
+    const env = cfEnv(await tokenFile(dir));
+    // Ignores the abort signal for the first 10s: only the clamped timeout can end this.
+    const hung = ((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("still hung after 10s")), 10_000);
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new DOMException("aborted", "AbortError"));
+      });
+    })) as typeof fetch;
+    const started = Date.now();
+    const result = await resolveOptionalEnvSecrets(env, {
+      fetch: hung,
+      timeoutMs: 60_000,
+      log: (line) => logs.push(line),
+    });
+    const elapsed = Date.now() - started;
+    assert.equal(result, env);
+    assert.equal(env.EXA_API_KEY, undefined);
+    assert.equal(env.DEEPSEEK_WEB_API_KEY, undefined);
+    assert.equal(logs.filter((line) => line.includes("SECRETS_UNAVAILABLE")).length, 2);
+    // Proves the 60s request was clamped to the 3s ceiling and that startup was never held longer.
+    assert.ok(elapsed >= 2_500, `resolved in ${elapsed}ms, expected the 3s clamp to apply`);
+    assert.ok(elapsed < 6_000, `resolved in ${elapsed}ms, startup was held too long`);
+  });
+});
+
 test("a malformed body or value is rejected without leaking it", async () => {
   await withDir(async (dir) => {
     const logs: string[] = [];
