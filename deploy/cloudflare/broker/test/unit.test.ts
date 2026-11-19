@@ -314,8 +314,24 @@ test("an outlook refresh sends scope so Microsoft reissues a refresh token", asy
   assert.match(refreshCalls[0]!.url, /login\.microsoftonline\.com\/common\/oauth2\/v2\.0\/token/);
   const form = new URLSearchParams(refreshCalls[0]!.body);
   assert.equal(form.get("grant_type"), "refresh_token");
-  assert.equal(form.get("scope"), "offline_access Mail.Read User.Read");
+  assert.equal(form.get("scope"), "offline_access User.Read Mail.ReadWrite Mail.Send");
   assert.equal(form.get("client_id"), "outlook-client-id");
+});
+
+test("a gmail refresh asks for the read/write scope set, never mail.google.com", async () => {
+  const { response, refreshCalls } = await tokenCall(
+    { refreshToken: "gmail-refresh", accessToken: "old", expiresAt: "2026-11-18T11:00:00.000Z" },
+    { provider: "gmail" },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(refreshCalls.length, 1);
+  assert.match(refreshCalls[0]!.url, /oauth2\.googleapis\.com\/token/);
+  const form = new URLSearchParams(refreshCalls[0]!.body);
+  assert.equal(
+    form.get("scope"),
+    "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send",
+  );
+  assert.ok(!form.get("scope")!.includes("mail.google.com"));
 });
 
 test("a linear refresh uses Linear's token endpoint and the documented form", async () => {
@@ -333,8 +349,8 @@ test("a linear refresh uses Linear's token endpoint and the documented form", as
 
 test("google calendar and drive refresh through the Google endpoint with their scopes", async () => {
   for (const [provider, scope] of [
-    ["google_calendar", "openid email https://www.googleapis.com/auth/calendar.readonly"],
-    ["google_drive", "openid email https://www.googleapis.com/auth/drive.readonly"],
+    ["google_calendar", "openid email https://www.googleapis.com/auth/calendar"],
+    ["google_drive", "openid email https://www.googleapis.com/auth/drive.file"],
   ] as const) {
     const { response, refreshCalls } = await tokenCall(
       { refreshToken: "google-refresh", accessToken: "old", expiresAt: "2026-11-18T11:00:00.000Z" },

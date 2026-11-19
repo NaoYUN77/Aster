@@ -375,6 +375,227 @@ export class ConnectorService {
       (connection, token) => this.#drive.getFile(token, input.fileId));
   }
 
+  async createIssue(
+    input: { readonly connection?: string; readonly repo: string; readonly title: string; readonly body?: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("github", input.connection, binding, "connector_github_create_issue",
+      (connection, token) => this.#github.createIssue(token, input.repo, {
+        title: input.title,
+        ...(input.body === undefined ? {} : { body: input.body }),
+      }));
+  }
+
+  async commentIssue(
+    input: { readonly connection?: string; readonly repo: string; readonly number: number; readonly body: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("github", input.connection, binding, "connector_github_comment_issue",
+      (connection, token) => this.#github.commentIssue(token, input.repo, input.number, input.body));
+  }
+
+  async updateIssue(
+    input: {
+      readonly connection?: string;
+      readonly repo: string;
+      readonly number: number;
+      readonly state?: string;
+      readonly labels?: readonly string[];
+    },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("github", input.connection, binding, "connector_github_update_issue",
+      (connection, token) => this.#github.updateIssue(token, input.repo, input.number, {
+        ...(input.state === undefined ? {} : { state: input.state }),
+        ...(input.labels === undefined ? {} : { labels: input.labels }),
+      }));
+  }
+
+  async sendGmailMessage(
+    input: { readonly connection?: string; readonly to: string; readonly subject: string; readonly body: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("gmail", input.connection, binding, "connector_gmail_send_message",
+      (connection, token) => this.#gmail.sendMessage(token, { to: input.to, subject: input.subject, body: input.body }));
+  }
+
+  async createGmailDraft(
+    input: { readonly connection?: string; readonly to: string; readonly subject: string; readonly body: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("gmail", input.connection, binding, "connector_gmail_create_draft",
+      (connection, token) => this.#gmail.createDraft(token, { to: input.to, subject: input.subject, body: input.body }));
+  }
+
+  async modifyGmailLabels(
+    input: {
+      readonly connection?: string;
+      readonly id: string;
+      readonly archive?: boolean;
+      readonly markRead?: boolean;
+      readonly addLabel?: string;
+    },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("gmail", input.connection, binding, "connector_gmail_modify_labels",
+      (connection, token) => this.#gmail.modifyLabels(token, input.id, {
+        ...(input.archive === undefined ? {} : { archive: input.archive }),
+        ...(input.markRead === undefined ? {} : { markRead: input.markRead }),
+        ...(input.addLabel === undefined ? {} : { addLabel: input.addLabel }),
+      }));
+  }
+
+  async sendOutlookMessage(
+    input: { readonly connection?: string; readonly to: string; readonly subject: string; readonly body: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("outlook", input.connection, binding, "connector_outlook_send_message",
+      (connection, token) => this.#outlook.sendMessage(token, { to: input.to, subject: input.subject, body: input.body }));
+  }
+
+  async replyOutlookMessage(
+    input: { readonly connection?: string; readonly id: string; readonly comment: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("outlook", input.connection, binding, "connector_outlook_reply_message",
+      (connection, token) => this.#outlook.replyMessage(token, input.id, input.comment));
+  }
+
+  async updateOutlookMessage(
+    input: { readonly connection?: string; readonly id: string; readonly isRead?: boolean; readonly moveTo?: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("outlook", input.connection, binding, "connector_outlook_update_message",
+      (connection, token) => this.#outlook.updateMessage(token, input.id, {
+        ...(input.isRead === undefined ? {} : { isRead: input.isRead }),
+        ...(input.moveTo === undefined ? {} : { moveTo: input.moveTo }),
+      }));
+  }
+
+  async createLinearIssue(
+    input: { readonly connection?: string; readonly team: string; readonly title: string; readonly description?: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("linear", input.connection, binding, "connector_linear_create_issue",
+      (connection, token) => this.#linear.createIssue(token, {
+        team: input.team,
+        title: input.title,
+        ...(input.description === undefined ? {} : { description: input.description }),
+      }));
+  }
+
+  async updateLinearIssue(
+    input: {
+      readonly connection?: string;
+      readonly identifier: string;
+      readonly state?: string;
+      readonly title?: string;
+      readonly assignee?: string;
+    },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("linear", input.connection, binding, "connector_linear_update_issue",
+      (connection, token) => this.#linear.updateIssue(token, input.identifier, {
+        ...(input.state === undefined ? {} : { state: input.state }),
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.assignee === undefined ? {} : { assignee: input.assignee }),
+      }));
+  }
+
+  async commentLinearIssue(
+    input: { readonly connection?: string; readonly identifier: string; readonly body: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("linear", input.connection, binding, "connector_linear_comment_issue",
+      (connection, token) => this.#linear.commentIssue(token, input.identifier, input.body));
+  }
+
+  async createNotionPage(
+    input: { readonly connection?: string; readonly parentId: string; readonly title: string; readonly content?: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("notion", input.connection, binding, "connector_notion_create_page",
+      (connection, token) => this.#notion.createPage(token, {
+        parentId: input.parentId,
+        title: input.title,
+        ...(input.content === undefined ? {} : { content: input.content }),
+      }));
+  }
+
+  async appendNotionBlocks(
+    input: { readonly connection?: string; readonly pageId: string; readonly content: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("notion", input.connection, binding, "connector_notion_append_blocks",
+      (connection, token) => this.#notion.appendBlocks(token, { pageId: input.pageId, content: input.content }));
+  }
+
+  async createCalendarEvent(
+    input: {
+      readonly connection?: string;
+      readonly summary: string;
+      readonly start: string;
+      readonly end: string;
+      readonly timeZone?: string;
+      readonly description?: string;
+      readonly location?: string;
+    },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("google_calendar", input.connection, binding, "connector_google_calendar_create_event",
+      (connection, token) => this.#calendar.createEvent(token, {
+        summary: input.summary,
+        start: input.start,
+        end: input.end,
+        ...(input.timeZone === undefined ? {} : { timeZone: input.timeZone }),
+        ...(input.description === undefined ? {} : { description: input.description }),
+        ...(input.location === undefined ? {} : { location: input.location }),
+      }));
+  }
+
+  async updateCalendarEvent(
+    input: {
+      readonly connection?: string;
+      readonly eventId: string;
+      readonly summary?: string;
+      readonly description?: string;
+      readonly location?: string;
+      readonly start?: string;
+      readonly end?: string;
+      readonly timeZone?: string;
+    },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("google_calendar", input.connection, binding, "connector_google_calendar_update_event",
+      (connection, token) => this.#calendar.updateEvent(token, input.eventId, {
+        ...(input.summary === undefined ? {} : { summary: input.summary }),
+        ...(input.description === undefined ? {} : { description: input.description }),
+        ...(input.location === undefined ? {} : { location: input.location }),
+        ...(input.start === undefined ? {} : { start: input.start }),
+        ...(input.end === undefined ? {} : { end: input.end }),
+        ...(input.timeZone === undefined ? {} : { timeZone: input.timeZone }),
+      }));
+  }
+
+  async createDriveFile(
+    input: { readonly connection?: string; readonly name: string; readonly content: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("google_drive", input.connection, binding, "connector_google_drive_create_file",
+      (connection, token) => this.#drive.createFile(token, { name: input.name, content: input.content }));
+  }
+
+  async updateDriveFile(
+    input: { readonly connection?: string; readonly fileId: string; readonly name?: string; readonly content?: string },
+    binding: CredentialBinding,
+  ) {
+    return this.#withConnection("google_drive", input.connection, binding, "connector_google_drive_update_file",
+      (connection, token) => this.#drive.updateFile(token, input.fileId, {
+        ...(input.name === undefined ? {} : { name: input.name }),
+        ...(input.content === undefined ? {} : { content: input.content }),
+      }));
+  }
+
   close(): void {
     this.#broker.revokeAll();
   }

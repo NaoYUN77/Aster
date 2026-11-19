@@ -35,6 +35,12 @@ export type ProviderSpec = {
    * it or no refresh token is issued; other providers reject or ignore unknown fields.
    */
   readonly tokenScope?: string;
+  /**
+   * `scope` sent on a refresh. Google and Microsoft only return a token covering what is requested,
+   * so this must stay in step with the connection scopes in `DEFINITIONS`. A token granted an older,
+   * narrower scope set fails to refresh and asks the user to reauthorize.
+   */
+  readonly refreshScope?: string;
   readonly profile: (token: string, fetchImpl: typeof fetch, signal: AbortSignal) => Promise<string>;
 };
 
@@ -72,6 +78,7 @@ export const PROVIDERS: Readonly<Record<OAuthProvider, ProviderSpec>> = {
       prompt: "consent",
       include_granted_scopes: "true",
     },
+    refreshScope: "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send",
     profile: async (token, fetchImpl, signal) => {
       const response = await fetchImpl("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
         headers: { authorization: `Bearer ${token}`, accept: "application/json" },
@@ -92,7 +99,8 @@ export const PROVIDERS: Readonly<Record<OAuthProvider, ProviderSpec>> = {
     pkce: true,
     // With the `common` endpoint the token request must repeat the scope, including offline_access,
     // or Microsoft returns no refresh token.
-    tokenScope: "offline_access User.Read Mail.Read",
+    tokenScope: "offline_access User.Read Mail.ReadWrite Mail.Send",
+    refreshScope: "offline_access User.Read Mail.ReadWrite Mail.Send",
     profile: async (token, fetchImpl, signal) => {
       const response = await fetchImpl(
         "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName",
@@ -187,6 +195,7 @@ export const PROVIDERS: Readonly<Record<OAuthProvider, ProviderSpec>> = {
       prompt: "consent",
       include_granted_scopes: "true",
     },
+    refreshScope: "openid email https://www.googleapis.com/auth/calendar",
     profile: googleProfile,
   },
   google_drive: {
@@ -200,6 +209,7 @@ export const PROVIDERS: Readonly<Record<OAuthProvider, ProviderSpec>> = {
       prompt: "consent",
       include_granted_scopes: "true",
     },
+    refreshScope: "openid email https://www.googleapis.com/auth/drive.file",
     profile: googleProfile,
   },
 };

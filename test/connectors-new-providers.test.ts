@@ -80,13 +80,13 @@ test("outlook OAuth uses PKCE, offline scope and sends the Microsoft token scope
     const started = await env.service.startOAuth("mail");
     const url = new URL(started.url);
     assert.equal(url.origin + url.pathname, "https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
-    assert.equal(url.searchParams.get("scope"), "offline_access User.Read Mail.Read");
+    assert.equal(url.searchParams.get("scope"), "offline_access User.Read Mail.ReadWrite Mail.Send");
     assert.equal(url.searchParams.get("code_challenge_method"), "S256");
     const connected = await env.service.completeOAuth(url.searchParams.get("state")!, "code");
     assert.equal(connected.accountLabel, "me@example.test");
     const exchange = requests.find((request) => request.url.endsWith("/oauth2/v2.0/token"))!;
     const form = new URLSearchParams(exchange.body);
-    assert.equal(form.get("scope"), "offline_access User.Read Mail.Read");
+    assert.equal(form.get("scope"), "offline_access User.Read Mail.ReadWrite Mail.Send");
     assert.ok(form.get("code_verifier") !== null && form.get("code_verifier")!.length > 20);
   } finally {
     await env.close();
@@ -112,7 +112,7 @@ test("linear OAuth uses PKCE and a form exchange", async () => {
     const started = await env.service.startOAuth("issues");
     const url = new URL(started.url);
     assert.equal(url.origin + url.pathname, "https://linear.app/oauth/authorize");
-    assert.equal(url.searchParams.get("scope"), "read");
+    assert.equal(url.searchParams.get("scope"), "read write");
     assert.equal(url.searchParams.get("code_challenge_method"), "S256");
     const connected = await env.service.completeOAuth(url.searchParams.get("state")!, "code");
     assert.equal(connected.accountLabel, "Dev");
@@ -167,8 +167,8 @@ test("notion OAuth has no PKCE or scope and exchanges with Basic auth and JSON",
 
 test("google calendar and drive reuse the Google client with openid profile and offline access", async () => {
   for (const [provider, scope, slug] of [
-    ["google_calendar", "https://www.googleapis.com/auth/calendar.readonly", "cal"],
-    ["google_drive", "https://www.googleapis.com/auth/drive.readonly", "drive"],
+    ["google_calendar", "https://www.googleapis.com/auth/calendar", "cal"],
+    ["google_drive", "https://www.googleapis.com/auth/drive.file", "drive"],
   ] as const) {
     const fake = (async (input) => {
       const url = String(input);

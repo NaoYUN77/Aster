@@ -24,7 +24,7 @@ export type NotionPage = NotionSearchHit & {
   readonly truncated: boolean;
 };
 
-/** Read-only Notion client: search, page metadata and block text. No write endpoint exists here. */
+/** Notion client: search, page reads, page creation and block appends. Nothing here deletes or archives. */
 export class NotionClient {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
@@ -91,9 +91,79 @@ export class NotionClient {
     return lines.join("\n");
   }
 
+  /**
+   * Creates a page under a parent page or database. The parent kind and, for databases, the title
+   * property are discovered from the API; the caller never supplies raw property payloads.
+   */
+  async createPage(
+    token: string,
+    input: { readonly parentId: string; readonly title: string; readonly content?: string },
+  ): Promise<{ readonly id: string; readonly url: string; readonly title: string }> {
+    const parentId = input.parentId.trim();
+    if (!PAGE_ID.test(parentId)) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "parent id is invalid");
+    const title = boundedTitle(input.title);
+    const content = boundedContent(input.content ?? "", "content");
+    const parent = await this.#parentOf(token, parentId);
+    const body = await this.#request(token, "POST", "/pages", {
+      parent: { [parent.type]: parentId },
+      properties: { [parent.titleProperty]: { title: richTextOf(title) } },
+      ...(content === "" ? {} : { children: paragraphBlocks(content) }),
+    }, false);
+    if (!isRecord(body) || typeof body.id !== "string") {
+      throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "Notion response was invalid");
+    }
+    return {
+      id: body.id,
+      url: typeof body.url === "string" ? body.url : "",
+      title,
+    };
+  }
+
+  /** Appends plain paragraphs to a page or block. Each request is capped at 100 blocks. */
+  async appendBlocks(
+    token: string,
+    input: { readonly pageId: string; readonly content: string },
+  ): Promise<{ readonly pageId: string; readonly blocksAdded: number }> {
+    const pageId = input.pageId.trim();
+    if (!PAGE_ID.test(pageId)) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "page id is invalid");
+    const content = boundedContent(input.content, "content");
+    if (content.trim() === "") throw new ConnectorError("CONNECTOR_INVALID_INPUT", "content must not be empty");
+    const children = paragraphBlocks(content);
+    const body = await this.#request(token, "PATCH", `/blocks/${pageId}/children`, { children }, false);
+    if (!isRecord(body) || !Array.isArray(body.results)) {
+      throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "Notion response was invalid");
+    }
+    return { pageId, blocksAdded: body.results.length };
+  }
+
+  /**
+   * Probes databases first, then pages. Notion answers a wrong-kind id either 404 or 400, so a
+   * failed probe is not fatal; auth and scope failures still propagate.
+   */
+  async #parentOf(token: string, id: string): Promise<{ readonly type: "database_id" | "page_id"; readonly titleProperty: string }> {
+    const database = await this.#probe(token, `/databases/${id}`);
+    if (isRecord(database) && database.object === "database" && isRecord(database.properties)) {
+      const key = titlePropertyKey(database.properties);
+      if (key !== undefined) return { type: "database_id", titleProperty: key };
+    }
+    const page = await this.#probe(token, `/pages/${id}`);
+    if (isRecord(page) && page.object === "page") return { type: "page_id", titleProperty: "title" };
+    throw new ConnectorError("CONNECTOR_UPSTREAM_NOT_FOUND", "the parent page or database was not found or is not shared with Aster");
+  }
+
+  async #probe(token: string, path: string): Promise<unknown> {
+    try {
+      return await this.#request(token, "GET", path, undefined, true);
+    } catch (error) {
+      if (error instanceof ConnectorError
+        && (error.code === "CONNECTOR_UPSTREAM_NOT_FOUND" || error.code === "CONNECTOR_UPSTREAM_UNAVAILABLE")) return undefined;
+      throw error;
+    }
+  }
+
   async #request(
     token: string,
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PATCH",
     path: string,
     payload: unknown,
     notFound: boolean,
@@ -109,6 +179,52 @@ export class NotionClient {
       ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs, notFound });
   }
+}
+
+function boundedTitle(value: string): string {
+  const title = value.trim();
+  if (title === "" || title.length > 256) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", "title must be 1-256 characters");
+  }
+  return title;
+}
+
+function boundedContent(value: string, field: string): string {
+  if (value.length > MAX_CONTENT_CHARS) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", `${field} must be at most ${MAX_CONTENT_CHARS} characters`);
+  }
+  return value;
+}
+
+function richTextOf(text: string): unknown[] {
+  return [{ type: "text", text: { content: text } }];
+}
+
+/** Notion caps each rich-text node at 2000 characters and each request at 100 blocks. */
+function paragraphBlocks(content: string): unknown[] {
+  const paragraphs = content.replace(/\r\n/g, "\n").split("\n").flatMap((line) => {
+    const trimmed = line.trim();
+    if (trimmed === "") return [];
+    const chunks: string[] = [];
+    for (let index = 0; index < trimmed.length; index += 2_000) chunks.push(trimmed.slice(index, index + 2_000));
+    return chunks;
+  });
+  if (paragraphs.length === 0) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "content must not be empty");
+  if (paragraphs.length > 100) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", "content is too long for one request; append it in smaller parts");
+  }
+  return paragraphs.map((text) => ({
+    object: "block",
+    type: "paragraph",
+    paragraph: { rich_text: richTextOf(text) },
+  }));
+}
+
+function titlePropertyKey(properties: Record<string, unknown>): string | undefined {
+  for (const [key, property] of Object.entries(properties)) {
+    if (isRecord(property) && property.type === "title") return key;
+  }
+  return undefined;
 }
 
 function hitFrom(value: unknown): NotionSearchHit | undefined {
@@ -144,7 +260,7 @@ function richText(entries: readonly unknown[]): string {
   return parts.join("").trim();
 }
 
-/** Text of the block types a read-only summary needs; unsupported blocks are skipped. */
+/** Text of the block types the page summary needs; unsupported blocks are skipped. */
 function blockText(value: unknown): string {
   if (!isRecord(value) || typeof value.type !== "string") return "";
   const payload = isRecord(value[value.type]) ? value[value.type] as Record<string, unknown> : undefined;

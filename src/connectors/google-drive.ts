@@ -1,10 +1,15 @@
+import { randomUUID } from "node:crypto";
+
 import { ConnectorError } from "./errors.js";
-import { clip, connectorJson, connectorText } from "./http.js";
+import { clip, connectorJson, connectorText, connectorWrite } from "./http.js";
 
 const API = "https://www.googleapis.com/drive/v3";
+const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
 const FILE_ID = /^[A-Za-z0-9_-]{1,200}$/;
 const GOOGLE_DOC = "application/vnd.google-apps.document";
+const TEXT_MIME = "text/plain";
 const MAX_CONTENT_CHARS = 20_000;
+const MAX_NAME_CHARS = 256;
 const FIELDS = "id,name,mimeType,modifiedTime,size,webViewLink";
 
 export type GoogleDriveClientOptions = {
@@ -30,7 +35,7 @@ export type DriveFile = DriveFileSummary & {
   readonly note: string;
 };
 
-/** Read-only Google Drive client. It never downloads or returns binary content. */
+/** Google Drive client for metadata, Docs export and plain-text files. It never downloads or uploads binary content. */
 export class GoogleDriveClient {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
@@ -96,11 +101,106 @@ export class GoogleDriveClient {
     return { ...summary, description, content: "", truncated: false, note };
   }
 
+  /** Creates a plain-text file owned by the connected account. No binary upload exists here. */
+  async createFile(
+    token: string,
+    input: { readonly name: string; readonly content: string },
+  ): Promise<DriveFileSummary> {
+    const name = boundedName(input.name);
+    const content = boundedContent(input.content);
+    const { body, contentType } = multipartBody({ name, mimeType: TEXT_MIME }, content);
+    const params = new URLSearchParams({ uploadType: "multipart", fields: FIELDS });
+    const result = await connectorWrite(`${UPLOAD_API}/files?${params.toString()}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, accept: "application/json", "content-type": contentType },
+      body,
+    }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs });
+    return fileIdentity(result);
+  }
+
+  /**
+   * Renames and/or replaces the text content of a file. Only files Aster can write (created or
+   * opened through the drive.file scope) succeed; Google Docs are not editable here.
+   */
+  async updateFile(
+    token: string,
+    fileId: string,
+    input: { readonly name?: string; readonly content?: string },
+  ): Promise<DriveFileSummary> {
+    if (!FILE_ID.test(fileId)) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "file id is invalid");
+    if (input.name === undefined && input.content === undefined) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "name or content is required");
+    }
+    const name = input.name === undefined ? undefined : boundedName(input.name);
+    const params = new URLSearchParams({ fields: FIELDS });
+    let result: unknown;
+    if (input.content !== undefined) {
+      const content = boundedContent(input.content);
+      const metadata = { ...(name === undefined ? {} : { name }), mimeType: TEXT_MIME };
+      const { body, contentType } = multipartBody(metadata, content);
+      params.set("uploadType", "multipart");
+      result = await connectorWrite(`${UPLOAD_API}/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${token}`, accept: "application/json", "content-type": contentType },
+        body,
+      }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs });
+    } else {
+      result = await connectorWrite(`${API}/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${token}`, accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs });
+    }
+    return fileIdentity(result);
+  }
+
   async #get(token: string, path: string, notFound: boolean): Promise<unknown> {
     return connectorJson(`${API}${path}`, {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
     }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs, notFound });
   }
+}
+
+function boundedName(value: string): string {
+  const name = value.trim();
+  if (name === "" || name.length > MAX_NAME_CHARS || /[\\/\u0000-\u001f]/.test(name)) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", "name must be 1-256 characters without slashes or control characters");
+  }
+  return name;
+}
+
+function boundedContent(value: string): string {
+  if (value.length > MAX_CONTENT_CHARS) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", `content must be at most ${MAX_CONTENT_CHARS} characters`);
+  }
+  return value;
+}
+
+/** multipart/related: a JSON metadata part followed by the UTF-8 text part. */
+function multipartBody(metadata: Record<string, unknown>, content: string): { body: string; contentType: string } {
+  let boundary = `aster-${randomUUID().replace(/-/g, "")}`;
+  for (let attempt = 0; attempt < 5 && content.includes(boundary); attempt += 1) {
+    boundary = `aster-${randomUUID().replace(/-/g, "")}`;
+  }
+  const body = [
+    `--${boundary}`,
+    "Content-Type: application/json; charset=UTF-8",
+    "",
+    JSON.stringify(metadata),
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "",
+    content,
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+  return { body, contentType: `multipart/related; boundary=${boundary}` };
+}
+
+function fileIdentity(value: unknown): DriveFileSummary {
+  const summary = summaryFrom(value);
+  if (summary === undefined) throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "Google Drive response was invalid");
+  return summary;
 }
 
 function summaryFrom(value: unknown): DriveFileSummary | undefined {

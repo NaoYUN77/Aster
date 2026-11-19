@@ -60,8 +60,11 @@ service token 校验通过后注入），否则 401 `BROKER_UNAUTHORIZED`。
 - 普通 GitHub OAuth App 不返回 refresh token：PUT 时省略该字段，broker 存 `null`，`POST /token`
   直接返回已存 access token，不会尝试刷新（无 access token 时 503 `CONNECTOR_NOT_CONFIGURED`）。
   Notion 同理（token 长期有效、无 refresh token）。
-- Microsoft 刷新请求带 `scope=offline_access Mail.Read User.Read`；Google Calendar / Drive 刷新
-  分别带各自的只读 scope；Linear 用 `grant_type=refresh_token` + client_id/secret。
+- 刷新请求带与连接一致的 scope（Google / Microsoft 只发被授予的集合，旧连接若只批了只读 scope
+  会刷新失败并要求重新授权）：Gmail 为 `gmail.modify gmail.send`（永不含 `https://mail.google.com/`），
+  Microsoft 为 `offline_access User.Read Mail.ReadWrite Mail.Send`，Google Calendar 为
+  `openid email .../auth/calendar`，Google Drive 为 `openid email .../auth/drive.file`。
+  Linear 用 `grant_type=refresh_token` + client_id/secret，不带 scope。
 
 ## 需要配置的 Workers Secrets
 

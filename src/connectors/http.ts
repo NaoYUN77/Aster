@@ -28,6 +28,25 @@ export async function connectorJson(
   }
 }
 
+/**
+ * A write request that may legitimately return an empty body (202/204). JSON is parsed when
+ * present; the caller only ever returns its own confirmation text to the model.
+ */
+export async function connectorWrite(
+  url: string,
+  init: RequestInit,
+  options: ConnectorFetchOptions,
+): Promise<unknown> {
+  const response = await connectorResponse(url, init, options);
+  const text = await boundedText(response);
+  if (text.trim() === "") return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "connector upstream returned invalid JSON");
+  }
+}
+
 /** Bounded plain-text request, used for Google Docs export; the body is never binary. */
 export async function connectorText(
   url: string,

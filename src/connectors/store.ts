@@ -62,56 +62,96 @@ export type OAuthSession = {
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 
-const DEFINITIONS: readonly ConnectorDefinition[] = [
+type DefinitionEntry = ConnectorDefinition & { readonly writeTools: readonly string[] };
+
+/**
+ * Read and write tools per provider. Deliberately no delete tools: removing mail, files, events
+ * or issues is irreversible and needs its own confirmed flow, not a model-selected call.
+ */
+const DEFINITIONS: readonly DefinitionEntry[] = [
   {
     provider: "github",
     displayName: "GitHub",
     transport: "oauth",
-    defaultScopes: ["read:user"],
-    tools: ["connector_github_list_repositories", "connector_github_list_issues", "connector_github_get_issue"],
+    defaultScopes: ["read:user", "repo"],
+    tools: [
+      "connector_github_list_repositories", "connector_github_list_issues", "connector_github_get_issue",
+      "connector_github_create_issue", "connector_github_comment_issue", "connector_github_update_issue",
+    ],
+    writeTools: ["connector_github_create_issue", "connector_github_comment_issue", "connector_github_update_issue"],
   },
   {
     provider: "gmail",
-    displayName: "Gmail (read-only)",
+    displayName: "Gmail",
     transport: "oauth",
-    defaultScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
-    tools: ["connector_gmail_search_messages", "connector_gmail_get_message"],
+    // gmail.modify covers archive/read/labels; gmail.send covers sending. Never mail.google.com.
+    defaultScopes: [
+      "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/gmail.send",
+    ],
+    tools: [
+      "connector_gmail_search_messages", "connector_gmail_get_message",
+      "connector_gmail_send_message", "connector_gmail_create_draft", "connector_gmail_modify_labels",
+    ],
+    writeTools: ["connector_gmail_send_message", "connector_gmail_create_draft", "connector_gmail_modify_labels"],
   },
   {
     provider: "outlook",
-    displayName: "Outlook (read-only)",
+    displayName: "Outlook",
     transport: "oauth",
-    defaultScopes: ["offline_access", "User.Read", "Mail.Read"],
-    tools: ["connector_outlook_list_messages", "connector_outlook_search_messages", "connector_outlook_get_message"],
+    defaultScopes: ["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"],
+    tools: [
+      "connector_outlook_list_messages", "connector_outlook_search_messages", "connector_outlook_get_message",
+      "connector_outlook_send_message", "connector_outlook_reply_message", "connector_outlook_update_message",
+    ],
+    writeTools: ["connector_outlook_send_message", "connector_outlook_reply_message", "connector_outlook_update_message"],
   },
   {
     provider: "linear",
-    displayName: "Linear (read-only)",
+    displayName: "Linear",
     transport: "oauth",
-    defaultScopes: ["read"],
-    tools: ["connector_linear_list_issues", "connector_linear_search_issues", "connector_linear_get_issue"],
+    defaultScopes: ["read", "write"],
+    tools: [
+      "connector_linear_list_issues", "connector_linear_search_issues", "connector_linear_get_issue",
+      "connector_linear_create_issue", "connector_linear_update_issue", "connector_linear_comment_issue",
+    ],
+    writeTools: ["connector_linear_create_issue", "connector_linear_update_issue", "connector_linear_comment_issue"],
   },
   {
     provider: "notion",
-    displayName: "Notion (read-only)",
+    displayName: "Notion",
     transport: "oauth",
-    // Notion has no OAuth scope parameter; the integration's capabilities are chosen in Notion.
+    // Notion has no OAuth scope parameter; Insert content / Update content are chosen in the
+    // integration settings, not in the authorization request.
     defaultScopes: [],
-    tools: ["connector_notion_search", "connector_notion_get_page"],
+    tools: [
+      "connector_notion_search", "connector_notion_get_page",
+      "connector_notion_create_page", "connector_notion_append_blocks",
+    ],
+    writeTools: ["connector_notion_create_page", "connector_notion_append_blocks"],
   },
   {
     provider: "google_calendar",
-    displayName: "Google Calendar (read-only)",
+    displayName: "Google Calendar",
     transport: "oauth",
-    defaultScopes: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
-    tools: ["connector_google_calendar_list_events", "connector_google_calendar_get_event"],
+    defaultScopes: ["openid", "email", "https://www.googleapis.com/auth/calendar"],
+    tools: [
+      "connector_google_calendar_list_events", "connector_google_calendar_get_event",
+      "connector_google_calendar_create_event", "connector_google_calendar_update_event",
+    ],
+    writeTools: ["connector_google_calendar_create_event", "connector_google_calendar_update_event"],
   },
   {
     provider: "google_drive",
-    displayName: "Google Drive (read-only)",
+    displayName: "Google Drive",
     transport: "oauth",
-    defaultScopes: ["openid", "email", "https://www.googleapis.com/auth/drive.readonly"],
-    tools: ["connector_google_drive_search_files", "connector_google_drive_get_file"],
+    // drive.file only reaches files Aster created or the user explicitly opened with Aster.
+    defaultScopes: ["openid", "email", "https://www.googleapis.com/auth/drive.file"],
+    tools: [
+      "connector_google_drive_search_files", "connector_google_drive_get_file",
+      "connector_google_drive_create_file", "connector_google_drive_update_file",
+    ],
+    writeTools: ["connector_google_drive_create_file", "connector_google_drive_update_file"],
   },
   {
     provider: "mcp_stdio",
@@ -119,8 +159,19 @@ const DEFINITIONS: readonly ConnectorDefinition[] = [
     transport: "stdio",
     defaultScopes: [],
     tools: [],
+    writeTools: [],
   },
 ];
+
+const WRITE_TOOLS = new Set(DEFINITIONS.flatMap((definition) => definition.writeTools));
+
+/**
+ * Per-connection metadata only: enforcement happens in the tool registry, where
+ * `src/connectors/tools.ts` marks exactly these names as `authz: write`.
+ */
+function writeAuthz(tool: string): "read" | "write" {
+  return WRITE_TOOLS.has(tool) ? "write" : "read";
+}
 
 type ConnectionRow = {
   id: string;
@@ -254,6 +305,23 @@ export class ConnectorStore {
         createdAt,
       );
     }
+    // Existing connections predate newly added tools (for example the write tools) and would
+    // otherwise never get a tool_scopes row. Insert missing rows and correct authz without
+    // touching `enabled`, so an admin's toggle survives.
+    this.syncToolScopes();
+  }
+
+  /** Adds rows for tools introduced after a connection was created; safe to run on every boot. */
+  private syncToolScopes(): void {
+    const rows = this.#db.prepare("SELECT id, provider FROM connections").all() as { id: string; provider: string }[];
+    const scope = this.#db.prepare(`INSERT INTO tool_scopes (connection_id, tool_name, authz, enabled)
+      VALUES (?, ?, ?, 1)
+      ON CONFLICT(connection_id, tool_name) DO UPDATE SET authz = excluded.authz`);
+    for (const row of rows) {
+      const definition = DEFINITIONS.find((entry) => entry.provider === row.provider);
+      if (definition === undefined) continue;
+      for (const tool of definition.tools) scope.run(row.id, tool, writeAuthz(tool));
+    }
   }
 
   definitions(): ConnectorDefinition[] {
@@ -292,7 +360,7 @@ export class ConnectorStore {
     return row === undefined ? undefined : connection(row);
   }
 
-  /** Creates a connection row and its read-only tool scopes. Repeating the same slug is not a duplicate. */
+  /** Creates a connection row and its tool scopes. Repeating the same slug is not a duplicate. */
   create(input: { readonly ownerId: string; readonly provider: ConnectorProvider; readonly slug: string }): {
     readonly connection: ConnectorConnection;
     readonly created: boolean;
@@ -320,9 +388,9 @@ export class ConnectorStore {
         id, input.provider, input.slug, input.ownerId, JSON.stringify(definition.defaultScopes), now, now,
       );
       const scope = this.#db.prepare(
-        "INSERT OR IGNORE INTO tool_scopes (connection_id, tool_name, authz, enabled) VALUES (?, ?, 'read', 1)",
+        "INSERT OR IGNORE INTO tool_scopes (connection_id, tool_name, authz, enabled) VALUES (?, ?, ?, 1)",
       );
-      for (const tool of definition.tools) scope.run(id, tool);
+      for (const tool of definition.tools) scope.run(id, tool, writeAuthz(tool));
       this.audit(id, "connection.created");
       const row = this.#db.prepare("SELECT * FROM connections WHERE id = ?").get(id) as ConnectionRow;
       return { connection: connection(row), created: true };

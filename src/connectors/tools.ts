@@ -1,7 +1,35 @@
-import { defineExtension, defineTool, type Extension, type ToolExecutionResult } from "@earendil-works/pi-durable";
-import { int, obj, opt, str } from "@earendil-works/pi-schema";
+import {
+  defineExtension, defineTool, type Extension, type ToolExecutionResult, type ToolRegistration,
+} from "@earendil-works/pi-durable";
+import { arr, bool, int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
+import type { GovernedTool } from "../tools.js";
 import { ConnectorError, connectorCode, safeConnectorMessage } from "./errors.js";
 import type { ConnectorService } from "./service.js";
+
+/**
+ * Tools that only read upstream data. Everything else in this extension is a write by default, so a
+ * new tool that is forgotten here stays behind write authority rather than slipping through as read.
+ */
+const READ_TOOL_NAMES = new Set([
+  "connector_list",
+  "connector_github_list_repositories", "connector_github_list_issues", "connector_github_get_issue",
+  "connector_gmail_search_messages", "connector_gmail_get_message",
+  "connector_outlook_list_messages", "connector_outlook_search_messages", "connector_outlook_get_message",
+  "connector_linear_list_issues", "connector_linear_search_issues", "connector_linear_get_issue",
+  "connector_notion_search", "connector_notion_get_page",
+  "connector_google_calendar_list_events", "connector_google_calendar_get_event",
+  "connector_google_drive_search_files", "connector_google_drive_get_file",
+]);
+
+function governed(tool: ToolRegistration): GovernedTool {
+  return Object.assign(tool, {
+    governance: {
+      source: { kind: "builtin" as const, extension: "connectors" },
+      trust: "trusted" as const,
+      authz: READ_TOOL_NAMES.has(tool.name) ? "read" as const : "write" as const,
+    },
+  });
+}
 
 const CONNECTION = opt(str({
   maxLength: 48,
@@ -58,6 +86,33 @@ const DRIVE_FILE_ID = str({
   description: "Drive file id returned by search",
 });
 const DAYS = opt(int({ minimum: 1, maximum: 90, description: "Time window in days from now (1-90, default 7)" }));
+const EMAIL_TEXT = str({
+  minLength: 3,
+  maxLength: 320,
+  description: "Email address; separate several addresses with commas",
+});
+const SUBJECT = str({ minLength: 1, maxLength: 256, description: "Subject line" });
+const PLAIN_BODY = str({ maxLength: 20_000, description: "Plain-text body" });
+const TITLE = str({ minLength: 1, maxLength: 256, description: "Title" });
+const ISSUE_NUMBER = int({ minimum: 1, maximum: 1_000_000_000, description: "Issue number, for example 42" });
+const LABELS = arr(str({ minLength: 1, maxLength: 100 }), {
+  minItems: 1,
+  maxItems: 20,
+  description: "Label names to set (1-20); replaces the current labels",
+});
+const NOTION_CONTENT = str({ minLength: 1, maxLength: 20_000, description: "Plain text; each line becomes a paragraph" });
+const EVENT_TIME = str({
+  minLength: 16,
+  maxLength: 40,
+  description: "RFC 3339 time such as 2026-11-20T10:00:00+08:00; without an offset, time_zone is required",
+});
+const TIME_ZONE = opt(str({
+  minLength: 1,
+  maxLength: 64,
+  description: "IANA time zone such as Asia/Shanghai; required when start/end carry no offset",
+}));
+const DRIVE_NAME = str({ minLength: 1, maxLength: 256, description: "File name" });
+const DRIVE_CONTENT = str({ maxLength: 20_000, description: "Plain-text file content" });
 
 type ToolApi = {
   readonly conversationId: number;
@@ -489,11 +544,462 @@ export function createConnectorExtension(service: ConnectorService, ownerId: str
     },
   });
 
+  const githubCreateIssue = defineTool({
+    name: "connector_github_create_issue",
+    description: "Create an issue in a GitHub repository. Writes to the repository; returns only the new issue number, title, state and link.",
+    parameters: obj({ connection: CONNECTION, repo: REPO, title: TITLE, body: opt(PLAIN_BODY) }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.createIssue({
+          repo: args.repo,
+          title: args.title,
+          ...(args.body === undefined ? {} : { body: args.body }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_github_create_issue", api));
+        return success(result, { number: result.number, state: result.state });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const githubCommentIssue = defineTool({
+    name: "connector_github_comment_issue",
+    description: "Post a comment on a GitHub issue or pull request. Writes to the repository; returns the new comment id and link.",
+    parameters: obj({
+      connection: CONNECTION,
+      repo: REPO,
+      number: ISSUE_NUMBER,
+      body: str({ minLength: 1, maxLength: 20_000, description: "Comment text" }),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.commentIssue({
+          repo: args.repo,
+          number: args.number,
+          body: args.body,
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_github_comment_issue", api));
+        return success(result, { id: result.id, issueNumber: result.issueNumber });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const githubUpdateIssue = defineTool({
+    name: "connector_github_update_issue",
+    description: "Close or reopen a GitHub issue and/or replace its labels. Writes to the repository; at least one of state or labels is required.",
+    parameters: obj({
+      connection: CONNECTION,
+      repo: REPO,
+      number: ISSUE_NUMBER,
+      state: opt(oneOf(["open", "closed"], { description: "New issue state" })),
+      labels: opt(LABELS),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.updateIssue({
+          repo: args.repo,
+          number: args.number,
+          ...(args.state === undefined ? {} : { state: args.state }),
+          ...(args.labels === undefined ? {} : { labels: args.labels }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_github_update_issue", api));
+        return success(result, { number: result.number, state: result.state });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const gmailSend = defineTool({
+    name: "connector_gmail_send_message",
+    description: "Send a plain-text email from the connected Gmail account. This sends real mail; returns only the new message id.",
+    parameters: obj({ connection: CONNECTION, to: EMAIL_TEXT, subject: SUBJECT, body: PLAIN_BODY }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.sendGmailMessage({
+          to: args.to,
+          subject: args.subject,
+          body: args.body,
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_gmail_send_message", api));
+        return success(result, { id: result.id });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const gmailDraft = defineTool({
+    name: "connector_gmail_create_draft",
+    description: "Save a plain-text email as a Gmail draft without sending it. Returns the new draft id and message id.",
+    parameters: obj({ connection: CONNECTION, to: EMAIL_TEXT, subject: SUBJECT, body: PLAIN_BODY }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.createGmailDraft({
+          to: args.to,
+          subject: args.subject,
+          body: args.body,
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_gmail_create_draft", api));
+        return success(result, { draftId: result.draftId });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const gmailModifyLabels = defineTool({
+    name: "connector_gmail_modify_labels",
+    description: "Archive, mark read and/or add one label to a Gmail message. It never deletes, trashes or spams a message. At least one change is required.",
+    parameters: obj({
+      connection: CONNECTION,
+      id: str({ minLength: 1, maxLength: 128, description: "Gmail message id returned by search" }),
+      archive: opt(bool({ description: "Remove the message from the inbox" })),
+      mark_read: opt(bool({ description: "Mark the message as read" })),
+      add_label: opt(str({ minLength: 1, maxLength: 100, description: "Label name to add; it must already exist" })),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.modifyGmailLabels({
+          id: args.id,
+          ...(args.archive === undefined ? {} : { archive: args.archive }),
+          ...(args.mark_read === undefined ? {} : { markRead: args.mark_read }),
+          ...(args.add_label === undefined ? {} : { addLabel: args.add_label }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_gmail_modify_labels", api));
+        return success(result, { id: result.id, added: result.added.length, removed: result.removed.length });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const outlookSend = defineTool({
+    name: "connector_outlook_send_message",
+    description: "Send a plain-text email from the connected Outlook mailbox. This sends real mail.",
+    parameters: obj({ connection: CONNECTION, to: EMAIL_TEXT, subject: SUBJECT, body: PLAIN_BODY }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.sendOutlookMessage({
+          to: args.to,
+          subject: args.subject,
+          body: args.body,
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_outlook_send_message", api));
+        return success(result, { sent: result.sent });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const outlookReply = defineTool({
+    name: "connector_outlook_reply_message",
+    description: "Reply to an existing Outlook message, keeping the thread. This sends real mail.",
+    parameters: obj({
+      connection: CONNECTION,
+      id: MESSAGE_ID,
+      comment: str({ minLength: 1, maxLength: 20_000, description: "Reply text" }),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.replyOutlookMessage({
+          id: args.id,
+          comment: args.comment,
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_outlook_reply_message", api));
+        return success(result, { replied: result.replied, inReplyTo: result.inReplyTo });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const outlookUpdate = defineTool({
+    name: "connector_outlook_update_message",
+    description: "Mark an Outlook message read/unread and/or move it to a standard folder (inbox, archive, drafts, sentitems, junkemail). It cannot delete a message. At least one change is required.",
+    parameters: obj({
+      connection: CONNECTION,
+      id: MESSAGE_ID,
+      is_read: opt(bool({ description: "New read state" })),
+      move_to: opt(oneOf(["inbox", "archive", "drafts", "sentitems", "junkemail"], {
+        description: "Destination folder",
+      })),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.updateOutlookMessage({
+          id: args.id,
+          ...(args.is_read === undefined ? {} : { isRead: args.is_read }),
+          ...(args.move_to === undefined ? {} : { moveTo: args.move_to }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_outlook_update_message", api));
+        return success(result, {
+          id: result.id,
+          ...(result.isRead === undefined ? {} : { isRead: result.isRead }),
+          ...(result.movedTo === undefined ? {} : { movedTo: result.movedTo }),
+        });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const linearCreateIssue = defineTool({
+    name: "connector_linear_create_issue",
+    description: "Create a Linear issue in a team (by team key). Writes to Linear; returns the new issue identifier and link.",
+    parameters: obj({
+      connection: CONNECTION,
+      team: str({ minLength: 1, maxLength: 20, description: "Linear team key, for example ENG" }),
+      title: TITLE,
+      description: opt(PLAIN_BODY),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.createLinearIssue({
+          team: args.team,
+          title: args.title,
+          ...(args.description === undefined ? {} : { description: args.description }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_linear_create_issue", api));
+        return success(result, { identifier: result.identifier, state: result.state });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const linearUpdateIssue = defineTool({
+    name: "connector_linear_update_issue",
+    description: "Change a Linear issue's state, title or assignee (by email). At least one field is required; values are resolved to workspace ids server-side.",
+    parameters: obj({
+      connection: CONNECTION,
+      identifier: LINEAR_IDENTIFIER,
+      state: opt(str({ minLength: 1, maxLength: 64, description: "State name, for example 'In Progress'" })),
+      title: opt(TITLE),
+      assignee: opt(str({ minLength: 3, maxLength: 320, description: "Assignee email address" })),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.updateLinearIssue({
+          identifier: args.identifier,
+          ...(args.state === undefined ? {} : { state: args.state }),
+          ...(args.title === undefined ? {} : { title: args.title }),
+          ...(args.assignee === undefined ? {} : { assignee: args.assignee }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_linear_update_issue", api));
+        return success(result, { identifier: result.identifier, state: result.state });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const linearComment = defineTool({
+    name: "connector_linear_comment_issue",
+    description: "Post a comment on a Linear issue. Writes to Linear; returns the new comment id.",
+    parameters: obj({
+      connection: CONNECTION,
+      identifier: LINEAR_IDENTIFIER,
+      body: str({ minLength: 1, maxLength: 20_000, description: "Comment text" }),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.commentLinearIssue({
+          identifier: args.identifier,
+          body: args.body,
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_linear_comment_issue", api));
+        return success(result, { id: result.id, identifier: result.identifier });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const notionCreatePage = defineTool({
+    name: "connector_notion_create_page",
+    description: "Create a Notion page under a page or database and optionally add plain-text paragraphs. The parent must be shared with the integration and the integration must allow inserting content.",
+    parameters: obj({
+      connection: CONNECTION,
+      parent_id: str({
+        minLength: 32,
+        maxLength: 36,
+        description: "Parent page or database id returned by search",
+      }),
+      title: TITLE,
+      content: opt(PLAIN_BODY),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.createNotionPage({
+          parentId: args.parent_id,
+          title: args.title,
+          ...(args.content === undefined ? {} : { content: args.content }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_notion_create_page", api));
+        return success(result, { id: result.id, title: result.title });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const notionAppend = defineTool({
+    name: "connector_notion_append_blocks",
+    description: "Append plain-text paragraphs to an existing Notion page. The integration must allow updating content.",
+    parameters: obj({ connection: CONNECTION, page_id: NOTION_PAGE_ID, content: NOTION_CONTENT }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.appendNotionBlocks({
+          pageId: args.page_id,
+          content: args.content,
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_notion_append_blocks", api));
+        return success(result, { pageId: result.pageId, blocksAdded: result.blocksAdded });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const calendarCreateEvent = defineTool({
+    name: "connector_google_calendar_create_event",
+    description: "Create an event on the primary Google Calendar. Times must be unambiguous: either an offset in start/end or a time_zone. No attendees are invited.",
+    parameters: obj({
+      connection: CONNECTION,
+      summary: str({ minLength: 1, maxLength: 256, description: "Event title" }),
+      start: EVENT_TIME,
+      end: EVENT_TIME,
+      time_zone: TIME_ZONE,
+      description: opt(PLAIN_BODY),
+      location: opt(str({ maxLength: 500, description: "Location text" })),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.createCalendarEvent({
+          summary: args.summary,
+          start: args.start,
+          end: args.end,
+          ...(args.time_zone === undefined ? {} : { timeZone: args.time_zone }),
+          ...(args.description === undefined ? {} : { description: args.description }),
+          ...(args.location === undefined ? {} : { location: args.location }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_google_calendar_create_event", api));
+        return success(result, { id: result.id, start: result.start, end: result.end });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const calendarUpdateEvent = defineTool({
+    name: "connector_google_calendar_update_event",
+    description: "Update a Google Calendar event's title, description, location or times. Start and end must be given together. At least one field is required.",
+    parameters: obj({
+      connection: CONNECTION,
+      event_id: CALENDAR_EVENT_ID,
+      summary: opt(str({ minLength: 1, maxLength: 256, description: "New event title" })),
+      description: opt(PLAIN_BODY),
+      location: opt(str({ maxLength: 500, description: "Location text" })),
+      start: opt(EVENT_TIME),
+      end: opt(EVENT_TIME),
+      time_zone: TIME_ZONE,
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.updateCalendarEvent({
+          eventId: args.event_id,
+          ...(args.summary === undefined ? {} : { summary: args.summary }),
+          ...(args.description === undefined ? {} : { description: args.description }),
+          ...(args.location === undefined ? {} : { location: args.location }),
+          ...(args.start === undefined ? {} : { start: args.start }),
+          ...(args.end === undefined ? {} : { end: args.end }),
+          ...(args.time_zone === undefined ? {} : { timeZone: args.time_zone }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_google_calendar_update_event", api));
+        return success(result, { id: result.id, start: result.start, end: result.end });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const driveCreateFile = defineTool({
+    name: "connector_google_drive_create_file",
+    description: "Create a plain-text file in Google Drive. Only text is supported; returns the new file id and link.",
+    parameters: obj({ connection: CONNECTION, name: DRIVE_NAME, content: DRIVE_CONTENT }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.createDriveFile({
+          name: args.name,
+          content: args.content,
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_google_drive_create_file", api));
+        return success(result, { id: result.id, name: result.name });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
+  const driveUpdateFile = defineTool({
+    name: "connector_google_drive_update_file",
+    description: "Rename and/or replace the text content of a file Aster created or opened in Google Drive. Google Docs and other binary files cannot be updated here.",
+    parameters: obj({
+      connection: CONNECTION,
+      file_id: DRIVE_FILE_ID,
+      name: opt(DRIVE_NAME),
+      content: opt(DRIVE_CONTENT),
+    }),
+    replay: "unsafe",
+    execute: async (args, api) => {
+      try {
+        const result = await service.updateDriveFile({
+          fileId: args.file_id,
+          ...(args.name === undefined ? {} : { name: args.name }),
+          ...(args.content === undefined ? {} : { content: args.content }),
+          ...(args.connection === undefined ? {} : { connection: args.connection }),
+        }, binding(ownerId, "connector_google_drive_update_file", api));
+        return success(result, { id: result.id, name: result.name });
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  });
+
   return defineExtension({
     name: "connectors",
     tools: [list, repositories, issues, issue, search, message,
       outlookMessages, outlookSearch, outlookMessage, linearIssues, linearSearch, linearIssue,
-      notionSearch, notionPage, calendarEvents, calendarEvent, driveSearch, driveFile],
+      notionSearch, notionPage, calendarEvents, calendarEvent, driveSearch, driveFile,
+      githubCreateIssue, githubCommentIssue, githubUpdateIssue,
+      gmailSend, gmailDraft, gmailModifyLabels,
+      outlookSend, outlookReply, outlookUpdate,
+      linearCreateIssue, linearUpdateIssue, linearComment,
+      notionCreatePage, notionAppend,
+      calendarCreateEvent, calendarUpdateEvent,
+      driveCreateFile, driveUpdateFile].map(governed),
     // Refreshed before every model request by the harness, so a status change needs no restart.
     sections: [{
       key: "connectors",

@@ -1,11 +1,16 @@
 import { ConnectorError } from "./errors.js";
-import { clip, connectorJson } from "./http.js";
+import { clip, connectorJson, connectorWrite } from "./http.js";
 
 const API = "https://graph.microsoft.com/v1.0";
 const MESSAGE_ID = /^[A-Za-z0-9_=+./-]{1,512}$/;
 const SELECT = "id,subject,from,receivedDateTime,bodyPreview";
 const DETAIL_SELECT = "id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,bodyPreview,webLink";
 const MAX_BODY_CHARS = 20_000;
+const EMAIL = /^[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+$/;
+const MAX_RECIPIENTS = 20;
+const MAX_SUBJECT = 256;
+/** Well-known folders mail may be moved to. deleteditems/recoverableitems are deliberately absent. */
+const MOVE_FOLDERS = new Set(["inbox", "archive", "drafts", "sentitems", "junkemail"]);
 
 export type OutlookClientOptions = {
   readonly fetch: typeof fetch;
@@ -28,7 +33,7 @@ export type OutlookMessage = OutlookMessageSummary & {
   readonly truncated: boolean;
 };
 
-/** Read-only Microsoft Graph mail client. No send, delete, move or draft endpoint exists here. */
+/** Microsoft Graph mail client. Send, reply and flag/move only; nothing here deletes a message. */
 export class OutlookClient {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
@@ -81,11 +86,100 @@ export class OutlookClient {
     };
   }
 
+  /** Sends a plain-text message; Graph answers 202 with no body. */
+  async sendMessage(
+    token: string,
+    input: { readonly to: string; readonly subject: string; readonly body: string },
+  ): Promise<{ readonly sent: boolean }> {
+    const recipients = emailList(input.to);
+    const subject = input.subject.trim();
+    if (subject === "" || subject.length > MAX_SUBJECT) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "subject must be 1-256 characters");
+    }
+    const body = boundedText(input.body, "body");
+    await this.#write(token, "POST", "/me/sendMail", {
+      message: {
+        subject,
+        body: { contentType: "Text", content: body },
+        toRecipients: recipients.map((address) => ({ emailAddress: { address } })),
+      },
+      saveToSentItems: true,
+    });
+    return { sent: true };
+  }
+
+  async replyMessage(
+    token: string,
+    id: string,
+    comment: string,
+  ): Promise<{ readonly replied: boolean; readonly inReplyTo: string }> {
+    if (!MESSAGE_ID.test(id)) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "message id is invalid");
+    const body = boundedText(comment, "comment");
+    if (body.trim() === "") throw new ConnectorError("CONNECTOR_INVALID_INPUT", "comment must not be empty");
+    await this.#write(token, "POST", `/me/messages/${encodeURIComponent(id)}/reply`, { comment: body });
+    return { replied: true, inReplyTo: id };
+  }
+
+  async updateMessage(
+    token: string,
+    id: string,
+    input: { readonly isRead?: boolean; readonly moveTo?: string },
+  ): Promise<{ readonly id: string; readonly isRead?: boolean; readonly movedTo?: string }> {
+    if (!MESSAGE_ID.test(id)) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "message id is invalid");
+    if (input.isRead === undefined && input.moveTo === undefined) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "is_read or move_to is required");
+    }
+    if (input.moveTo !== undefined && !MOVE_FOLDERS.has(input.moveTo)) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "move_to must be inbox, archive, drafts, sentitems or junkemail");
+    }
+    if (input.isRead !== undefined) {
+      await this.#write(token, "PATCH", `/me/messages/${encodeURIComponent(id)}`, { isRead: input.isRead });
+    }
+    if (input.moveTo !== undefined) {
+      await this.#write(token, "POST", `/me/messages/${encodeURIComponent(id)}/move`, { destinationId: input.moveTo });
+    }
+    return {
+      id,
+      ...(input.isRead === undefined ? {} : { isRead: input.isRead }),
+      ...(input.moveTo === undefined ? {} : { movedTo: input.moveTo }),
+    };
+  }
+
   async #get(token: string, path: string, notFound: boolean): Promise<unknown> {
     return connectorJson(`${API}${path}`, {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
     }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs, notFound });
   }
+
+  async #write(token: string, method: "POST" | "PATCH", path: string, payload: unknown): Promise<unknown> {
+    return connectorWrite(`${API}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs });
+  }
+}
+
+function boundedText(value: string, field: string): string {
+  if (value.length > MAX_BODY_CHARS) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", `${field} must be at most ${MAX_BODY_CHARS} characters`);
+  }
+  return value.trim() === "" ? "" : value;
+}
+
+function emailList(value: string): string[] {
+  const addresses = value.split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
+  if (addresses.length === 0 || addresses.length > MAX_RECIPIENTS) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", `to must list 1-${MAX_RECIPIENTS} addresses`);
+  }
+  for (const address of addresses) {
+    if (!EMAIL.test(address)) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "to contains an invalid email address");
+  }
+  return addresses;
 }
 
 function messagesFrom(body: unknown, limit: number): OutlookMessageSummary[] {

@@ -1091,7 +1091,7 @@ components:
           description: True only when a manual selection was unavailable and another model answered.
     ConnectorProvider:
       type: string
-      enum: [github, gmail, mcp_stdio]
+      enum: [github, gmail, outlook, linear, notion, google_calendar, google_drive, mcp_stdio]
     ConnectorStatus:
       type: string
       enum: [pending, connected, error, revoked]
@@ -1111,7 +1111,9 @@ components:
           items: { type: string }
         tools:
           type: array
-          description: Read-only model tool names this provider can expose.
+          description: >-
+            Model tool names this provider can expose. Read tools are governed as read; the
+            create/send/update tools are governed as write. No delete tool exists.
           items: { type: string }
     ConnectorConnection:
       type: object

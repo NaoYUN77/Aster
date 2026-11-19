@@ -1,9 +1,13 @@
 import { ConnectorError } from "./errors.js";
-import { clip, connectorJson } from "./http.js";
+import { clip, connectorJson, connectorWrite } from "./http.js";
 
 const API = "https://api.github.com";
 const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const ISSUE_STATES = new Set(["open", "closed", "all"]);
+const WRITE_STATES = new Set(["open", "closed"]);
+const MAX_TITLE = 256;
+const MAX_BODY = 20_000;
+const MAX_LABELS = 20;
 
 export type GithubClientOptions = {
   readonly fetch: typeof fetch;
@@ -34,7 +38,7 @@ export type GithubIssue = {
   readonly body?: string;
 };
 
-/** Read-only GitHub REST client. It never accepts a token from a model parameter. */
+/** GitHub REST client. Create, comment and update issues only; it never accepts a token from a model parameter. */
 export class GithubClient {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
@@ -97,6 +101,77 @@ export class GithubClient {
     };
   }
 
+  /** Creates an issue. Only the new issue's identity is returned, never the upstream payload. */
+  async createIssue(
+    token: string,
+    repo: string,
+    input: { readonly title: string; readonly body?: string },
+  ): Promise<{ readonly number: number; readonly title: string; readonly state: string; readonly url: string }> {
+    assertRepo(repo);
+    const title = input.title.trim();
+    if (title === "" || title.length > MAX_TITLE) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "title must be 1-256 characters");
+    }
+    const body = boundedBody(input.body ?? "");
+    const result = await this.#write(token, "POST", `/repos/${repo}/issues`, {
+      title,
+      ...(body === "" ? {} : { body }),
+    });
+    const issue = issueFrom(result);
+    if (issue === undefined) throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "GitHub response was invalid");
+    return { number: issue.number, title: issue.title, state: issue.state, url: issue.url };
+  }
+
+  async commentIssue(
+    token: string,
+    repo: string,
+    number: number,
+    body: string,
+  ): Promise<{ readonly id: number; readonly issueNumber: number; readonly url: string }> {
+    assertRepo(repo);
+    assertNumber(number);
+    const comment = boundedBody(body);
+    if (comment === "") throw new ConnectorError("CONNECTOR_INVALID_INPUT", "comment body must not be empty");
+    const result = await this.#write(token, "POST", `/repos/${repo}/issues/${number}/comments`, { body: comment });
+    if (!isRecord(result) || typeof result.id !== "number") {
+      throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "GitHub response was invalid");
+    }
+    return {
+      id: result.id,
+      issueNumber: number,
+      url: typeof result.html_url === "string" ? result.html_url : "",
+    };
+  }
+
+  async updateIssue(
+    token: string,
+    repo: string,
+    number: number,
+    input: { readonly state?: string; readonly labels?: readonly string[] },
+  ): Promise<{ readonly number: number; readonly state: string; readonly labels: readonly string[]; readonly url: string }> {
+    assertRepo(repo);
+    assertNumber(number);
+    if (input.state === undefined && input.labels === undefined) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "state or labels is required");
+    }
+    if (input.state !== undefined && !WRITE_STATES.has(input.state)) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "state must be open or closed");
+    }
+    const labels = input.labels?.map((label) => label.trim());
+    if (labels !== undefined) {
+      if (labels.length > MAX_LABELS || labels.some((label) => label === "" || label.length > 100)) {
+        throw new ConnectorError("CONNECTOR_INVALID_INPUT", "labels must be 1-20 names of at most 100 characters");
+      }
+    }
+    const result = await this.#write(token, "PATCH", `/repos/${repo}/issues/${number}`, {
+      ...(input.state === undefined ? {} : { state: input.state }),
+      ...(labels === undefined ? {} : { labels }),
+    });
+    const issue = issueFrom(result);
+    if (issue === undefined) throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "GitHub response was invalid");
+    return { number: issue.number, state: issue.state, labels: issue.labels, url: issue.url };
+  }
+
   async #get(token: string, path: string, notFound: boolean): Promise<unknown> {
     return connectorJson(`${API}${path}`, {
       headers: {
@@ -105,6 +180,30 @@ export class GithubClient {
         "user-agent": "aster-connector",
       },
     }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs, notFound });
+  }
+
+  async #write(token: string, method: "POST" | "PATCH", path: string, payload: unknown): Promise<unknown> {
+    return connectorWrite(`${API}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "aster-connector",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs });
+  }
+}
+
+function boundedBody(value: string): string {
+  if (value.length > MAX_BODY) throw new ConnectorError("CONNECTOR_INVALID_INPUT", `body must be at most ${MAX_BODY} characters`);
+  return value;
+}
+
+function assertNumber(number: number): void {
+  if (!Number.isInteger(number) || number < 1 || number > 1_000_000_000) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", "number must be a positive issue number");
   }
 }
 

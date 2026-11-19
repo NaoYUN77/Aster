@@ -87,15 +87,18 @@ export class LocalTokenVault implements TokenVault {
       this.#secrets.readText(spec.clientIdSecret),
       this.#secrets.readText(spec.clientSecretSecret),
     ]);
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: previous.refresh_token!,
+      client_id: clientId,
+      client_secret: clientSecret,
+    });
+    // Google and Microsoft issue a token only for the scopes named here; the broker sends the same set.
+    if (spec.refreshScope !== undefined) body.set("scope", spec.refreshScope);
     const response = await this.#fetch(spec.tokenUrl, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: previous.refresh_token!,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
+      body,
       signal: AbortSignal.timeout(this.#config.httpTimeoutMs),
     });
     if (!response.ok) {

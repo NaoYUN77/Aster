@@ -1,11 +1,18 @@
 import { ConnectorError } from "./errors.js";
-import { clip, connectorJson } from "./http.js";
+import { clip, connectorJson, connectorWrite } from "./http.js";
 
 const API = "https://www.googleapis.com/calendar/v3";
 const EVENT_ID = /^[A-Za-z0-9_-]{1,1024}$/;
 const DEFAULT_DAYS = 7;
 const MAX_DAYS = 90;
 const MAX_DESCRIPTION_CHARS = 20_000;
+const MAX_SUMMARY = 256;
+const MAX_LOCATION = 500;
+/** RFC 3339 with an explicit UTC offset, or the same shape without one (then time_zone is required). */
+const OFFSET_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const PLAIN_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d{1,9})?$/;
+const TIME_ZONE = /^[A-Za-z][A-Za-z0-9_+/-]{0,63}$/;
+const EVENT_FIELDS = "id,summary,start,end,htmlLink";
 
 export type GoogleCalendarClientOptions = {
   readonly fetch: typeof fetch;
@@ -29,7 +36,7 @@ export type CalendarEvent = CalendarEventSummary & {
   readonly attendees: readonly string[];
 };
 
-/** Read-only Google Calendar client. It only reads the primary calendar. */
+/** Google Calendar client for the primary calendar: list, read, create and update. No delete exists here. */
 export class GoogleCalendarClient {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
@@ -90,11 +97,164 @@ export class GoogleCalendarClient {
     };
   }
 
+  /**
+   * Creates an event on the primary calendar. Times must be explicit: either an RFC 3339 stamp
+   * with an offset, or a local stamp plus `timeZone`. No attendees are invited.
+   */
+  async createEvent(
+    token: string,
+    input: {
+      readonly summary: string;
+      readonly start: string;
+      readonly end: string;
+      readonly timeZone?: string;
+      readonly description?: string;
+      readonly location?: string;
+    },
+  ): Promise<{ readonly id: string; readonly summary: string; readonly start: string; readonly end: string; readonly htmlLink: string }> {
+    const summary = boundedSummary(input.summary);
+    const start = eventTime(input.start, "start", input.timeZone);
+    const end = eventTime(input.end, "end", input.timeZone);
+    assertOrder(start.dateTime, end.dateTime);
+    const description = boundedDescription(input.description ?? "");
+    const location = boundedLocation(input.location ?? "");
+    const payload = {
+      summary,
+      start,
+      end,
+      ...(description === "" ? {} : { description }),
+      ...(location === "" ? {} : { location }),
+    };
+    const params = new URLSearchParams({ fields: EVENT_FIELDS });
+    const body = await this.#write(token, "POST", `/calendars/primary/events?${params.toString()}`, payload);
+    return eventIdentity(body);
+  }
+
+  /** Patches summary, description, location and/or times. At least one field is required. */
+  async updateEvent(
+    token: string,
+    eventId: string,
+    input: {
+      readonly summary?: string;
+      readonly description?: string;
+      readonly location?: string;
+      readonly start?: string;
+      readonly end?: string;
+      readonly timeZone?: string;
+    },
+  ): Promise<{ readonly id: string; readonly summary: string; readonly start: string; readonly end: string; readonly htmlLink: string }> {
+    if (!EVENT_ID.test(eventId)) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "event id is invalid");
+    if (input.start === undefined && input.end === undefined && input.summary === undefined
+      && input.description === undefined && input.location === undefined) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "summary, description, location, start or end is required");
+    }
+    if ((input.start === undefined) !== (input.end === undefined)) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", "start and end must be given together");
+    }
+    const payload: Record<string, unknown> = {};
+    if (input.summary !== undefined) payload.summary = boundedSummary(input.summary);
+    if (input.description !== undefined) payload.description = boundedDescription(input.description);
+    if (input.location !== undefined) payload.location = boundedLocation(input.location);
+    if (input.start !== undefined && input.end !== undefined) {
+      const start = eventTime(input.start, "start", input.timeZone);
+      const end = eventTime(input.end, "end", input.timeZone);
+      assertOrder(start.dateTime, end.dateTime);
+      payload.start = start;
+      payload.end = end;
+    }
+    const params = new URLSearchParams({ fields: EVENT_FIELDS });
+    const body = await this.#write(
+      token,
+      "PATCH",
+      `/calendars/primary/events/${encodeURIComponent(eventId)}?${params.toString()}`,
+      payload,
+    );
+    return eventIdentity(body);
+  }
+
   async #get(token: string, path: string, notFound: boolean): Promise<unknown> {
     return connectorJson(`${API}${path}`, {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
     }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs, notFound });
   }
+
+  async #write(token: string, method: "POST" | "PATCH", path: string, payload: unknown): Promise<unknown> {
+    return connectorWrite(`${API}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }, { fetch: this.#fetch, timeoutMs: this.#timeoutMs });
+  }
+}
+
+function boundedSummary(value: string): string {
+  const summary = value.trim();
+  if (summary === "" || summary.length > MAX_SUMMARY) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", "summary must be 1-256 characters");
+  }
+  return summary;
+}
+
+function boundedDescription(value: string): string {
+  if (value.length > MAX_DESCRIPTION_CHARS) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", `description must be at most ${MAX_DESCRIPTION_CHARS} characters`);
+  }
+  return value;
+}
+
+function boundedLocation(value: string): string {
+  const location = value.trim();
+  if (location.length > MAX_LOCATION) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", `location must be at most ${MAX_LOCATION} characters`);
+  }
+  return location;
+}
+
+/** Rejects ambiguous times: an offset is required unless the caller names the time zone. */
+function eventTime(value: string, field: "start" | "end", timeZone: string | undefined): { dateTime: string; timeZone?: string } {
+  const stamp = value.trim();
+  if (OFFSET_TIME.test(stamp) && Number.isFinite(Date.parse(stamp))) {
+    return timeZone === undefined ? { dateTime: stamp } : { dateTime: stamp, timeZone: validZone(timeZone) };
+  }
+  if (PLAIN_TIME.test(stamp)) {
+    if (timeZone === undefined) {
+      throw new ConnectorError("CONNECTOR_INVALID_INPUT", `${field} has no UTC offset; supply time_zone (e.g. Asia/Shanghai)`);
+    }
+    return { dateTime: stamp, timeZone: validZone(timeZone) };
+  }
+  throw new ConnectorError("CONNECTOR_INVALID_INPUT", `${field} must be an RFC 3339 timestamp such as 2026-11-20T10:00:00+08:00`);
+}
+
+function validZone(value: string): string {
+  const zone = value.trim();
+  if (!TIME_ZONE.test(zone)) throw new ConnectorError("CONNECTOR_INVALID_INPUT", "time_zone is invalid");
+  return zone;
+}
+
+function assertOrder(start: string, end: string): void {
+  const startAt = Date.parse(start);
+  const endAt = Date.parse(end);
+  if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt <= startAt) {
+    throw new ConnectorError("CONNECTOR_INVALID_INPUT", "end must be after start");
+  }
+}
+
+function eventIdentity(value: unknown): { id: string; summary: string; start: string; end: string; htmlLink: string } {
+  const identity = summaryFrom(value);
+  if (!isRecord(value) || identity === undefined) {
+    throw new ConnectorError("CONNECTOR_UPSTREAM_UNAVAILABLE", "Google Calendar response was invalid");
+  }
+  return {
+    id: identity.id,
+    summary: identity.summary,
+    start: identity.start,
+    end: identity.end,
+    htmlLink: typeof value.htmlLink === "string" ? value.htmlLink : "",
+  };
 }
 
 function summaryFrom(value: unknown): CalendarEventSummary | undefined {

@@ -95,11 +95,14 @@ is broadcast as `model.changed` just like a button click.
   defaults, so a native shell deployment must list its exact origin there. The SSE response is
   written on a hijacked socket and therefore echoes `Access-Control-Allow-Origin` and
   `Vary: Origin` itself; an origin outside the allowlist gets no ACAO.
-- Connectors (GitHub, Gmail, Outlook, Linear, Notion, Google Calendar and Google Drive, all
-  read-only) are authorized once on the server and shared by every client: create with `POST /connectors`, open the URL from `POST /connectors/{slug}/oauth/start`,
+- Connectors (GitHub, Gmail, Outlook, Linear, Notion, Google Calendar and Google Drive) are
+  authorized once on the server and shared by every client: create with `POST /connectors`, open the URL from `POST /connectors/{slug}/oauth/start`,
   and poll `GET /connectors` (or listen for `connector.changed`). Tokens never reach a client.
   `credential.request` means a tool needs authorization; it carries only the slug/provider/tool.
-  Gmail has no send/delete/modify tools.
+  Read tools are governed as `authz: read`; every create/send/update tool is `authz: write`.
+  **There are deliberately no delete tools**: no message, file, event or issue can be removed
+  through the connector extension, and a write result carries only a confirmation plus the new
+  object's id or link, never the upstream payload.
 - `DELETE /api/v1/connectors/{slug}` deletes the encrypted credential and marks the row `revoked`
   in one transaction, then broadcasts `connector.changed`; its tools return
   `CONNECTOR_NOT_CONNECTED` until it is authorized again. The row and slug stay, so a fresh
@@ -134,15 +137,38 @@ is broadcast as `model.changed` just like a button click.
   the same route but start only on the next server boot, after the command is re-checked against
   `CONNECTOR_STDIO_ALLOWLIST`. They run a host binary with `inheritEnv: false` and a private working
   directory under `DATA_DIR`; treat enabling one as a high-risk admin action.
-- Connector tools are `connector_list`, `connector_github_list_repositories`,
-  `connector_github_list_issues`, `connector_github_get_issue`,
-  `connector_gmail_search_messages`, `connector_gmail_get_message`,
-  `connector_outlook_list_messages`, `connector_outlook_search_messages`,
-  `connector_outlook_get_message`, `connector_linear_list_issues`,
-  `connector_linear_search_issues`, `connector_linear_get_issue`, `connector_notion_search`,
-  `connector_notion_get_page`, `connector_google_calendar_list_events`,
-  `connector_google_calendar_get_event`, `connector_google_drive_search_files`,
-  `connector_google_drive_get_file`.
+- Connector scopes, read tools and write tools per provider:
+
+  | provider | scopes | read tools | write tools |
+  | --- | --- | --- | --- |
+  | `github` | `read:user`, `repo` | `connector_github_list_repositories`, `connector_github_list_issues`, `connector_github_get_issue` | `connector_github_create_issue`, `connector_github_comment_issue`, `connector_github_update_issue` |
+  | `gmail` | `.../auth/gmail.modify`, `.../auth/gmail.send` | `connector_gmail_search_messages`, `connector_gmail_get_message` | `connector_gmail_send_message`, `connector_gmail_create_draft`, `connector_gmail_modify_labels` |
+  | `outlook` | `offline_access`, `User.Read`, `Mail.ReadWrite`, `Mail.Send` | `connector_outlook_list_messages`, `connector_outlook_search_messages`, `connector_outlook_get_message` | `connector_outlook_send_message`, `connector_outlook_reply_message`, `connector_outlook_update_message` |
+  | `linear` | `read`, `write` | `connector_linear_list_issues`, `connector_linear_search_issues`, `connector_linear_get_issue` | `connector_linear_create_issue`, `connector_linear_update_issue`, `connector_linear_comment_issue` |
+  | `notion` | none (see below) | `connector_notion_search`, `connector_notion_get_page` | `connector_notion_create_page`, `connector_notion_append_blocks` |
+  | `google_calendar` | `openid`, `email`, `.../auth/calendar` | `connector_google_calendar_list_events`, `connector_google_calendar_get_event` | `connector_google_calendar_create_event`, `connector_google_calendar_update_event` |
+  | `google_drive` | `openid`, `email`, `.../auth/drive.file` | `connector_google_drive_search_files`, `connector_google_drive_get_file` | `connector_google_drive_create_file`, `connector_google_drive_update_file` |
+
+  `connector_list` reports definitions and connections. Token refresh repeats the same scope set
+  (Google and Microsoft issue a token only for the scopes named there); a connection granted an
+  older, narrower set fails to refresh and asks the user to reauthorize.
+
+- Scope trade-offs:
+  - **GitHub `repo` vs `public_repo`**: `repo` is full control of public *and* private repositories
+    the account can reach. It is required for the issue write tools to work on private repos;
+    `public_repo` would restrict writes to public repositories but makes private-repo workflows fail
+    with `CONNECTOR_SCOPE_DENIED`. The connector needs no `delete_repo` or workflow scope.
+  - **Gmail**: `gmail.modify` covers read, labels, archive and mark-read; `gmail.send` covers sending.
+    The full-access `https://mail.google.com/` scope is never requested, and the client refuses the
+    `TRASH`/`SPAM` labels so a model cannot trash a message through a label change.
+  - **Google Drive `drive.file`**: only files this app created or the user opened through it are
+    visible and writable. Aster cannot modify arbitrary pre-existing Drive files, and a Google Doc
+    cannot be edited through the media upload path (`create_file`/`update_file` are plain text).
+    That is the deliberate cost of not requesting `drive` (all files).
+  - **Notion has no OAuth scope parameter.** After installing the integration the user must enable
+    *Insert content* and *Update content* in the integration's capabilities; otherwise
+    `connector_notion_create_page` and `connector_notion_append_blocks` fail with
+    `CONNECTOR_SCOPE_DENIED`. The parent page or database must also be shared with the integration.
 - Errors use `{ "error": { "code", "message" } }`; display `message`, branch on `code`.
 
 ## Error codes

@@ -28,15 +28,19 @@ const ENDPOINTS: Record<Provider, string> = {
   google_drive: "https://oauth2.googleapis.com/token",
 };
 
-/** Provider-specific refresh parameters. Microsoft only reissues a refresh token when offline_access is in scope. */
+/**
+ * Provider-specific refresh parameters. Microsoft only reissues a refresh token when offline_access
+ * is in scope. Google and Microsoft only return a token covering what was granted, so this list must
+ * stay in step with the connector definitions on the host.
+ */
 const REFRESH_PARAMS: Readonly<Record<Provider, Readonly<Record<string, string>>>> = {
   github: {},
-  gmail: {},
-  outlook: { scope: "offline_access Mail.Read User.Read" },
+  gmail: { scope: "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send" },
+  outlook: { scope: "offline_access User.Read Mail.ReadWrite Mail.Send" },
   linear: {},
   notion: {},
-  google_calendar: { scope: "openid email https://www.googleapis.com/auth/calendar.readonly" },
-  google_drive: { scope: "openid email https://www.googleapis.com/auth/drive.readonly" },
+  google_calendar: { scope: "openid email https://www.googleapis.com/auth/calendar" },
+  google_drive: { scope: "openid email https://www.googleapis.com/auth/drive.file" },
 };
 
 const REFRESH_SKEW_MS = 60_000;
