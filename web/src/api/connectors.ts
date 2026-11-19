@@ -58,8 +58,6 @@ export type Connector = {
   status: ConnectorStatus;
   account: ConnectorAccount | null;
   scopes: string[];
-  /** Gmail 本轮只读；UI 不展示发送/删除入口。 */
-  readOnly: boolean;
   connectedAt: string | null;
   lastError: string | null;
 };
@@ -125,16 +123,6 @@ const UI_PROVIDERS: ConnectorId[] = [
   "google_calendar",
   "google_drive",
 ];
-
-/** 本轮只读的 provider；UI 不展示发送/删除/修改入口。 */
-const READ_ONLY_PROVIDERS = new Set<ConnectorId>([
-  "gmail",
-  "outlook",
-  "linear",
-  "notion",
-  "google_calendar",
-  "google_drive",
-]);
 
 function timeoutSignal(ms: number): AbortSignal {
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
@@ -273,7 +261,6 @@ export function mapConnectorList(
         connection?.scopes ??
         definition?.defaultScopes ??
         [],
-      readOnly: READ_ONLY_PROVIDERS.has(provider),
       connectedAt: connection?.createdAt ?? null,
       lastError: connection?.lastErrorCode
         ? connectorErrorText(connection.lastErrorCode, "连接异常，请重新授权")

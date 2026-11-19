@@ -13,7 +13,6 @@ function remote(overrides: Partial<Connector> & Pick<Connector, "id">): Connecto
     status: "disconnected",
     account: null,
     scopes: [],
-    readOnly: false,
     connectedAt: null,
     lastError: null,
     ...overrides,
@@ -21,7 +20,7 @@ function remote(overrides: Partial<Connector> & Pick<Connector, "id">): Connecto
 }
 
 describe("catalog", () => {
-  it("七个 provider 都有 meta，只读标记正确", () => {
+  it("七个 provider 都有 meta，且不再出现只读文案", () => {
     expect(CONNECTOR_CATALOG.map((meta) => meta.id)).toEqual([
       "github",
       "gmail",
@@ -34,31 +33,28 @@ describe("catalog", () => {
     for (const meta of CONNECTOR_CATALOG) {
       expect(connectorMeta(meta.id)).toBe(meta);
       expect(meta.permissions.length).toBeGreaterThan(0);
+      expect(meta.tagline).not.toContain("只读");
+      expect(`${meta.description}${meta.permissions.join("")}`).not.toContain(
+        "只读",
+      );
     }
-    expect(connectorMeta("github")?.readOnly).toBe(false);
-    expect(connectorMeta("gmail")?.readOnly).toBe(true);
-    expect(connectorMeta("outlook")?.readOnly).toBe(true);
-    expect(connectorMeta("linear")?.readOnly).toBe(true);
-    expect(connectorMeta("notion")?.readOnly).toBe(true);
-    expect(connectorMeta("google_calendar")?.readOnly).toBe(true);
-    expect(connectorMeta("google_drive")?.readOnly).toBe(true);
   });
 
-  it("Notion / Calendar / Drive 的文案与权限", () => {
+  it("Notion / Calendar / Drive 使用读写口径的文案与权限", () => {
     expect(connectorMeta("notion")).toMatchObject({
       name: "Notion",
-      tagline: "只读页面与数据库",
-      permissions: ["搜索页面/数据库", "读取页面内容"],
+      tagline: "页面与数据库读写",
+      permissions: ["搜索页面/数据库", "读取与写入页面内容"],
     });
     expect(connectorMeta("google_calendar")).toMatchObject({
       name: "Google Calendar",
-      tagline: "只读日历事件",
-      permissions: ["读取日历与事件"],
+      tagline: "日程读取与创建",
+      permissions: ["读取日历与事件", "创建日程"],
     });
     expect(connectorMeta("google_drive")).toMatchObject({
       name: "Google Drive",
-      tagline: "只读文件检索",
-      permissions: ["搜索文件", "读取 Google 文档正文"],
+      tagline: "文件检索与读写",
+      permissions: ["搜索文件", "读取与写入 Google 文档"],
     });
   });
 
@@ -85,18 +81,19 @@ describe("mergeCatalog", () => {
       "google_drive",
     ]);
     expect(merged.every((connector) => connector.status === "disconnected")).toBe(true);
-    expect(merged.filter((connector) => connector.readOnly)).toHaveLength(6);
+    expect(merged.every((connector) => !connector.description.includes("只读"))).toBe(
+      true,
+    );
   });
 
-  it("以服务端状态为准，但 Gmail 保持只读", () => {
+  it("以服务端状态为准，未知 id 被忽略", () => {
     const merged = mergeCatalog([
       remote({
         id: "gmail",
         name: "Gmail",
         status: "connected",
-        readOnly: false,
         account: { id: "a@b.c", label: "a@b.c" },
-        scopes: ["gmail.readonly"],
+        scopes: ["gmail.modify"],
         connectedAt: "2026-01-01T00:00:00.000Z",
       }),
       remote({ id: "slack" as Connector["id"], status: "connected" }),
@@ -104,7 +101,6 @@ describe("mergeCatalog", () => {
 
     const gmail = merged.find((connector) => connector.id === "gmail");
     expect(gmail?.status).toBe("connected");
-    expect(gmail?.readOnly).toBe(true);
     expect(gmail?.account?.label).toBe("a@b.c");
     expect(merged.some((connector) => (connector.id as string) === "slack")).toBe(false);
   });

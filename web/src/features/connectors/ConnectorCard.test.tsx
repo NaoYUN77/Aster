@@ -11,7 +11,6 @@ function connector(overrides: Partial<Connector>): Connector {
     status: "disconnected",
     account: null,
     scopes: [],
-    readOnly: false,
     connectedAt: null,
     lastError: null,
     ...overrides,
@@ -86,7 +85,6 @@ describe("ConnectorCard 四态", () => {
         id: "gmail",
         name: "Gmail",
         status: "error",
-        readOnly: true,
         lastError: "服务器未配置 OAuth 凭据",
       }),
     );
@@ -94,5 +92,6 @@ describe("ConnectorCard 四态", () => {
     expect(html).toContain("连接异常");
     expect(html).toContain("服务器未配置 OAuth 凭据");
     expect(html).toContain("重试");
+    expect(html).not.toContain("只读");
   });
 });

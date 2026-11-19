@@ -103,13 +103,11 @@ describe("mapConnectorList", () => {
       status: "connected",
       account: { id: "octocat", label: "octocat" },
       scopes: ["repo"],
-      readOnly: false,
     });
     expect(mapped[1]).toMatchObject({
       status: "pending",
       account: null,
       scopes: [],
-      readOnly: true,
     });
   });
 
@@ -140,18 +138,16 @@ describe("mapConnectorList", () => {
       name: "Outlook",
       status: "connected",
       account: { id: "a@outlook.com", label: "a@outlook.com" },
-      readOnly: true,
     });
     expect(mapped[3]).toMatchObject({
       id: "linear",
       name: "Linear (read-only)",
       status: "connected",
       account: { id: "aster", label: "aster" },
-      readOnly: true,
     });
   });
 
-  it("Notion / Calendar / Drive 映射 connected 与只读标记", () => {
+  it("Notion / Calendar / Drive 映射 connected 状态", () => {
     const mapped = mapConnectorList({
       providers: [
         provider("notion", []),
@@ -183,21 +179,18 @@ describe("mapConnectorList", () => {
         name: "Notion",
         status: "connected",
         account: { label: "Aster Workspace" },
-        readOnly: true,
       },
       {
         id: "google_calendar",
         name: "Google Calendar",
         status: "connected",
         account: { label: "a@b.c" },
-        readOnly: true,
       },
       {
         id: "google_drive",
         name: "Google Drive",
         status: "connected",
         account: { label: "a@b.c" },
-        readOnly: true,
       },
     ]);
   });
@@ -240,11 +233,6 @@ describe("mapConnectorList", () => {
     // 只展示七个可管理的 provider；mcp_stdio 不展示。
     expect(mapped).toHaveLength(7);
     expect(mapped.every((item) => item.status === "disconnected")).toBe(true);
-    expect(mapped[2]).toMatchObject({ id: "outlook", readOnly: true });
-    expect(mapped[3]).toMatchObject({ id: "linear", readOnly: true });
-    expect(mapped[4]).toMatchObject({ id: "notion", readOnly: true });
-    expect(mapped[5]).toMatchObject({ id: "google_calendar", readOnly: true });
-    expect(mapped[6]).toMatchObject({ id: "google_drive", readOnly: true });
   });
 });
 

@@ -95,11 +95,6 @@ export function ConnectorCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-semibold">{connector.name}</span>
-            {connector.readOnly && (
-              <Badge variant="outline" className="px-1.5 py-0 text-[10px] leading-4">
-                只读
-              </Badge>
-            )}
           </div>
           <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{meta.tagline}</p>
         </div>

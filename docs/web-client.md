@@ -263,9 +263,9 @@ SSE 使用 `fetch` 且带 `Cache-Control: no-cache` 请求头，属于非简单�
   列表为准。
 - 刷新/重启后状态来自服务端，不来自客户端缓存。若服务端暂时不可达，
   页面显示错误与“重试”，不会把未知状态显示成已连接。
-- Gmail 与 Outlook 本轮只读，只展示搜索/读取邮件的能力；Linear 只读 Issue；
-  Notion 只读页面与数据库；Google Calendar / Drive 只读日历与文件。以上 UI 都标注
-  “只读”，不出现写入、发送、删除或修改入口。
+- 连接器支持读取与写入：Gmail / Outlook 可检索、发送与回复邮件；GitHub / Linear
+  可读取并创建或更新 Issue 与评论；Notion / Google Calendar / Drive 可读取并写入。
+  UI 不再展示「只读」标签，本轮不提供删除操作。
   目录固定为 GitHub / Gmail / Outlook / Linear / Notion / Google Calendar /
   Google Drive；服务端暂未返回某个 provider 时，卡片以「未连接」占位显示，不会白屏。
 

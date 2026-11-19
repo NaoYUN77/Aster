@@ -3,7 +3,6 @@ import {
   CheckCircle2,
   Info,
   Link2,
-  Lock,
   ShieldCheck,
   Unplug,
   Zap,
@@ -129,11 +128,6 @@ export function ConnectorDetail({
           <div className="min-w-0">
             <DialogTitle className="flex items-center gap-2 text-base font-semibold">
               {connector.name}
-              {connector.readOnly && (
-                <Badge variant="outline" className="px-1.5 py-0 text-[10px] leading-4">
-                  只读
-                </Badge>
-              )}
             </DialogTitle>
             <DialogDescription className="mt-0.5 text-xs text-muted-foreground">
               {meta?.tagline ?? connector.description}
@@ -217,12 +211,6 @@ export function ConnectorDetail({
               </li>
             ))}
           </ul>
-          {connector.readOnly && meta?.readOnlyNotice && (
-            <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-muted-foreground">
-              <Lock className="mt-0.5 size-3 shrink-0" />
-              {meta.readOnlyNotice}
-            </p>
-          )}
         </div>
 
         <Separator className="my-4" />
