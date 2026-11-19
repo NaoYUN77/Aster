@@ -126,6 +126,11 @@ is broadcast as `model.changed` just like a button click.
   stored in the broker and no `credential_master_key` is needed. `ASTER_CONNECTOR_MIGRATE=1`
   (accepted only with `cf`) copies existing local credentials to the broker at startup and deletes
   each local ciphertext only after its upload succeeds; logs report counts, never values.
+- In `cf` mode the optional provider keys `EXA_API_KEY` (`exa_api_key`) and `DEEPSEEK_WEB_API_KEY`
+  (`deepseek_web_api_key`) are also read from the broker when the environment variable is absent or
+  empty; an existing value is never overwritten. This is best-effort: a missing secret, a 403, a
+  timeout or an unreachable broker leaves the key unset and never fails startup, and logs contain
+  only the secret name and a stable code. Connector secrets keep their own fail-closed path above.
 - `CONNECTOR_OAUTH_RETURN_URL` is optional. Empty (the default) keeps the success page in the
   browser. When set (an `aster:`, `http:` or `https:` URL), the success page additionally offers a
   meta-refresh link and a button to that URL with `?slug=<slug>&status=connected`; no token is

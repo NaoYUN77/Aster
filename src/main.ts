@@ -10,6 +10,7 @@ import { readProviderConfig } from "./provider-config.js";
 import { ReactionAnchor } from "./reactions.js";
 import { PROVIDER_IDS } from "./providers.js";
 import { ReminderScheduler, ReminderStore } from "./reminders.js";
+import { resolveOptionalEnvSecrets } from "./secret-env.js";
 import { REACTIONS_READ_SCOPE, serveSlack, SlackClient, styleStartupLine } from "./slack.js";
 import { StyleLearning, StyleStore } from "./style.js";
 import { serveTelegram, TelegramClient } from "./telegram.js";
@@ -40,7 +41,10 @@ try {
     PROVIDER_IDS,
   );
   if (providerConfig.error !== undefined) throw new ConfigurationError(providerConfig.error);
-  const config = readConfig(process.env, providerConfig.providers);
+  // Optional provider keys may live in the Cloudflare broker; this never fails startup and never
+  // overwrites an environment value. Connector secrets keep their own (fail-closed) path.
+  const env = await resolveOptionalEnvSecrets(process.env);
+  const config = readConfig(env, providerConfig.providers);
   // Tracing is auxiliary: absent keys or an exporter failure must not stop the bot.
   trace = startTrace(config.trace);
   if (config.channel.kind === "web") {
