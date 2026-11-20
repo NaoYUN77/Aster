@@ -310,7 +310,7 @@ test("a thread anchor is part of the request and survives a restart", async () =
   let inbox = new Inbox(path);
   try {
     const threaded = {
-      requestId: "slack:T1:Ev1",
+      requestId: "chat:T1:Ev1",
       conversationId: "C0CHANNEL12",
       senderId: "U0MEMBER123",
       text: "and then?",
@@ -329,7 +329,7 @@ test("a thread anchor is part of the request and survives a restart", async () =
     inbox.beginPart(threaded.requestId, 0);
     inbox.confirmPart(threaded.requestId, 0, "1700000000.000200");
     // A flat request keeps no anchor, and reading it back does not invent one.
-    inbox.accept(2, { requestId: "slack:T1:Ev2", conversationId: "C0CHANNEL12", senderId: "U0MEMBER123", text: "flat" });
+    inbox.accept(2, { requestId: "chat:T1:Ev2", conversationId: "C0CHANNEL12", senderId: "U0MEMBER123", text: "flat" });
     assert.equal(inbox.next()?.threadTs, undefined);
   } finally {
     inbox.close();

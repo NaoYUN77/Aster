@@ -298,7 +298,7 @@ test("an admitted tool execution gets its own span without uploading arguments o
   const logs: string[] = [];
   const runtime = startTrace({ enabled: true }, (line) => logs.push(line), { tracerProvider: provider });
   assert.ok(runtime);
-  const request = beginRequest({ conversationId: 9, requestId: "slack:9:req-1" });
+  const request = beginRequest({ conversationId: 9, requestId: "chat:9:req-1" });
   assert.ok(request);
 
   const execution = beginToolExecution({

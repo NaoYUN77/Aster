@@ -5,8 +5,6 @@ import { ConfigurationError } from "./errors.js";
 import { MODEL_FAILOVER_DEFAULTS, type ModelRef } from "./model-failover.js";
 import type { WatchersConfig } from "./watchers/protocol.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
-import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
-import { STYLE_MODES } from "./style.js";
 import type { CustomProviderDeclaration } from "./provider-config.js";
 import { ROUTINE_DEFAULTS, type RoutinesConfig } from "./routines/protocol.js";
 import { assertTimeZone, isValidTimeOfDay, normalizeTimeOfDay } from "./routines/time.js";
@@ -154,9 +152,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   };
   // The channel comes first: which variables exist, including the owner id, depends on it.
   const channelKind = readChannelKind(env);
-  const ownerId = channelKind === "slack"
-    ? readSlackOwnerId(env, required)
-    : channelKind === "web" ? readWebOwnerId(env) : readOwnerId(env);
+  const ownerId = channelKind === "web" ? readWebOwnerId(env) : readOwnerId(env);
   const provider = required("MODEL_PROVIDER");
   // A declared provider carries its own credential variable name; either kind resolves to exactly
   // one environment variable holding one explicit key.
@@ -176,7 +172,6 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   const routines = readRoutinesConfig(env);
   const skills = readSkillsConfig(env);
   const browser = readBrowserConfig(env);
-  const style = readStyleConfig(env);
   // The channel's own credentials keep their place in the error order; MODEL_ID follows them as before.
   const channel = readChannelCredentials(env, channelKind, ownerId, required);
   const model = required("MODEL_ID");
@@ -207,7 +202,6 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(routines.enabled ? { routines } : {}),
     ...(skills.enabled ? { skills } : {}),
     ...(browser === undefined ? {} : { browser }),
-    style,
     trace: readTraceConfig(env),
     // Memory is part of the configuration every channel sees, so an explicit MEMORY_ENABLED=0 is
     // honored rather than silently replaced by defaults when the agent is composed.
@@ -347,29 +341,6 @@ export function readReminderConfig(env: NodeJS.ProcessEnv = process.env): Remind
     maxPerHour: boundedInteger(env, "REMINDERS_MAX_PER_HOUR", 20, 1, 1_000),
     horizonDays: boundedInteger(env, "REMINDERS_MAX_HORIZON_DAYS", 366, 1, 3_650),
   };
-}
-
-/** Reaction feedback: record signals, and at most once per scope ask what to change. */
-export type StyleConfig = {
-  /**
-   * `off` (default) records nothing; `observe` records only; `ask` records and asks. Default `off`
-   * because Slack delivers reaction events only after `reactions:read` and the matching event
-   * subscriptions are added — until then any other value would look like silence.
-   */
-  readonly mode: "off" | "observe" | "ask";
-};
-
-/**
- * One variable with three states, and an unknown value is a startup error rather than a silent fall
- * back to the safest one: which of the three the deployment is in has to be a decision somebody made.
- */
-export function readStyleConfig(env: NodeJS.ProcessEnv = process.env): StyleConfig {
-  const raw = env.STYLE_LEARNING?.trim().toLowerCase();
-  if (raw === undefined || raw === "") return { mode: "off" };
-  if (!(STYLE_MODES as readonly string[]).includes(raw)) {
-    throw new ConfigurationError(`STYLE_LEARNING must be one of: ${STYLE_MODES.join(", ")}`);
-  }
-  return { mode: raw as StyleConfig["mode"] };
 }
 
 /**
@@ -523,23 +494,9 @@ function boundedInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, m
  */
 export type ChannelConfig =
   | { readonly kind: "telegram"; readonly ownerId: string; readonly token: string; readonly apiRoot?: string }
-  | {
-    readonly kind: "slack";
-    readonly ownerId: string;
-    readonly botToken: string;
-    readonly appToken: string;
-    /** Members allowed to drive the bot besides the owner. Empty keeps the owner-only DM behaviour. */
-    readonly allowedUsers: readonly string[];
-    /** Channels the bot answers in. Empty keeps the owner-only DM behaviour. */
-    readonly allowedChannels: readonly string[];
-    /** Emoji the bot attaches to a message while it works, and the ones that can replace it. */
-    readonly receipts: ReceiptEmojis;
-    /** How many reactions the model may spend on one message; keeps a lively answer from becoming a wall. */
-    readonly maxReactions: number;
-  }
   | { readonly kind: "web"; readonly ownerId: string };
 
-export const CHANNELS = ["telegram", "slack", "web"] as const;
+export const CHANNELS = ["telegram", "web"] as const;
 
 /** Web adapter runtime settings (only read when CHANNEL=web). */
 export type WebConfig = {
@@ -783,134 +740,38 @@ export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): Conn
   };
 }
 
-const SLACK_BOT_TOKEN_SHAPE = /^xoxb-[A-Za-z0-9-]{20,250}$/;
-const SLACK_APP_TOKEN_SHAPE = /^xapp-[A-Za-z0-9-]{20,250}$/;
-// Slack member ids: a U (or legacy W) plus the member's alphanumeric id.
-const SLACK_OWNER_ID_SHAPE = /^[UW][A-Z0-9]{6,15}$/;
-// Channel ids: C (public), G (private or legacy group) or D (direct); the bot token type decides access.
-const SLACK_CHANNEL_ID_SHAPE = /^[CGD][A-Z0-9]{6,15}$/;
-
 /**
  * Which channel this process serves. The default keeps every existing deployment working, and an
- * unrecognised value is a startup error rather than a silent fallback to Telegram.
+ * unrecognised value — including `slack`, which now lives in its own repository — is a startup
+ * error rather than a silent fallback to Telegram.
  */
-function readChannelKind(env: NodeJS.ProcessEnv): "telegram" | "slack" | "web" {
+function readChannelKind(env: NodeJS.ProcessEnv): "telegram" | "web" {
   const raw = env.CHANNEL?.trim().toLowerCase();
   if (raw !== undefined && raw !== "" && !(CHANNELS as readonly string[]).includes(raw)) {
     throw new ConfigurationError(`CHANNEL must be one of: ${CHANNELS.join(", ")}`);
   }
-  if (raw === "slack") return "slack";
   if (raw === "web") return "web";
   return "telegram";
 }
 
-function readSlackOwnerId(env: NodeJS.ProcessEnv, required: (key: string) => string): string {
-  const ownerId = required("SLACK_OWNER_ID");
-  if (!SLACK_OWNER_ID_SHAPE.test(ownerId)) {
-    throw new ConfigurationError("SLACK_OWNER_ID must be a Slack member ID, such as U0123ABCDEF");
-  }
-  return ownerId;
-}
-
-/** The emoji receipts a Slack deployment asks for by default; each one can be turned off explicitly. */
-const SLACK_RECEIPT_DEFAULTS = {
-  working: "eyes",
-  done: "white_check_mark",
-  failed: "warning",
-  lost: "x",
-} as const;
-/** A deployment that wants no receipt at all writes one of these instead of a name. */
-const RECEIPT_OFF = new Set(["none", "off", "0", "-"]);
-
-/**
- * Reads one receipt emoji. Absent means the default, an empty or explicit "none" means this receipt
- * is off, and anything Slack could not accept as an emoji name is a startup error rather than a bot
- * whose acknowledgement silently never appears.
- */
-function readReceiptEmoji(env: NodeJS.ProcessEnv, key: string, fallback: string): string | undefined {
-  const raw = env[key]?.trim();
-  if (raw === undefined) return fallback;
-  if (raw === "" || RECEIPT_OFF.has(raw.toLowerCase())) return undefined;
-  const name = normalizeEmojiName(raw);
-  if (name === undefined) {
-    throw new ConfigurationError(`${key} must be a Slack emoji name, such as ${fallback}, or none`);
-  }
-  return name;
-}
-
-/**
- * A comma-separated allowlist. Absent or empty is not "allow everything": it is the owner-only
- * behaviour this deployment had before team channels existed. A malformed id is a startup error, so a
- * typo shows up as a refused boot instead of a member whose messages are silently ignored.
- */
-function readSlackIdList(
-  env: NodeJS.ProcessEnv,
-  key: string,
-  shape: RegExp,
-  what: string,
-): readonly string[] {
-  const raw = env[key]?.trim();
-  if (raw === undefined || raw === "") return [];
-  const ids = raw.split(",").map((value) => value.trim()).filter((value) => value !== "");
-  for (const id of ids) {
-    if (!shape.test(id)) throw new ConfigurationError(`${key} must list ${what}, comma-separated and without spaces`);
-  }
-  return [...new Set(ids)];
-}
-
 /**
  * Reads the selected channel's own variables. Only the active channel's credentials are required, so
- * a Telegram deployment never needs Slack tokens and vice versa. A prefix check catches a token
- * pasted into the wrong variable; a vault placeholder is accepted wherever a credential is expected.
+ * a Telegram deployment never needs web settings. A vault placeholder is accepted wherever a
+ * credential is expected.
  */
 function readChannelCredentials(
   env: NodeJS.ProcessEnv,
-  kind: "telegram" | "slack" | "web",
+  kind: "telegram" | "web",
   ownerId: string,
   required: (key: string) => string,
 ): ChannelConfig {
   // The web adapter has no bot token: the owner authenticates with a password, and the HTTP layer
   // enforces that. Configuration only names the internal sender id.
   if (kind === "web") return { kind: "web", ownerId };
-  if (kind === "slack") {
-    const botToken = required("SLACK_BOT_TOKEN");
-    const appToken = required("SLACK_APP_TOKEN");
-    assertSlackToken("SLACK_BOT_TOKEN", botToken, SLACK_BOT_TOKEN_SHAPE);
-    assertSlackToken("SLACK_APP_TOKEN", appToken, SLACK_APP_TOKEN_SHAPE);
-    // Receipts need `reactions:write`; the shape is checked here so a bad name is a refused boot, and a
-    // missing scope shows up as a refused call rather than as a bot that never reacts.
-    const working = readReceiptEmoji(env, "SLACK_ACK_EMOJI", SLACK_RECEIPT_DEFAULTS.working);
-    const done = readReceiptEmoji(env, "SLACK_DONE_EMOJI", SLACK_RECEIPT_DEFAULTS.done);
-    const failed = readReceiptEmoji(env, "SLACK_FAIL_EMOJI", SLACK_RECEIPT_DEFAULTS.failed);
-    const lost = readReceiptEmoji(env, "SLACK_LOST_EMOJI", SLACK_RECEIPT_DEFAULTS.lost);
-    return {
-      kind: "slack",
-      ownerId,
-      botToken,
-      appToken,
-      // Both lists are optional: an empty one is the owner-only private behaviour, not an open door.
-      allowedUsers: readSlackIdList(env, "SLACK_ALLOWED_USERS", SLACK_OWNER_ID_SHAPE, "Slack member IDs"),
-      allowedChannels: readSlackIdList(env, "SLACK_ALLOWED_CHANNELS", SLACK_CHANNEL_ID_SHAPE, "Slack channel IDs"),
-      receipts: {
-        ...(working === undefined ? {} : { working }),
-        ...(done === undefined ? {} : { done }),
-        ...(failed === undefined ? {} : { failed }),
-        ...(lost === undefined ? {} : { lost }),
-      },
-      // A reaction budget per message, not per process: the model is asked to be lively, not to decorate.
-      maxReactions: boundedInteger(env, "SLACK_MAX_REACTIONS", 3, 1, 10),
-    };
-  }
   const token = required("TELEGRAM_BOT_TOKEN");
   assertValidCredentialShape("TELEGRAM_BOT_TOKEN", token);
   const apiRoot = readTelegramApiRoot(env);
   return { kind: "telegram", ownerId, token, ...(apiRoot ? { apiRoot } : {}) };
-}
-
-function assertSlackToken(key: string, value: string, shape: RegExp): void {
-  assertValidCredentialShape(key, value);
-  if (isVaultPlaceholder(value)) return;
-  if (!shape.test(value)) throw new ConfigurationError(`${key} is not shaped like a Slack token`);
 }
 
 /**

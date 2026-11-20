@@ -41,14 +41,17 @@ test("WEB_OWNER_ID and WEB_* bounds are validated", () => {
   assert.throws(() => readConfig({ ...WEB_ENV, WEB_TRUST_PROXY: "yes" }), ConfigurationError);
 });
 
-test("telegram and slack still require their own identity and credentials", () => {
+test("telegram still requires its own identity and slack is refused", () => {
   assert.throws(
     () => readConfig({ MODEL_PROVIDER: "deepseek", MODEL_ID: "x", DEEPSEEK_API_KEY: "k" }),
     /TELEGRAM_OWNER_ID/,
   );
+  // The Slack bot lives in its own repository; an old CHANNEL=slack must fail loudly instead of
+  // falling back to Telegram.
   assert.throws(
     () => readConfig({ ...WEB_ENV, CHANNEL: "slack" }),
-    /SLACK_OWNER_ID/,
+    (error: unknown) => error instanceof ConfigurationError
+      && /CHANNEL must be one of: telegram, web/.test(error.message),
   );
 });
 

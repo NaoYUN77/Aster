@@ -31,7 +31,7 @@ export const WEB_APP_VERSION = "1.0.0";
 /**
  * Boot the web adapter next to the existing channels without touching them.
  *
- * The web process never creates a HubStore, never connects Telegram/Slack, and never opens another
+ * The web process never connects Telegram, and never opens another
  * data directory than the one it was configured with. Shutdown drains the worker, ends SSE, and only
  * then closes the agent and SQLite.
  */

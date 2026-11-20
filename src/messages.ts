@@ -4,11 +4,11 @@ export interface TextRequest {
   conversationId: string;
   senderId: string;
   text: string;
-  /** Slack thread to answer in, when the request arrived inside one. Absent means a flat reply. */
+  /** Thread to answer in, when the request arrived inside one. Absent means a flat reply. */
   threadTs?: string;
   /**
-   * The inbound message's own id at the channel (`ts` on Slack), when the channel has one. It is what
-   * a reaction is attached to; absent means the channel cannot address the message it received.
+   * The inbound message's own id at the channel, when the channel has one. It stays part of the
+   * durable request format; absent means the channel cannot address the message it received.
    */
   messageTs?: string;
 }

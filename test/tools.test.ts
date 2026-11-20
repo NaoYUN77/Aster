@@ -148,7 +148,7 @@ test("an admitted execution is traced as one tool span, and a denied call never 
   const runtime = startTrace({ enabled: true }, () => {}, { tracerProvider: provider });
   assert.ok(runtime);
   try {
-    const request = beginRequest({ conversationId: 11, requestId: "slack:11:req-1" });
+    const request = beginRequest({ conversationId: 11, requestId: "chat:11:req-1" });
     assert.ok(request);
     const writer = defineTool({
       name: "writer",
