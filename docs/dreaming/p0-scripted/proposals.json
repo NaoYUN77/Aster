@@ -1,0 +1,349 @@
+{
+  "runId": "p0-scripted",
+  "mode": "scripted",
+  "corrections": [
+    {
+      "segmentId": "p0-launch-date",
+      "caseId": "launch-date",
+      "proposalId": "f4cfb889e9cb823d",
+      "newText": "Beta launches on 2026-11-18.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        1
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-database",
+      "caseId": "database",
+      "proposalId": "5feb53e8ca94215b",
+      "newText": "The beta backend uses SQLite.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        4
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-notifications-owner",
+      "caseId": "notifications-owner",
+      "proposalId": "db15bc750c1fff73",
+      "newText": "Bob owns the notification service.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        7
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-deploy-region",
+      "caseId": "deploy-region",
+      "proposalId": "b97d7bc17a718482",
+      "newText": "Deploy to the Singapore region (sin).",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        10
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-api-version",
+      "caseId": "api-version",
+      "proposalId": "ed22a780b95b2839",
+      "newText": "The deployed API version is v2.4.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        13
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-tests",
+      "caseId": "tests",
+      "proposalId": "9763e965bff08cec",
+      "newText": "The test suite has 41 passing tests.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        16
+      ],
+      "label": "incorrect",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-report-deadline",
+      "caseId": "report-deadline",
+      "proposalId": "dfa2df6fb37aa6ed",
+      "newText": "The board report is due 2026-11-21.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        19
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-budget",
+      "caseId": "budget",
+      "proposalId": "845ba0effe787105",
+      "newText": "The cloud budget is $450 per month.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        22
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-outage-cause",
+      "caseId": "outage-cause",
+      "proposalId": "9f55fc2f4f1f06f4",
+      "newText": "The outage was caused by an expired TLS certificate.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        25
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-chart-library",
+      "caseId": "chart-library",
+      "proposalId": "6215f8d8b79b2248",
+      "newText": "The dashboard uses Recharts for charts.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        28
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-meeting-move",
+      "caseId": "meeting-move",
+      "proposalId": "b6d517d2f02c60d6",
+      "newText": "The design review moved to Wednesday at 15:00.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        31
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-repo-name",
+      "caseId": "repo-name",
+      "proposalId": "5e51415268cfe35d",
+      "newText": "The app repository is herbarium-app.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        34
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-staging-count",
+      "caseId": "staging-count",
+      "proposalId": "f6d008fbba5a4f12",
+      "newText": "Provisioned 5 staging servers.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        37
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-timezone",
+      "caseId": "timezone",
+      "proposalId": "7ab5763b26fd3b81",
+      "newText": "The user's timezone is Asia/Shanghai.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        40
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-deploy-status",
+      "caseId": "deploy-status",
+      "proposalId": "baaeaf884c814df6",
+      "newText": "The production deploy failed during migration 0042.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        43
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-auth-plan",
+      "caseId": "auth-plan",
+      "proposalId": "5fe0e435643af964",
+      "newText": "The beta uses passkeys for login.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        46
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-pr-reviewer",
+      "caseId": "pr-reviewer",
+      "proposalId": "889a925d99017dcf",
+      "newText": "Priya reviewed PR #212.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        49
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-seed-count",
+      "caseId": "seed-count",
+      "proposalId": "e66ef294b2e0e71d",
+      "newText": "The seed database contains 2,100 plants.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        52
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-kickoff-date",
+      "caseId": "kickoff-date",
+      "proposalId": "a9dacf10410c6b67",
+      "newText": "The kickoff meeting was on 2026-11-11.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        55
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-search-perf",
+      "caseId": "search-perf",
+      "proposalId": "af2375db82d1e79b",
+      "newText": "Search is slow because plant.name has no index.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        58
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-free-tier",
+      "caseId": "free-tier",
+      "proposalId": "b952827083bcef98",
+      "newText": "The free tier includes 50 plants.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        61
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-sync-provider",
+      "caseId": "sync-provider",
+      "proposalId": "fc610e774e320b20",
+      "newText": "Plant data syncs through Dropbox.",
+      "reason": "The cited source entries state a different value.",
+      "sourceEntryIds": [
+        64
+      ],
+      "label": "correct",
+      "applyCandidate": true,
+      "warnings": []
+    },
+    {
+      "segmentId": "p0-app-name",
+      "caseId": "app-name",
+      "proposalId": "15e916c6b543e551",
+      "newText": "The app is named Herbarium Pro.",
+      "reason": "Scripted false positive for the pipeline check.",
+      "sourceEntryIds": [
+        67
+      ],
+      "label": "incorrect",
+      "applyCandidate": true,
+      "warnings": []
+    }
+  ],
+  "notes": [
+    {
+      "kind": "result",
+      "status": "observed",
+      "text": "The beta launch is scheduled for 2026-11-18.",
+      "sourceEntryIds": [
+        1
+      ],
+      "applyCandidate": true
+    },
+    {
+      "kind": "result",
+      "status": "observed",
+      "text": "The beta launch is scheduled for 2026-11-18.",
+      "sourceEntryIds": [
+        25
+      ],
+      "applyCandidate": true
+    },
+    {
+      "kind": "result",
+      "status": "observed",
+      "text": "The beta launch is scheduled for 2026-11-18.",
+      "sourceEntryIds": [
+        49
+      ],
+      "applyCandidate": true
+    },
+    {
+      "kind": "result",
+      "status": "observed",
+      "text": "The beta launch is scheduled for 2026-11-18.",
+      "sourceEntryIds": [
+        73
+      ],
+      "applyCandidate": true
+    }
+  ],
+  "refusals": [
+    {
+      "segmentId": "p0-dark-mode",
+      "reason": "The source describes a mockup, not a preference."
+    }
+  ]
+}
