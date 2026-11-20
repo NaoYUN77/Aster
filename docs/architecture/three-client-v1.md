@@ -69,7 +69,7 @@
 - Rust 重写、Rust 网关、Rust sidecar。
 - 应用商店上架、推送通知、离线模型。
 - 自动更新、灰度发布、生产监控大盘。
-- 把 Telegram/Slack 渠道删掉或重构；v1 只新增 web 模式，旧渠道代码保持可用但不在 web 部署中启用。
+- 把 Telegram 渠道删掉或重构；v1 只新增 web 模式，Telegram 保持可用但不在 web 部署中启用。
 
 ---
 
@@ -148,7 +148,7 @@ Aster/
 │  ├─ model-failover.ts         # 现有；增加 onModelUsed 回调
 │  ├─ model-policy.ts           # 现有；不改选择范围
 │  ├─ config.ts                 # 增加 CHANNEL=web 与 WEB_*
-│  ├─ main.ts                   # web 模式启动 HTTP，不启动 Telegram/Slack
+│  ├─ main.ts                   # web 模式启动 HTTP，不启动 Telegram
 │  └─ agent.ts                  # 增加历史读取 / 模型元数据钩子；web 模式不建 Hub
 ├─ web/                         # 新增：三端共享前端（Dev 2）
 │  ├─ package.json
@@ -208,7 +208,7 @@ main
 
 ### 4.1 运行模式：新增 `CHANNEL=web`
 
-现有配置只接受 Telegram/Slack。Web 产品不需要这两个渠道，因此新增第三种运行模式：
+现有配置只接受 Telegram（Slack 通道已拆分到独立仓库）。Web 产品不需要 Telegram，因此新增第二种运行模式：
 
 ```text
 CHANNEL=web
@@ -222,10 +222,10 @@ WEB_SESSION_TTL_DAYS=30
 
 行为：
 
-- `CHANNEL=web` 时不需要 Telegram/Slack token；`main.ts` 不启动 Telegram/Slack 轮询，不创建 `HubStore`。
+- `CHANNEL=web` 时不需要 Telegram token；`main.ts` 不启动 Telegram 轮询。
 - `config.channel` 增加 `{ kind: "web", ownerId }`；`agent.reply()` 的 `senderId` 使用 `WEB_OWNER_ID`。
-- Telegram/Slack 代码保持原样，不在本轮重构；web 模式只是不实例化它们。
-- 旧的 `CHANNEL=telegram|slack` 行为不变，避免影响生产分支。
+- Telegram 代码保持原样，不在本轮重构；web 模式只是不实例化它。
+- 旧的 `CHANNEL=telegram` 行为不变；Slack 通道已拆分到独立仓库，`CHANNEL=slack` 启动即报错。
 - 一个 `DATA_DIR` 只能有一个进程（现有 flock 语义不变）；开发/测试必须用独立目录。
 
 ### 4.2 Fastify 组成
@@ -733,7 +733,7 @@ Dev 1 部署前必须逐项确认：
    - `docs/api/three-client-v1.openapi.yaml`：auth、messages、models、events、health、错误码。
    - 与 Dev 2 对齐字段；后续变更走契约 PR。
 2. **配置与启动**
-   - `config.ts` 支持 `CHANNEL=web`、`WEB_*`；不破坏 telegram/slack。
+   - `config.ts` 支持 `CHANNEL=web`、`WEB_*`；不破坏 telegram。
    - `main.ts` web 分支启动 HTTP；不创建 `HubStore`；优雅关闭。
    - `web.sqlite` 初始化（WAL、sessions、web_requests）。
 3. **认证**
@@ -840,7 +840,7 @@ Jay 明天按以下清单验收：
 
 - [ ] `npm run check`、`npm test` 通过。
 - [ ] `web` 的 `npm run build` 通过。
-- [ ] `CHANNEL=web` 本地启动；`CHANNEL=telegram|slack` 现有路径未被破坏。
+- [ ] `CHANNEL=web` 本地启动；`CHANNEL=telegram` 现有路径未被破坏。
 - [ ] `web.sqlite` 表结构、WAL、清理策略可用。
 - [ ] SSE 经 Caddy 不缓冲；心跳正常。
 - [ ] Compose/Caddy 使用独立 project/volume/端口。

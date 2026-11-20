@@ -48,15 +48,13 @@ MITM 只把客户端**显式发出**的 `__vault_<NAME>__` 换成 OpenBao 中的
 | 变量名（`.env`） | 是否占位 | 占位符值 | OpenBao KV 路径 | 允许出站主机 |
 | --- | --- | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | 是（`CHANNEL=telegram`，默认） | `__vault_TELEGRAM_BOT_TOKEN__` | `secret/aster/TELEGRAM_BOT_TOKEN` | `api.telegram.org` |
-| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | 是（`CHANNEL=slack` 时） | `__vault_SLACK_BOT_TOKEN__` / `__vault_SLACK_APP_TOKEN__` | `secret/aster/<NAME>` | `slack.com`（Socket Mode 的 `wss-primary.slack.com` 只在 URL 里带票据，不带凭据头，无需列出） |
 | `DEEPSEEK_API_KEY` | 是 | `__vault_DEEPSEEK_API_KEY__` | `secret/aster/DEEPSEEK_API_KEY` | `api.deepseek.com` |
 | `DEEPSEEK_WEB_API_KEY` | 是（可选） | `__vault_DEEPSEEK_WEB_API_KEY__` | `secret/aster/DEEPSEEK_WEB_API_KEY` | `api.deepseek.com` |
 | `EXA_API_KEY` | 是（可选） | `__vault_EXA_API_KEY__` | `secret/aster/EXA_API_KEY` | `api.exa.ai` |
 | 其他提供商 `*_API_KEY` | 是（按需） | `__vault_<NAME>__` | `secret/aster/<NAME>` | 见 `addon/allowlist.json` |
 | `MAGPIE_API_KEY` | 是（`MODEL_PROVIDER` 声明为 `magpie` 时） | `__vault_MAGPIE_API_KEY__` | `secret/aster/MAGPIE_API_KEY` | `10.1.4.9`、`100.66.135.123` |
-| `TELEGRAM_OWNER_ID` / `SLACK_OWNER_ID` | 否 | 数值用户 ID / Slack member ID（进程内比对，不出站） | — | — |
-| `SLACK_ALLOWED_USERS` / `SLACK_ALLOWED_CHANNELS` | 否 | 频道白名单：成员 ID / 频道 ID 列表（进程内比对，不出站；空着即只服务所有者单聊） | — | — |
-| `CHANNEL` | 否 | `telegram`（默认）或 `slack` | — | — |
+| `TELEGRAM_OWNER_ID` | 否 | 纯数字用户 ID（进程内比对，不出站） | — | — |
+| `CHANNEL` | 否 | `telegram`（默认）或 `web` | — | — |
 | `MODEL_PROVIDER` / `MODEL_ID` / `DATA_DIR` / `MEMORY_*` / `PROVIDERS_CONFIG` | 否 | 普通配置值 | — | — |
 | `LANGFUSE_SECRET_KEY` | 是（启用 Langfuse Trace 时） | `__vault_LANGFUSE_SECRET_KEY__` | `secret/aster/LANGFUSE_SECRET_KEY` | `cloud.langfuse.com`、`us.cloud.langfuse.com` |
 | `LANGFUSE_PUBLIC_KEY` | 否（公开值） | 明文即可；要统一管理也可用 `__vault_LANGFUSE_PUBLIC_KEY__` | `secret/aster/LANGFUSE_PUBLIC_KEY`（可选） | `cloud.langfuse.com`、`us.cloud.langfuse.com` |

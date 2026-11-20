@@ -2,7 +2,7 @@
 
 **This stack is for local/dev verification only. It must not be deployed to the production host.**
 
-The production Aster bot (Telegram/Slack) keeps running untouched. The web stack is a separate
+The production Aster bot (Telegram) keeps running untouched. The web stack is a separate
 Compose project (`aster-web`) with its own volume (`aster-web-data`), its own `DATA_DIR`, and
 non-standard host ports.
 

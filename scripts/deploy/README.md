@@ -25,13 +25,13 @@ vi .env
 chmod 600 .env
 ```
 
-必填项（渠道二选一）：`MODEL_PROVIDER`（`src/providers.ts` 注册表内的 id）、`MODEL_ID`（该提供商在 pi-ai 1.5.0 模型目录中的 id）、当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`，其他提供商的 key 留空）、`CHANNEL`（可选，`telegram` 默认或 `slack`，只校验选中渠道的变量）。Telegram（默认）：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`（纯数字用户 ID，不要写用户名）。Slack（`CHANNEL=slack`）：`SLACK_BOT_TOKEN`（`xoxb-`）、`SLACK_APP_TOKEN`（`xapp-`）、`SLACK_OWNER_ID`（`U…` member ID）。`SLACK_ALLOWED_USERS` / `SLACK_ALLOWED_CHANNELS`（可选，仅 Slack）：成员 ID 与频道 ID，逗号分隔、不写空格，空着即只服务所有者单聊。`TELEGRAM_API_ROOT`（可选，仅 Telegram）：https 前缀、无 query 或 fragment，供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理，未设置时使用官方根地址。
+必填项（渠道二选一）：`MODEL_PROVIDER`（`src/providers.ts` 注册表内的 id）、`MODEL_ID`（该提供商在 pi-ai 1.5.0 模型目录中的 id）、当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`，其他提供商的 key 留空）、`CHANNEL`（可选，`telegram` 默认或 `web`，只校验选中渠道的变量）。Telegram（默认）：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`（纯数字用户 ID，不要写用户名）。Web（`CHANNEL=web`）：`WEB_OWNER_ID`（1–64 个 `[A-Za-z0-9._-]` 字符的内部所有者 id）。`TELEGRAM_API_ROOT`（可选，仅 Telegram）：https 前缀、无 query 或 fragment，供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理，未设置时使用官方根地址。
 
 只检查键是否存在，不要在终端或日志中回显值：
 
 ```sh
 grep -cE '^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # Telegram 部署预期 4
-grep -cE '^(SLACK_BOT_TOKEN|SLACK_APP_TOKEN|SLACK_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # Slack 部署预期 5
+grep -cE '^(WEB_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env                        # Web 部署预期 3
 grep -cE '^[A-Z0-9_]*_API_KEY=.+' .env                                            # 至少 1
 ```
 
@@ -76,7 +76,7 @@ docker compose logs --tail 50 personal-agent
 docker compose exec personal-agent ls -la /data /data/workspace
 ```
 
-预期日志出现 `Personal agent starting; single-owner private Telegram messages enabled.`（`CHANNEL=slack` 时为 `... private Slack messages enabled.`）且无持续报错；**`docker compose ps` 显示 `running` 只表示进程存在，不代表已通过渠道验收**。用 owner 账号私聊 bot 发送「现在几点？」，预期收到与服务器 UTC 时间一致的回复、日志没有 `Agent request failed`，且 `inbox.sqlite`、`agent.sqlite`、`workspace/` 在卷中存在。
+预期日志出现 `Personal agent starting; single-owner private Telegram messages enabled.` 且无持续报错；**`docker compose ps` 显示 `running` 只表示进程存在，不代表已通过渠道验收**。用 owner 账号私聊 bot 发送「现在几点？」，预期收到与服务器 UTC 时间一致的回复、日志没有 `Agent request failed`，且 `inbox.sqlite`、`agent.sqlite`、`workspace/` 在卷中存在。
 
 ### 生产更新与回滚
 
@@ -226,7 +226,7 @@ npm run release:preflight -- \
 
 - 找不到镜像 / `pull access denied`：镜像未构建、未 `load` 或引用写错 —— 核对 `ASTER_IMAGE`，重新分发或拉取。
 - 启动即退出，`Missing configuration` 或 webhook 错误：`.env` 缺项 / bot 已有 webhook —— 补齐对应键、先停用原 webhook。
-- 启动即退出，`belongs to another ... bot or owner` / `CHANNEL must be one of` / `SLACK_* is not shaped like a Slack token`：数据卷身份冲突 / `CHANNEL` 非法 / bot 与 app token 填反 —— 换独立数据卷或确认身份后迁移、改成合法值、按 `xoxb-`／`xapp-` 前缀对调。
+- 启动即退出，`belongs to another ... bot or owner` / `CHANNEL must be one of`：数据卷身份冲突 / `CHANNEL` 非法（只接受 `telegram` 与 `web`，旧的 `slack` 已拆分到独立仓库）—— 换独立数据卷或确认身份后迁移、改成合法值。
 - 启动即退出，`flock` 无法加锁：同一数据卷已有实例 —— 停掉旧容器，不要并行运行。
 - `EACCES` / `Unable to open the database file`：卷内文件属主不是 uid 1000 —— `chown -R 1000:1000 /data`。
 - 容器 `running` 但无回复：模型或渠道网络失败 —— 看日志错误码、核对出网与端点可达性。

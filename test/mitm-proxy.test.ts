@@ -372,11 +372,6 @@ test("deployment example, MITM overlay, and allowlist stay aligned without real 
   // A declared provider's key is allowlisted by host (no port), one entry per network entrance.
   assert.deepEqual(allowlist.MAGPIE_API_KEY, ["10.1.4.9", "100.66.135.123"]);
   assert.deepEqual(allowlist.TELEGRAM_BOT_TOKEN, ["api.telegram.org"]);
-  // Socket Mode dials wss-primary.slack.com with a single-use ticket in the URL and no credential
-  // header, so only the Web API host has to be reachable through the proxy.
-  assert.deepEqual(allowlist.SLACK_BOT_TOKEN, ["slack.com"]);
-  assert.deepEqual(allowlist.SLACK_APP_TOKEN, ["slack.com"]);
-
   const raw = await readFile(join(root, "docker-compose.mitm.yml"), "utf8");
   const overlay = raw
     .split("\n")

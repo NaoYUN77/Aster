@@ -67,7 +67,8 @@ export class Inbox {
     addColumn(this.db, "inbox", "repliedAt", "TEXT");
     // A reply is only in the right place if the thread anchor survives a restart; NULL is a flat reply.
     addColumn(this.db, "inbox", "threadTs", "TEXT");
-    // The received message itself, kept so a reaction can still be attached after a restart.
+    // The channel's own id for the received message. Telegram does not supply one, so it stays NULL
+    // there; the column remains for channels that address a message after it was delivered.
     addColumn(this.db, "inbox", "messageTs", "TEXT");
     addColumn(this.db, "deliveries", "createdAt", "TEXT");
     addColumn(this.db, "deliveries", "updatedAt", "TEXT");

@@ -15,7 +15,5 @@
   "MAGPIE_API_KEY": ["10.1.4.9", "100.66.135.123"],
   "LANGFUSE_PUBLIC_KEY": ["cloud.langfuse.com", "us.cloud.langfuse.com"],
   "LANGFUSE_SECRET_KEY": ["cloud.langfuse.com", "us.cloud.langfuse.com"],
-  "TELEGRAM_BOT_TOKEN": ["api.telegram.org"],
-  "SLACK_BOT_TOKEN": ["slack.com"],
-  "SLACK_APP_TOKEN": ["slack.com"]
+  "TELEGRAM_BOT_TOKEN": ["api.telegram.org"]
 }
