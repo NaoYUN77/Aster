@@ -13,8 +13,7 @@ tenants or other callers.
 _Avoid_: user, member, tenant, customer
 
 **Turn**:
-One completed request and reply between the owner and the agent. The unit of the dreaming
-counter.
+One completed request and reply between the owner and the agent.
 _Avoid_: message, step, round, exchange
 
 **Conversation**:
@@ -92,6 +91,11 @@ _Avoid_: extraction, distillation, index
 **Dream run**:
 One execution of dreaming, from trigger to applied changes or discard.
 _Avoid_: cycle, pass, job
+
+**Nightly trigger**:
+The once-per-local-date moment named by `DREAMING_AT` in the memory timezone. A process that
+starts after that moment catches up the same date once; the date is claimed when it fires.
+_Avoid_: schedule, cron, interval
 
 **Promotion**:
 Moving a fact up a layer — from the transcript into a note, or from a note into the index's core

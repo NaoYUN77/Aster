@@ -515,7 +515,10 @@ export async function openAgent(
       }
     };
     await checkGithubRecovery();
-    if (memory) memory.attach(harness, root);
+    if (memory) {
+      memory.attach(harness, root);
+      memory.startDreaming();
+    }
     const priorPins = await readResidentTools(durableStorage, root.id, context);
     const inspection = await harness.inspect(context);
     const hasPins = priorPins.length > 0 || Object.values(mcp.pins?.tools ?? {}).some(({ pin }) => pin);

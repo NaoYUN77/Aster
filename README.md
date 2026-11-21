@@ -144,10 +144,10 @@ npm start
 
 - `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。
 - `WEB_OWNER_ID` / `WEB_PORT` / `WEB_HOST` / `WEB_ALLOWED_ORIGINS` / `WEB_SESSION_TTL_DAYS` / `WEB_STATIC_DIR` / `WEB_TRUST_PROXY`：web 入口的可选项，默认值见 `.env.example`。`WEB_OWNER_ID` 只是 agent 看到的内部 sender id，不是登录名。
-- 旧版本的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*`、`STYLE_LEARNING`、`DREAMING_REVIEW` 不再读取；启动时只打印一次变量名提示，值不会出现在日志里。
+- 旧版本的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*`、`STYLE_LEARNING`、`DREAMING_REVIEW`、`DREAMING_TURNS` 不再读取；启动时只打印一次变量名提示，值不会出现在日志里。
 - 记忆系统（working state、压缩、dreaming）始终启用，没有环境总开关；`MEMORY_*` 只配置预算与时区。旧版本遗留的 `MEMORY_ENABLED` 会被忽略，并在启动时按变量名提示一次。
 - `MEMORY_FS_ENABLED` / `MEMORY_FS_DIR` / `MEMORY_FS_CORE_TOKENS`：core memory 的总开关（默认开）、git 仓库绝对路径（默认 `DATA_DIR/memory-fs`）与注入 `MEMORY.md` 的 token 预算（默认 4096，范围 256..65536）。
-- `DREAMING_*`：后台记忆整理。`DREAMING_ENABLED`（默认 1，`MEMORY_FS_ENABLED=0` 时无可写仓库，自动不跑）、`DREAMING_TURNS`（每多少个已完成的 owner turn 触发一次，默认 20）、`DREAMING_ON_COMPACTION`（压缩完成后也触发，默认 1）、`DREAMING_BEHAVIOR`（`auto-launch` 后台写 / `reminder` 只在下一次请求提示一行）、`DREAMING_DRY_RUN`（全流程但不 merge，默认 0）、`DREAMING_TIMEOUT_MS`（整轮硬超时，覆盖模型调用、git 与 apply，默认 120000）。旧版本的 `DREAMING_REVIEW` 不再读取。
+- `DREAMING_*`：后台记忆整理。`DREAMING_ENABLED`（默认 1，`MEMORY_FS_ENABLED=0` 时无可写仓库，自动不跑）、`DREAMING_AT`（夜间触发时刻，`HH:MM` 24 小时制，按 `MEMORY_TIMEZONE` 解释，默认 `04:00`；每个本地日期最多一次，进程在该时刻之后启动会补触发当天一次）、`DREAMING_ON_COMPACTION`（压缩完成后也触发，默认 1）、`DREAMING_BEHAVIOR`（`auto-launch` 后台写 / `reminder` 只在下一次请求提示一行）、`DREAMING_DRY_RUN`（全流程但不 merge，默认 0）、`DREAMING_TIMEOUT_MS`（整轮硬超时，覆盖模型调用、git 与 apply，默认 120000）。旧版本的 `DREAMING_REVIEW` 与 `DREAMING_TURNS` 不再读取。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
 - `PROVIDERS_CONFIG`：自定义提供商声明文件路径，默认 `DATA_DIR/providers.json`；默认文件缺失表示没有自定义提供商。
 - `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
@@ -170,7 +170,7 @@ core memory 是 `$MEMORY_FS_DIR` 下的 git 仓库。只有根目录的 `MEMORY.
 
 ### Dreaming
 
-dreaming 是后台的记忆整理，不阻塞聊天：每 `DREAMING_TURNS` 个完成的 owner turn（或一次压缩完成）后检查阈值，只把任务入队，绝不等在回复路径上。进程内同一时刻最多一个 run，期间的再次触发合并成一个 pending，不排队。
+dreaming 是后台的记忆整理，不阻塞聊天：每个本地日期到了 `DREAMING_AT`（默认 04:00，按 `MEMORY_TIMEZONE` 解释）触发一次，压缩完成时按 `DREAMING_ON_COMPACTION` 也触发；进程在当天该时刻之后启动会补触发一次，同一本地日期不会跑第二次。触发只把任务入队，绝不等在回复路径上。进程内同一时刻最多一个 run，期间的再次触发合并成一个 pending，不排队。
 
 一次 run 的流程：
 
@@ -179,9 +179,9 @@ dreaming 是后台的记忆整理，不阻塞聊天：每 `DREAMING_TURNS` 个�
 3. 布局检查：`MEMORY.md` 必须只含 `## Core`（必须进入每轮提示的少数事实）与 `## Index`（每个 note 一行链接）；每个 note 都必须被索引，每个索引链接都必须指向存在的文件，越界链接直接拒绝。不满足时整轮丢弃，原因 `layout-invalid`。
 4. 应用：宿主提交 worktree（actor `dreaming`）→ 若 live 树有脏改动先提交 → live 前进过则 rebase → `git merge --ff-only`。rebase 冲突、超时、布局不合法都丢弃 worktree 和分支，live 文件一个字节都不动，永远不做 forced merge。
 5. 超时是**整轮**的：`DREAMING_TIMEOUT_MS` 从 run 开始计时，模型调用、git、worktree 创建与清理、apply 共用同一个 signal，到点统一按丢弃处理并清掉计时器。
-6. `DREAMING_DRY_RUN=1` 跑完整流程但不提交、不 merge；完成后计数同样归零，下一次仍要攒满 `DREAMING_TURNS`。
+6. `DREAMING_DRY_RUN=1` 跑完整流程但不提交、不 merge；当晚同样只算一次，第二天或下一次压缩才会再触发。
 
-状态在仓库内被 gitignore 的 `.aster/dreaming.json`：`turnsSinceApply`、`reminderTurns`、`lastRun`、`lastAppliedCommit`、`failure`、`evidenceThrough`（条目 id 水位）。旧状态文件里的 `archiveThrough` 字段会被直接忽略，下一次 run 从 durable 历史开头重新读一遍（受 20000 条扫描上限与 8000 token 裁剪约束），之后写入 `evidenceThrough`。应用成功或 dry run 完成会把 `turnsSinceApply` 清零；超时、丢弃、失败都不消耗。`reminderTurns` 持久化，重启后从上次进度继续。模型瞬时失败重试一次，再失败记录并按失败次数退避，不无限重试。`DREAMING_BEHAVIOR=reminder` 时不下发任何后台任务，只在下一次 owner 请求里附一行「memory review due」，计数写回 0。启动时 runner 会清理崩溃残留：`git worktree prune`，并删除没有对应存活 worktree 的 `dreaming/*` 分支。
+状态在仓库内被 gitignore 的 `.aster/dreaming.json`：`lastNightlyDate`（已触发过的本地日期，用于同日去重）、`reminderTurns`、`lastRun`、`lastAppliedCommit`、`failure`、`evidenceThrough`（条目 id 水位）。旧状态文件里的 `turnsSinceApply`、`archiveThrough` 会被忽略；下一次 run 从 durable 历史开头重新读一遍（受 20000 条扫描上限与 8000 token 裁剪约束），之后写入 `evidenceThrough`。`DREAMING_BEHAVIOR=reminder` 时不下发任何后台任务，只在到了 `DREAMING_AT`（或压缩完成）后于下一次 owner 请求里附一行「memory review due」，同一本地日期只提示一次。模型瞬时失败重试一次，再失败记录并按失败次数退避，不无限重试；夜间触发、压缩触发与 reminder 共用同一个单例 runner、同一个 pending 合并与同一套退避。启动时 runner 会清理崩溃残留：`git worktree prune`，并删除没有对应存活 worktree 的 `dreaming/*` 分支。
 
 查看状态：`npm run dreaming -- status`（只读，不打印消息正文或凭据）。日志事件为 `dreaming.trigger` / `dreaming.run.start` / `dreaming.run.layout` / `dreaming.run.applied` / `dreaming.run.discarded` / `dreaming.run.failed`，只含 runId、动作、状态、计数与耗时。
 
