@@ -522,8 +522,6 @@ export type ChannelConfig =
     readonly ownerId: string;
     readonly botToken: string;
     readonly appToken: string;
-    /** Members allowed to drive the bot besides the owner. Empty keeps the owner-only DM behaviour. */
-    readonly allowedUsers: readonly string[];
     /** Channels the bot answers in. Empty keeps the owner-only DM behaviour. */
     readonly allowedChannels: readonly string[];
     /** Emoji the bot attaches to a message while it works, and the ones that can replace it. */
@@ -634,8 +632,7 @@ function readChannelCredentials(
       ownerId,
       botToken,
       appToken,
-      // Both lists are optional: an empty one is the owner-only private behaviour, not an open door.
-      allowedUsers: readSlackIdList(env, "SLACK_ALLOWED_USERS", SLACK_OWNER_ID_SHAPE, "Slack member IDs"),
+      // Optional: an empty list is the owner-only private behaviour, not an open door.
       allowedChannels: readSlackIdList(env, "SLACK_ALLOWED_CHANNELS", SLACK_CHANNEL_ID_SHAPE, "Slack channel IDs"),
       receipts: {
         ...(working === undefined ? {} : { working }),

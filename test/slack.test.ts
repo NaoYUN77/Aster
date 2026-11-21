@@ -30,7 +30,6 @@ const OTHER_CHANNEL = "C0OTHERC12";
 const policy = (overrides: Partial<SlackInboundPolicy> = {}, log: string[] = []) => ({
   ownerId: OWNER,
   botId: BOT,
-  allowedUsers: [MEMBER],
   allowedChannels: [CHANNEL],
   log: (line: string) => log.push(line),
   ...overrides,
@@ -88,7 +87,7 @@ function channelEvent(event: Record<string, unknown> = {}) {
       type: "app_mention",
       channel_type: "channel",
       channel: CHANNEL,
-      user: MEMBER,
+      user: OWNER,
       text: `<@${BOT}> hello`,
       ...event,
     },
@@ -148,7 +147,6 @@ test("the channel is selected explicitly, and only its own variables are require
     ownerId: OWNER,
     botToken: "xoxb-1234567890123456789012",
     appToken: "xapp-1234567890123456789012",
-    allowedUsers: [],
     allowedChannels: [],
     receipts: { working: "eyes", done: "white_check_mark", failed: "warning", lost: "x" },
     maxReactions: 3,
@@ -163,21 +161,15 @@ test("Slack credentials and the owner id are checked for shape", () => {
   assert.throws(() => readConfig({ ...slackEnv, SLACK_APP_TOKEN: "xoxb-1234567890123456789012" }), /SLACK_APP_TOKEN is not shaped/);
   assert.throws(() => readConfig({ ...slackEnv, SLACK_OWNER_ID: "@owner" }), /SLACK_OWNER_ID must be a Slack member ID/);
   assert.throws(
-    () => readConfig({ ...slackEnv, SLACK_ALLOWED_USERS: `${MEMBER}, @member` }),
-    /SLACK_ALLOWED_USERS must list Slack member IDs, comma-separated and without spaces/,
-  );
-  assert.throws(
     () => readConfig({ ...slackEnv, SLACK_ALLOWED_CHANNELS: "general" }),
     /SLACK_ALLOWED_CHANNELS must list Slack channel IDs, comma-separated and without spaces/,
   );
   // A list is a set: repeating an id does not make it count twice, and blanks are ignored.
   const listed = readConfig({
     ...slackEnv,
-    SLACK_ALLOWED_USERS: `${MEMBER},${MEMBER}`,
-    SLACK_ALLOWED_CHANNELS: ` ${CHANNEL} ,`,
+    SLACK_ALLOWED_CHANNELS: ` ${CHANNEL} ,${CHANNEL}`,
   }).channel;
-  assert.deepEqual(listed.kind === "slack" ? [listed.allowedUsers, listed.allowedChannels] : undefined,
-    [[MEMBER], [CHANNEL]]);
+  assert.deepEqual(listed.kind === "slack" ? listed.allowedChannels : undefined, [CHANNEL]);
   assert.throws(() => readConfig({ ...slackEnv, SLACK_BOT_TOKEN: "  " }), /Missing configuration: SLACK_BOT_TOKEN/);
   // Receipt emoji: the defaults are the four the bot uses out of the box, each one is normalized, and
   // a name Slack could not accept is a refused boot instead of a receipt that never appears.
@@ -243,23 +235,21 @@ test("the owner's private DMs stay the only DM that becomes a request", () => {
   assert.deepEqual(log, ["Slack event dropped: DM_NOT_OWNER"]);
 });
 
-test("a channel needs a mention to start a conversation, an allowed sender and an allowed channel", () => {
+test("a channel needs a mention, the owner, and an allowed channel", () => {
   assert.deepEqual(toRequest(channelEvent(), policy()), {
     requestId: "slack:T1:Ev7",
     conversationId: CHANNEL,
-    senderId: MEMBER,
+    senderId: OWNER,
     // The mention is Slack's addressing, not part of the request.
     text: "hello",
   });
-  // The owner may mention the bot anywhere it is allowed to answer.
-  assert.deepEqual(toRequest(channelEvent({ user: OWNER }), policy())?.senderId, OWNER);
   // `message` with a mention is the same request as `app_mention`: clients differ in what they emit.
   assert.deepEqual(toRequest(channelEvent({ type: "message" }), policy())?.text, "hello");
 
   const rejects: [string, Record<string, unknown>, Partial<SlackInboundPolicy>][] = [
     ["NOT_A_MENTION", channelEvent({ type: "message", text: "hello" }), {}],
     ["CHANNEL_NOT_ALLOWED", channelEvent({ channel: OTHER_CHANNEL }), {}],
-    ["SENDER_NOT_ALLOWED", channelEvent({ user: STRANGER }), {}],
+    ["SENDER_NOT_OWNER", channelEvent({ user: STRANGER }), {}],
   ];
   for (const [reason, payload, overrides] of rejects) {
     const log: string[] = [];
@@ -272,25 +262,29 @@ test("a channel needs a mention to start a conversation, an allowed sender and a
   assert.deepEqual(closed, ["Slack event dropped: CHANNEL_NOT_ALLOWED"]);
 });
 
-test("a reply inside a thread continues the conversation and carries its anchor", () => {
-  // A follow-up does not repeat the mention; the thread is what makes it a request.
+test("a plain follow-up inside a thread is a request, and its reply is flat", () => {
+  // A follow-up does not repeat the mention; the thread is what makes it a request. The thread is a
+  // delivery location, not a conversation, so the request carries no anchor.
   const followUp = channelEvent({ type: "message", text: "and then?", thread_ts: "1700000000.000100" });
   assert.deepEqual(toRequest(followUp, policy()), {
     requestId: "slack:T1:Ev7",
     conversationId: CHANNEL,
-    senderId: MEMBER,
+    senderId: OWNER,
     text: "and then?",
-    threadTs: "1700000000.000100",
   });
-  // A threaded mention keeps its anchor too, and a reply that was also broadcast is still a reply.
-  assert.equal(toRequest(channelEvent({ thread_ts: "1700000000.000100" }), policy())?.threadTs, "1700000000.000100");
+  // A threaded mention and a broadcast reply are still requests; neither carries a route.
+  assert.deepEqual(toRequest(channelEvent({ thread_ts: "1700000000.000100" }), policy()), {
+    requestId: "slack:T1:Ev7",
+    conversationId: CHANNEL,
+    senderId: OWNER,
+    text: "hello",
+  });
   assert.equal(
-    toRequest(channelEvent({ type: "message", subtype: "thread_broadcast", text: "ps", thread_ts: "1700000000.000100" }), policy())?.threadTs,
-    "1700000000.000100",
+    toRequest(channelEvent({ type: "message", subtype: "thread_broadcast", text: "ps", thread_ts: "1700000000.000100" }), policy())?.text,
+    "ps",
   );
-  // A top-level channel request stays flat: the reply goes to the channel, and the member's answer
-  // under it is what opens the thread.
-  assert.equal(toRequest(channelEvent(), policy())?.threadTs, undefined);
+  // A top-level channel request is the same shape: there is one conversation and one flat delivery.
+  assert.equal("threadTs" in (toRequest(channelEvent(), policy()) ?? {}), false);
 });
 
 test("a request without usable text or identity is dropped, and envelope noise never logs", () => {
@@ -445,16 +439,9 @@ test("a store failure is fatal and the envelope stays unacknowledged", async () 
   assert.deepEqual(socket.acked, [], "an unstored envelope must remain unacknowledged");
 });
 
-test("a stored reply is delivered in segments over the channel", async () => {
+test("a stored reply is delivered flat in segments over the channel", async () => {
   await withInbox(async (inbox) => {
-    // The anchor survives a restart with the request: this reply belongs inside the thread it came from.
-    inbox.accept(1, {
-      requestId: "slack:T1:Ev9",
-      conversationId: "D0DM",
-      senderId: OWNER,
-      text: "hi",
-      threadTs: "1700000000.000100",
-    });
+    inbox.accept(1, { requestId: "slack:T1:Ev9", conversationId: "D0DM", senderId: OWNER, text: "hi" });
     const socket = new TestSocket();
     const shutdown = new AbortController();
     const sent: { target: string; text: string; threadTs?: string }[] = [];
@@ -472,8 +459,8 @@ test("a stored reply is delivered in segments over the channel", async () => {
     await served;
 
     assert.deepEqual(sent.map(({ target }) => target), ["D0DM", "D0DM"]);
-    // Every part carries the same anchor, so a segmented answer stays in one thread.
-    assert.deepEqual(sent.map(({ threadTs }) => threadTs), ["1700000000.000100", "1700000000.000100"]);
+    // A reply is flat: no part carries a thread anchor, even when the question arrived inside one.
+    assert.deepEqual(sent.map(({ threadTs }) => threadTs), [undefined, undefined]);
     assert.equal(sent[0]?.text.length, 4000);
     assert.equal(sent[0]?.text, "answer " + "x".repeat(3993));
     assert.equal(sent[1]?.text, "x".repeat(7));
@@ -481,9 +468,8 @@ test("a stored reply is delivered in segments over the channel", async () => {
   });
 });
 
-test("a received message carries its own timestamp, next to the thread it belongs to", () => {
-  // The thread anchor is where an answer goes; the message's own timestamp is what a reaction is
-  // attached to. Inside a thread they are two different messages, so both have to survive.
+test("a received message carries its own timestamp for reactions", () => {
+  // The message's own timestamp is what a reaction is attached to; it is not a routing key.
   assert.deepEqual(toRequest(messageEvent({ ts: "1700000000.000100" }), policy()), {
     requestId: "slack:T1:Ev1",
     conversationId: "D0DM",
@@ -494,9 +480,8 @@ test("a received message carries its own timestamp, next to the thread it belong
   assert.deepEqual(toRequest(channelEvent({ ts: "1700000000.000300", thread_ts: "1700000000.000100" }), policy()), {
     requestId: "slack:T1:Ev7",
     conversationId: CHANNEL,
-    senderId: MEMBER,
+    senderId: OWNER,
     text: "hello",
-    threadTs: "1700000000.000100",
     messageTs: "1700000000.000300",
   });
 });

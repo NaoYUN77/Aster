@@ -2,7 +2,7 @@
 //
 // The repository is an ordinary directory. The agent edits it with the ordinary read/write/edit/
 // bash tools (as in Letta); this module does not intercept writes and imposes no per-path sandbox.
-// Its job is to initialize the repository, render the root `*.md` files into the prompt, and commit
+// Its job is to initialize the repository, render `MEMORY.md` into the prompt, and commit
 // whatever the tree accumulated at a turn boundary, so `git log` stays the undo path.
 //
 // Commits are serialized inside the process: a turn-boundary commit and a render never overlap on
@@ -43,7 +43,7 @@ export interface MemoryFs {
   readonly directory: string;
   /** Create/init the repository now. Every other method calls it lazily; `main` calls it to fail early. */
   ensure(): Promise<void>;
-  /** Render the root `*.md` files, `MEMORY.md` first, within `budgetTokens`. */
+  /** Render the root `MEMORY.md` within `budgetTokens`; every other file is read on demand. */
   renderCore(budgetTokens?: number): Promise<MemoryRender>;
   /** Commit the working tree if it changed; `null` when it was already clean. */
   commitDirty(actor: Actor, reason: string): Promise<MemoryCommit | null>;
@@ -106,50 +106,47 @@ class GitMemoryFs implements MemoryFs {
     if (!Number.isFinite(budgetTokens) || budgetTokens < 1) {
       throw new MemoryFsError("invalid-path", "core token budget must be a positive number");
     }
-    const root = this.#root!;
-    const names = (await readdir(root, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && !entry.isSymbolicLink() && !entry.name.startsWith(".") && isMarkdown(entry.name))
-      .map((entry) => entry.name)
-      .sort((left, right) => rank(left) - rank(right) || compareStrings(left, right));
+    const empty: MemoryRender = {
+      text: "",
+      hash: sha256(Buffer.from("", "utf8")),
+      included: [],
+      omittedFiles: [],
+      truncatedFiles: [],
+    };
+    // Only the root index is core memory. Persona, the owner's profile and standing rules are its
+    // sections; every other file is read on demand with the ordinary tools.
+    const content = await this.#readText(join(this.#root!, INITIAL_INDEX), INITIAL_INDEX).catch((error: unknown) => {
+      if (error instanceof MemoryFsError && error.code === "not-found") return undefined;
+      throw error;
+    });
+    if (content === undefined || content.trim() === "") return empty;
 
-    const sections: string[] = [];
-    const included: MemoryPath[] = [];
-    const omittedFiles: MemoryPath[] = [];
-    const truncatedFiles: MemoryPath[] = [];
-    let remaining = Math.floor(budgetTokens);
-
-    for (const name of names) {
-      const content = await this.#readText(join(root, name), name);
-      if (content.trim() === "") continue;
-      const header = `## ${name}\n\n`;
-      const body = escapeMemoryBody(content).replace(/\n+$/u, "");
-      const full = `${header}${body}\n\n`;
-      if (estimateTextTokens(full) <= remaining) {
-        sections.push(full);
-        included.push(name);
-        remaining -= estimateTextTokens(full);
-        continue;
-      }
-      const available = remaining - estimateTextTokens(`${header}${TRUNCATION_MARKER}\n\n`);
-      const cut = truncateToBudget(body, available);
-      const section = cut === undefined ? undefined : `${header}${cut}${TRUNCATION_MARKER}\n\n`;
-      if (section === undefined || estimateTextTokens(section) > remaining) {
-        omittedFiles.push(name);
-        continue;
-      }
-      sections.push(section);
-      included.push(name);
-      truncatedFiles.push(name);
-      remaining -= estimateTextTokens(section);
+    const header = `## ${INITIAL_INDEX}\n\n`;
+    const body = escapeMemoryBody(content).replace(/\n+$/u, "");
+    const full = `${header}${body}\n\n`;
+    const remaining = Math.floor(budgetTokens);
+    if (estimateTextTokens(full) <= remaining) {
+      return {
+        text: full,
+        hash: sha256(Buffer.from(full, "utf8")),
+        included: [INITIAL_INDEX],
+        omittedFiles: [],
+        truncatedFiles: [],
+      };
     }
 
-    const text = sections.join("");
+    const available = remaining - estimateTextTokens(`${header}${TRUNCATION_MARKER}\n\n`);
+    const cut = truncateToBudget(body, available);
+    const section = cut === undefined ? undefined : `${header}${cut}${TRUNCATION_MARKER}\n\n`;
+    if (section === undefined || estimateTextTokens(section) > remaining) {
+      return { ...empty, omittedFiles: [INITIAL_INDEX] };
+    }
     return {
-      text,
-      hash: sha256(Buffer.from(text, "utf8")),
-      included,
-      omittedFiles,
-      truncatedFiles,
+      text: section,
+      hash: sha256(Buffer.from(section, "utf8")),
+      included: [INITIAL_INDEX],
+      omittedFiles: [],
+      truncatedFiles: [INITIAL_INDEX],
     };
   }
 
@@ -248,7 +245,8 @@ class GitMemoryFs implements MemoryFs {
   }
 
   async #readText(absolute: string, path: string): Promise<string> {
-    const bytes = await readFile(absolute).catch(() => {
+    const bytes = await readFile(absolute).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") throw new MemoryFsError("not-found", `${path} does not exist`);
       throw new MemoryFsError("git-failed", `${path} could not be read`);
     });
     return decodeUtf8(bytes, path);
@@ -314,10 +312,6 @@ function isLockConflict(error: unknown): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
-}
-
-function rank(name: string): number {
-  return name === INITIAL_INDEX ? 0 : 1;
 }
 
 function isMarkdown(name: string): boolean {

@@ -155,7 +155,7 @@ export class MemoryIntegration {
   readonly #log: (event: MemoryLogEvent) => void;
   /** The attached root's store; every other conversation maps to a root in `#conversationRoots`. */
   readonly #rootStore: DailyStore;
-  /** One store handle per resolved root; a hub and its forks therefore share one. */
+  /** One store handle per resolved root; conversations registered to the same root thus share one. */
   readonly #stores = new Map<string, DailyStore>();
   /** Conversation id to resolved root; the attached root conversation is not listed (it is `#rootStore`). */
   readonly #conversationRoots = new Map<ConversationId, string>();
@@ -185,7 +185,7 @@ export class MemoryIntegration {
    * the store lives under `<root>/memory/daily`. Idempotent for the same pair. A different root for
    * an already registered conversation is a programming error. Registering the attached root
    * conversation is a no-op: it already maps to `options.root`. Store handles open lazily and are
-   * cached by root, so a hub and its forks share one store.
+   * cached by root, so conversations registered to one root share a store.
    */
   registerConversationStore(conversationId: ConversationId, root: string): void {
     const resolved = openDaily(root).root;
@@ -208,7 +208,7 @@ export class MemoryIntegration {
   /**
    * The store for one conversation: never a model parameter, always the durable conversation the
    * operation belongs to. An unregistered conversation is an explicit error, never a fallback to
-   * another hub's (or the owner's) memory.
+   * another conversation's memory.
    */
   #storeFor(conversationId: ConversationId): DailyStore {
     const root = this.#conversationRoots.get(conversationId)
@@ -291,9 +291,8 @@ export class MemoryIntegration {
    * that contradicts the initialized archive is a `revision-conflict`, not a silent change.
    * Archive state is keyed by `conversation.id` in durable storage, so conversations never share it.
    *
-   * A fork has no archive of its own: its inherited history belongs to the Hub, and it reaches the
-   * Hub's long-term memory only through the shared store it was registered with. Its lifecycle is
-   * marked initialized so the request path does not fault; archive boundary work skips it (no state).
+   * A conversation registered to a shared store still has archive state of its own, keyed by its
+   * own id; the shared store only decides where its daily files live.
    */
   async initializeConversation(conversation: Conversation, context: Context): Promise<void> {
     if (this.#initialized.has(conversation.id)) return;
@@ -306,31 +305,23 @@ export class MemoryIntegration {
         });
       }
     } else {
-      const forked = await session.commit(
-        async (tx) => (await tx.conversation(conversation.id))?.parent !== undefined,
-        context,
-      );
-      if (forked) {
-        this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: "fork" });
-      } else {
-        const tail = await session.commit(async (tx) => {
-          const page = await tx.scanEntries({ conversationId: conversation.id, order: "descending" }, 1);
-          return page.items[0]?.id ?? null;
-        }, context);
-        await session.commit(async (tx) => {
-          const slot = await tx.doc(MigrationDoc, conversation.id, "v1", UNSET_MIGRATION);
-          if ((slot as MigrationRecord).at === UNSET_MIGRATION.at) {
-            Object.assign(slot, {
-              version: MEMORY_SCHEMA_VERSION,
-              archiveOrigin: tail,
-              hadHistory: tail !== null,
-              at: Date.now(),
-            } satisfies MigrationRecord);
-          }
-        }, context);
-        await initializeArchive(session, conversation.id, tail, this.#options.timezone, context);
-        this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: tail === null ? "fresh" : "origin-at-tail" });
-      }
+      const tail = await session.commit(async (tx) => {
+        const page = await tx.scanEntries({ conversationId: conversation.id, order: "descending" }, 1);
+        return page.items[0]?.id ?? null;
+      }, context);
+      await session.commit(async (tx) => {
+        const slot = await tx.doc(MigrationDoc, conversation.id, "v1", UNSET_MIGRATION);
+        if ((slot as MigrationRecord).at === UNSET_MIGRATION.at) {
+          Object.assign(slot, {
+            version: MEMORY_SCHEMA_VERSION,
+            archiveOrigin: tail,
+            hadHistory: tail !== null,
+            at: Date.now(),
+          } satisfies MigrationRecord);
+        }
+      }, context);
+      await initializeArchive(session, conversation.id, tail, this.#options.timezone, context);
+      this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: tail === null ? "fresh" : "origin-at-tail" });
     }
     this.#initialized.add(conversation.id);
     await this.#rescanIn(conversation, context);
@@ -541,8 +532,8 @@ export class MemoryIntegration {
   async #rescanIn(conversation: Conversation, context: Context): Promise<void> {
     const session = this.#session();
     const root = conversation;
-    // Boundary work is archive work. A conversation with no archive state (an uninitialized
-    // member, or a fork whose inherited history belongs to its Hub) has nothing to re-scan.
+    // Boundary work is archive work. A conversation with no archive state (one whose initialization
+    // has not completed) has nothing to re-scan.
     let initialized = false;
     try {
       initialized = (await readArchive(session, root.id, context))?.initialized === true;
