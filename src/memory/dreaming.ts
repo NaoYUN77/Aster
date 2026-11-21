@@ -82,6 +82,8 @@ export type DreamingState = {
   readonly failure: { readonly at: string; readonly reason: string } | null;
   /** Newest daily-archive date a run has consumed; advanced only by an applied run. */
   readonly archiveThrough: string | null;
+  /** Completed turns toward the next reminder; persisted so a restart does not lose progress. */
+  readonly reminderTurns: number;
 };
 
 export type DreamingLogEvent = {
@@ -166,13 +168,6 @@ class DreamDiscard extends Error {
   }
 }
 
-class DreamTimeout extends Error {
-  constructor() {
-    super("dreaming run timed out");
-    this.name = "DreamTimeout";
-  }
-}
-
 export function createDreamingRunner(options: DreamingRunnerOptions): DreamingRunner {
   return new Runner(options);
 }
@@ -190,8 +185,6 @@ class Runner implements DreamingRunner {
   #idleWaiters: Array<() => void> = [];
   #failureCount = 0;
   #backoffUntil = 0;
-  // Reminder behavior keeps its small amount of state in memory and writes no file, as designed.
-  #reminderTurns = 0;
   #reminderDue = false;
 
   constructor(options: DreamingRunnerOptions) {
@@ -206,16 +199,18 @@ class Runner implements DreamingRunner {
 
   async observeTurn(): Promise<void> {
     if (this.#closed || !this.#options.config.enabled) return;
+    await this.#load();
     if (this.#options.config.behavior === "reminder") {
-      this.#reminderTurns += 1;
-      if (this.#reminderTurns >= this.#options.config.turns) {
-        this.#reminderTurns = 0;
-        this.#reminderDue = true;
-        this.#log({ event: "dreaming.trigger", action: "reminder", turns: 0 });
-      }
+      const reminderTurns = this.#state.reminderTurns + 1;
+      this.#state = { ...this.#state, reminderTurns };
+      await this.#persist();
+      if (reminderTurns < this.#options.config.turns) return;
+      this.#state = { ...this.#state, reminderTurns: 0 };
+      this.#reminderDue = true;
+      await this.#persist();
+      this.#log({ event: "dreaming.trigger", action: "reminder", turns: 0 });
       return;
     }
-    await this.#load();
     this.#state = { ...this.#state, turnsSinceApply: this.#state.turnsSinceApply + 1 };
     await this.#persist();
     if (this.#state.turnsSinceApply < this.#options.config.turns) return;
@@ -224,12 +219,15 @@ class Runner implements DreamingRunner {
 
   async compactionCompleted(): Promise<void> {
     if (this.#closed || !this.#options.config.enabled || !this.#options.config.onCompaction) return;
+    await this.#load();
     if (this.#options.config.behavior === "reminder") {
+      // A compaction is an immediate nudge; any partial reminder progress is settled.
+      this.#state = { ...this.#state, reminderTurns: 0 };
       this.#reminderDue = true;
+      await this.#persist();
       this.#log({ event: "dreaming.trigger", action: "reminder", turns: 0 });
       return;
     }
-    await this.#load();
     this.#schedule("compaction");
   }
 
@@ -299,89 +297,105 @@ class Runner implements DreamingRunner {
     const startedMs = this.#now().getTime();
     const config = this.#options.config;
     const adapter = new AbortController();
+    // One hard deadline for the whole run: both model turns, every git command, review and apply
+    // share it, so DREAMING_TIMEOUT_MS is the run's limit rather than each call's.
+    const deadline = new AbortController();
+    const signal = AbortSignal.any([adapter.signal, deadline.signal]);
+    const timer = setTimeout(() => deadline.abort(), config.timeoutMs);
     this.#abort = adapter;
     let worktree: Worktree | undefined;
     let applied = false;
     try {
       await this.#load();
+      signal.throwIfAborted();
       await this.#options.memory.ensure();
+      signal.throwIfAborted();
       const input = await this.#options.input({ archiveThrough: this.#state.archiveThrough });
       const turns = this.#state.turnsSinceApply;
       const runId = await this.#newRunId();
-      const base = (await git(this.#options.memory.directory, ["rev-parse", "HEAD"])).trim();
+      const memoryDir = this.#options.memory.directory;
+      const base = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
       worktree = {
         runId,
         branch: `${BRANCH_PREFIX}${runId}`,
         path: join(this.#options.dataDir, "dreaming", "worktrees", runId),
       };
       await mkdir(dirname(worktree.path), { recursive: true });
+      signal.throwIfAborted();
       await rm(worktree.path, { recursive: true, force: true });
       // A crashed earlier process leaves a registered worktree and branch behind; neither may
       // block this run.
-      await gitTry(this.#options.memory.directory, ["worktree", "remove", "--force", worktree.path]);
-      await gitTry(this.#options.memory.directory, ["worktree", "prune"]);
-      await gitTry(this.#options.memory.directory, ["branch", "-D", worktree.branch]);
-      await git(this.#options.memory.directory, ["worktree", "add", "-b", worktree.branch, worktree.path, base]);
+      await gitTry(memoryDir, ["worktree", "remove", "--force", worktree.path]);
+      await gitTry(memoryDir, ["worktree", "prune"]);
+      await gitTry(memoryDir, ["branch", "-D", worktree.branch]);
+      await git(memoryDir, ["worktree", "add", "-b", worktree.branch, worktree.path, base], signal);
       this.#log({ event: "dreaming.run.start", runId, action: reason, turns });
 
       const dreamPrompt = buildDreamPrompt(input, this.#options.timezone);
-      await this.#runWithRetry(adapter.signal, {
+      await this.#runWithRetry(signal, {
         runId, role: "dream", cwd: worktree.path, instructions: DREAMING_INSTRUCTIONS, prompt: dreamPrompt,
       }, async () => {
-        await git(worktree!.path, ["reset", "--hard", "HEAD"]);
-        await git(worktree!.path, ["clean", "-fd"]);
+        await git(worktree!.path, ["reset", "--hard", "HEAD"], signal);
+        await git(worktree!.path, ["clean", "-fd"], signal);
       });
 
-      await git(worktree.path, ["add", "-A"]);
-      if ((await gitTry(worktree.path, ["diff", "--cached", "--quiet"])).code === 0) {
+      await git(worktree.path, ["add", "-A"], signal);
+      if ((await gitTry(worktree.path, ["diff", "--cached", "--quiet"], signal)).code === 0) {
         throw new DreamDiscard("no-change");
       }
-      const diff = (await git(worktree.path, ["diff", "--cached"])).slice(0, DIFF_MAX_CHARS);
+      const diff = (await git(worktree.path, ["diff", "--cached"], signal)).slice(0, DIFF_MAX_CHARS);
 
       if (config.review) {
         this.#log({ event: "dreaming.run.review", runId });
-        const verdictText = await this.#withTimeout(adapter.signal, (signal) => this.#options.run({
+        signal.throwIfAborted();
+        const verdictText = await this.#options.run({
           runId,
           role: "review",
-          cwd: worktree!.path,
+          cwd: worktree.path,
           instructions: REVIEW_INSTRUCTIONS,
           prompt: buildReviewPrompt(diff, input),
           signal,
-        }));
+        });
         const verdict = parseVerdict(verdictText);
         if (verdict === undefined) throw new DreamDiscard("review-invalid");
         if (verdict.revert.length > 0) {
+          signal.throwIfAborted();
           for (const path of verdict.revert) await revertPath(worktree.path, path);
-          await git(worktree.path, ["add", "-A"]);
+          await git(worktree.path, ["add", "-A"], signal);
         }
         if (verdict.verdict !== "apply") throw new DreamDiscard("review-rejected");
-        if ((await gitTry(worktree.path, ["diff", "--cached", "--quiet"])).code === 0) {
+        if ((await gitTry(worktree.path, ["diff", "--cached", "--quiet"], signal)).code === 0) {
           throw new DreamDiscard("no-change");
         }
       }
 
       if (config.dryRun) {
         this.#log({ event: "dreaming.run.discarded", runId, action: "dry-run", turns });
-        await this.#record({ startedAt, status: "dry-run", commit: null, reason: null });
+        // A dry run is a completed cycle: the counter restarts, so the next trigger again needs a
+        // full threshold instead of firing on every following turn.
+        await this.#record({ startedAt, status: "dry-run", commit: null, reason: null }, { turnsSinceApply: 0 });
         return;
       }
 
-      // Apply, per ADR-0001: commit the worktree, commit a dirty live tree, then fast-forward.
-      await git(worktree.path, ["commit", "--no-verify", "-m", commitMessage(runId, turns, this.#now())]);
+      // Apply, per ADR-0001: commit the worktree, commit a dirty live tree, rebase the reviewed
+      // commit if live advanced, then fast-forward. Never a forced merge.
+      signal.throwIfAborted();
+      await git(worktree.path, ["commit", "--no-verify", "-m", commitMessage(runId, turns, this.#now())], signal);
       await this.#options.memory.commitDirty("owner", "pre-dreaming-apply");
-      const liveHead = (await git(this.#options.memory.directory, ["rev-parse", "HEAD"])).trim();
+      signal.throwIfAborted();
+      const liveHead = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
       if (liveHead !== base) {
         // The live branch advanced while the run worked. Rebase the reviewed commit onto it so the
         // apply is still a fast-forward; a real conflict is the discard path, never a forced merge.
-        const rebase = await gitTry(worktree.path, ["rebase", liveHead]);
+        const rebase = await gitTry(worktree.path, ["rebase", liveHead], signal);
         if (rebase.code !== 0) {
           await gitTry(worktree.path, ["rebase", "--abort"]);
           throw new DreamDiscard("conflict");
         }
       }
-      const merge = await gitTry(this.#options.memory.directory, ["merge", "--ff-only", worktree.branch]);
+      const merge = await gitTry(memoryDir, ["merge", "--ff-only", worktree.branch], signal);
       if (merge.code !== 0) throw new DreamDiscard("merge-failed");
-      const commit = (await git(this.#options.memory.directory, ["rev-parse", "HEAD"])).trim();
+      const commit = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
       applied = true;
       await this.#record(
         { startedAt, status: "applied", commit, reason: null },
@@ -403,7 +417,7 @@ class Runner implements DreamingRunner {
         // A host shutdown aborted the run; that is a discard, not a model failure to back off from.
         this.#log({ event: "dreaming.run.discarded", runId: worktree?.runId, action: "closed", code: "closed" });
         await this.#record({ startedAt, status: "discarded", commit: null, reason: "closed" });
-      } else if (error instanceof DreamTimeout) {
+      } else if (deadline.signal.aborted) {
         this.#log({ event: "dreaming.run.discarded", runId: worktree?.runId, action: "timeout", code: "timeout" });
         await this.#record({ startedAt, status: "discarded", commit: null, reason: "timeout" });
       } else {
@@ -418,7 +432,9 @@ class Runner implements DreamingRunner {
         );
       }
     } finally {
+      clearTimeout(timer);
       this.#abort = undefined;
+      // Cleanup must run even after the deadline fired, so it never uses the timed signal.
       if (worktree !== undefined) await this.#discardWorktree(worktree, applied);
     }
   }
@@ -442,25 +458,14 @@ class Runner implements DreamingRunner {
   async #runWithRetry(signal: AbortSignal, input: Omit<DreamingTurnInput, "signal">, reset: () => Promise<void>): Promise<string> {
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.#withTimeout(signal, (turnSignal) => this.#options.run({ ...input, signal: turnSignal }));
+        return await this.#options.run({ ...input, signal });
       } catch (error) {
-        if (error instanceof DreamTimeout || signal.aborted || attempt >= 2) throw error;
+        if (signal.aborted || attempt >= 2) throw error;
         // A transient model failure earns exactly one retry, from a clean worktree.
         this.#log({ event: "dreaming.run.start", runId: input.runId, action: "retry" });
         await reset();
         await delay(RETRY_DELAY_MS, signal);
       }
-    }
-  }
-
-  async #withTimeout(signal: AbortSignal, operation: (signal: AbortSignal) => Promise<string>): Promise<string> {
-    const timeout = AbortSignal.timeout(this.#options.config.timeoutMs);
-    const combined = AbortSignal.any([signal, timeout]);
-    try {
-      return await abortable(operation(combined), combined);
-    } catch (error) {
-      if (timeout.aborted && !signal.aborted) throw new DreamTimeout();
-      throw error;
     }
   }
 
@@ -496,20 +501,43 @@ class Runner implements DreamingRunner {
 
   async #loadInner(): Promise<void> {
     const path = this.#statePath();
-    let text: string;
     try {
-      text = await readFile(path, "utf8");
+      const text = await readFile(path, "utf8");
+      try {
+        const parsed: unknown = JSON.parse(text);
+        this.#state = parseDreamingState(parsed);
+      } catch {
+        // Never guess at a damaged state file; start clean and let the operator inspect the old one.
+        this.#log({ event: "dreaming.state.corrupt" });
+        this.#state = emptyState();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      return;
     }
-    try {
-      const parsed: unknown = JSON.parse(text);
-      this.#state = parseState(parsed);
-    } catch {
-      // Never guess at a damaged state file; start clean and let the operator inspect the old one.
-      this.#log({ event: "dreaming.state.corrupt" });
-      this.#state = emptyState();
+    await this.#cleanupStaleBranches().catch(() => undefined);
+  }
+
+  /**
+   * Remove branches a crashed process left behind. A `dreaming/*` branch with no registered live
+   * worktree can never be applied, so it is deleted; a branch whose worktree still exists (an
+   * in-flight or deliberately kept run, or the current branch) is never touched. Cleanup is not
+   * on any critical path, so every failure stays silent.
+   */
+  async #cleanupStaleBranches(): Promise<void> {
+    const directory = this.#options.memory.directory;
+    await gitTry(directory, ["worktree", "prune"]);
+    const listed = await gitTry(directory, ["worktree", "list", "--porcelain"]);
+    if (listed.code !== 0) return;
+    const live = new Set<string>();
+    for (const line of listed.stdout.split("\n")) {
+      const match = /^branch refs\/heads\/(.+)$/u.exec(line.trim());
+      if (match?.[1] !== undefined) live.add(match[1]);
+    }
+    const branches = await gitTry(directory, ["for-each-ref", "--format=%(refname:short)", "refs/heads/dreaming"]);
+    if (branches.code !== 0) return;
+    for (const name of branches.stdout.split("\n").map((line) => line.trim())) {
+      if (name === "" || !name.startsWith(BRANCH_PREFIX) || live.has(name)) continue;
+      await gitTry(directory, ["branch", "-D", name]);
     }
   }
 
@@ -540,11 +568,15 @@ function emptyState(): DreamingState {
     lastAppliedCommit: null,
     failure: null,
     archiveThrough: null,
+    reminderTurns: 0,
   };
 }
 
-/** Strict enough for a host-owned file; a malformed field sends the whole state back to empty. */
-function parseState(value: unknown): DreamingState {
+/**
+ * Validate a host-owned state document. Unknown extra fields are dropped, so a damaged or
+ * hand-edited file can never smuggle arbitrary content into the status view.
+ */
+export function parseDreamingState(value: unknown): DreamingState {
   if (typeof value !== "object" || value === null) throw new Error("not an object");
   const record = value as Record<string, unknown>;
   if (record.version !== STATE_VERSION) throw new Error("unknown version");
@@ -559,7 +591,9 @@ function parseState(value: unknown): DreamingState {
         return { at: requiredString(item.at), reason: requiredString(item.reason) };
       })();
   const archiveThrough = nullableString(record.archiveThrough);
-  return { version: STATE_VERSION, turnsSinceApply, lastRun, lastAppliedCommit, failure, archiveThrough };
+  // A state file written before reminder behavior existed simply has no counter yet.
+  const reminderTurns = record.reminderTurns === undefined ? 0 : integer(record.reminderTurns);
+  return { version: STATE_VERSION, turnsSinceApply, lastRun, lastAppliedCommit, failure, archiveThrough, reminderTurns };
 }
 
 function parseRun(value: unknown): DreamingRunRecord {
@@ -661,8 +695,8 @@ async function revertPath(worktree: string, path: string): Promise<void> {
 
 // --- git --------------------------------------------------------------------------------------
 
-function git(directory: string, args: readonly string[]): Promise<string> {
-  return gitRun(directory, args).then((result) => {
+function git(directory: string, args: readonly string[], signal?: AbortSignal): Promise<string> {
+  return gitRun(directory, args, signal).then((result) => {
     if (result.code !== 0) {
       const detail = result.stderr.trim().split("\n").at(-1) ?? "";
       throw Object.assign(new Error(`dreaming git failed${detail === "" ? "" : `: ${detail}`}`), { code: "DREAMING_GIT_FAILED" });
@@ -671,11 +705,11 @@ function git(directory: string, args: readonly string[]): Promise<string> {
   });
 }
 
-function gitTry(directory: string, args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  return gitRun(directory, args);
+function gitTry(directory: string, args: readonly string[], signal?: AbortSignal): Promise<{ code: number; stdout: string; stderr: string }> {
+  return gitRun(directory, args, signal);
 }
 
-function gitRun(directory: string, args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+function gitRun(directory: string, args: readonly string[], signal?: AbortSignal): Promise<{ code: number; stdout: string; stderr: string }> {
   if (!isAbsolute(directory)) {
     return Promise.resolve({ code: 1, stdout: "", stderr: "memory directory must be absolute" });
   }
@@ -683,6 +717,7 @@ function gitRun(directory: string, args: readonly string[]): Promise<{ code: num
     execFile("git", ["-C", directory, ...args], {
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: 16 * 1024 * 1024,
+      ...(signal === undefined ? {} : { signal }),
       env: {
         ...process.env,
         GIT_AUTHOR_NAME: COMMIT_AUTHOR.name,
@@ -710,24 +745,6 @@ function errorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code === "string") return code.slice(0, 64);
   return error instanceof Error && error.name === "AbortError" ? "ABORTED" : "DREAMING_FAILED";
-}
-
-function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortError(signal));
-  return new Promise<T>((resolvePromise, reject) => {
-    const onAbort = () => reject(abortError(signal));
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolvePromise(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
 }
 
 function abortError(signal: AbortSignal): Error {

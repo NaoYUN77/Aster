@@ -157,7 +157,7 @@ npm start
 - Slack 没有对应的地址覆盖项：`slack.com` 与 Socket Mode 的 `wss-primary.slack.com` 在部署过的机器上都能直连，出站仍可按需走 MITM 代理。
 - `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭。其余 `MEMORY_*` 为预算、时区与归档超时。
 - `MEMORY_FS_ENABLED` / `MEMORY_FS_DIR` / `MEMORY_FS_CORE_TOKENS`：core memory 的总开关（默认开）、git 仓库绝对路径（默认 `DATA_DIR/memory-fs`）与注入 `MEMORY.md` 的 token 预算（默认 4096，范围 256..65536）。
-- `DREAMING_*`：后台记忆整理。`DREAMING_ENABLED`（默认 1，`MEMORY_FS_ENABLED=0` 时无可写仓库，自动不跑）、`DREAMING_TURNS`（每多少个已完成的 owner turn 触发一次，默认 20）、`DREAMING_ON_COMPACTION`（压缩完成后也触发，默认 1）、`DREAMING_BEHAVIOR`（`auto-launch` 后台写 / `reminder` 只在下一次请求提示一行）、`DREAMING_REVIEW`（应用前跑二次 review，默认 1）、`DREAMING_DRY_RUN`（全流程但不 merge，默认 0）、`DREAMING_TIMEOUT_MS`（单次硬超时，默认 120000）。
+- `DREAMING_*`：后台记忆整理。`DREAMING_ENABLED`（默认 1，`MEMORY_FS_ENABLED=0` 时无可写仓库，自动不跑）、`DREAMING_TURNS`（每多少个已完成的 owner turn 触发一次，默认 20）、`DREAMING_ON_COMPACTION`（压缩完成后也触发，默认 1）、`DREAMING_BEHAVIOR`（`auto-launch` 后台写 / `reminder` 只在下一次请求提示一行）、`DREAMING_REVIEW`（应用前跑二次 review，默认 1）、`DREAMING_DRY_RUN`（全流程但不 merge，默认 0）、`DREAMING_TIMEOUT_MS`（整轮硬超时，覆盖两次模型调用、git 与 apply，默认 120000）。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
 - `PROVIDERS_CONFIG`：自定义提供商声明文件路径，默认 `DATA_DIR/providers.json`；默认文件缺失表示没有自定义提供商。
 - `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
@@ -189,10 +189,11 @@ dreaming 是后台的记忆整理，不阻塞聊天：每 `DREAMING_TURNS` 个�
 1. 从 memory 仓库开一个 git worktree，分支 `dreaming/<UTC 时间戳>`，路径在 `$DATA_DIR/dreaming/worktrees/<runId>`（不在仓库里，避免被 ignore/清理规则扫到）。
 2. 后台子代理只用 `read` / `write` / `edit` / `bash` 在 worktree 里整理文件，可改 `MEMORY.md` 和仓库内任意文件；输入是最近若干轮 owner 对话与上次应用以来的 daily archive，按 token 裁剪。复用主模型链。
 3. `DREAMING_REVIEW=1` 时，第二个后台会话读 staged diff 与同一段 transcript，返回一个 JSON 裁决：`apply` 或 `reject`，并可 revert 单个文件。裁决无法解析按 reject 处理（fail closed）。
-4. 应用：宿主提交 worktree（actor `dreaming`）→ 若 live 树有脏改动先提交 → 必要时把 review 过的提交 rebase 到 live HEAD → `git merge --ff-only`。冲突、超时、review 拒绝都丢弃 worktree 和分支，live 文件一个字节都不动。
-5. `DREAMING_DRY_RUN=1` 跑完整流程（含 review）但不提交、不 merge。
+4. 应用：宿主提交 worktree（actor `dreaming`）→ 若 live 树有脏改动先提交 → 必要时把 review 过的提交 rebase 到 live HEAD → `git merge --ff-only`。rebase 冲突、超时、review 拒绝都丢弃 worktree 和分支，live 文件一个字节都不动，永远不做 forced merge。
+5. 超时是**整轮**的：`DREAMING_TIMEOUT_MS` 从 run 开始计时，dream、review、git、worktree 创建与清理、apply 共用同一个 signal，到点统一按丢弃处理并清掉计时器。
+6. `DREAMING_DRY_RUN=1` 跑完整流程（含 review）但不提交、不 merge；完成后计数同样归零，下一次仍要攒满 `DREAMING_TURNS`。
 
-状态在仓库内被 gitignore 的 `.aster/dreaming.json`：`turnsSinceApply`、`lastRun`、`lastAppliedCommit`、`failure`、`archiveThrough`。只有应用成功的 run 才把计数清零；超时、丢弃、失败都不消耗。模型瞬时失败重试一次，再失败记录并按失败次数退避，不无限重试。`DREAMING_BEHAVIOR=reminder` 时不下发任何后台任务，也不写文件，只在下一次 owner 请求里附一行「memory review due」。
+状态在仓库内被 gitignore 的 `.aster/dreaming.json`：`turnsSinceApply`、`reminderTurns`、`lastRun`、`lastAppliedCommit`、`failure`、`archiveThrough`。应用成功或 dry run 完成会把 `turnsSinceApply` 清零；超时、丢弃、失败都不消耗。`reminderTurns` 持久化，重启后从上次进度继续。模型瞬时失败重试一次，再失败记录并按失败次数退避，不无限重试。`DREAMING_BEHAVIOR=reminder` 时不下发任何后台任务，只在下一次 owner 请求里附一行「memory review due」，计数写回 0。启动时 runner 会清理崩溃残留：`git worktree prune`，并删除没有对应存活 worktree 的 `dreaming/*` 分支。
 
 查看状态：`npm run dreaming -- status`（只读，不打印消息正文或凭据）。日志事件为 `dreaming.trigger` / `dreaming.run.start` / `dreaming.run.review` / `dreaming.run.applied` / `dreaming.run.discarded` / `dreaming.run.failed`，只含 runId、动作、状态、计数与耗时。
 

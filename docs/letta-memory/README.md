@@ -89,8 +89,9 @@ render.
 ### 5.3 Dreaming
 
 - **Trigger**: every `DREAMING_TURNS` completed owner turns, or after a compaction when enabled.
-  One global counter; a trigger during a run coalesces into one pending run. The counter resets
-  only after a run is applied; a failed run does not consume it.
+  One global counter; a trigger during a run coalesces into one pending run. An applied run — and a
+  completed dry run, which is also a finished cycle — resets the counter; a failed, discarded or
+  timed-out run does not consume it.
 - **Input**: the last K turns of the owner conversation plus the daily archive since the last
   run's cursor, bounded by tokens. No member Hubs exist to read.
 - **Run**: one background subagent in an isolated `git worktree`, with the ordinary tools, using
@@ -98,12 +99,14 @@ render.
   its persona/human sections.
 - **Review** (`DREAMING_REVIEW=1`): a second background conversation reads the worktree diff and
   the cited transcript range, and may revert files or reject the run. No human approval gate.
-- **Apply**: the host commits the worktree, commits the live tree if dirty, then
-  `git merge --ff-only`. A conflict, timeout or rejection discards the worktree and branch; the
-  live directory is never touched.
-- **Reminder** (opt-in): a one-line "memory review due" note on the next request; nothing is
-  written.
-- **Dry run**: the full pipeline runs, but apply is skipped.
+- **Apply**: the host commits the worktree (actor `dreaming`), commits the live tree if dirty,
+  rebases the reviewed commit onto the live HEAD if live advanced meanwhile, then
+  `git merge --ff-only`. A rebase conflict, timeout or rejection discards the worktree and branch;
+  the live directory is never touched and a forced merge is never used.
+- **Reminder** (opt-in): a one-line "memory review due" note on the next request. The counter
+  toward the next reminder is persisted in `.aster/dreaming.json`, so a restart continues it.
+- **Dry run**: the full pipeline runs, apply is skipped, and the turn counter restarts as after an
+  applied run.
 
 ### 5.4 Background execution model
 
@@ -114,10 +117,13 @@ Dreaming is asynchronous, not a separate daemon:
   in the reply path.
 - A "turn" is a completed owner request. Aster does not expose pi-durable's internal tool rounds,
   so this approximates Letta's step count and the documentation says so.
-- A run has a hard timeout, one retry on transient model failure, and then backoff. No unbounded
-  loops.
-- State lives in `.aster/dreaming.json`: turn counter, last run, last applied commit, failure
+- A run has one hard timeout (`DREAMING_TIMEOUT_MS`) that covers both model turns, every git
+  command, review and apply; expiry discards the run like any other abort. One retry on a
+  transient model failure, then backoff. No unbounded loops.
+- State lives in `.aster/dreaming.json`: both counters, last run, last applied commit, failure
   reason. `dreaming status` prints it; logs use `dreaming.*` events.
+- At startup the runner prunes crashed leftovers: `git worktree prune`, then delete a
+  `dreaming/*` branch only when no live worktree is registered for it.
 
 ## 6. Single-owner cleanup (same change set)
 

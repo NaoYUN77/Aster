@@ -30,6 +30,7 @@ export { createMemoryFs, type MemoryFs } from "./fs/store.js";
 export {
   createDreamingRunner,
   DREAMING_DEFAULTS,
+  parseDreamingState,
   type DreamingBehavior,
   type DreamingConfig,
   type DreamingInput,
