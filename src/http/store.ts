@@ -10,7 +10,15 @@ import { DatabaseSync } from "node:sqlite";
  * history source; `web_requests` exists for status, idempotency and short-lived retry state only.
  */
 
-export type WebRequestStatus = "queued" | "running" | "done" | "failed" | "aborted";
+export type WebRequestStatus = "queued" | "running" | "promoted" | "done" | "failed" | "aborted";
+
+/** One pending message as `GET /api/v1/queue` and the SSE `queue.changed` event expose it. */
+export type QueuedRequestView = {
+  readonly requestId: string;
+  readonly clientMessageId: string;
+  readonly text: string;
+  readonly createdAt: number;
+};
 
 export type ModelRefView = { readonly id: string; readonly label: string };
 export type RequestedModelView = ModelRefView & { readonly kind: "primary" | "manual" | "auto" };
@@ -141,6 +149,50 @@ export class WebRequestStore {
       | undefined;
   }
 
+  /** The pending queue, in the same order the worker claims it. Oldest first, bounded. */
+  listQueued(limit = 100): QueuedRequestView[] {
+    const rows = this.db.prepare(`
+      SELECT request_id, client_message_id, text, created_at FROM web_requests
+       WHERE status = 'queued'
+       ORDER BY created_at, rowid
+       LIMIT ?
+    `).all(limit) as { request_id: string; client_message_id: string; text: string; created_at: number }[];
+    return rows.map((row) => ({
+      requestId: row.request_id,
+      clientMessageId: row.client_message_id,
+      text: row.text,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /** Move one queued row out of the FIFO without starting it. Idempotent: false means it was not queued. */
+  markPromoted(requestId: string): boolean {
+    const result = this.db.prepare(
+      "UPDATE web_requests SET status = 'promoted', finished_at = ? WHERE request_id = ? AND status = 'queued'",
+    ).run(Date.now(), requestId);
+    return Number(result.changes) === 1;
+  }
+
+  /** Undo `markPromoted` after the injection failed, so a retry can promote the row again. */
+  revertPromoted(requestId: string): void {
+    this.db.prepare(
+      "UPDATE web_requests SET status = 'queued', finished_at = NULL WHERE request_id = ? AND status = 'promoted'",
+    ).run(requestId);
+  }
+
+  /** Start one specific row now, skipping older queued rows. Used by promote when nothing is running. */
+  startSpecific(requestId: string): WebRequestRow | undefined {
+    return this.transaction(() => {
+      const startedAt = Date.now();
+      const result = this.db.prepare(`
+        UPDATE web_requests SET status = 'running', started_at = ?, finished_at = NULL
+         WHERE request_id = ? AND status IN ('queued', 'promoted')
+      `).run(startedAt, requestId);
+      if (Number(result.changes) !== 1) return undefined;
+      return this.get(requestId);
+    });
+  }
+
   /** Claim the oldest queued request for this process. Single process, so no lease is needed. */
   claimNext(): WebRequestRow | undefined {
     return this.transaction(() => {
@@ -220,7 +272,7 @@ export class WebRequestStore {
   cleanup(now = Date.now()): void {
     this.db.prepare(`
       DELETE FROM web_requests
-       WHERE status IN ('done', 'failed', 'aborted')
+       WHERE status IN ('promoted', 'done', 'failed', 'aborted')
          AND finished_at IS NOT NULL
          AND finished_at < ?
     `).run(now - RETENTION_MS);

@@ -1,0 +1,35 @@
+# Cloudflare Worker that brokers connector secrets and OAuth tokens.
+#
+# Nothing here contains a real account id, domain, audience or secret. Fill the values in at deploy
+# time (see README.md); `account_id` is intentionally absent so `wrangler` takes
+# `CLOUDFLARE_ACCOUNT_ID` from the environment instead of committing an id.
+
+name = "aster-connector-broker"
+main = "src/index.ts"
+compatibility_date = "2026-11-18"
+
+# Access is the only gate in front of this Worker; the Worker re-checks the signed JWT itself.
+routes = [
+  { pattern = "secrets.naiwa.asia", custom_domain = true }
+]
+
+# Access application values. Deploy with `--var` or edit the CI secret store; the empty defaults
+# make every non-health route answer 503 BROKER_NOT_CONFIGURED instead of failing open.
+[vars]
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""
+BROKER_OWNER_ID = "default"
+BROKER_DEV_BYPASS = "0"
+
+[[durable_objects.bindings]]
+name = "VAULT"
+class_name = "Vault"
+
+# SQLite-backed Durable Object: one object per owner, tokens stored only as AES-GCM ciphertext.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Vault"]
+
+# Request bodies carry refresh tokens; Cloudflare-side request logging is deliberately off.
+[observability]
+enabled = false

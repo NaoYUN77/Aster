@@ -17,6 +17,11 @@ export type AgentHostComposition = {
   readonly hubStore?: HubStore;
   /** Extensions owned by host features (watchers, routines, connectors, ...). */
   readonly extraExtensions?: readonly Extension[];
+  /**
+   * Host-managed MCP servers, such as local stdio connectors persisted in `connectors.sqlite`.
+   * They are appended to the configured MCP file rather than replacing it.
+   */
+  readonly mcpServers?: OpenAgentOptions["mcpServers"];
   /** Installed skills, indexed at startup. */
   readonly skills?: SkillIndex;
   /**
@@ -57,6 +62,7 @@ export function buildAgentOptions(
     ...(host.reminderStore === undefined ? {} : { reminderStore: host.reminderStore }),
     ...(host.hubStore === undefined ? {} : { hubStore: host.hubStore }),
     ...(extensions.length === 0 ? {} : { extraExtensions: extensions }),
+    ...(host.mcpServers === undefined || host.mcpServers.length === 0 ? {} : { mcpServers: host.mcpServers }),
     ...(host.skills === undefined ? {} : { skills: host.skills }),
     ...(reactions === undefined ? {} : { reactions }),
   };

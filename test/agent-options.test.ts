@@ -73,11 +73,23 @@ test("Slack adds reactions over the same shared composition", () => {
   assert.equal(options.reactions, reactions);
 });
 
+test("host-managed MCP servers are carried, and an empty list is omitted", () => {
+  const server = {
+    name: "conn_local", transport: "stdio" as const, command: "node", args: ["server.js"],
+    env: {}, inheritEnv: false, timeoutMs: 60_000, connectTimeoutMs: 10_000,
+  };
+  const options = buildAgentOptions(webConfig(), { mcpServers: [server] });
+  assert.deepEqual(options.mcpServers, [server]);
+  const omitted = buildAgentOptions(webConfig(), { mcpServers: [] });
+  assert.equal("mcpServers" in omitted, false);
+});
+
 test("absent capabilities are omitted instead of passed as undefined", () => {
   const options = buildAgentOptions(webConfig(), { extraExtensions: [] });
   assert.equal("reminderStore" in options, false);
   assert.equal("hubStore" in options, false);
   assert.equal("extraExtensions" in options, false);
+  assert.equal("mcpServers" in options, false);
   assert.equal("skills" in options, false);
   assert.equal("reactions" in options, false);
 });

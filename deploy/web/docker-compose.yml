@@ -27,6 +27,9 @@ services:
       - aster-web-data:/data
       # Built by Dev 2 (`npm run build` in web/). Read-only: the backend never writes the UI.
       - ../../web/dist:/app/web/dist:ro
+      # Connector secret files, read-only. Uncomment and replace with the real host path when
+      # GitHub/Gmail OAuth is configured; never bake these values into the image or .env.
+      # - /etc/aster/connectors/secrets:/run/secrets/aster-connectors:ro
     expose:
       - "8787"
     mem_limit: 1g
