@@ -114,6 +114,32 @@ tools are registered, and no path sandbox is imposed beyond the container itself
   "agent reviews before applying".
 - The background run is asynchronous: it starts when a trigger fires, not inside the reply path.
 
+### 5.4 Background execution model
+
+Dreaming is asynchronous, not a separate daemon:
+
+- One in-process runner per memory directory. States: `idle -> running -> idle`; at most one run
+  at a time. A trigger that fires while a run is active is coalesced into a single pending run.
+- The trigger check runs **after** a reply is delivered (step counter) or after compaction
+  completes; it never sits in the reply path. `void runner.kick(reason).catch(log)`.
+- A "step" is a completed agent request; Aster does not expose pi-durable's internal tool rounds,
+  so the counter approximates Letta's step count and the documentation says so.
+- A run: create `git worktree add <tmp> -b dream/<id>` from the memory repository, run one
+  subagent with `cwd` = the worktree and the ordinary tools, then have the host commit the
+  worktree. Live conversations never wait on it.
+- The subagent's instructions: review recent transcript and daily archive; update memory files;
+  `persona.md` / `human.md` are allowed; never store credentials; do not commit; the host owns
+  git.
+- Apply: if the live tree is dirty, commit it first, then `git merge --ff-only dream/<id>`. Any
+  conflict or review rejection discards the worktree and branch and records the failure in state;
+  the next trigger may retry. A failed run never touches the live directory.
+- Review pass (`DREAMING_REVIEW=1`): a second background conversation reads the worktree diff and
+  the cited transcript range, and may revert files or reject the run before apply.
+- Timeout and output caps are enforced on the subagent; transient model failures get one retry,
+  then backoff. There is no unbounded retry loop.
+- `reminder` behavior instead records a one-line "memory review due" note that the next request
+  includes; nothing is written.
+
 ## 6. Safety invariants
 
 1. Dreaming may write any memory file, including `persona.md` and `human.md`, exactly as in
