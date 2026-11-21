@@ -98,8 +98,6 @@ async function discardInterruptedTurn(
 }
 /** A dream run edits memory with the ordinary file tools and nothing else. */
 const DREAMING_ALLOWED_TOOLS = new Set(["read", "write", "edit", "bash"]);
-/** The review pass audits a diff the host already extracted; it only needs to read the worktree. */
-const REVIEW_ALLOWED_TOOLS = new Set(["read"]);
 
 function sessionFailure(cause: unknown): Error {
   // The first storage error surfaces raw, before the Session latches; every later call throws SessionFailed.
@@ -405,14 +403,13 @@ export async function openAgent(
   let harness!: Awaited<ReturnType<typeof Harness.open>>;
 
   /**
-   * One background conversation for a dream or review turn. It is ownerless, runs with the main
-   * model in the worktree the runner names, and is offered only the tools that role needs. The
+   * One background conversation for a dream turn. It is ownerless, runs with the main
+   * model in the worktree the runner names, and is offered only the tools the pass needs. The
    * runner owns the timeout: aborting its signal cancels this wait and the durable run.
    */
   async function runDreamingTurn(input: DreamingTurnInput): Promise<string> {
-    const allowed = input.role === "review" ? REVIEW_ALLOWED_TOOLS : DREAMING_ALLOWED_TOOLS;
     const remove = registry.snapshot().tools()
-      .filter(({ tool }) => !allowed.has(tool.name))
+      .filter(({ tool }) => !DREAMING_ALLOWED_TOOLS.has(tool.name))
       .map(({ tool }) => tool);
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
@@ -420,7 +417,7 @@ export async function openAgent(
         model: { provider: config.provider, modelId: config.model },
         cwd: input.cwd,
         instructions: input.instructions,
-        maxTurns: input.role === "review" ? 4 : 40,
+        maxTurns: 40,
         ...(remove.length === 0 ? {} : { tools: { remove } }),
       },
     }, context);
@@ -428,7 +425,7 @@ export async function openAgent(
     const submission = await conversation.submit({
       type: "input",
       content: input.prompt,
-      requestId: `dreaming:${input.runId}:${input.role}`,
+      requestId: `dreaming:${input.runId}:dream`,
     }, context);
     let settled;
     try {

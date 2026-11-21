@@ -2,8 +2,8 @@
 //
 // A run never writes the live memory repository during the model work. It gets its own git
 // worktree (ADR-0001), the child edits files there with the ordinary read/write/edit/bash tools,
-// an optional review pass audits the staged diff, and only then does the host commit both sides
-// and fast-forward the live branch. A conflict, timeout, rejection or dry run discards the
+// the host checks the wiki layout, and only then commits both sides and fast-forwards the live
+// branch. A conflict, timeout, rejection or dry run discards the
 // worktree; the live directory keeps every byte it had.
 //
 // The runner is a process-wide singleton by construction (the integration creates exactly one):
@@ -17,6 +17,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { checkMemoryLayout } from "./fs/layout.js";
 import type { MemoryFs } from "./fs/store.js";
 
 export const DREAMING_DEFAULTS = {
@@ -24,7 +25,6 @@ export const DREAMING_DEFAULTS = {
   turns: 20,
   onCompaction: true,
   behavior: "auto-launch",
-  review: true,
   dryRun: false,
   timeoutMs: 120_000,
 } as const;
@@ -37,17 +37,13 @@ export type DreamingConfig = {
   readonly turns: number;
   readonly onCompaction: boolean;
   readonly behavior: DreamingBehavior;
-  readonly review: boolean;
   readonly dryRun: boolean;
   readonly timeoutMs: number;
 };
 
-export type DreamingTurnRole = "dream" | "review";
-
 /** One background turn handed to the host: it runs in `cwd` with the main model and returns text. */
 export type DreamingTurnInput = {
   readonly runId: string;
-  readonly role: DreamingTurnRole;
   readonly cwd: string;
   readonly instructions: string;
   readonly prompt: string;
@@ -70,7 +66,7 @@ export type DreamingRunRecord = {
   readonly endedAt: string;
   readonly status: DreamingRunStatus;
   readonly commit: string | null;
-  /** A stable code such as `timeout`, `conflict`, `review-rejected`; never model text. */
+  /** A stable code such as `timeout`, `conflict`, `layout-invalid`; never model text. */
   readonly reason: string | null;
 };
 
@@ -94,6 +90,9 @@ export type DreamingLogEvent = {
   readonly code?: string;
   readonly turns?: number;
   readonly durationMs?: number;
+  /** Layout lint only: issue codes and their count, never memory text. */
+  readonly codes?: readonly string[];
+  readonly issues?: number;
 };
 
 export type DreamingRunnerOptions = {
@@ -130,7 +129,6 @@ const STATE_DIR = ".aster";
 const BRANCH_PREFIX = "dreaming/";
 const COMMIT_AUTHOR = { name: "Aster Memory", email: "memory@aster.local" } as const;
 const GIT_TIMEOUT_MS = 30_000;
-const DIFF_MAX_CHARS = 24_000;
 const RETRY_DELAY_MS = 1_000;
 const FAILURE_BACKOFF_BASE_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 60 * 60_000;
@@ -139,22 +137,29 @@ const REMINDER_LINE = "System note: a memory review is due. Consider whether any
 /** The fixed brief for the dream conversation. Evidence arrives in the prompt, never here. */
 export const DREAMING_INSTRUCTIONS = `You are Aster's dreaming pass. You are working inside an isolated git worktree of
 the owner's core-memory repository, and that worktree is your whole world.
-Use read, write, edit and bash to update the memory files. MEMORY.md is the file that is injected
-into every future turn: keep persona, the owner's profile, standing goals and constraints there,
-organized under headings, and keep it concise. Other files are read on demand; keep them factual.
-Only record what the supplied evidence supports. Never invent events, never store credentials,
-tokens, passwords or keys. Prefer correcting and merging existing notes over appending duplicates.
-Delete notes the evidence shows are obsolete. When you are done, reply with one plain line naming
-what changed; do not use Markdown markup.`;
-
-/** The fixed brief for the review conversation. Its answer is parsed, never shown. */
-export const REVIEW_INSTRUCTIONS = `You audit a proposed update to an owner's core memory before it is applied.
-You receive the staged diff of an isolated worktree and the transcript the dream pass was given.
-Check that every change is supported by the evidence, that nothing durable was dropped by mistake,
-and that no credential, token, password or key appears in the diff.
-Answer with exactly one JSON object and nothing else:
-{"verdict":"apply"|"reject","reason":"a short code-like phrase","revert":["path",...]}
-Use "revert" to drop individual files that should not change; use "reject" to discard the whole run.`;
+Memory has three layers, and you maintain all of them.
+Layer one is the transcript evidence in the prompt below: what the owner actually said and did.
+Layer two is the notes: one Markdown file per topic, read on demand. You decide how many notes
+exist, what each covers and how each is structured. Write dense, abstracted facts, never quotes
+or a replay of a conversation. Merge and rewrite notes instead of appending; split a note when it
+stops covering one topic; delete a note the evidence shows is obsolete.
+Layer three is MEMORY.md, the only file injected into every future turn. It contains exactly two
+sections and nothing else:
+- "## Core": the few facts Aster must know without reading anything, one short line each, such as
+  a standing constraint, the owner's name and language, or a hard preference.
+- "## Index": one line per note, written as a Markdown link plus a short hint, for example
+  "- [Deploy host](notes/deploy-host.md) — hostname, paths, restart command". Every note must be
+  linked here, and every link must point to a note that exists.
+Promote a fact into "## Core" when it recurs across turns or the owner says it must always be
+known; everything else stays in a note. When evidence contradicts a Core fact, take it out of
+Core: correct it into a note, or delete it when it was never true. What the owner states
+explicitly overrides anything stored, so record the correction rather than the old belief.
+Only record what the supplied evidence supports: every fact must trace to an owner statement, a
+tool call and its result, or an error. Never invent events, never store credentials, tokens,
+passwords or keys.
+Leave every edit uncommitted: never run git commit, checkout, reset or any command that moves HEAD;
+the host stages, checks the layout and commits the worktree.
+When you are done, reply with one plain line naming what changed; do not use Markdown markup.`;
 
 type Worktree = { readonly path: string; readonly branch: string; readonly runId: string };
 
@@ -297,7 +302,7 @@ class Runner implements DreamingRunner {
     const startedMs = this.#now().getTime();
     const config = this.#options.config;
     const adapter = new AbortController();
-    // One hard deadline for the whole run: both model turns, every git command, review and apply
+    // One hard deadline for the whole run: the model turn, every git command and the apply
     // share it, so DREAMING_TIMEOUT_MS is the run's limit rather than each call's.
     const deadline = new AbortController();
     const signal = AbortSignal.any([adapter.signal, deadline.signal]);
@@ -333,42 +338,34 @@ class Runner implements DreamingRunner {
 
       const dreamPrompt = buildDreamPrompt(input, this.#options.timezone);
       await this.#runWithRetry(signal, {
-        runId, role: "dream", cwd: worktree.path, instructions: DREAMING_INSTRUCTIONS, prompt: dreamPrompt,
+        runId, cwd: worktree.path, instructions: DREAMING_INSTRUCTIONS, prompt: dreamPrompt,
       }, async () => {
-        await git(worktree!.path, ["reset", "--hard", "HEAD"], signal);
+        await git(worktree!.path, ["reset", "--hard", base], signal);
         await git(worktree!.path, ["clean", "-fd"], signal);
       });
 
+      // The brief forbids committing, but a model may commit anyway. Rewind to the base without
+      // touching the working tree so its edits are staged like any other change, not mistaken for
+      // an empty run.
+      const dreamHead = (await git(worktree.path, ["rev-parse", "HEAD"], signal)).trim();
+      if (dreamHead !== base) await git(worktree.path, ["reset", "--soft", base], signal);
       await git(worktree.path, ["add", "-A"], signal);
       if ((await gitTry(worktree.path, ["diff", "--cached", "--quiet"], signal)).code === 0) {
         throw new DreamDiscard("no-change");
       }
-      const diff = (await git(worktree.path, ["diff", "--cached"], signal)).slice(0, DIFF_MAX_CHARS);
-
-      if (config.review) {
-        this.#log({ event: "dreaming.run.review", runId });
-        signal.throwIfAborted();
-        const verdictText = await this.#options.run({
+      // The wiki contract: MEMORY.md indexes every note, every index link resolves. A pass that
+      // breaks it is not memory worth keeping.
+      signal.throwIfAborted();
+      const layout = await checkMemoryLayout(worktree.path);
+      if (layout.length > 0) {
+        this.#log({
+          event: "dreaming.run.layout",
           runId,
-          role: "review",
-          cwd: worktree.path,
-          instructions: REVIEW_INSTRUCTIONS,
-          prompt: buildReviewPrompt(diff, input),
-          signal,
+          codes: [...new Set(layout.map((issue) => issue.code))],
+          issues: layout.length,
         });
-        const verdict = parseVerdict(verdictText);
-        if (verdict === undefined) throw new DreamDiscard("review-invalid");
-        if (verdict.revert.length > 0) {
-          signal.throwIfAborted();
-          for (const path of verdict.revert) await revertPath(worktree.path, path);
-          await git(worktree.path, ["add", "-A"], signal);
-        }
-        if (verdict.verdict !== "apply") throw new DreamDiscard("review-rejected");
-        if ((await gitTry(worktree.path, ["diff", "--cached", "--quiet"], signal)).code === 0) {
-          throw new DreamDiscard("no-change");
-        }
+        throw new DreamDiscard("layout-invalid");
       }
-
       if (config.dryRun) {
         this.#log({ event: "dreaming.run.discarded", runId, action: "dry-run", turns });
         // A dry run is a completed cycle: the counter restarts, so the next trigger again needs a
@@ -377,7 +374,7 @@ class Runner implements DreamingRunner {
         return;
       }
 
-      // Apply, per ADR-0001: commit the worktree, commit a dirty live tree, rebase the reviewed
+      // Apply, per ADR-0001: commit the worktree, commit a dirty live tree, rebase the dream
       // commit if live advanced, then fast-forward. Never a forced merge.
       signal.throwIfAborted();
       await git(worktree.path, ["commit", "--no-verify", "-m", commitMessage(runId, turns, this.#now())], signal);
@@ -385,7 +382,7 @@ class Runner implements DreamingRunner {
       signal.throwIfAborted();
       const liveHead = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
       if (liveHead !== base) {
-        // The live branch advanced while the run worked. Rebase the reviewed commit onto it so the
+        // The live branch advanced while the run worked. Rebase the dream commit onto it so the
         // apply is still a fast-forward; a real conflict is the discard path, never a forced merge.
         const rebase = await gitTry(worktree.path, ["rebase", liveHead], signal);
         if (rebase.code !== 0) {
@@ -628,7 +625,7 @@ function nullableString(value: unknown): string | null {
   return value;
 }
 
-// --- prompts and review -----------------------------------------------------------------------
+// --- prompts ------------------------------------------------------------------------------------
 
 function buildDreamPrompt(input: DreamingInput, timezone: string): string {
   return `Recent owner turns (oldest first, already bounded):
@@ -642,55 +639,6 @@ ${input.archive === "" ? "(none)" : input.archive}
 ---
 
 Consolidate this into core memory now. Times are in ${timezone}. Finish every edit, then reply with one line.`;
-}
-
-function buildReviewPrompt(diff: string, input: DreamingInput): string {
-  return `Staged diff proposed by the dream pass:
----
-${diff}
----
-
-Transcript the dream pass was given:
----
-${input.transcript === "" ? "(none)" : input.transcript}
----
-
-Reply with one JSON object.`;
-}
-
-type Verdict = { readonly verdict: "apply" | "reject"; readonly revert: readonly string[] };
-
-function parseVerdict(text: string): Verdict | undefined {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null) return undefined;
-  const record = parsed as Record<string, unknown>;
-  if (record.verdict !== "apply" && record.verdict !== "reject") return undefined;
-  const revert = Array.isArray(record.revert)
-    ? record.revert.filter((item): item is string => typeof item === "string")
-    : [];
-  return { verdict: record.verdict, revert };
-}
-
-/** Undo one file in the worktree: restore a tracked file, remove one the run added. */
-async function revertPath(worktree: string, path: string): Promise<void> {
-  const root = resolve(worktree);
-  const absolute = resolve(root, path);
-  if (!absolute.startsWith(`${root}${sep}`) || path.split("/").includes(".git")) return;
-  const tracked = await gitTry(root, ["cat-file", "-e", `HEAD:${path}`]);
-  if (tracked.code === 0) {
-    await gitTry(root, ["checkout", "HEAD", "--", path]);
-    return;
-  }
-  await gitTry(root, ["rm", "--cached", "--ignore-unmatch", "-f", "--", path]);
-  await rm(absolute, { force: true });
 }
 
 // --- git --------------------------------------------------------------------------------------

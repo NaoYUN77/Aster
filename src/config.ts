@@ -218,7 +218,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
  * Variables an upgraded deployment may still carry: the Telegram/Slack builds, and the memory
  * switch that no longer exists because the memory system is always composed.
  */
-const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING", "MEMORY_ENABLED"] as const;
+const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING", "MEMORY_ENABLED", "DREAMING_REVIEW"] as const;
 const REMOVED_ENV_PREFIXES = ["TELEGRAM_", "SLACK_"] as const;
 
 /**
@@ -234,7 +234,7 @@ export function removedConfigKeys(env: NodeJS.ProcessEnv = process.env): readonl
 }
 
 /** The one startup line printed when {@link removedConfigKeys} finds anything. Names only. */
-export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED are no longer read";
+export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED, DREAMING_REVIEW are no longer read";
 
 /** At most this many fallbacks; the first batch intentionally keeps the chain short. */
 const MAX_MODEL_FALLBACKS = 5;
@@ -891,7 +891,6 @@ export function readDreamingConfig(env: NodeJS.ProcessEnv = process.env): Dreami
     turns: boundedInteger(env, "DREAMING_TURNS", DREAMING_DEFAULTS.turns, 1, 10_000),
     onCompaction: flag("DREAMING_ON_COMPACTION", DREAMING_DEFAULTS.onCompaction),
     behavior: (behaviorRaw === undefined || behaviorRaw === "" ? DREAMING_DEFAULTS.behavior : behaviorRaw) as DreamingBehavior,
-    review: flag("DREAMING_REVIEW", DREAMING_DEFAULTS.review),
     dryRun: flag("DREAMING_DRY_RUN", DREAMING_DEFAULTS.dryRun),
     timeoutMs: boundedInteger(env, "DREAMING_TIMEOUT_MS", DREAMING_DEFAULTS.timeoutMs, 1_000, 600_000),
   };

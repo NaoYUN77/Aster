@@ -30,9 +30,36 @@ _Avoid_: channel, transport, connector, interface
 ### Memory
 
 **Core memory**:
-The small, durable set of notes that is in the prompt on every turn and that the owner and the
-agent maintain explicitly.
+The durable wiki the owner and the agent maintain together, made of an index file, its notes, and
+a small set of core facts that are in the prompt on every turn.
 _Avoid_: long-term memory, profile, context
+
+**Memory index**:
+The one file of core memory that is injected on every turn: a short list of core facts plus a
+soft link to every note. It is the agent's only map of what the wiki holds.
+_Avoid_: table of contents, summary, index file, MEMORY.md
+
+**Note**:
+One Markdown file of core memory holding dense, abstracted facts about a single topic, read only
+when the index or another note links to it. How many notes exist and what each covers is the
+dream pass's decision, never a fixed layout.
+_Avoid_: page, document, block, memory item
+
+**Core facts**:
+The few lines in the memory index that must be in every prompt: standing constraints, identity and
+hard preferences. A fact is promoted here when it recurs or the owner insists, and demoted to a
+note or deleted when evidence contradicts it.
+_Avoid_: pinned facts, profile, persona
+
+**Soft link**:
+A reference from the memory index, or between notes, to another note by name. It carries no copy
+of the target's content, so a note is either current or absent.
+_Avoid_: hard link, embed, include
+
+**Layout check**:
+The host's structural check before a dream run applies: the index exists, every note is linked
+from it, and every link resolves inside the wiki. It says nothing about whether facts are true.
+_Avoid_: lint, validation, review, audit
 
 **Daily archive**:
 The append-only, searchable record of what happened, grouped by day and linked to its sources.
@@ -54,19 +81,24 @@ Background consolidation of recent experience into core memory, modeled on Letta
 _Avoid_: reflection,归纳, summarization, background job
 
 **Consolidation**:
-What a dream run does: read recent turns and the daily archive, decide what is durable, and update
-core memory.
+What a dream run does: read the transcript and activity evidence, decide what is durable, and
+rewrite notes and the memory index accordingly, promoting or demoting facts between layers.
 _Avoid_: extraction, distillation, index
 
 **Dream run**:
 One execution of dreaming, from trigger to applied changes or discard.
 _Avoid_: cycle, pass, job
 
-**Review pass**:
-A second background check of a dream run's proposed changes against the transcript before they are
-applied.
-_Avoid_: validation, approval, audit
+**Promotion**:
+Moving a fact up a layer — from the transcript into a note, or from a note into the index's core
+facts — because it recurs or the owner says it must always be known.
+_Avoid_: elevation, pinning
+
+**Demotion**:
+Moving a fact down a layer, or deleting it, when newer evidence contradicts it. A contradicted
+core fact returns to a note (corrected) or disappears; it never stays in the index.
+_Avoid_: rollback, downgrade, correction (correction is the content; demotion is the move)
 
 **Dry run**:
-A dream run that computes and reviews changes without applying them.
+A dream run that computes changes and passes the layout check without applying them.
 _Avoid_: shadow mode, rehearsal

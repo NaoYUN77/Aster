@@ -26,7 +26,7 @@ test("a leftover MEMORY_ENABLED is reported by name, never by value", () => {
   assert.match(REMOVED_CONFIG_LINE, /MEMORY_ENABLED/);
   // Every removable key family is named, so the prose cannot drift from the filter silently.
   const keys = removedConfigKeys({
-    CHANNEL: "web", MEMORY_ENABLED: "0", STYLE_LEARNING: "observe",
+    CHANNEL: "web", MEMORY_ENABLED: "0", STYLE_LEARNING: "observe", DREAMING_REVIEW: "1",
     TELEGRAM_BOT_TOKEN: "x", SLACK_APP_TOKEN: "x",
   });
   for (const key of keys) {
