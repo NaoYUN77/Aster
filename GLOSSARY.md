@@ -8,8 +8,8 @@ codebase and the design docs.
 ### Identity and conversation
 
 **Owner**:
-The one person the agent serves. Every admitted message is the owner's; there are no members or
-tenants.
+The one person the agent serves. The single entry admits only the owner; there are no members,
+tenants or other callers.
 _Avoid_: user, member, tenant, customer
 
 **Turn**:
@@ -18,9 +18,14 @@ counter.
 _Avoid_: message, step, round, exchange
 
 **Conversation**:
-The single durable thread of turns between the owner and the agent. Slack threads and channels
-are only delivery locations, not separate conversations.
+The single durable thread of turns between the owner and the agent. Where a turn is delivered is
+not part of the model; there is one conversation.
 _Avoid_: session, chat, thread
+
+**Entry**:
+The one way the owner's messages reach the agent: the authenticated web endpoint. An entry carries
+turns into the conversation; it is not itself a conversation, a place or a choice.
+_Avoid_: channel, transport, connector, interface
 
 ### Memory
 
