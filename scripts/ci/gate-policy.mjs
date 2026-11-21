@@ -303,10 +303,15 @@ function checkSecrets(added) {
   }
 }
 
-function checkDocsAsFix(files, testFindings) {
+function checkDocsAsFix(files, testFindings, opts) {
   // 只认"改文档 + 削弱测试"这个组合。仅仅"碰了文档也碰了测试"是绝大多数 PR 的常态,
   // 拿它报警只会把这条规则淹成噪声。
+  //
+  // 这是启发式,不是绝对禁令:删除测试却同时改文档,也可能是合法的重构(删掉一个子系统
+  // 时,文档和它的测试必须一起走)。所以和 GATE_TEST_REMOVED 一样,由仓库所有者显式加
+  // gate-change-approved 标签放行——标签表示"人已经看过这个组合",而不是规则失效。
   const rule = RULES.docsAsFix;
+  if (opts.labels.includes(RULES.protectedPaths.label)) return;
   const docsTouched = files.some((f) => rule.docsPaths.some((p) => pathMatches(f.path, p)));
   if (!docsTouched) return;
   if (testFindings.deleted) fail(rule.code, testFindings.deletedTestFiles[0], "改文档同时删测试文件");
@@ -330,7 +335,7 @@ function main() {
   checkDependencies(files, head);
   checkTestScript(files, opts.staged ? "HEAD" : opts.base, head, opts);
   checkSecrets(added);
-  checkDocsAsFix(files, testFindings);
+  checkDocsAsFix(files, testFindings, opts);
 
   if (opts.json) {
     console.log(JSON.stringify({
