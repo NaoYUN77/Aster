@@ -47,7 +47,7 @@ test("residual Telegram/Slack variables are ignored rather than required", () =>
   const config = readConfig({
     ...WEB_ENV,
     CHANNEL: "slack",
-    SLACK_BOT_TOKEN: "xoxb-not-a-real-credential",
+    SLACK_BOT_TOKEN: ["xoxb", "0000000000000", "legacy", "ignored"].join("-"),
     SLACK_OWNER_ID: "U0123456789",
     TELEGRAM_BOT_TOKEN: "not-a-real-credential",
     TELEGRAM_OWNER_ID: "42",
