@@ -12,10 +12,11 @@ We rejected keeping Slack as a transition entry: it would keep two authenticatio
 inbound identity schemes and a second delivery loop alive with no owner to migrate them. We
 rejected keeping `CHANNEL` as a selector: every value would now mean web, so the variable could
 only mislead. We rejected failing fast on a leftover `TELEGRAM_*`/`SLACK_*`/`CHANNEL`/
-`STYLE_LEARNING` variable: an upgraded host must be able to pull a new image and boot with its
-existing `.env` before anyone edits it. Instead those keys are ignored, and startup prints one
-line — `REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING are no longer read` — naming
-variables only, never values.
+`STYLE_LEARNING`/`MEMORY_ENABLED` variable: an upgraded host must be able to pull a new image and
+boot with its existing `.env` before anyone edits it. Instead those keys are ignored, and startup
+prints one line — `REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED are
+no longer read` — naming variables only, never values. (`MEMORY_ENABLED` was the MEM-07 master
+switch; the memory system is now always composed, so the key became a removed one.)
 
 Consequences: an old `.env` boots silently with those keys inert until the operator removes them;
 the reaction-feedback path has no live event source; and production currently runs as a Slack DM,

@@ -6,6 +6,7 @@ import { readConfig } from "../src/config.js";
 import type { MemoryFs } from "../src/memory-fs.js";
 import type { ReminderStore } from "../src/reminders.js";
 import type { SkillIndex } from "../src/skills.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 const extra: Extension = { name: "test-extension" } as unknown as Extension;
 const reminders = {} as ReminderStore;
@@ -13,14 +14,13 @@ const memory = {} as MemoryFs;
 const skills = {} as SkillIndex;
 
 function webConfig() {
-  return readConfig({
+  return withMemoryOff(readConfig({
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: "agent-options-web",
-    MEMORY_ENABLED: "0",
-  });
+  }));
 }
 
 test("the shared composition carries reminders, hubs, extensions and skills", () => {

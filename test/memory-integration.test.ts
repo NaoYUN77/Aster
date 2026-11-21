@@ -42,6 +42,7 @@ import {
   type MemoryIntegration,
   type MemoryLogEvent,
 } from "../src/memory/integration.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 const context = BACKGROUND_CONTEXT;
 const running = new AbortController().signal;
@@ -129,18 +130,16 @@ test("07-F: memory configuration defaults, overrides and invalid values", () => 
   assert.equal(defaults.archiveTimeoutMs, 60_000);
 
   const custom = readMemoryConfig({
-    MEMORY_ENABLED: "0",
     MEMORY_EVALUATE_AFTER_USER_TURNS: "5",
     MEMORY_TIMEZONE: "Asia/Shanghai",
     MEMORY_RESERVE_TOKENS: "8192",
   });
-  assert.equal(custom.enabled, false);
+  assert.equal(custom.enabled, true);
   assert.equal(custom.budget.evaluateAfterUserTurns, 5);
   assert.equal(custom.timezone, "Asia/Shanghai");
   assert.equal(custom.reserveTokens, 8192);
 
   const invalid: NodeJS.ProcessEnv[] = [
-    { MEMORY_ENABLED: "yes" },
     { MEMORY_EVALUATE_AFTER_USER_TURNS: "0" },
     { MEMORY_EVALUATE_AFTER_USER_TURNS: "1001" },
     { MEMORY_SEARCH_RESULT_TOKENS: "127" },
@@ -156,28 +155,24 @@ test("07-F: memory configuration defaults, overrides and invalid values", () => 
   }
 
   // The memory section travels with the rest of the configuration: the agent must never fall back
-  // to process defaults, so an explicit MEMORY_ENABLED=0 cannot be lost between readConfig and
-  // openAgent.
+  // to process defaults, so custom budgets must survive readConfig. There is no switch to disable
+  // the system; a leftover MEMORY_ENABLED is reported by removedConfigKeys instead.
   const base = {
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: "memory-config-test",
   };
-  const disabled = readConfig({ ...base, MEMORY_ENABLED: "0" });
-  assert.equal(disabled.memory.enabled, false);
-  const enabled = readConfig({
+  const configured = readConfig({
     ...base,
-    MEMORY_ENABLED: "1",
     MEMORY_EVALUATE_AFTER_USER_TURNS: "3",
     MEMORY_TIMEZONE: "Asia/Shanghai",
     MEMORY_RESERVE_TOKENS: "8192",
   });
-  assert.equal(enabled.memory.enabled, true);
-  assert.equal(enabled.memory.budget.evaluateAfterUserTurns, 3);
-  assert.equal(enabled.memory.timezone, "Asia/Shanghai");
-  assert.equal(enabled.memory.reserveTokens, 8192);
-  assert.throws(() => readConfig({ ...base, MEMORY_ENABLED: "yes" }), ConfigurationError);
+  assert.equal(configured.memory.enabled, true);
+  assert.equal(configured.memory.budget.evaluateAfterUserTurns, 3);
+  assert.equal(configured.memory.timezone, "Asia/Shanghai");
+  assert.equal(configured.memory.reserveTokens, 8192);
 });
 
 // ---------------------------------------------------------------------------
@@ -948,10 +943,11 @@ test("07 wiring: completed turns evaluate, compact, switch cycle and trigger the
 });
 
 // ---------------------------------------------------------------------------
-// MEMORY_ENABLED=0: the pre-MEM-07 application, unchanged (the rollback switch)
+// An injected disabled memory section: the pre-MEM-07 application, unchanged. There is no
+// environment switch; tests (and future embedders) inject `enabled: false` themselves.
 // ---------------------------------------------------------------------------
 
-test("07-F: MEMORY_ENABLED=0 keeps the previous registry, settings and request path", { timeout: 60_000 }, async () => {
+test("07-F: an injected disabled memory section keeps the previous registry, settings and request path", { timeout: 60_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "mem07-disabled-"));
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
@@ -962,7 +958,7 @@ test("07-F: MEMORY_ENABLED=0 keeps the previous registry, settings and request p
       assert.ok(!names.includes("memory_search") && !names.includes("working_update"), "no memory tools are registered");
       return fauxAssistantMessage("plain answer");
     }]);
-    app = await openAgent(appConfig(directory, { MEMORY_ENABLED: "0" }), models);
+    app = await openAgent(withMemoryOff(appConfig(directory)), models);
     assert.equal(await app.reply(request("1", "hello"), running), "plain answer");
     await app.close();
     app = undefined;

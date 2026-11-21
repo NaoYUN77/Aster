@@ -12,11 +12,12 @@ import { AgentDoc, Harness, defineTool, type Storage } from "@earendil-works/pi-
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { openAgent } from "../src/agent.js";
-import { readConfig, readMemoryConfig } from "../src/config.js";
+import { readConfig } from "../src/config.js";
 import type { McpHost } from "../src/mcp.js";
 import { readToolCatalog, readToolLedger, withToolLedger } from "../src/tool-ledger.js";
 import { installMcpTools } from "../src/tool-pins.js";
 import { createToolRegistry, type GovernedTool } from "../src/tools.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 const context = BACKGROUND_CONTEXT;
 const githubName = "mcp__github__issue_read";
@@ -41,8 +42,8 @@ function host(approval?: string, present = true): McpHost {
     subscribeAvailability: (listener) => { listener("github", "available"); return () => {}; }, close: async () => {} };
 }
 function config(directory: string) {
-  return { ...readConfig({ MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+  return withMemoryOff(readConfig({ MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }));
 }
 async function rootId(storage: Storage) {
   return (await storage.scanConversations({}, 100, undefined, context)).items[0]!.id;

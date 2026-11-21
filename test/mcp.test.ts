@@ -17,7 +17,8 @@ import {
 } from "@earendil-works/pi-mcp";
 import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
 import { openAgent } from "../src/agent.js";
-import { readConfig, readMemoryConfig } from "../src/config.js";
+import { readConfig } from "../src/config.js";
+import { withMemoryOff } from "./support/memory-off.js";
 import { buildMcpTool, connectMcp, mcpToolName, openMcpConnection, type McpConnection, type McpToolInfo } from "../src/mcp.js";
 import type { McpFileConfig, McpServerConfig } from "../src/mcp-config.js";
 import type { TextRequest } from "../src/messages.js";
@@ -635,10 +636,10 @@ test("MCP health filters native search and blocks loaded calls without changing 
         return fauxAssistantMessage("recovered");
       },
     ]);
-    const appConfig = { ...readConfig({
+    const appConfig = withMemoryOff(readConfig({
       MODEL_PROVIDER: "openai", MODEL_ID: "faux-1",
       OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory,
-    }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+    }));
     app = await openAgent(appConfig, models, storage, { mcp: host });
     assert.equal(await app.reply({ requestId: "telegram:health:1", conversationId: "test", senderId: "1", text: "use alpha" }, new AbortController().signal), "recovered");
   } finally {

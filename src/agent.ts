@@ -397,10 +397,9 @@ export async function openAgent(
       ...(config.exaApiKey === undefined ? {} : { exaApiKey: config.exaApiKey }),
     }));
   }
-  // Memory wiring (MEM-07) goes through the one composition entry; with MEMORY_ENABLED=0 the
-  // application keeps exactly its previous registry, settings and request path. `readConfig`
-  // carries the memory section so the enabled flag always comes from the same environment as the
-  // rest of the configuration; there is deliberately no fallback to process defaults here.
+  // Memory wiring (MEM-07) goes through the one composition entry. `readConfig` always carries an
+  // enabled memory section; a host may inject `enabled: false` to keep exactly its previous
+  // registry, settings and request path. There is deliberately no fallback to process defaults.
   // The harness is opened below; a dream turn is only ever started after that, so the closure can
   // read the late-bound handle without reordering the composition.
   let harness!: Awaited<ReturnType<typeof Harness.open>>;

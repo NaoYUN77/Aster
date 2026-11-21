@@ -11,10 +11,11 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { Harness, MemoryStorage, ToolResultEntry, defineTool, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { openAgent } from "../src/agent.js";
-import { readConfig, readMemoryConfig } from "../src/config.js";
+import { readConfig } from "../src/config.js";
 import { connectMcp, type McpConnection, type McpToolInfo } from "../src/mcp.js";
 import { validateMcpConfig } from "../src/mcp-config.js";
 import { createToolRegistry, type GovernedTool, type ToolAuthority } from "../src/tools.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 const context = BACKGROUND_CONTEXT;
 const lastResult = (messages: readonly Message[]) => messages.findLast((message) => message.role === "toolResult");
@@ -263,8 +264,7 @@ test("production host enforces restricted authority and reads authz alongside pi
           return fauxAssistantMessage("done");
         },
       ]);
-      const config = { ...readConfig({ MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }),
-        memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+      const config = withMemoryOff(readConfig({ MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }));
       app = await openAgent(config, fixture.models, undefined, { toolAuthority: authority, toolReviewLog: audit.log });
       assert.equal(await app.reply({ requestId: "telegram:authz", conversationId: "test", senderId: "1", text: "read and write" }, new AbortController().signal), "done");
       assert.deepEqual(audit.events.map(({ code }) => code), ["TOOL_ALLOWED", authority === "owner" ? "TOOL_ALLOWED" : "TOOL_AUTHZ_DENIED"]);

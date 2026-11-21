@@ -7,28 +7,27 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { openAgent } from "../src/agent.js";
 import { readConfig } from "../src/config.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 function config(dataDir: string) {
-  return readConfig({
+  return withMemoryOff(readConfig({
     WEB_OWNER_ID: "1",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: dataDir,
-    MEMORY_ENABLED: "0",
-  });
+  }));
 }
 
 function webConfig(dataDir: string) {
-  return readConfig({
+  return withMemoryOff(readConfig({
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     MODEL_FALLBACKS: "openai:faux-2",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: dataDir,
-    MEMORY_ENABLED: "0",
-  });
+  }));
 }
 
 test("history reads the durable transcript, projects messages and pages by entry cursor", async () => {

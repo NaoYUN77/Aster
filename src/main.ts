@@ -29,8 +29,9 @@ try {
   const config = readConfig(env, providerConfig.providers);
   // Tracing is auxiliary: absent keys or an exporter failure must not stop the service.
   trace = startTrace(config.trace);
-  // An upgraded .env may still carry CHANNEL/TELEGRAM_*/SLACK_*/STYLE_LEARNING. They are ignored;
-  // say so once, by name only, so nobody believes a leftover token still does something.
+  // An upgraded .env may still carry CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING or MEMORY_ENABLED.
+  // They are ignored; say so once, by name only, so nobody believes a leftover token still does
+  // something.
   if (removedConfigKeys(process.env).length > 0) console.info(REMOVED_CONFIG_LINE);
   // The web adapter is the only entry: one owner, one conversation, one HTTP surface. It owns the
   // request queue, the connector runtime, core memory and the reminder/watcher/routine loops.

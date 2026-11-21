@@ -146,7 +146,7 @@ npm start
 - `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。
 - `WEB_OWNER_ID` / `WEB_PORT` / `WEB_HOST` / `WEB_ALLOWED_ORIGINS` / `WEB_SESSION_TTL_DAYS` / `WEB_STATIC_DIR` / `WEB_TRUST_PROXY`：web 入口的可选项，默认值见 `.env.example`。`WEB_OWNER_ID` 只是 agent 看到的内部 sender id，不是登录名。
 - 旧版本的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*`、`STYLE_LEARNING` 不再读取；启动时只打印一次变量名提示，值不会出现在日志里。
-- `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭。其余 `MEMORY_*` 为预算、时区与归档超时。
+- 记忆系统（working state、daily archive、检索工具、压缩、profile）始终启用，没有环境总开关；`MEMORY_*` 只配置预算、时区与归档超时。旧版本遗留的 `MEMORY_ENABLED` 会被忽略，并在启动时按变量名提示一次。
 - `MEMORY_FS_ENABLED` / `MEMORY_FS_DIR` / `MEMORY_FS_CORE_TOKENS`：core memory 的总开关（默认开）、git 仓库绝对路径（默认 `DATA_DIR/memory-fs`）与注入 `MEMORY.md` 的 token 预算（默认 4096，范围 256..65536）。
 - `DREAMING_*`：后台记忆整理。`DREAMING_ENABLED`（默认 1，`MEMORY_FS_ENABLED=0` 时无可写仓库，自动不跑）、`DREAMING_TURNS`（每多少个已完成的 owner turn 触发一次，默认 20）、`DREAMING_ON_COMPACTION`（压缩完成后也触发，默认 1）、`DREAMING_BEHAVIOR`（`auto-launch` 后台写 / `reminder` 只在下一次请求提示一行）、`DREAMING_REVIEW`（应用前跑二次 review，默认 1）、`DREAMING_DRY_RUN`（全流程但不 merge，默认 0）、`DREAMING_TIMEOUT_MS`（整轮硬超时，覆盖两次模型调用、git 与 apply，默认 120000）。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
