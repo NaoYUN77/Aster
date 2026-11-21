@@ -23,6 +23,11 @@
 // Observation carries identifiers, versions, counts, durations and safe error codes only —
 // never memory text (design §11).
 
+// Core memory (MemFS) shares this composition entry so the application keeps exactly one memory
+// import (the 07-G/08-H boundary checks); the host reaches the factory through `src/memory-fs.ts`.
+export { MEMORY_LIMITS } from "./fs/contracts.js";
+export { createMemoryFs, type MemoryFs } from "./fs/store.js";
+
 import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";

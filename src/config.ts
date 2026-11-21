@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
 import { MODEL_FAILOVER_DEFAULTS, type ModelRef } from "./model-failover.js";
 import type { WatchersConfig } from "./watchers/protocol.js";
+import { MEMORY_LIMITS } from "./memory/fs/contracts.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
 import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
 import { STYLE_MODES } from "./style.js";
@@ -206,6 +207,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(skills.enabled ? { skills } : {}),
     ...(browser === undefined ? {} : { browser }),
     style,
+    memoryFs: readMemoryFsConfig(env),
     trace: readTraceConfig(env),
   };
 }
@@ -741,6 +743,44 @@ export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryCo
     reserveTokens: memoryInteger(env, "MEMORY_RESERVE_TOKENS", 16_384, 1, 1_048_576),
     timezone,
     archiveTimeoutMs: memoryInteger(env, "MEMORY_ARCHIVE_TIMEOUT_MS", 60_000, 1, 300_000),
+  };
+}
+
+/** MemFS (M1): the git-backed core-memory repository. */
+export type MemoryFsConfig = {
+  readonly enabled: boolean;
+  /** Absolute repository path; `main` creates it lazily and fails startup if it cannot. */
+  readonly dir: string;
+  /** Token budget for the core section injected into the owner's prompt. */
+  readonly coreTokens: number;
+};
+
+/**
+ * All MemFS settings are validated even when the switch is off, so a malformed value cannot surface
+ * later when somebody flips MEMORY_FS_ENABLED. Relative paths are refused: the repository path is
+ * resolved once, at startup, and must not depend on the process working directory.
+ */
+export function readMemoryFsConfig(env: NodeJS.ProcessEnv = process.env): MemoryFsConfig {
+  const enabledRaw = env.MEMORY_FS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("MEMORY_FS_ENABLED must be 0 or 1");
+  }
+  const rawDir = env.MEMORY_FS_DIR?.trim();
+  const dir = rawDir === undefined || rawDir === ""
+    ? join(resolve(env.DATA_DIR || "data"), "memory-fs")
+    : isAbsolute(rawDir)
+      ? resolve(rawDir)
+      : (() => { throw new ConfigurationError("MEMORY_FS_DIR must be an absolute path"); })();
+  return {
+    enabled: enabledRaw !== "0",
+    dir,
+    coreTokens: boundedInteger(
+      env,
+      "MEMORY_FS_CORE_TOKENS",
+      MEMORY_LIMITS.coreTokens,
+      MEMORY_LIMITS.minCoreTokens,
+      MEMORY_LIMITS.maxCoreTokens,
+    ),
   };
 }
 

@@ -5,6 +5,7 @@ import { ConfigurationError, configureEnvProxy, readConfig, resolveProviderConfi
 import { errorCode, StateError } from "./errors.js";
 import { HubStore } from "./hubs.js";
 import { Inbox } from "./inbox.js";
+import { createMemoryFs } from "./memory-fs.js";
 import { readProviderConfig } from "./provider-config.js";
 import { ReactionAnchor } from "./reactions.js";
 import { PROVIDER_IDS } from "./providers.js";
@@ -150,8 +151,15 @@ try {
       send: (target, body, partSignal, threadTs) => channel.send(target, body, partSignal, threadTs),
       log: (line) => console.error(line),
     });
+    // Core memory is initialized before the agent opens: an unusable directory is a startup error,
+    // never a quietly missing capability. With MEMORY_FS_ENABLED=0 nothing is created or read.
+    const memoryFs = config.memoryFs.enabled
+      ? createMemoryFs({ dir: config.memoryFs.dir })
+      : undefined;
+    if (memoryFs !== undefined) await memoryFs.ensure();
     const agent = await openAgent(config, undefined, undefined, {
       signal: shutdown.signal,
+      ...(memoryFs === undefined ? {} : { memoryFs }),
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
       ...(hubs === undefined ? {} : { hubStore: hubs }),
       ...(watchers?.extension === undefined && routinesExtension === undefined
