@@ -34,10 +34,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      # 用 base 分支的**当前 tip**,而不是 PR 打开时记录的 base.sha。
+      # 后者在 base 前进后不会自动更新(label/synchronize 事件下仍可能停在旧提交),
+      # 于是门禁会拿旧规则审新 PR —— 例如 #90/#91 合并后,#88 重跑仍执行旧检查器。
+      # 取分支名再由 GitHub 解析当前 tip,PR 的代码依然不会落到工作区。
       - name: Checkout base revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          ref: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_sha || github.sha }}
           fetch-depth: 0
 
       # 只 fetch 到对象库,不 checkout。PR 的文件永远不落到工作区、不被当作脚本执行。
@@ -57,10 +61,10 @@ jobs:
 
       - name: Run policy checks
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_sha }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           node scripts/ci/gate-policy.mjs \
-            --base "$BASE_SHA" \
+            --base "$BASE_REF" \
             --head FETCH_HEAD \
             --labels "$PR_LABELS"
