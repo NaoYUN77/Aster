@@ -27,9 +27,23 @@
 // import (the 07-G/08-H boundary checks); the host reaches the factory through `src/memory-fs.ts`.
 export { MEMORY_LIMITS } from "./fs/contracts.js";
 export { createMemoryFs, type MemoryFs } from "./fs/store.js";
+export {
+  createDreamingRunner,
+  DREAMING_DEFAULTS,
+  type DreamingBehavior,
+  type DreamingConfig,
+  type DreamingInput,
+  type DreamingLogEvent,
+  type DreamingRunRecord,
+  type DreamingRunStatus,
+  type DreamingState,
+  type DreamingRunner,
+  type DreamingTurn,
+  type DreamingTurnInput,
+} from "./dreaming.js";
 
 import { createHash } from "node:crypto";
-import type { Context } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
@@ -62,7 +76,9 @@ import {
 import { readWorking } from "./working.js";
 import { requireCurrentProfileEvidence } from "./profile.js";
 import { createWorkingExtension } from "./working-tools.js";
-import { openDaily, type DailyStore } from "./daily.js";
+import { openDaily, searchDaily, type DailyStore } from "./daily.js";
+import { createDreamingRunner, type DreamingConfig, type DreamingRunner, type DreamingTurn } from "./dreaming.js";
+import type { MemoryFs } from "./fs/store.js";
 import { createArchiveTask, initializeArchive, readArchive, reconcileArchive, requestArchive, type ArchiveTask } from "./archive-task.js";
 import {
   confirmCompactionCycle,
@@ -92,12 +108,24 @@ export type MemoryIntegrationOptions = {
   readonly profile?: boolean;
   /** Identifiers-and-codes-only observation; defaults to a one-line stderr log. */
   readonly log?: (event: MemoryLogEvent) => void;
+  /**
+   * Background consolidation (dreaming). Present only when core memory exists and the host enabled
+   * it; without a memory repository there is nothing for a dream run to write.
+   */
+  readonly dreaming?: {
+    readonly config: DreamingConfig;
+    readonly memory: MemoryFs;
+    readonly dataDir: string;
+    /** One background turn in a worktree, using the host's main model chain. */
+    readonly run: DreamingTurn;
+  };
 };
 
 export type MemoryLogEvent = {
   readonly event: string;
   readonly conversationId?: number;
   readonly requestId?: string;
+  readonly runId?: string;
   readonly action?: string;
   readonly code?: string | null;
   readonly turns?: number;
@@ -165,6 +193,7 @@ export class MemoryIntegration {
   #harness: Harness | undefined;
   #root: Conversation | undefined;
   #rootConversationId: ConversationId | undefined;
+  #dreaming: DreamingRunner | undefined;
   #closed = false;
 
   constructor(options: MemoryIntegrationOptions) {
@@ -178,6 +207,24 @@ export class MemoryIntegration {
       ...(options.archiveTimeoutMs === undefined ? {} : { timeoutMs: options.archiveTimeoutMs }),
       ...(options.profile === undefined ? {} : { profile: options.profile }),
     });
+    if (options.dreaming !== undefined) {
+      this.#dreaming = createDreamingRunner({
+        config: options.dreaming.config,
+        memory: options.dreaming.memory,
+        dataDir: options.dreaming.dataDir,
+        timezone: options.timezone,
+        run: options.dreaming.run,
+        input: (cursor) => this.#dreamingInput(cursor),
+        log: (event) => this.#log({
+          event: event.event,
+          ...(event.runId === undefined ? {} : { runId: event.runId }),
+          ...(event.action === undefined ? {} : { action: event.action }),
+          ...(event.code === undefined ? {} : { code: event.code }),
+          ...(event.turns === undefined ? {} : { turns: event.turns }),
+          ...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
+        }),
+      });
+    }
   }
 
   /**
@@ -252,13 +299,22 @@ export class MemoryIntegration {
         model: this.#options.model,
         budget: this.#options.budget,
         facts: () => this.currentFacts(),
-        onResult: (observation) => this.#log({
-          event: "compaction.result",
-          conversationId: observation.conversationId,
-          action: observation.outcome,
-          code: observation.errorCode,
-          turns: observation.attempts,
-        }),
+        onResult: (observation) => {
+          this.#log({
+            event: "compaction.result",
+            conversationId: observation.conversationId,
+            action: observation.outcome,
+            code: observation.errorCode,
+            turns: observation.attempts,
+          });
+          // A completed compaction is a natural consolidation point. The check only enqueues a run;
+          // the hook itself never waits for a model.
+          if (observation.outcome === "succeeded" && observation.conversationId === this.#rootConversationId) {
+            void this.#dreaming?.compactionCompleted().catch((error: unknown) => {
+              this.#log({ event: "dreaming.trigger", action: "failed", code: safeCode(error) });
+            });
+          }
+        },
       }),
       { name: "memory-archive", tasks: [this.#archiveTask] },
     ];
@@ -461,6 +517,15 @@ export class MemoryIntegration {
       if (!(error instanceof MemoryError)) throw error;
       this.#log({ event: "memory.count", conversationId: root.id, requestId, action: "failed", code: error.appCode });
     }
+    // A completed owner turn is the dreaming counter's unit. The threshold check enqueues work and
+    // returns; the run itself is never awaited on the reply path.
+    if (counted !== undefined && root.id === this.#rootConversationId && this.#dreaming !== undefined) {
+      try {
+        await this.#dreaming.observeTurn();
+      } catch (error) {
+        this.#log({ event: "dreaming.observe", conversationId: root.id, requestId, action: "failed", code: safeCode(error) });
+      }
+    }
     if (counted?.shouldEvaluate === true) {
       const view = await root.context(context);
       const decision = evaluateCompaction({
@@ -508,6 +573,17 @@ export class MemoryIntegration {
    */
   close(): void {
     this.#closed = true;
+    this.#dreaming?.close();
+  }
+
+  /** The one-line "memory review due" note, when reminder behavior owes one. */
+  reminderLine(): string | undefined {
+    return this.#dreaming?.reminderLine();
+  }
+
+  /** Resolves when no dream run is active or pending; the host uses it for shutdown and tests. */
+  whenDreamingIdle(): Promise<void> {
+    return this.#dreaming?.whenIdle() ?? Promise.resolve();
   }
 
   /**
@@ -579,6 +655,41 @@ export class MemoryIntegration {
         return;
       }
     }
+  }
+
+  /**
+   * The bounded evidence one dream run receives: the owner's most recent turns and the daily archive
+   * since the last applied run. Token-bounded on both sides; never memoized, because a run starts
+   * after the trigger and should see the newest facts.
+   */
+  async #dreamingInput(cursor: { readonly archiveThrough: string | null }): Promise<{ transcript: string; archive: string; archiveThrough: string | null }> {
+    const conversation = this.#conversation();
+    const view = await conversation.context(BACKGROUND_CONTEXT);
+    const transcript = boundFromEnd(transcriptExcerpt(view.entries, view.contributions), DREAMING_EVIDENCE_TOKENS);
+    const archive = await this.#archiveExcerpt(cursor.archiveThrough);
+    return {
+      transcript,
+      archive: archive.text,
+      archiveThrough: archive.through ?? cursor.archiveThrough,
+    };
+  }
+
+  async #archiveExcerpt(from: string | null): Promise<{ text: string; through: string | null }> {
+    const search = await searchDaily(this.#rootStore, {
+      ...(from === null || from === "" ? {} : { from }),
+      limit: 100,
+    });
+    const lines: string[] = [];
+    let through = from;
+    for (const hit of search.hits) {
+      const segment = hit.segment;
+      lines.push(`[${segment.date} ${segment.kind}] ${segment.text}`);
+      // A record with an unknown date cannot be a cursor: rescanned is safer than skipped.
+      if (DREAMING_CURSOR_DATE.test(segment.date) && (through === null || !DREAMING_CURSOR_DATE.test(through) || segment.date > through)) {
+        through = segment.date;
+      }
+    }
+    return { text: boundFromEnd(lines.join("\n"), DREAMING_EVIDENCE_TOKENS), through };
   }
 
   #session(): Harness {
@@ -697,6 +808,59 @@ function compactableTokens(
     else compactable += tokens;
   }
   return compactable;
+}
+
+/** Dreaming evidence bounds: each side of the prompt is capped independently. */
+const DREAMING_EVIDENCE_TOKENS = 8_000;
+/** Only a real calendar date can be an archive cursor; `unknown` is rescanned. */
+const DREAMING_CURSOR_DATE = /^\d{4}-\d{2}-\d{2}$/u;
+const DREAMING_TRANSCRIPT_TURNS = 20;
+
+/**
+ * The owner's last turns as plain `role: text` lines, oldest first. A turn ends at a user message;
+ * tool traffic is already represented in the assistant text the harness keeps.
+ */
+function transcriptExcerpt(
+  entries: readonly { readonly kind: string }[],
+  contributions: readonly (readonly Message[])[],
+): string {
+  const lines: string[] = [];
+  let turns = 0;
+  for (let index = entries.length - 1; index >= 0 && turns <= DREAMING_TRANSCRIPT_TURNS; index -= 1) {
+    for (const message of contributions[index] ?? []) {
+      if (message.role === "user") {
+        turns += 1;
+        if (turns > DREAMING_TRANSCRIPT_TURNS) break;
+      }
+      if (message.role !== "user" && message.role !== "assistant") continue;
+      const text = messageText([message]).trim();
+      if (text === "") continue;
+      lines.push(`${message.role}: ${text}`);
+    }
+  }
+  lines.reverse();
+  return lines.join("\n");
+}
+
+/** Keep the newest part of a bounded evidence block, cutting at a line boundary. */
+function boundFromEnd(text: string, tokens: number): string {
+  if (estimateTextTokens(text) <= tokens) return text;
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  let used = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!;
+    const cost = estimateTextTokens(`${line}\n`);
+    if (used + cost > tokens) break;
+    used += cost;
+    kept.push(line);
+  }
+  return kept.reverse().join("\n");
+}
+
+function safeCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code.slice(0, 64) : "DREAMING_ERROR";
 }
 
 function messageText(messages: readonly Message[]): string {

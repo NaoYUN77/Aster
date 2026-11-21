@@ -14,7 +14,7 @@ import { createSkillsExtension, type SkillIndex, type SkillSummary } from "./ski
 import { readMcpConfig } from "./mcp-config.js";
 import type { TextRequest } from "./messages.js";
 import { createLoopGuard } from "./loop-guard.js";
-import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, MEMORY_LIMITS, memoryAppError, type MemoryFs, type MemoryIntegration } from "./memory/integration.js";
+import { createMemoryIntegration, hasUnsubmittedMemoryProjection, isMemoryError, MEMORY_LIMITS, memoryAppError, type DreamingTurnInput, type MemoryFs, type MemoryIntegration } from "./memory/integration.js";
 import { readProviderConfig } from "./provider-config.js";
 import { createReactionExtension, type EmojiSource, type ReactionAnchor, type ReactionHost } from "./reactions.js";
 import {
@@ -49,6 +49,10 @@ const requestFailureCodes = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT
  * stranger's message. Every other tool is available, exactly as in the owner's own conversation.
  */
 const ROUTINE_DENIED_TOOLS = new Set(["react_to_message", "emoji_search"]);
+/** A dream run edits memory with the ordinary file tools and nothing else. */
+const DREAMING_ALLOWED_TOOLS = new Set(["read", "write", "edit", "bash"]);
+/** The review pass audits a diff the host already extracted; it only needs to read the worktree. */
+const REVIEW_ALLOWED_TOOLS = new Set(["read"]);
 
 function sessionFailure(cause: unknown): Error {
   // The first storage error surfaces raw, before the Session latches; every later call throws SessionFailed.
@@ -357,6 +361,56 @@ export async function openAgent(
   // application keeps exactly its previous registry, settings and request path. The memory
   // section is read from the same environment the rest of the config came from, unless the
   // caller attached one explicitly (tests do; `readConfig` deliberately keeps its old shape).
+  // The harness is opened below; a dream turn is only ever started after that, so the closure can
+  // read the late-bound handle without reordering the composition.
+  let harness!: Awaited<ReturnType<typeof Harness.open>>;
+
+  /**
+   * One background conversation for a dream or review turn. It is ownerless, runs with the main
+   * model in the worktree the runner names, and is offered only the tools that role needs. The
+   * runner owns the timeout: aborting its signal cancels this wait and the durable run.
+   */
+  async function runDreamingTurn(input: DreamingTurnInput): Promise<string> {
+    const allowed = input.role === "review" ? REVIEW_ALLOWED_TOOLS : DREAMING_ALLOWED_TOOLS;
+    const remove = registry.snapshot().tools()
+      .filter(({ tool }) => !allowed.has(tool.name))
+      .map(({ tool }) => tool);
+    const conversation = await harness.createConversation({
+      ownership: { kind: "ownerless" },
+      agent: {
+        model: { provider: config.provider, modelId: config.model },
+        cwd: input.cwd,
+        instructions: input.instructions,
+        maxTurns: input.role === "review" ? 4 : 40,
+        ...(remove.length === 0 ? {} : { tools: { remove } }),
+      },
+    }, context);
+    harness.resume();
+    const submission = await conversation.submit({
+      type: "input",
+      content: input.prompt,
+      requestId: `dreaming:${input.runId}:${input.role}`,
+    }, context);
+    let settled;
+    try {
+      settled = await submission.wait(withAbortSignal(input.signal, context));
+    } catch (error) {
+      if (input.signal.aborted) await conversation.abort(context).catch(() => undefined);
+      throw error;
+    }
+    if (settled.status === "unanswered") {
+      throw Object.assign(new Error("Dreaming run was not answered"), { code: "AGENT_UNANSWERED" });
+    }
+    if (settled.type !== "input") {
+      throw Object.assign(new Error("Dreaming run returned an unexpected submission type"), { code: "AGENT_UNANSWERED" });
+    }
+    const answer = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
+    const messages = (answer?.model ?? []).flatMap((message) => message.role === "assistant" ? [message] : []);
+    const text = contentText(messages.flatMap((message) => message.content)).trim();
+    if (!text) throw Object.assign(new Error("Dreaming run returned no final text"), { code: "EMPTY_REPLY" });
+    return text;
+  }
+
   const memoryConfig: MemoryConfig = (config as { memory?: MemoryConfig }).memory ?? readMemoryConfig({});
   const memory = memoryConfig.enabled
     ? createMemoryIntegration({
@@ -368,6 +422,16 @@ export async function openAgent(
         reserveTokens: memoryConfig.reserveTokens,
         timezone: memoryConfig.timezone,
         archiveTimeoutMs: memoryConfig.archiveTimeoutMs,
+        ...(options.memoryFs === undefined || !config.dreaming.enabled
+          ? {}
+          : {
+              dreaming: {
+                config: config.dreaming,
+                memory: options.memoryFs,
+                dataDir: config.dataDir,
+                run: runDreamingTurn,
+              },
+            }),
       })
     : undefined;
   if (memory) for (const extension of memory.extensions()) registry.install(extension);
@@ -376,7 +440,6 @@ export async function openAgent(
   const mcpExtensions = orderedMcpExtensions(mcp.extensions);
   for (const extension of mcpExtensions) registry.install(extension);
 
-  let harness: Awaited<ReturnType<typeof Harness.open>>;
   let durableStorage: Storage;
   let syncCatalog = false;
   let githubRecovery: Awaited<ReturnType<typeof inspectGithubToolRecovery>>;
@@ -643,7 +706,10 @@ export async function openAgent(
           fields: { textBytes: Buffer.byteLength(request.text, "utf8") },
         });
         await refreshMemory();
-        const text = await executeRequest(root, request, signal, 300_000, requestTrace);
+        // Reminder behavior appends one host-owned line exactly once; nothing is written anywhere.
+        const reminder = memory?.reminderLine();
+        const asked = reminder === undefined ? request : { ...request, text: `${request.text}\n\n${reminder}` };
+        const text = await executeRequest(root, asked, signal, 300_000, requestTrace);
         // The turn boundary: what the ordinary tools wrote to memory is committed once, after a
         // successful reply. A commit failure is logged and never withholds the answer.
         if (memoryFs !== undefined) {
@@ -691,6 +757,8 @@ export async function openAgent(
       },
       // Conversation-wide cancellation waits for ordinary tasks to become terminal.
       abort: () => root.abort(context),
+      /** Resolves when no dream run is active or coalesced; used by shutdown and tests. */
+      dreamingIdle: () => memory?.whenDreamingIdle() ?? Promise.resolve(),
       // Ends the current context cycle; the next reply establishes the new snapshot behind the
       // reset before its input, so its first model call already carries block B.
       reset: () => memory ? memory.resetConversation(context) : root.reset(undefined, context),
@@ -699,6 +767,8 @@ export async function openAgent(
         // reopen. Closing the harness first cancels tool contexts, so MCP shutdown is not
         // recorded as tool failure.
         memory?.close();
+        // A dream run is aborted by close(); let its worktree cleanup finish before the harness goes.
+        await memory?.whenDreamingIdle().catch(() => undefined);
         try {
           await harness.close(context);
         } finally {

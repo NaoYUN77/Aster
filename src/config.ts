@@ -5,6 +5,7 @@ import { ConfigurationError } from "./errors.js";
 import { MODEL_FAILOVER_DEFAULTS, type ModelRef } from "./model-failover.js";
 import type { WatchersConfig } from "./watchers/protocol.js";
 import { MEMORY_LIMITS } from "./memory/fs/contracts.js";
+import { DREAMING_DEFAULTS, type DreamingBehavior, type DreamingConfig } from "./memory/dreaming.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
 import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
 import { STYLE_MODES } from "./style.js";
@@ -208,6 +209,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(browser === undefined ? {} : { browser }),
     style,
     memoryFs: readMemoryFsConfig(env),
+    dreaming: readDreamingConfig(env),
     trace: readTraceConfig(env),
   };
 }
@@ -778,6 +780,35 @@ export function readMemoryFsConfig(env: NodeJS.ProcessEnv = process.env): Memory
       MEMORY_LIMITS.minCoreTokens,
       MEMORY_LIMITS.maxCoreTokens,
     ),
+  };
+}
+
+/**
+ * Dreaming (M2): the background consolidation pass over core memory. Every value is validated even
+ * when the pass is disabled, so a malformed setting cannot surface later after DREAMING_ENABLED is
+ * flipped. An unknown behavior is a startup error rather than a silent fallback: a reminder-only
+ * deployment and an auto-launch one are different promises to the owner.
+ */
+export function readDreamingConfig(env: NodeJS.ProcessEnv = process.env): DreamingConfig {
+  const flag = (key: string, fallback: boolean): boolean => {
+    const raw = env[key]?.trim();
+    if (raw === undefined || raw === "") return fallback;
+    if (raw !== "0" && raw !== "1") throw new ConfigurationError(`${key} must be 0 or 1`);
+    return raw === "1";
+  };
+  const behaviorRaw = env.DREAMING_BEHAVIOR?.trim().toLowerCase();
+  const behaviors: readonly DreamingBehavior[] = ["auto-launch", "reminder"];
+  if (behaviorRaw !== undefined && behaviorRaw !== "" && !behaviors.includes(behaviorRaw as DreamingBehavior)) {
+    throw new ConfigurationError(`DREAMING_BEHAVIOR must be one of: ${behaviors.join(", ")}`);
+  }
+  return {
+    enabled: flag("DREAMING_ENABLED", DREAMING_DEFAULTS.enabled),
+    turns: boundedInteger(env, "DREAMING_TURNS", DREAMING_DEFAULTS.turns, 1, 10_000),
+    onCompaction: flag("DREAMING_ON_COMPACTION", DREAMING_DEFAULTS.onCompaction),
+    behavior: (behaviorRaw === undefined || behaviorRaw === "" ? DREAMING_DEFAULTS.behavior : behaviorRaw) as DreamingBehavior,
+    review: flag("DREAMING_REVIEW", DREAMING_DEFAULTS.review),
+    dryRun: flag("DREAMING_DRY_RUN", DREAMING_DEFAULTS.dryRun),
+    timeoutMs: boundedInteger(env, "DREAMING_TIMEOUT_MS", DREAMING_DEFAULTS.timeoutMs, 1_000, 600_000),
   };
 }
 

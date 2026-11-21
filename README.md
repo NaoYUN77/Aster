@@ -40,7 +40,7 @@ flowchart TB
 | 入口与部署 | 组合接线、部署渲染、环境预检、发布清单 | `src/main.ts`、`src/deployment-*.ts`、`src/release-*.ts` |
 | 渠道 | 二选一的消息通道：Telegram 长轮询或 Slack Socket Mode；单聊只服务所有者，Slack 还接允许频道里的 @ 与线程内追问；持久化收件箱（offset 检查点、分段投递与对账）与共享的投递/失败分类（`src/channel.ts`） | `src/telegram.ts`、`src/slack.ts`、`src/channel.ts`、`src/inbox.ts` |
 | 运行时 | 基于 pi-durable 的 Session：durable 执行、checkpoint、replay 恢复；唯一的所有者会话，常驻任务各有自己的会话 | `src/agent.ts` |
-| 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具；core memory 是 `MEMORY_FS_DIR` 的 git 仓库，只注入 `MEMORY.md` | `src/memory/`、`src/memory/fs/` |
+| 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具；core memory 是 `MEMORY_FS_DIR` 的 git 仓库，只注入 `MEMORY.md`；后台 dreaming 在隔离 worktree 里整理它 | `src/memory/`、`src/memory/fs/` |
 | 工具 | 工具注册表（常驻 + deferred）、MCP 接入与 OAuth 凭据保管 | `src/tools.ts`、`src/mcp*.ts` |
 | 模型 | 提供商注册表、声明文件解析、模型目录拉取与解析、启动前目录校验 | `src/providers.ts`、`src/provider-config.ts`、`src/provider-catalog.ts` |
 | 配置 | `.env` 解析与严格校验（缺项/错项启动前失败），含 Slack 频道白名单 | `src/config.ts` |
@@ -157,6 +157,7 @@ npm start
 - Slack 没有对应的地址覆盖项：`slack.com` 与 Socket Mode 的 `wss-primary.slack.com` 在部署过的机器上都能直连，出站仍可按需走 MITM 代理。
 - `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭。其余 `MEMORY_*` 为预算、时区与归档超时。
 - `MEMORY_FS_ENABLED` / `MEMORY_FS_DIR` / `MEMORY_FS_CORE_TOKENS`：core memory 的总开关（默认开）、git 仓库绝对路径（默认 `DATA_DIR/memory-fs`）与注入 `MEMORY.md` 的 token 预算（默认 4096，范围 256..65536）。
+- `DREAMING_*`：后台记忆整理。`DREAMING_ENABLED`（默认 1，`MEMORY_FS_ENABLED=0` 时无可写仓库，自动不跑）、`DREAMING_TURNS`（每多少个已完成的 owner turn 触发一次，默认 20）、`DREAMING_ON_COMPACTION`（压缩完成后也触发，默认 1）、`DREAMING_BEHAVIOR`（`auto-launch` 后台写 / `reminder` 只在下一次请求提示一行）、`DREAMING_REVIEW`（应用前跑二次 review，默认 1）、`DREAMING_DRY_RUN`（全流程但不 merge，默认 0）、`DREAMING_TIMEOUT_MS`（单次硬超时，默认 120000）。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
 - `PROVIDERS_CONFIG`：自定义提供商声明文件路径，默认 `DATA_DIR/providers.json`；默认文件缺失表示没有自定义提供商。
 - `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
@@ -178,6 +179,22 @@ npm start
 已确认的会话范围由后台归档任务增量提取为 `memory/daily/*.md`。归档失败只记录状态，不影响聊天。检索超限返回明确错误，不静默截断。
 
 core memory 是 `$MEMORY_FS_DIR` 下的 git 仓库。只有根目录的 `MEMORY.md` 注入提示词，persona、所有者画像、长期目标和约束都是它的 section；其它文件（包括子目录的 `MEMORY.md` 索引）用普通 `read` / `bash` 按需读取。agent 用现有的 `read`、`write`、`edit`、`bash` 直接编辑仓库，宿主在每轮成功回复后提交脏树并注明 actor，`git log` 是回滚路径。早期的 `workspace/MEMORY.md` 已退役。
+
+### Dreaming
+
+dreaming 是后台的记忆整理，不阻塞聊天：每 `DREAMING_TURNS` 个完成的 owner turn（或一次压缩完成）后检查阈值，只把任务入队，绝不等在回复路径上。进程内同一时刻最多一个 run，期间的再次触发合并成一个 pending，不排队。
+
+一次 run 的流程：
+
+1. 从 memory 仓库开一个 git worktree，分支 `dreaming/<UTC 时间戳>`，路径在 `$DATA_DIR/dreaming/worktrees/<runId>`（不在仓库里，避免被 ignore/清理规则扫到）。
+2. 后台子代理只用 `read` / `write` / `edit` / `bash` 在 worktree 里整理文件，可改 `MEMORY.md` 和仓库内任意文件；输入是最近若干轮 owner 对话与上次应用以来的 daily archive，按 token 裁剪。复用主模型链。
+3. `DREAMING_REVIEW=1` 时，第二个后台会话读 staged diff 与同一段 transcript，返回一个 JSON 裁决：`apply` 或 `reject`，并可 revert 单个文件。裁决无法解析按 reject 处理（fail closed）。
+4. 应用：宿主提交 worktree（actor `dreaming`）→ 若 live 树有脏改动先提交 → 必要时把 review 过的提交 rebase 到 live HEAD → `git merge --ff-only`。冲突、超时、review 拒绝都丢弃 worktree 和分支，live 文件一个字节都不动。
+5. `DREAMING_DRY_RUN=1` 跑完整流程（含 review）但不提交、不 merge。
+
+状态在仓库内被 gitignore 的 `.aster/dreaming.json`：`turnsSinceApply`、`lastRun`、`lastAppliedCommit`、`failure`、`archiveThrough`。只有应用成功的 run 才把计数清零；超时、丢弃、失败都不消耗。模型瞬时失败重试一次，再失败记录并按失败次数退避，不无限重试。`DREAMING_BEHAVIOR=reminder` 时不下发任何后台任务，也不写文件，只在下一次 owner 请求里附一行「memory review due」。
+
+查看状态：`npm run dreaming -- status`（只读，不打印消息正文或凭据）。日志事件为 `dreaming.trigger` / `dreaming.run.start` / `dreaming.run.review` / `dreaming.run.applied` / `dreaming.run.discarded` / `dreaming.run.failed`，只含 runId、动作、状态、计数与耗时。
 
 ## 工具
 
