@@ -64,9 +64,9 @@ type Runtime = TaskRuntime<Record<string, never>, Checkpoint, Result, object>;
 export type ArchiveBoundary = "extracted" | "saved" | "published" | "confirmed" | "before-cursor" | "profile";
 export type ArchiveTaskOptions = {
   /**
-   * The daily store this task writes to, or a resolver by conversation. A single task serves many
-   * hubs, so the composition root passes a resolver and each run publishes into the store of
-   * `runtime.conversationId`; the model can never choose or widen it.
+   * The daily store this task writes to, or a resolver by conversation. A single task serves the
+   * owner's conversation and each routine's, so the composition root passes a resolver and each run
+   * publishes into the store of `runtime.conversationId`; the model can never choose or widen it.
    */
   store: DailyStore | ((conversationId: ConversationId) => DailyStore);
   model: { provider: string; modelId: string };
