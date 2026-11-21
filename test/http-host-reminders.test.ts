@@ -8,6 +8,7 @@ import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { openAgent } from "../src/agent.js";
 import { readConfig } from "../src/config.js";
 import { AgentGate } from "../src/http/agent-gate.js";
+import { withMemoryOff } from "./support/memory-off.js";
 import type { EventHub } from "../src/http/events.js";
 import { WebHostDelivery } from "../src/http/host-delivery.js";
 import { ReminderScheduler, ReminderStore } from "../src/reminders.js";
@@ -15,14 +16,13 @@ import { createRoutines } from "../src/routines/runtime.js";
 import { SqliteRoutineStore } from "../src/routines/store.js";
 
 function webConfig(dataDir: string) {
-  return readConfig({
+  return withMemoryOff(readConfig({
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: dataDir,
-    MEMORY_ENABLED: "0",
-  });
+  }));
 }
 
 test("a due reminder becomes one durable system row and one host.message", async () => {

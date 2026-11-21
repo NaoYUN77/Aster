@@ -11,6 +11,7 @@ import { openConnectors } from "../src/connectors/index.js";
 import { createConnectorExtension } from "../src/connectors/tools.js";
 import { readConfig } from "../src/config.js";
 import { ReminderStore } from "../src/reminders.js";
+import { withMemoryOff } from "./support/memory-off.js";
 import { createRoutinesExtension } from "../src/routines/tools.js";
 import { SqliteRoutineStore } from "../src/routines/store.js";
 import { SkillIndex } from "../src/skills.js";
@@ -19,14 +20,13 @@ import { SqliteWatchStore } from "../src/watchers/store.js";
 
 test("the web host composition exposes reminders, watches, routines and skills", async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-web-tools-"));
-  const config = readConfig({
+  const config = withMemoryOff(readConfig({
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: directory,
-    MEMORY_ENABLED: "0",
-  });
+  }));
   assert.equal(config.channel.kind, "web");
   assert.ok(config.watchers !== undefined && config.routines !== undefined && config.skills !== undefined);
   const reminders = new ReminderStore(join(directory, "reminders.sqlite"), { limits: config.reminders! });

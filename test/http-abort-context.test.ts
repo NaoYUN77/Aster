@@ -10,16 +10,16 @@ import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/provid
 import { openAgent } from "../src/agent.js";
 import { readConfig } from "../src/config.js";
 import { waitFor } from "./http-testkit.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 function config(dataDir: string) {
-  return readConfig({
+  return withMemoryOff(readConfig({
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: dataDir,
-    MEMORY_ENABLED: "0",
-  });
+  }));
 }
 
 test("a stopped turn leaves no empty assistant row and is not answered by the next request", async () => {

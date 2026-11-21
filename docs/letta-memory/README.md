@@ -65,6 +65,11 @@ $DATA_DIR/memory-fs/            # git repository, branch main
 | `DREAMING_DRY_RUN` | `0` | Compute and review, but never merge. |
 | `DREAMING_TIMEOUT_MS` | `120000` | One run's hard limit. |
 
+There is no switch for the MEM-07 memory system itself: working state, the daily archive,
+retrieval tools, compaction and the profile pipeline are always composed. A leftover
+`MEMORY_ENABLED` from an older deployment is ignored and reported by name at startup; a host that
+needs the pre-MEM-07 composition injects `enabled: false` into the memory config section itself.
+
 Dreaming uses the main model chain; there is no separate dreaming model.
 
 ## 5. Runtime model

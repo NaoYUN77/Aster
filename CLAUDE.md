@@ -23,4 +23,4 @@
 
 模型提供商：`src/providers.ts` 的 `PROVIDERS` 是编译期内置名单，共 12 家——`anthropic`、`openai`、`deepseek`、`google`、`xai`、`mistral`、`groq`、`moonshotai`、`moonshotai-cn`、`minimax`、`zai`、`openrouter`；每家用 `apiKeyEnv` 指向单个显式 API key。自建 OpenAI 兼容网关由 `DATA_DIR/providers.json` 声明，底层用 pi-ai 的 `createProvider()`／`envApiKeyAuth()`。
 
-消息入口：web/http 是唯一入口（`src/http/`，Fastify + SSE），单所有者、密码登录，`src/main.ts` 直接启动 web 适配器。主动投递（提醒、事件、定时任务）仍走 `src/channel.ts` 的 `DeliveryChannel`。旧的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*`、`STYLE_LEARNING` 不再读取，启动时只打印一行变量名提示。决策见 `docs/adr/0002-web-is-the-only-entry.md`。
+消息入口：web/http 是唯一入口（`src/http/`，Fastify + SSE），单所有者、密码登录，`src/main.ts` 直接启动 web 适配器。主动投递（提醒、事件、定时任务）仍走 `src/channel.ts` 的 `DeliveryChannel`。旧的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*`、`STYLE_LEARNING`、`MEMORY_ENABLED` 不再读取，启动时只打印一行变量名提示。决策见 `docs/adr/0002-web-is-the-only-entry.md`。

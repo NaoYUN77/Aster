@@ -207,16 +207,18 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     memoryFs: readMemoryFsConfig(env),
     dreaming: readDreamingConfig(env),
     trace: readTraceConfig(env),
-    // Memory is part of the configuration every deployment sees, so an explicit MEMORY_ENABLED=0 is
-    // honored rather than silently replaced by defaults when the agent is composed.
+    // The memory system is always composed; MEMORY_ENABLED is a removed key, reported by name.
     memory: readMemoryConfig(env),
     web: readWebConfig(env),
     connectors: readConnectorsConfig(env),
   };
 }
 
-/** Variables an upgraded deployment may still carry from the Telegram/Slack builds. */
-const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING"] as const;
+/**
+ * Variables an upgraded deployment may still carry: the Telegram/Slack builds, and the memory
+ * switch that no longer exists because the memory system is always composed.
+ */
+const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING", "MEMORY_ENABLED"] as const;
 const REMOVED_ENV_PREFIXES = ["TELEGRAM_", "SLACK_"] as const;
 
 /**
@@ -232,7 +234,7 @@ export function removedConfigKeys(env: NodeJS.ProcessEnv = process.env): readonl
 }
 
 /** The one startup line printed when {@link removedConfigKeys} finds anything. Names only. */
-export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING are no longer read";
+export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED are no longer read";
 
 /** At most this many fallbacks; the first batch intentionally keeps the chain short. */
 const MAX_MODEL_FALLBACKS = 5;
@@ -760,6 +762,10 @@ export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): Conn
 }
 /** Memory wiring (MEM-07): budgets, the compaction reserve, the archive timezone and timeout. */
 export type MemoryConfig = {
+  /**
+   * Injection-only. `readMemoryConfig` always returns true because the memory system is part of the
+   * product, not a switchable feature; an isolating test sets this to false on the returned section.
+   */
   readonly enabled: boolean;
   readonly budget: MemoryBudget;
   /** Tokens kept free for the model's answer; the compaction thresholds derive from it. */
@@ -785,12 +791,11 @@ function memoryInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, mi
  * range, and the assembled budget must satisfy the one budget schema (MEM-01) plus the rule that a
  * single retrieval fits inside one request's cumulative retrieval budget. Anything else is a
  * startup configuration error naming the variable, never a silent clamp.
+ *
+ * There is no environment switch for the memory system itself: it is part of the product. Tests
+ * that need to isolate other features inject `enabled: false` into the returned section.
  */
 export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryConfig {
-  const enabledRaw = env.MEMORY_ENABLED?.trim();
-  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
-    throw new ConfigurationError("MEMORY_ENABLED must be 0 or 1");
-  }
   const budget: MemoryBudget = {
     backgroundTargetTokens: memoryInteger(env, "MEMORY_BACKGROUND_TARGET_TOKENS", MEMORY_BUDGET_DEFAULTS.backgroundTargetTokens, 1_024, 1_048_576),
     recentVerbatimTokens: memoryInteger(env, "MEMORY_RECENT_VERBATIM_TOKENS", MEMORY_BUDGET_DEFAULTS.recentVerbatimTokens, 512, 1_048_576),
@@ -817,7 +822,7 @@ export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryCo
     throw new ConfigurationError(`MEMORY_TIMEZONE is not a known time zone: ${timezone}`);
   }
   return {
-    enabled: enabledRaw !== "0",
+    enabled: true,
     budget,
     reserveTokens: memoryInteger(env, "MEMORY_RESERVE_TOKENS", 16_384, 1, 1_048_576),
     timezone,

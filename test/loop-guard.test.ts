@@ -11,9 +11,10 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import { openAgent } from "../src/agent.js";
-import { readConfig, readMemoryConfig } from "../src/config.js";
+import { readConfig } from "../src/config.js";
 import { AgentLoopDetectedError } from "../src/loop-guard.js";
 import type { TextRequest } from "../src/messages.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 const running = new AbortController().signal;
 
@@ -31,10 +32,9 @@ function appConfig(dataDir: string, env: NodeJS.ProcessEnv = {}) {
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: dataDir,
-    MEMORY_ENABLED: "0",
     ...env,
   };
-  return { ...readConfig(full), memory: readMemoryConfig(full) } as ReturnType<typeof readConfig>;
+  return withMemoryOff(readConfig(full));
 }
 
 function modelFixture() {

@@ -11,18 +11,18 @@ import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { openAgent } from "../src/agent.js";
 import { readConfig } from "../src/config.js";
+import { withMemoryOff } from "./support/memory-off.js";
 import { waitFor } from "./http-testkit.js";
 
 function config(dataDir: string) {
-  return readConfig({
+  return withMemoryOff(readConfig({
     CHANNEL: "web",
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
     DATA_DIR: dataDir,
-    MEMORY_ENABLED: "0",
-  });
+  }));
 }
 
 type ControllableTool = {

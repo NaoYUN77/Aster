@@ -17,6 +17,7 @@ import { readConfig, readMemoryConfig } from "../src/config.js";
 import { readResidentTools, readToolCatalog, readToolLedger } from "../src/tool-ledger.js";
 import { installMcpTools } from "../src/tool-pins.js";
 import { createToolRegistry, personalTools, type GovernedTool } from "../src/tools.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 const context = BACKGROUND_CONTEXT;
 const mcpTool = (name: string): GovernedTool => Object.assign(defineTool({
@@ -76,8 +77,8 @@ async function ledger(storage: Storage) {
 
 test("production startup keeps declaration order when server configuration order changes", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "tool-pin-order-"));
-  const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+  const config = withMemoryOff(readConfig({ MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }));
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   let storage: Storage | undefined;
   let declarations: string | undefined;
@@ -180,9 +181,9 @@ test("pin changes preserve a committed memory projection whose input was not adm
 test("unchanged pins persist the resident catalog without advancing the declaration epoch", { timeout: 30_000 }, async () => {
   for (const enabled of [false, true]) {
     const directory = await mkdtemp(join(tmpdir(), "tool-pin-catalog-"));
-    const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }),
-      memory: readMemoryConfig({ MEMORY_ENABLED: enabled ? "1" : "0" }) };
+    const base = readConfig({ MODEL_PROVIDER: "openai",
+      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory });
+    const config = enabled ? base : withMemoryOff(base);
     let app: Awaited<ReturnType<typeof openAgent>> | undefined;
     let storage: Storage | undefined;
     try {
@@ -298,8 +299,8 @@ test("pin changes settle on the next restart and never rewrite recorded load sna
     const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
       args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }],
       tools: { mcp__s__echo: { pin: priorPin } }, residentToolBudgetTokens: 8_192 };
-    const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+    const config = withMemoryOff(readConfig({ MODEL_PROVIDER: "openai",
+      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }));
     const request = { requestId: "web:pin:initial", conversationId: "test", senderId: "1", text: "load env" };
     let app: Awaited<ReturnType<typeof openAgent>> | undefined;
     let storage: Storage | undefined;
@@ -364,8 +365,8 @@ test("file pins settle on idle restart, allow direct calls and leave the active 
   const path = join(directory, "mcp.json");
   const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
     args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
-  const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+  const config = withMemoryOff(readConfig({ MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }));
   const request = (id: number) => ({ requestId: `telegram:pin:${id}`, conversationId: "test", senderId: "1", text: "echo" });
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   let storage: Storage | undefined;
