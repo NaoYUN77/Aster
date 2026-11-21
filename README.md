@@ -17,7 +17,7 @@ flowchart TB
   client["Web 客户端 / WebView"] --> http["Fastify HTTP + SSE<br/>密码会话 / CORS / 速率限制"]
   http --> store["web.sqlite<br/>请求队列 · 会话 · 历史"]
   store --> runtime["pi-durable Session（agent.sqlite）<br/>唯一所有者会话 + 每个常驻任务自己的会话"]
-  runtime --> memory["记忆：daily store + core memory<br/>MEMORY_FS_DIR 的 MEMORY.md"]
+  runtime --> memory["记忆：working state + core memory<br/>MEMORY_FS_DIR 的 MEMORY.md"]
   runtime --> tools["常驻工具 / Web / MCP / 浏览器"]
   memory --> model["模型提供商"]
   tools --> runtime
@@ -44,12 +44,11 @@ flowchart TB
 
 | 路径 | 内容 |
 | --- | --- |
-| `agent.sqlite`（及 WAL） | 底座会话与执行恢复状态；记忆系统的 working 状态、周期快照投影、归档进度与轮数计数 |
+| `agent.sqlite`（及 WAL） | 底座会话与执行恢复状态；记忆系统的 working 状态、周期快照投影与轮数计数 |
 | `web.sqlite`（及 WAL） | web 请求队列、登录会话与历史（web 入口的唯一请求存储） |
 | `inbox.sqlite`（及 WAL） | 旧渠道收件箱与投递状态；`deliveries` CLI 与恢复测试仍使用 |
 | `memory-fs/` | core memory 的 git 仓库：根目录 `MEMORY.md` 注入提示词，其它文件按需读取 |
 | `workspace/` | agent 的任务文件 |
-| `memory/daily/YYYY-MM-DD.md` | 每日事件记忆：归档任务从已确认的会话范围增量提取 |
 | `mcp.json`（可选） | MCP server 配置 |
 | `mcp-oauth/<server>.json`（可选） | 远程 MCP server 的 OAuth token，仅属主可读 |
 | `providers.json`（可选） | 自定义模型提供商声明（地址与凭据变量名）；随数据目录一起备份 |
@@ -146,7 +145,7 @@ npm start
 - `DATA_DIR`：持久化数据目录，默认 `./data`（Docker 部署固定为 `/data`）。
 - `WEB_OWNER_ID` / `WEB_PORT` / `WEB_HOST` / `WEB_ALLOWED_ORIGINS` / `WEB_SESSION_TTL_DAYS` / `WEB_STATIC_DIR` / `WEB_TRUST_PROXY`：web 入口的可选项，默认值见 `.env.example`。`WEB_OWNER_ID` 只是 agent 看到的内部 sender id，不是登录名。
 - 旧版本的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*`、`STYLE_LEARNING`、`DREAMING_REVIEW` 不再读取；启动时只打印一次变量名提示，值不会出现在日志里。
-- 记忆系统（working state、daily archive、检索工具、压缩、profile）始终启用，没有环境总开关；`MEMORY_*` 只配置预算、时区与归档超时。旧版本遗留的 `MEMORY_ENABLED` 会被忽略，并在启动时按变量名提示一次。
+- 记忆系统（working state、压缩、dreaming）始终启用，没有环境总开关；`MEMORY_*` 只配置预算与时区。旧版本遗留的 `MEMORY_ENABLED` 会被忽略，并在启动时按变量名提示一次。
 - `MEMORY_FS_ENABLED` / `MEMORY_FS_DIR` / `MEMORY_FS_CORE_TOKENS`：core memory 的总开关（默认开）、git 仓库绝对路径（默认 `DATA_DIR/memory-fs`）与注入 `MEMORY.md` 的 token 预算（默认 4096，范围 256..65536）。
 - `DREAMING_*`：后台记忆整理。`DREAMING_ENABLED`（默认 1，`MEMORY_FS_ENABLED=0` 时无可写仓库，自动不跑）、`DREAMING_TURNS`（每多少个已完成的 owner turn 触发一次，默认 20）、`DREAMING_ON_COMPACTION`（压缩完成后也触发，默认 1）、`DREAMING_BEHAVIOR`（`auto-launch` 后台写 / `reminder` 只在下一次请求提示一行）、`DREAMING_DRY_RUN`（全流程但不 merge，默认 0）、`DREAMING_TIMEOUT_MS`（整轮硬超时，覆盖模型调用、git 与 apply，默认 120000）。旧版本的 `DREAMING_REVIEW` 不再读取。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
@@ -159,15 +158,13 @@ npm start
 
 ## 记忆系统
 
-每次请求的上下文分三区：A 区为稳定规则（系统提示与工具声明，保持不变以利用提供商前缀缓存）；B 区为周期快照（连续性摘要与 working 基线，只在压缩或重置正式生效时切换）；C 区为实时尾巴（近期原文、工具结果与本轮检索结果）。
+每次请求的上下文分三区：A 区为稳定规则（系统提示与工具声明，保持不变以利用提供商前缀缓存）；B 区为周期快照（连续性摘要与 working 基线，只在压缩或重置正式生效时切换）；C 区为实时尾巴（近期原文与工具结果）。
 
 | 工具 | 用途 |
 | --- | --- |
 | `working_read` / `working_update` | 读取 / 按预期版本更新当前任务状态 |
-| `memory_search` | 按关键词与日期范围检索每日事件记忆 |
-| `memory_read` | 按日期 + 段落 id 精确读取一条每日事件 |
 
-已确认的会话范围由后台归档任务增量提取为 `memory/daily/*.md`。归档失败只记录状态，不影响聊天。检索超限返回明确错误，不静默截断。
+dreaming 的证据来自原始会话本身，不再落一份单独的每日归档：宿主从 durable 条目里生成 activity digest，覆盖所有 owner 会话自上次应用以来的用户/助手文本、工具调用名与参数摘要、工具结果和错误，按天分组；凭据形状的值（key/token/password/secret 等）在截断前先脱敏，绝不进入 digest；整体上限 8000 token，从最新一行往前整行裁剪。游标是条目 id 水位（`evidenceThrough`），不是日期字符串。
 
 core memory 是 `$MEMORY_FS_DIR` 下的 git 仓库。只有根目录的 `MEMORY.md` 注入提示词，它只保留 `## Core`（少数必须每轮知道的事实）与 `## Index`（指向每个 note 的一行链接）；note 由 dreaming 自行决定数量与结构，用普通 `read` / `bash` 按需读取。agent 用现有的 `read`、`write`、`edit`、`bash` 直接编辑仓库，宿主在每轮成功回复后提交脏树并注明 actor，`git log` 是回滚路径。早期的 `workspace/MEMORY.md` 已退役。
 
@@ -178,13 +175,13 @@ dreaming 是后台的记忆整理，不阻塞聊天：每 `DREAMING_TURNS` 个�
 一次 run 的流程：
 
 1. 从 memory 仓库开一个 git worktree，分支 `dreaming/<UTC 时间戳>`，路径在 `$DATA_DIR/dreaming/worktrees/<runId>`（不在仓库里，避免被 ignore/清理规则扫到）。
-2. 后台子代理只用 `read` / `write` / `edit` / `bash` 在 worktree 里整理文件，可改 `MEMORY.md` 和仓库内任意文件；输入是最近若干轮 owner 对话与上次应用以来的 evidence，按 token 裁剪。复用主模型链。
+2. 后台子代理只用 `read` / `write` / `edit` / `bash` 在 worktree 里整理文件，可改 `MEMORY.md` 和仓库内任意文件；输入是最近若干轮 owner 对话，加上上次应用以来的 activity digest（按天分组、已脱敏、整行裁剪）。复用主模型链。
 3. 布局检查：`MEMORY.md` 必须只含 `## Core`（必须进入每轮提示的少数事实）与 `## Index`（每个 note 一行链接）；每个 note 都必须被索引，每个索引链接都必须指向存在的文件，越界链接直接拒绝。不满足时整轮丢弃，原因 `layout-invalid`。
 4. 应用：宿主提交 worktree（actor `dreaming`）→ 若 live 树有脏改动先提交 → live 前进过则 rebase → `git merge --ff-only`。rebase 冲突、超时、布局不合法都丢弃 worktree 和分支，live 文件一个字节都不动，永远不做 forced merge。
 5. 超时是**整轮**的：`DREAMING_TIMEOUT_MS` 从 run 开始计时，模型调用、git、worktree 创建与清理、apply 共用同一个 signal，到点统一按丢弃处理并清掉计时器。
 6. `DREAMING_DRY_RUN=1` 跑完整流程但不提交、不 merge；完成后计数同样归零，下一次仍要攒满 `DREAMING_TURNS`。
 
-状态在仓库内被 gitignore 的 `.aster/dreaming.json`：`turnsSinceApply`、`reminderTurns`、`lastRun`、`lastAppliedCommit`、`failure`、`archiveThrough`。应用成功或 dry run 完成会把 `turnsSinceApply` 清零；超时、丢弃、失败都不消耗。`reminderTurns` 持久化，重启后从上次进度继续。模型瞬时失败重试一次，再失败记录并按失败次数退避，不无限重试。`DREAMING_BEHAVIOR=reminder` 时不下发任何后台任务，只在下一次 owner 请求里附一行「memory review due」，计数写回 0。启动时 runner 会清理崩溃残留：`git worktree prune`，并删除没有对应存活 worktree 的 `dreaming/*` 分支。
+状态在仓库内被 gitignore 的 `.aster/dreaming.json`：`turnsSinceApply`、`reminderTurns`、`lastRun`、`lastAppliedCommit`、`failure`、`evidenceThrough`（条目 id 水位）。旧状态文件里的 `archiveThrough` 字段会被直接忽略，下一次 run 从 durable 历史开头重新读一遍（受 20000 条扫描上限与 8000 token 裁剪约束），之后写入 `evidenceThrough`。应用成功或 dry run 完成会把 `turnsSinceApply` 清零；超时、丢弃、失败都不消耗。`reminderTurns` 持久化，重启后从上次进度继续。模型瞬时失败重试一次，再失败记录并按失败次数退避，不无限重试。`DREAMING_BEHAVIOR=reminder` 时不下发任何后台任务，只在下一次 owner 请求里附一行「memory review due」，计数写回 0。启动时 runner 会清理崩溃残留：`git worktree prune`，并删除没有对应存活 worktree 的 `dreaming/*` 分支。
 
 查看状态：`npm run dreaming -- status`（只读，不打印消息正文或凭据）。日志事件为 `dreaming.trigger` / `dreaming.run.start` / `dreaming.run.layout` / `dreaming.run.applied` / `dreaming.run.discarded` / `dreaming.run.failed`，只含 runId、动作、状态、计数与耗时。
 

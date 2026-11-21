@@ -17,6 +17,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import type { EntryId } from "@earendil-works/pi-durable";
 import { checkMemoryLayout } from "./fs/layout.js";
 import type { MemoryFs } from "./fs/store.js";
 
@@ -54,9 +55,12 @@ export type DreamingTurn = (input: DreamingTurnInput) => Promise<string>;
 
 /** What the host supplies as the run's evidence, already bounded by tokens. */
 export type DreamingInput = {
+  /** The root conversation's most recent owner turns, oldest first. */
   readonly transcript: string;
-  readonly archive: string;
-  readonly archiveThrough: string | null;
+  /** Activity from every owner conversation since the last applied run, grouped by day. */
+  readonly activity: string;
+  /** Newest entry id the activity covers; advanced only by an applied run. */
+  readonly evidenceThrough: EntryId | null;
 };
 
 export type DreamingRunStatus = "applied" | "dry-run" | "discarded" | "failed" | "no-change";
@@ -76,8 +80,8 @@ export type DreamingState = {
   readonly lastRun: DreamingRunRecord | null;
   readonly lastAppliedCommit: string | null;
   readonly failure: { readonly at: string; readonly reason: string } | null;
-  /** Newest daily-archive date a run has consumed; advanced only by an applied run. */
-  readonly archiveThrough: string | null;
+  /** Newest durable entry id a run has consumed; advanced only by an applied run. */
+  readonly evidenceThrough: EntryId | null;
   /** Completed turns toward the next reminder; persisted so a restart does not lose progress. */
   readonly reminderTurns: number;
 };
@@ -103,7 +107,7 @@ export type DreamingRunnerOptions = {
   readonly timezone: string;
   readonly run: DreamingTurn;
   /** Bounded evidence for one run; called only when a run actually starts. */
-  readonly input: (cursor: { readonly archiveThrough: string | null }) => Promise<DreamingInput>;
+  readonly input: (cursor: { readonly evidenceThrough: EntryId | null }) => Promise<DreamingInput>;
   readonly log?: (event: DreamingLogEvent) => void;
   /** Test seam; production uses the wall clock. */
   readonly now?: () => Date;
@@ -138,7 +142,9 @@ const REMINDER_LINE = "System note: a memory review is due. Consider whether any
 export const DREAMING_INSTRUCTIONS = `You are Aster's dreaming pass. You are working inside an isolated git worktree of
 the owner's core-memory repository, and that worktree is your whole world.
 Memory has three layers, and you maintain all of them.
-Layer one is the transcript evidence in the prompt below: what the owner actually said and did.
+Layer one is the evidence in the prompt below: the owner's recent turns, then the activity digest
+of what was actually said and done across owner conversations, including tool calls, results and
+errors, grouped by day.
 Layer two is the notes: one Markdown file per topic, read on demand. You decide how many notes
 exist, what each covers and how each is structured. Write dense, abstracted facts, never quotes
 or a replay of a conversation. Merge and rewrite notes instead of appending; split a note when it
@@ -315,7 +321,7 @@ class Runner implements DreamingRunner {
       signal.throwIfAborted();
       await this.#options.memory.ensure();
       signal.throwIfAborted();
-      const input = await this.#options.input({ archiveThrough: this.#state.archiveThrough });
+      const input = await this.#options.input({ evidenceThrough: this.#state.evidenceThrough });
       const turns = this.#state.turnsSinceApply;
       const runId = await this.#newRunId();
       const memoryDir = this.#options.memory.directory;
@@ -394,13 +400,18 @@ class Runner implements DreamingRunner {
       if (merge.code !== 0) throw new DreamDiscard("merge-failed");
       const commit = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
       applied = true;
+      // The cursor only moves forward: a stale or simultaneous scan can never rewind it.
+      const through = input.evidenceThrough !== null
+        && (this.#state.evidenceThrough === null || input.evidenceThrough > this.#state.evidenceThrough)
+        ? input.evidenceThrough
+        : undefined;
       await this.#record(
         { startedAt, status: "applied", commit, reason: null },
         {
           turnsSinceApply: 0,
           lastAppliedCommit: commit,
           failure: null,
-          ...(input.archiveThrough === null ? {} : { archiveThrough: input.archiveThrough }),
+          ...(through === undefined ? {} : { evidenceThrough: through }),
         },
       );
       this.#failureCount = 0;
@@ -438,7 +449,7 @@ class Runner implements DreamingRunner {
 
   async #record(
     entry: { startedAt: string; status: DreamingRunStatus; commit: string | null; reason: string | null },
-    next?: Partial<Pick<DreamingState, "turnsSinceApply" | "lastAppliedCommit" | "failure" | "archiveThrough">>,
+    next?: Partial<Pick<DreamingState, "turnsSinceApply" | "lastAppliedCommit" | "failure" | "evidenceThrough">>,
   ): Promise<void> {
     const endedAt = this.#now().toISOString();
     const lastRun: DreamingRunRecord = {
@@ -564,7 +575,7 @@ function emptyState(): DreamingState {
     lastRun: null,
     lastAppliedCommit: null,
     failure: null,
-    archiveThrough: null,
+    evidenceThrough: null,
     reminderTurns: 0,
   };
 }
@@ -587,10 +598,13 @@ export function parseDreamingState(value: unknown): DreamingState {
         const item = record.failure as Record<string, unknown>;
         return { at: requiredString(item.at), reason: requiredString(item.reason) };
       })();
-  const archiveThrough = nullableString(record.archiveThrough);
+  // `evidenceThrough` is the entry-id cursor. A state file written by the daily-archive era
+  // carried a date string in `archiveThrough` instead; it is deliberately dropped so the next
+  // run starts from the beginning of durable history exactly once.
+  const evidenceThrough = nullableEntryId(record.evidenceThrough);
   // A state file written before reminder behavior existed simply has no counter yet.
   const reminderTurns = record.reminderTurns === undefined ? 0 : integer(record.reminderTurns);
-  return { version: STATE_VERSION, turnsSinceApply, lastRun, lastAppliedCommit, failure, archiveThrough, reminderTurns };
+  return { version: STATE_VERSION, turnsSinceApply, lastRun, lastAppliedCommit, failure, evidenceThrough, reminderTurns };
 }
 
 function parseRun(value: unknown): DreamingRunRecord {
@@ -619,6 +633,12 @@ function requiredString(value: unknown): string {
   return value;
 }
 
+function nullableEntryId(value: unknown): EntryId | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new Error("bad entry id");
+  return value as EntryId;
+}
+
 function nullableString(value: unknown): string | null {
   if (value === null) return null;
   if (typeof value !== "string") throw new Error("bad string");
@@ -633,9 +653,9 @@ function buildDreamPrompt(input: DreamingInput, timezone: string): string {
 ${input.transcript === "" ? "(none)" : input.transcript}
 ---
 
-Daily archive since the last applied run:
+Activity since the last applied run (grouped by day; credential-shaped values are redacted):
 ---
-${input.archive === "" ? "(none)" : input.archive}
+${input.activity === "" ? "(none)" : input.activity}
 ---
 
 Consolidate this into core memory now. Times are in ${timezone}. Finish every edit, then reply with one line.`;

@@ -760,7 +760,7 @@ export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): Conn
     stdioAllowlist: [...new Set(allowlist)],
   };
 }
-/** Memory wiring (MEM-07): budgets, the compaction reserve, the archive timezone and timeout. */
+/** Memory wiring (MEM-07): budgets, the compaction reserve and the activity timezone. */
 export type MemoryConfig = {
   /**
    * Injection-only. `readMemoryConfig` always returns true because the memory system is part of the
@@ -770,9 +770,8 @@ export type MemoryConfig = {
   readonly budget: MemoryBudget;
   /** Tokens kept free for the model's answer; the compaction thresholds derive from it. */
   readonly reserveTokens: number;
-  /** Zone archive dates are computed in. Default UTC; never the machine's local zone. */
+  /** Zone activity dates are computed in. Default UTC; never the machine's local zone. */
   readonly timezone: string;
-  readonly archiveTimeoutMs: number;
 };
 
 function memoryInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
@@ -802,13 +801,8 @@ export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryCo
     snapshotTokens: memoryInteger(env, "MEMORY_SNAPSHOT_TOKENS", MEMORY_BUDGET_DEFAULTS.snapshotTokens, 256, 262_144),
     narrativeTokens: memoryInteger(env, "MEMORY_NARRATIVE_TOKENS", MEMORY_BUDGET_DEFAULTS.narrativeTokens, 128, 262_144),
     instructionsTokens: memoryInteger(env, "MEMORY_INSTRUCTIONS_TOKENS", MEMORY_BUDGET_DEFAULTS.instructionsTokens, 256, 1_048_576),
-    searchResultTokens: memoryInteger(env, "MEMORY_SEARCH_RESULT_TOKENS", MEMORY_BUDGET_DEFAULTS.searchResultTokens, 128, 65_536),
-    requestSearchTokens: memoryInteger(env, "MEMORY_REQUEST_SEARCH_TOKENS", MEMORY_BUDGET_DEFAULTS.requestSearchTokens, 128, 262_144),
     evaluateAfterUserTurns: memoryInteger(env, "MEMORY_EVALUATE_AFTER_USER_TURNS", MEMORY_BUDGET_DEFAULTS.evaluateAfterUserTurns, 1, 1_000),
   };
-  if (budget.requestSearchTokens < budget.searchResultTokens) {
-    throw new ConfigurationError("MEMORY_REQUEST_SEARCH_TOKENS must be at least MEMORY_SEARCH_RESULT_TOKENS");
-  }
   try {
     assertSchema<MemoryBudget>(MemoryBudgetSchema, budget, "invalid-input");
   } catch (error) {
@@ -826,7 +820,6 @@ export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryCo
     budget,
     reserveTokens: memoryInteger(env, "MEMORY_RESERVE_TOKENS", 16_384, 1, 1_048_576),
     timezone,
-    archiveTimeoutMs: memoryInteger(env, "MEMORY_ARCHIVE_TIMEOUT_MS", 60_000, 1, 300_000),
   };
 }
 

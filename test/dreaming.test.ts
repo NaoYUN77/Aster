@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createModels } from "@earendil-works/pi-ai/models";
+import type { EntryId } from "@earendil-works/pi-durable";
 import { openAgent } from "../src/agent.js";
 import { readConfig, readDreamingConfig } from "../src/config.js";
 import { ConfigurationError } from "../src/errors.js";
@@ -67,7 +68,7 @@ type Fixture = {
 async function fixture(options: {
   readonly overrides?: Partial<DreamingConfig>;
   readonly run: DreamingTurn;
-  readonly archiveThrough?: string | null;
+  readonly evidenceThrough?: EntryId | null;
   readonly initialMemory?: string;
   readonly now?: () => Date;
 }): Promise<{ runner: ReturnType<typeof createDreamingRunner>; fixture: Fixture }> {
@@ -89,8 +90,8 @@ async function fixture(options: {
     },
     input: async () => ({
       transcript: "user: my color is blue",
-      archive: "[2026-11-20 decision] color is blue",
-      archiveThrough: options.archiveThrough ?? "2026-11-20",
+      activity: "## 2026-11-20\n[09:00] user: my color is blue",
+      evidenceThrough: options.evidenceThrough ?? (7 as EntryId),
     }),
     log: (event) => events.push(event.event),
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -139,7 +140,8 @@ test("dreaming: a threshold applies a MEMORY.md change and resets the counter", 
     assert.equal(state.turnsSinceApply, 0);
     assert.equal(state.lastRun?.status, "applied");
     assert.equal(state.lastAppliedCommit, (await git(f.memoryDir, ["rev-parse", "HEAD"])).trim());
-    assert.equal(state.archiveThrough, "2026-11-20");
+    assert.equal(state.evidenceThrough, 7);
+    assert.equal("archiveThrough" in state, false, "the date cursor is gone from the state file");
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: blue\n");
     assert.match(await git(f.memoryDir, ["log", "-1", "--format=%s"]), /^memory: dream run .* by dreaming at /);
     assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
@@ -479,7 +481,7 @@ test("dreaming: reminder progress survives a restart and nudges exactly once", {
         f.calls.push(input);
         return "unexpected";
       },
-      input: async () => ({ transcript: "", archive: "", archiveThrough: null }),
+      input: async () => ({ transcript: "", activity: "", evidenceThrough: null }),
     });
     try {
       assert.equal((await restarted.status()).reminderTurns, 1, "the counter continues, not restarts");
@@ -508,7 +510,7 @@ test("dreaming: a state file from before reminderTurns loads with a zero counter
     dataDir: root,
     timezone: "UTC",
     run: async () => "unexpected",
-    input: async () => ({ transcript: "", archive: "", archiveThrough: null }),
+    input: async () => ({ transcript: "", activity: "", evidenceThrough: null }),
   });
   try {
     await memory.ensure();
@@ -519,11 +521,12 @@ test("dreaming: a state file from before reminderTurns loads with a zero counter
       lastRun: null,
       lastAppliedCommit: null,
       failure: null,
-      archiveThrough: null,
+      archiveThrough: "2026-11-20",
     }), "utf8");
     const state = await runner.status();
     assert.equal(state.turnsSinceApply, 4);
     assert.equal(state.reminderTurns, 0);
+    assert.equal(state.evidenceThrough, null, "a date cursor from the archive era becomes no cursor");
   } finally {
     runner.close();
     await runner.whenIdle();
@@ -650,7 +653,7 @@ test("dreaming status: only state fields are printed, never stray content", { ti
       },
       lastAppliedCommit: "0123456789abcdef0123456789abcdef01234567",
       failure: null,
-      archiveThrough: "2026-11-20",
+      evidenceThrough: 12,
       // Hostile extras a hand-edited file might carry; they must never reach the output.
       text: "SECRET MESSAGE BODY",
       apiKey: "sk-live-not-a-real-key",

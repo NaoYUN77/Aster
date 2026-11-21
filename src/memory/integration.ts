@@ -2,23 +2,20 @@
 // memory modules into the request lifecycle. It constructs the modules, registers their native
 // tools, hooks and tasks, and performs the per-request durable steps in the frozen order:
 //
-//   startup   migration record + archive origin (the current tail; never a history backfill),
-//             then a bounded archive re-scan from persisted facts.
+//   startup   attach the opened Harness and its root conversation. Memory state is durable and
+//             keyed by conversation; there is nothing to re-scan at startup.
 //   prepare   an already-admitted requestId is classified (done = replay, unsettled = recovery)
-//             and gets no new projection, model call or archive trigger. A new request first
-//             re-checks compaction confirmations and archive coverage from durable facts, then
-//             plans with the pure Context module: establish B, project a working revision into
-//             C, or ask the native machinery to compact. A committed projection whose input was
-//             never submitted is reused as written, never recomputed over.
+//             and gets no new projection or model call. A new request plans with the pure
+//             Context module: establish B, project a working revision into C, or ask the native
+//             machinery to compact. A committed projection whose input was never submitted is
+//             reused as written, never recomputed over.
 //   complete  the finished request is counted once by requestId; at the evaluation point the
-//             token-first evaluation may start a native compaction, and the boundary re-scan
-//             picks up completions and published compactions for the archive.
+//             token-first evaluation may start a native compaction.
 //
 // Business errors stay `MemoryError`s with the frozen mapping (MEM-01): the request layer turns
 // them into `MEMORY_*` application errors, never `AGENT_SESSION_FAILED`. Storage failures are not
-// `MemoryError`s and keep the Session failure path. Archive and compaction housekeeping at the
-// boundaries is best-effort by design (§8, §11): a failed archive never fails a chat, its failure
-// fact is persisted by the archive module itself, and the next boundary retries from facts.
+// `MemoryError`s and keep the Session failure path. Compaction housekeeping at the boundaries is
+// best-effort by design (§8, §11): a failed confirmation is logged and never fails a chat.
 //
 // Observation carries identifiers, versions, counts, durations and safe error codes only —
 // never memory text (design §11).
@@ -48,7 +45,6 @@ import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context"
 import type { Message } from "@earendil-works/pi-ai";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
-  defineDocFamily,
   type Conversation,
   type ConversationId,
   type Cursor,
@@ -59,10 +55,8 @@ import {
   type Harness,
   type Session,
 } from "@earendil-works/pi-durable";
-import { Type, type Static } from "typebox";
 import {
   CYCLE_SNAPSHOT_KIND,
-  MEMORY_SCHEMA_VERSION,
   MemoryError,
   type CycleSnapshot,
   type MemoryBudget,
@@ -75,26 +69,21 @@ import {
   snapshotOfProjection,
 } from "./context.js";
 import { readWorking } from "./working.js";
-import { requireCurrentProfileEvidence } from "./profile.js";
 import { createWorkingExtension } from "./working-tools.js";
-import { openDaily, searchDaily, type DailyStore } from "./daily.js";
-import { createDreamingRunner, type DreamingConfig, type DreamingRunner, type DreamingTurn } from "./dreaming.js";
+import { createDreamingRunner, type DreamingConfig, type DreamingInput, type DreamingRunner, type DreamingTurn } from "./dreaming.js";
 import type { MemoryFs } from "./fs/store.js";
-import { createArchiveTask, initializeArchive, readArchive, reconcileArchive, requestArchive, type ArchiveTask } from "./archive-task.js";
 import {
-  confirmCompactionCycle,
   createCompactionExtension,
-  createHarnessConfirmDeps,
   evaluateCompaction,
   nativeCompactionPolicy,
   publishedSnapshot,
   readCompactionTurnCount,
   recordCompletedUserRequest,
 } from "./compaction.js";
-import { memoryToolsExtension } from "./memory-tools.js";
+import { buildActivityDigest, type ActivitySource } from "./activity.js";
 
 export type MemoryIntegrationOptions = {
-  /** Host data root: the daily store lives under `<root>/memory/daily` (design §3). */
+  /** Host data root; activity and dream state live under it. */
   readonly root: string;
   /** The exact instructions text configured on the conversation (block A, application part). */
   readonly instructions: string;
@@ -104,9 +93,12 @@ export type MemoryIntegrationOptions = {
   readonly budget: MemoryBudget;
   readonly reserveTokens: number;
   readonly timezone: string;
-  readonly archiveTimeoutMs?: number;
-  /** When false, confirmed archive batches do not update the working profile. Default true. */
-  readonly profile?: boolean;
+  /**
+   * Durable storage access for the dreaming activity window. It identifies conversations the
+   * dream pass itself created (request id prefix `dreaming:`) so their entries never feed back
+   * into the next run. Late-bound because the composition root is built before the Harness opens.
+   */
+  readonly storage?: () => Storage;
   /** Identifiers-and-codes-only observation; defaults to a one-line stderr log. */
   readonly log?: (event: MemoryLogEvent) => void;
   /**
@@ -138,36 +130,9 @@ export type PreparedRequest =
   | { readonly kind: "recover" }
   | { readonly kind: "new"; readonly action: string };
 
-const MIGRATION_KIND = "personal.memory.upgrade";
 const REVISION_PROJECTION_KIND = "personal.context.projection";
-const RECONCILE_MAX_SWEEPS = 32;
 /** Window assumed only when the model catalog omits one; production models state theirs. */
 const FALLBACK_CONTEXT_WINDOW = 128_000;
-
-const MigrationRecordSchema = Type.Object(
-  {
-    version: Type.Literal(MEMORY_SCHEMA_VERSION),
-    /** The entry the archive starts from: history at or before it is never backfilled. */
-    archiveOrigin: Type.Union([Type.Unsafe<EntryId>(Type.Integer({ minimum: 1 })), Type.Null()]),
-    hadHistory: Type.Boolean(),
-    at: Type.Integer({ minimum: 0 }),
-  },
-  { additionalProperties: false },
-);
-type MigrationRecord = Static<typeof MigrationRecordSchema>;
-
-const MigrationDoc = defineDocFamily({
-  kind: MIGRATION_KIND,
-  version: MEMORY_SCHEMA_VERSION,
-  family: true,
-  scope: "conversation",
-  history: "latest",
-  fork: "initial",
-  checkpointWhen: () => false,
-  initial: (seed: MigrationRecord): MigrationRecord => seed,
-});
-
-const UNSET_MIGRATION = { at: -1 } as unknown as MigrationRecord;
 
 /** An error in the shape the request layer surfaces: the frozen application code, nothing else. */
 export function memoryAppError(error: MemoryError): Error {
@@ -182,15 +147,6 @@ export function isMemoryError(error: unknown): error is MemoryError {
 export class MemoryIntegration {
   readonly #options: MemoryIntegrationOptions;
   readonly #log: (event: MemoryLogEvent) => void;
-  /** The attached root's store; every other conversation maps to a root in `#conversationRoots`. */
-  readonly #rootStore: DailyStore;
-  /** One store handle per resolved root; conversations registered to the same root thus share one. */
-  readonly #stores = new Map<string, DailyStore>();
-  /** Conversation id to resolved root; the attached root conversation is not listed (it is `#rootStore`). */
-  readonly #conversationRoots = new Map<ConversationId, string>();
-  readonly #archiveTask: ArchiveTask;
-  /** Conversations already initialized in this process; durable archive state stays keyed by id. */
-  readonly #initialized = new Set<ConversationId>();
   #harness: Harness | undefined;
   #root: Conversation | undefined;
   #rootConversationId: ConversationId | undefined;
@@ -200,14 +156,6 @@ export class MemoryIntegration {
   constructor(options: MemoryIntegrationOptions) {
     this.#options = options;
     this.#log = options.log ?? ((event) => console.error(`Memory ${event.event}: ${JSON.stringify(event)}`));
-    this.#rootStore = openDaily(options.root);
-    this.#stores.set(this.#rootStore.root, this.#rootStore);
-    this.#archiveTask = createArchiveTask({
-      store: (conversationId) => this.#storeFor(conversationId),
-      model: options.model,
-      ...(options.archiveTimeoutMs === undefined ? {} : { timeoutMs: options.archiveTimeoutMs }),
-      ...(options.profile === undefined ? {} : { profile: options.profile }),
-    });
     if (options.dreaming !== undefined) {
       this.#dreaming = createDreamingRunner({
         config: options.dreaming.config,
@@ -228,48 +176,6 @@ export class MemoryIntegration {
     }
   }
 
-  /**
-   * Bind a conversation's long-term memory to a host root. `root` means what `options.root` means:
-   * the store lives under `<root>/memory/daily`. Idempotent for the same pair. A different root for
-   * an already registered conversation is a programming error. Registering the attached root
-   * conversation is a no-op: it already maps to `options.root`. Store handles open lazily and are
-   * cached by root, so conversations registered to one root share a store.
-   */
-  registerConversationStore(conversationId: ConversationId, root: string): void {
-    const resolved = openDaily(root).root;
-    if (conversationId === this.#rootConversationId) {
-      if (resolved !== this.#rootStore.root) {
-        throw new MemoryError("invalid-input", "The attached root conversation already maps to the configured root");
-      }
-      return;
-    }
-    const existing = this.#conversationRoots.get(conversationId);
-    if (existing !== undefined) {
-      if (existing !== resolved) {
-        throw new MemoryError("invalid-input", "Conversation memory store is already registered with a different root");
-      }
-      return;
-    }
-    this.#conversationRoots.set(conversationId, resolved);
-  }
-
-  /**
-   * The store for one conversation: never a model parameter, always the durable conversation the
-   * operation belongs to. An unregistered conversation is an explicit error, never a fallback to
-   * another conversation's memory.
-   */
-  #storeFor(conversationId: ConversationId): DailyStore {
-    const root = this.#conversationRoots.get(conversationId)
-      ?? (conversationId === this.#rootConversationId ? this.#rootStore.root : undefined);
-    if (root === undefined) throw new MemoryError("invalid-input", "Conversation has no registered memory store");
-    let store = this.#stores.get(root);
-    if (store === undefined) {
-      store = openDaily(root);
-      this.#stores.set(root, store);
-    }
-    return store;
-  }
-
   /** The native compaction policy for the harness settings, derived from the one budget (§10). */
   compactionSettings() {
     return nativeCompactionPolicy(this.#options.budget, this.#options.reserveTokens, this.#options.contextWindow);
@@ -280,21 +186,17 @@ export class MemoryIntegration {
   }
 
   /**
-   * Extensions for the tool registry, in install order: working tools, retrieval tools, the
-   * compaction hook and the archive task. The compaction hook persists through a late-bound host
-   * commit — the harness only exists after the registry is installed — and hooks cannot run
-   * before `attach`, which the application calls immediately after opening the harness.
+   * Extensions for the tool registry, in install order: working tools and the compaction hook.
+   * The compaction hook persists through a late-bound host commit — the harness only exists after
+   * the registry is installed — and hooks cannot run before `attach`, which the application calls
+   * immediately after opening the harness.
    */
   extensions(): Extension[] {
     const commit: Pick<Session, "commit"> = {
       commit: (change, context) => this.#session().commit(change, context),
     };
     return [
-      createWorkingExtension({
-        resolveProfileEvidence: (refs, conversationId) =>
-          requireCurrentProfileEvidence(this.#storeFor(conversationId), refs),
-      }),
-      memoryToolsExtension({ store: (conversationId) => this.#storeFor(conversationId), budget: this.#options.budget }),
+      createWorkingExtension(),
       createCompactionExtension({
         commit,
         model: this.#options.model,
@@ -317,71 +219,15 @@ export class MemoryIntegration {
           }
         },
       }),
-      { name: "memory-archive", tasks: [this.#archiveTask] },
     ];
   }
 
-  /** Bind the opened harness and its root conversation. Call once, before `initialize`. */
+  /** Bind the opened harness and its root conversation. Call once, before any request work. */
   attach(harness: Harness, root: Conversation): void {
     if (this.#harness !== undefined) throw new MemoryError("invalid-input", "Memory integration is already attached");
-    const registered = this.#conversationRoots.get(root.id);
-    if (registered !== undefined && registered !== this.#rootStore.root) {
-      throw new MemoryError("invalid-input", "The root conversation is registered to a different memory store");
-    }
     this.#harness = harness;
     this.#root = root;
     this.#rootConversationId = root.id;
-  }
-
-  /**
-   * First-upgrade migration and startup re-scan for the attached root conversation. A thin
-   * delegation to `initializeConversation`; existing callers keep root-bound meaning.
-   */
-  async initialize(context: Context): Promise<void> {
-    return this.initializeConversation(this.#conversation(), context);
-  }
-
-  /**
-   * First-upgrade migration and startup re-scan for one conversation, idempotent across restarts
-   * and per conversation. The archive origin is the conversation's current tail: pre-upgrade
-   * history is never backfilled unless an operator later moves the target explicitly. A timezone
-   * that contradicts the initialized archive is a `revision-conflict`, not a silent change.
-   * Archive state is keyed by `conversation.id` in durable storage, so conversations never share it.
-   *
-   * A conversation registered to a shared store still has archive state of its own, keyed by its
-   * own id; the shared store only decides where its daily files live.
-   */
-  async initializeConversation(conversation: Conversation, context: Context): Promise<void> {
-    if (this.#initialized.has(conversation.id)) return;
-    const session = this.#session();
-    const state = await readArchive(session, conversation.id, context);
-    if (state?.initialized === true) {
-      if (state.timezone !== this.#options.timezone) {
-        throw new MemoryError("revision-conflict", "Archive timezone is already fixed", {
-          detail: { initialized: state.timezone, configured: this.#options.timezone },
-        });
-      }
-    } else {
-      const tail = await session.commit(async (tx) => {
-        const page = await tx.scanEntries({ conversationId: conversation.id, order: "descending" }, 1);
-        return page.items[0]?.id ?? null;
-      }, context);
-      await session.commit(async (tx) => {
-        const slot = await tx.doc(MigrationDoc, conversation.id, "v1", UNSET_MIGRATION);
-        if ((slot as MigrationRecord).at === UNSET_MIGRATION.at) {
-          Object.assign(slot, {
-            version: MEMORY_SCHEMA_VERSION,
-            archiveOrigin: tail,
-            hadHistory: tail !== null,
-            at: Date.now(),
-          } satisfies MigrationRecord);
-        }
-      }, context);
-      await initializeArchive(session, conversation.id, tail, this.#options.timezone, context);
-      this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: tail === null ? "fresh" : "origin-at-tail" });
-    }
-    this.#initialized.add(conversation.id);
-    await this.#rescanIn(conversation, context);
   }
 
   /**
@@ -422,8 +268,6 @@ export class MemoryIntegration {
       return { kind };
     }
 
-    await this.#rescanIn(root, context);
-
     // A projection committed for this request whose input was never submitted is reused as
     // written (§6): recomputing it could publish different bytes for the same fact.
     const projectionId = projectionRequestId(request.requestId);
@@ -445,8 +289,8 @@ export class MemoryIntegration {
       // The inputs B was built from changed and there is nothing to summarize (§14.2 step 6
       // would refuse the request outright). The design's own rule for a change that cannot be
       // carried by a tail revision is to end the cycle explicitly (§6): reset, then let the
-      // plan below establish the new B behind it. Durable history, working state and the
-      // archive cursors are untouched; only the active context restarts. With compactable
+      // plan below establish the new B behind it. Durable history and working state are
+      // untouched; only the active context restarts. With compactable
       // content the planner's compact/facts path handles the same change without a reset.
       await root.reset(undefined, context);
       view = await root.context(context);
@@ -501,7 +345,7 @@ export class MemoryIntegration {
 
   /**
    * The durable steps after a request completed with an answer, for one conversation: count it once,
-   * evaluate compaction at the boundary, and re-scan archive coverage. Counting is idempotent by
+   * evaluate compaction at the boundary. Counting is idempotent by
    * requestId, so a recovered request that completes now is counted exactly once and a replay
    * is filtered by the caller. Housekeeping failures are logged, never thrown into a finished
    * request; storage failures still propagate.
@@ -540,7 +384,6 @@ export class MemoryIntegration {
       this.#log({ event: "memory.evaluate", conversationId: root.id, requestId, action: decision.kind, turns: counted.completedUserTurns });
       if (decision.kind !== "none") await root.compact(undefined, context);
     }
-    await this.#rescanIn(root, context);
     this.#log({ event: "memory.complete", conversationId: root.id, requestId, turns: counted?.completedUserTurns, durationMs: Date.now() - started });
   }
 
@@ -590,9 +433,9 @@ export class MemoryIntegration {
   /**
    * Facts B is built from. The instructions are one: B is rendered to sit behind this exact
    * block A, so an upgraded prompt ends the cycle (§14.2). There is no external memory file:
-   * workspace/MEMORY.md was retired (ADR-0004); long-term facts live in the working state and
-   * daily archives this integration manages, whose changes flow through the cycle machinery
-   * itself — so there is no memory version B depends on, and `memoryDigest` is honestly
+   * workspace/MEMORY.md was retired (ADR-0004); long-term facts live in the working state this
+   * integration manages, whose changes flow through the cycle machinery itself — so there is no
+   * memory version B depends on, and `memoryDigest` is honestly
    * `null`. A host that ever loads external memory content into B must supply its digest
    * here and accept cycle invalidation.
    */
@@ -601,96 +444,89 @@ export class MemoryIntegration {
   }
 
   /**
-   * Boundary re-scan from persisted facts (§8): confirm every settled compaction task and, for
-   * each confirmed switch, offer its newly covered range to the archive; then sweep the archive
-   * reconciler until this pass is done. Best-effort per item — one failure is logged with its
-   * safe code and never blocks the request or the other items.
+   * The bounded evidence one dream run receives: the owner's most recent turns in the root
+   * conversation, and the activity digest of every owner conversation since the previous applied
+   * run. The digest is newest-first bounded and redacted by its own module. Never memoized: a run
+   * starts after the trigger and must see the newest facts.
    */
-  async #rescanIn(conversation: Conversation, context: Context): Promise<void> {
-    const session = this.#session();
-    const root = conversation;
-    // Boundary work is archive work. A conversation with no archive state (one whose initialization
-    // has not completed) has nothing to re-scan.
-    let initialized = false;
-    try {
-      initialized = (await readArchive(session, root.id, context))?.initialized === true;
-    } catch (error) {
-      if (!(error instanceof MemoryError)) throw error;
-      this.#log({ event: "memory.archive.reconcile", conversationId: root.id, action: "failed", code: error.appCode });
-      return;
-    }
-    if (!initialized) return;
-    try {
-      const tasks = await session.commit(
-        async (tx) => (await tx.scanTasks({ conversationId: root.id, kind: "pi.compaction" }, 40)).items,
-        context,
-      );
-      const deps = createHarnessConfirmDeps(this.#harness!);
-      for (const task of tasks) {
-        if (task.state.status !== "terminal") continue;
-        try {
-          const archive = await readArchive(session, root.id, context);
-          const confirmation = await confirmCompactionCycle(deps, root.id, task.id, context, {
-            archivedThrough: archive?.archivedThrough ?? null,
-          });
-          if (confirmation.status === "switched" && confirmation.archiveRange !== null) {
-            await requestArchive(session, root.id, confirmation.archiveRange.through, this.#archiveTask, context);
-            this.#log({ event: "memory.archive.trigger", conversationId: root.id, action: "compaction-switch" });
-          }
-        } catch (error) {
-          if (!(error instanceof MemoryError)) throw error;
-          this.#log({ event: "memory.confirm", conversationId: root.id, action: "failed", code: error.appCode });
-        }
-      }
-    } catch (error) {
-      if (!(error instanceof MemoryError)) throw error;
-      this.#log({ event: "memory.confirm", conversationId: root.id, action: "failed", code: error.appCode });
-    }
-    for (let sweep = 0; sweep < RECONCILE_MAX_SWEEPS; sweep += 1) {
-      try {
-        const { more } = await reconcileArchive(session, root.id, this.#archiveTask, Date.now(), context);
-        if (!more) return;
-      } catch (error) {
-        if (!(error instanceof MemoryError)) throw error;
-        this.#log({ event: "memory.archive.reconcile", conversationId: root.id, action: "failed", code: error.appCode });
-        return;
-      }
-    }
-  }
-
-  /**
-   * The bounded evidence one dream run receives: the owner's most recent turns and the daily archive
-   * since the last applied run. Token-bounded on both sides; never memoized, because a run starts
-   * after the trigger and should see the newest facts.
-   */
-  async #dreamingInput(cursor: { readonly archiveThrough: string | null }): Promise<{ transcript: string; archive: string; archiveThrough: string | null }> {
+  async #dreamingInput(cursor: { readonly evidenceThrough: EntryId | null }): Promise<DreamingInput> {
     const conversation = this.#conversation();
     const view = await conversation.context(BACKGROUND_CONTEXT);
     const transcript = boundFromEnd(transcriptExcerpt(view.entries, view.contributions), DREAMING_EVIDENCE_TOKENS);
-    const archive = await this.#archiveExcerpt(cursor.archiveThrough);
+    const { sources } = await this.#activitySources(cursor.evidenceThrough, BACKGROUND_CONTEXT);
+    const digest = buildActivityDigest(sources, { timezone: this.#options.timezone });
     return {
       transcript,
-      archive: archive.text,
-      archiveThrough: archive.through ?? cursor.archiveThrough,
+      activity: digest.text,
+      evidenceThrough: digest.through !== null
+        && (cursor.evidenceThrough === null || digest.through > cursor.evidenceThrough)
+        ? digest.through
+        : cursor.evidenceThrough,
     };
   }
 
-  async #archiveExcerpt(from: string | null): Promise<{ text: string; through: string | null }> {
-    const search = await searchDaily(this.#rootStore, {
-      ...(from === null || from === "" ? {} : { from }),
-      limit: 100,
-    });
-    const lines: string[] = [];
-    let through = from;
-    for (const hit of search.hits) {
-      const segment = hit.segment;
-      lines.push(`[${segment.date} ${segment.kind}] ${segment.text}`);
-      // A record with an unknown date cannot be a cursor: rescanned is safer than skipped.
-      if (DREAMING_CURSOR_DATE.test(segment.date) && (through === null || !DREAMING_CURSOR_DATE.test(through) || segment.date > through)) {
-        through = segment.date;
-      }
+  /**
+   * Every entry after `from` in every conversation that is not a dream conversation. Entry ids are
+   * global and increasing, so one id is the whole cursor; conversations are scanned independently
+   * and the newest entry seen becomes the next cursor. The scan is bounded as a safety valve; the
+   * digest's own token cap normally trims long before it.
+   */
+  async #activitySources(from: EntryId | null, context: Context): Promise<{ readonly sources: ActivitySource[]; readonly through: EntryId | null }> {
+    const excluded = await this.#dreamingConversations(context);
+    return this.#session().commit(async (tx) => {
+      const sources: ActivitySource[] = [];
+      let through = from;
+      let scanned = 0;
+      let conversationCursor: Cursor | undefined;
+      do {
+        const conversations = await tx.scanConversations({}, ACTIVITY_CONVERSATION_PAGE, conversationCursor);
+        for (const record of conversations.items) {
+          if (excluded.has(record.id)) continue;
+          let entryCursor: Cursor | undefined;
+          do {
+            const entries = await tx.scanEntries({
+              conversationId: record.id,
+              ...(from === null ? {} : { minEntryId: (from + 1) as EntryId }),
+              order: "ascending",
+            }, ACTIVITY_ENTRY_PAGE, entryCursor);
+            for (const entry of entries.items) {
+              sources.push({ conversationId: record.id, entry });
+              if (through === null || entry.id > through) through = entry.id;
+              scanned += 1;
+              if (scanned >= ACTIVITY_MAX_ENTRIES) return { sources, through };
+            }
+            entryCursor = entries.next;
+          } while (entryCursor !== undefined);
+        }
+        conversationCursor = conversations.next;
+      } while (conversationCursor !== undefined);
+      return { sources, through };
+    }, context);
+  }
+
+  /**
+   * Conversations the dream pass itself created, identified by their submission request id. A
+   * dream conversation is ownerless and would otherwise look like owner activity, so its entries
+   * must never feed the next run. Storage is required because the transaction surface cannot scan
+   * submissions.
+   */
+  async #dreamingConversations(context: Context): Promise<ReadonlySet<ConversationId>> {
+    const storage = this.#options.storage?.();
+    if (storage === undefined) {
+      throw new MemoryError("invalid-input", "Dreaming activity needs durable storage access");
     }
-    return { text: boundFromEnd(lines.join("\n"), DREAMING_EVIDENCE_TOKENS), through };
+    const excluded = new Set<ConversationId>();
+    let cursor: Cursor | undefined;
+    let scanned = 0;
+    do {
+      const page = await storage.scanSubmissions({}, DREAMING_SUBMISSION_PAGE, cursor, context);
+      for (const submission of page.items) {
+        if (submission.requestId?.startsWith(DREAMING_REQUEST_PREFIX)) excluded.add(submission.conversationId);
+      }
+      scanned += page.items.length;
+      cursor = page.next;
+    } while (cursor !== undefined && scanned < DREAMING_SUBMISSION_SCAN_MAX);
+    return excluded;
   }
 
   #session(): Harness {
@@ -811,11 +647,16 @@ function compactableTokens(
   return compactable;
 }
 
-/** Dreaming evidence bounds: each side of the prompt is capped independently. */
+/** Dreaming evidence bounds: the transcript is capped here, the activity digest by its own module. */
 const DREAMING_EVIDENCE_TOKENS = 8_000;
-/** Only a real calendar date can be an archive cursor; `unknown` is rescanned. */
-const DREAMING_CURSOR_DATE = /^\d{4}-\d{2}-\d{2}$/u;
 const DREAMING_TRANSCRIPT_TURNS = 20;
+const DREAMING_REQUEST_PREFIX = "dreaming:";
+const ACTIVITY_ENTRY_PAGE = 200;
+const ACTIVITY_CONVERSATION_PAGE = 100;
+/** Safety valve; the activity token cap trims the rendered digest long before this. */
+const ACTIVITY_MAX_ENTRIES = 20_000;
+const DREAMING_SUBMISSION_PAGE = 500;
+const DREAMING_SUBMISSION_SCAN_MAX = 200_000;
 
 /**
  * The owner's last turns as plain `role: text` lines, oldest first. A turn ends at a user message;

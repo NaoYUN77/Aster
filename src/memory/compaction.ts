@@ -6,8 +6,8 @@
 //       `hook(CompactionTask, { beforeCompact })` and nothing else. `options`:
 //         commit        host `Pick<Session, "commit">` — the ONLY persistence channel the hook
 //                       uses. `HookApi` has no commit (design §12.6), so usage accounting and the
-//                       saved summary result go through this injected host commit, exactly as
-//                       MEM-05's archive task injects its model/store through options.
+//                       saved summary result go through this injected host commit rather than a
+//                       runtime surface the hook does not have.
 //         model         `{ provider, modelId }` ref of the summary model, resolved per call
 //                       through `api.models`.
 //         budget        `MemoryBudget`; defaults to `MEMORY_BUDGET_DEFAULTS`.
@@ -19,7 +19,7 @@
 //                     -> the native `settings.compaction` derived from the one budget schema.
 //   compactionThresholds(contextWindow, reserveTokens, budget)
 //                     -> `{ blocking, background }`, the SDK's own threshold derivation (§10, §14.4).
-//   confirmCompactionCycle(deps, conversationId, taskId, context, options?)
+//   confirmCompactionCycle(deps, conversationId, taskId, context)
 //                     -> pending / not-published / switched, judged ONLY by §14.5: a submission
 //                       path needs `submission.status === "done"` AND the view head being that
 //                       submission's `pi.compaction`; a blocking path needs
@@ -111,7 +111,6 @@ import {
   type MemoryBudget,
   type MemoryErrorCode,
   type SnapshotFacts,
-  type SourceRange,
   type WorkingState,
 } from "./contracts.js";
 import { buildSnapshot, renderSnapshot, snapshotFromHead } from "./context.js";
@@ -551,24 +550,19 @@ export type CompactionConfirmation =
       /** The decoded snapshot; `undefined` with `native: true` for a native summary head. */
       readonly snapshot: CycleSnapshot | undefined;
       readonly native: boolean;
-      /** `(after, through]` this switch newly archives; `after` never rewinds (see §8). */
-      readonly archiveRange: SourceRange | null;
     };
 
 /**
  * Confirm a cycle switch from durable facts only. Both §14.5 paths end at the same test — the
  * new entry IS the active head — so a restart re-scan answers exactly what the live run saw:
  * submission `done` after reopen, or the blocking task's `outcome.result.entryId` against the
- * head. `archivedThrough` is the caller's continuous archive cursor; the returned range starts
- * at the later of the snapshot's own `after` and that cursor, so a late confirmation of an old
- * switch cannot rewind archiving.
+ * head.
  */
 export async function confirmCompactionCycle(
   deps: CompactionConfirmDeps,
   conversationId: ConversationId,
   taskId: TaskId,
   context: Context,
-  options: { readonly archivedThrough?: EntryId | null } = {},
 ): Promise<CompactionConfirmation> {
   const task = await deps.getTask(taskId, context);
   if (task === undefined) return { status: "not-published", reason: "task-not-found" };
@@ -587,7 +581,7 @@ export async function confirmCompactionCycle(
     if (view.head === undefined || view.head.id !== result.entryId) {
       return { status: "not-published", reason: "head-mismatch" };
     }
-    return switched(view.head, conversationId, options.archivedThrough ?? null);
+    return switched(view.head);
   }
   // Submission path: the conversation-owned compaction queued its summary write.
   const submission = await deps.submissionByRequest(conversationId, `compaction:${taskId}`, context);
@@ -606,25 +600,12 @@ export async function confirmCompactionCycle(
   if (view.head === undefined || submission.entry === undefined || view.head.id !== submission.entry) {
     return { status: "not-published", reason: "head-mismatch" };
   }
-  return switched(view.head, conversationId, options.archivedThrough ?? null);
+  return switched(view.head);
 }
 
-function switched(head: EntryRecord, conversationId: ConversationId, archivedThrough: EntryId | null): CompactionConfirmation {
+function switched(head: EntryRecord): CompactionConfirmation {
   const snapshot = publishedSnapshot(head);
-  let archiveRange: SourceRange | null = null;
-  if (snapshot?.sources !== null && snapshot?.sources !== undefined) {
-    const after = laterOf(snapshot.sources.after, archivedThrough);
-    archiveRange = after !== null && after >= snapshot.sources.through
-      ? null
-      : { conversationId, after, through: snapshot.sources.through };
-  }
-  return { status: "switched", entryId: head.id, snapshot, native: snapshot === undefined, archiveRange };
-}
-
-function laterOf(left: EntryId | null, right: EntryId | null): EntryId | null {
-  if (left === null) return right;
-  if (right === null) return left;
-  return left >= right ? left : right;
+  return { status: "switched", entryId: head.id, snapshot, native: snapshot === undefined };
 }
 
 /** Bind the confirmation deps to a Harness: task records, submissions and the live context view. */

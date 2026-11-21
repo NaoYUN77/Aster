@@ -1,5 +1,5 @@
 // MEM-08 acceptance, part 1 (in-process scenarios): 08-A deterministic cross-day trace,
-// 08-B windows 1 (projection) and 6 (reply saved, count pending), 08-C archive range states,
+// 08-B windows 1 (projection) and 6 (reply saved, count pending),
 // 08-D correction/revocation persistence, 08-E offline provider-adapter prefix comparison,
 // 08-H dependency review. The SIGKILL windows of 08-B live in memory-verification-crash.test.ts.
 //
@@ -40,10 +40,8 @@ import type { TranscriptContext } from "@earendil-works/pi-ai/utils/transcript";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createProviderModels } from "../src/providers.js";
 import { createToolRegistry } from "../src/tools.js";
-import { MEMORY_BUDGET_DEFAULTS, type MemorySegment } from "../src/memory/contracts.js";
-import { openDaily, publishSegments, readSegment, searchDaily, type DailyStore } from "../src/memory/daily.js";
+import { MEMORY_BUDGET_DEFAULTS } from "../src/memory/contracts.js";
 import { applyWorkingUpdate, readWorking } from "../src/memory/working.js";
-import { createArchiveTask, initializeArchive, readArchive, reconcileArchive, requestArchive, retryArchive, type ArchiveState } from "../src/memory/archive-task.js";
 import {
   publishedSnapshot,
   readCompactionTurnCount,
@@ -87,8 +85,8 @@ async function allEntries(harness: Harness, root: Conversation): Promise<EntryRe
 
 // ---------------------------------------------------------------------------
 // Shared raw fixture: a Harness with the MEM-07 composition root attached, a
-// classifying faux router (main / summary / archive on one provider, exactly
-// as the application wires one configured model), and a call recorder that
+// classifying faux router (main / summary on one provider, exactly as the
+// application wires one configured model), and a call recorder that
 // reduces every main-model request to identifiers, counts and versions only.
 // ---------------------------------------------------------------------------
 
@@ -104,7 +102,6 @@ type Trace = {
   readonly main: CallRecord[];
   readonly contexts: TranscriptContext[];
   summary: number;
-  archive: number;
 };
 
 const noteLookup = defineTool({
@@ -144,7 +141,7 @@ async function openRawV(name: string, options: {
   const models = createModels();
   models.setProvider(faux.provider);
   const logs: MemoryLogEvent[] = [];
-  const trace: Trace = { main: [], contexts: [], summary: 0, archive: 0 };
+  const trace: Trace = { main: [], contexts: [], summary: 0 };
   const fixture: RawFixture = {
     directory, database, workspace, faux, logs, trace, toolScript: false,
     integration: undefined as never, harness: undefined as never, root: undefined as never,
@@ -154,17 +151,6 @@ async function openRawV(name: string, options: {
     if (all.includes("context summarization assistant")) {
       trace.summary += 1;
       return fauxAssistantMessage("Work continues on the quarterly release; goals, constraints and open steps are preserved.");
-    }
-    if (all.includes("Extract useful daily events")) {
-      trace.archive += 1;
-      const user = transcript.messages.find((message) => message.role === "user")!;
-      const sources = JSON.parse(messageText(user)) as { entryId: number; text: string }[];
-      return fauxAssistantMessage(JSON.stringify({
-        segments: sources.map((source) => ({
-          sourceEntryId: source.entryId, kind: "result", status: "confirmed",
-          text: `Archived note for entry ${source.entryId}`, supersedes: [],
-        })),
-      }));
     }
     // A main-model request: reduce it to A/B/C sizes and the newest baseline revision it
     // carries. A = the effective system prompt, B = messages carrying a <cycle-snapshot>,
@@ -238,7 +224,6 @@ async function openRawV(name: string, options: {
     instructions: INSTRUCTIONS,
   }, context);
   integration.attach(harness, root);
-  await integration.initialize(context);
   harness.resume();
   return Object.assign(fixture, { integration, harness, root });
 }
@@ -262,7 +247,7 @@ async function driveRequest(fixture: RawFixture, id: string, text: string): Prom
   if (prepared.kind !== "replay") await fixture.integration.afterRequest(id, context);
 }
 
-/** Wait until no compaction or archive task is in flight and the head is stable across polls. */
+/** Wait until no background task is in flight and the head is stable across polls. */
 async function quiesce(fixture: RawFixture): Promise<void> {
   let lastHead: EntryId | undefined;
   let stable = 0;
@@ -300,7 +285,7 @@ async function lastUserEntryId(fixture: RawFixture): Promise<EntryId> {
 // scenario runs twice in fresh directories and the two traces must be equal:
 // that equality is the determinism claim. Cross-day coverage comes from
 // source entries with explicit timestamps on three simulated days (the
-// MEM-05 pattern), which the archive must file under their own dates.
+// MEM-05 pattern), which the activity digest must group under their own dates.
 // ---------------------------------------------------------------------------
 
 type RequestRecord = {
@@ -311,7 +296,7 @@ type RequestRecord = {
   readonly headRev: number | null;
 };
 
-async function runTrace(name: string): Promise<{ requests: RequestRecord[]; fixture: RawFixture; seededThrough: EntryId; summaryTotal: number }> {
+async function runTrace(name: string): Promise<{ requests: RequestRecord[]; fixture: RawFixture; summaryTotal: number }> {
   let fixture = await openRawV(name, { budget: { evaluateAfterUserTurns: 2, recentVerbatimTokens: 512 } });
   const requests: RequestRecord[] = [];
   const days = [
@@ -319,17 +304,16 @@ async function runTrace(name: string): Promise<{ requests: RequestRecord[]; fixt
     Date.parse("2026-10-25T09:00:00Z"),
     Date.parse("2026-10-26T09:00:00Z"),
   ];
-  let seededThrough: EntryId = 0 as EntryId;
   await fixture.harness.commit(async (tx) => {
     for (const [index, dayTs] of days.entries()) {
       await tx.appendEntry(fixture.root.id, {
         kind: "pi.user",
         model: [{ role: "user", content: [{ type: "text", text: `Day ${index + 1}: drafted the release checklist.` }], timestamp: dayTs }],
       });
-      seededThrough = (await tx.appendEntry(fixture.root.id, {
+      await tx.appendEntry(fixture.root.id, {
         kind: "pi.assistant",
         model: [fauxAssistantMessage(`Day ${index + 1}: checklist noted.`, { timestamp: dayTs + 60_000 })],
-      })).id;
+      });
     }
   }, context);
 
@@ -422,7 +406,7 @@ async function runTrace(name: string): Promise<{ requests: RequestRecord[]; fixt
   const summaryBefore = fixture.trace.summary;
   fixture = await openRawV(name, { budget: { evaluateAfterUserTurns: 2, recentVerbatimTokens: 512 }, dataDir: fixture.directory });
   for (let i = 41; i <= 44; i += 1) await drive(`t-${String(i).padStart(2, "0")}`, LONG);
-  return { requests, fixture, seededThrough, summaryTotal: summaryBefore + fixture.trace.summary };
+  return { requests, fixture, summaryTotal: summaryBefore + fixture.trace.summary };
 }
 
 test("08-A: deterministic cross-day trace with 44 requests and repeated compactions", { timeout: 1_200_000 }, async () => {
@@ -464,17 +448,11 @@ test("08-A: deterministic cross-day trace with 44 requests and repeated compacti
       assert.equal(snapshots[i]!.sources?.after, snapshots[i - 1]!.sources?.through, `cycle ${i} chains from cycle ${i - 1}`);
     }
 
-    // Cross-day archive: the seeded entries of all three simulated days are filed under
-    // their own dates once the boundary re-scans settle.
-    await until(async () => {
-      const state = await readArchive(fixture.harness, fixture.root.id, context);
-      return (state?.archivedThrough ?? 0) >= first.seededThrough;
-    }, "archive covers the seeded cross-day entries", 120_000);
-    const store = openDaily(fixture.directory);
-    const search = await searchDaily(store, {});
-    const dates = new Set(search.hits.map((hit) => hit.segment.date));
-    assert.ok(dates.has("2026-10-24") && dates.has("2026-10-25") && dates.has("2026-10-26"),
-      `seeded days filed under their own dates (saw ${[...dates].sort().join(", ")})`);
+    // The seeded cross-day entries survive as durable evidence for the activity digest;
+    // their day grouping is covered directly in memory-activity.test.ts.
+    const seeded = (await allEntries(fixture.harness, fixture.root)).filter((entry) => entry.kind === "pi.user"
+      && (entry.model ?? []).some((message) => messageText(message).startsWith("Day ")));
+    assert.equal(seeded.length, 3, "the three simulated days remain durable evidence");
     const summaryUsage = await fixture.harness.snapshot(UsageDoc, fixture.root.id, context);
     assert.ok((summaryUsage?.models["app/summary"]?.totalTokens ?? 0) > 0, "summary usage is accounted under app/summary");
     assert.equal(first.summaryTotal, snapshots.length, "one successful summary call per published compaction");
@@ -590,172 +568,12 @@ test("08-B/6: crash after the reply is saved returns it intact; the turn count i
 });
 
 // ---------------------------------------------------------------------------
-// 08-C: every source range can be classified from durable facts alone —
-// pending, archived (segments published, traceable to the original entries),
-// or confirmed-empty (extraction ran and retained nothing). A failed batch
-// is a gap the cursor never crosses, in either direction of retry; an
-// extraction that cites an unknown source is a failure, never a success.
-// ---------------------------------------------------------------------------
-
-type ArchiveFixture = Awaited<ReturnType<typeof openArchiveFixture>>;
-
-async function openArchiveFixture(existing?: string) {
-  const directory = existing ?? await mkdtemp(join(tmpdir(), "mem08-archive-"));
-  const store = openDaily(directory);
-  const faux = fauxProvider({ provider: "faux" });
-  const models = createModels();
-  models.setProvider(faux.provider);
-  const control = { mode: "echo" as "echo" | "empty" | "invalid" | "unknown-source", calls: 0 };
-  faux.setResponses(Array.from({ length: 256 }, () => (transcript: { messages: readonly Message[] }) => {
-    control.calls += 1;
-    if (control.mode === "invalid") return fauxAssistantMessage("this is not json");
-    const user = transcript.messages.find((message) => message.role === "user")!;
-    const sources = JSON.parse(messageText(user)) as { entryId: number; text: string }[];
-    if (control.mode === "empty") return fauxAssistantMessage('{"segments":[]}');
-    if (control.mode === "unknown-source") {
-      return fauxAssistantMessage(JSON.stringify({
-        segments: [{ sourceEntryId: 999_999, kind: "result", status: "confirmed", text: "invented", supersedes: [] }],
-      }));
-    }
-    return fauxAssistantMessage(JSON.stringify({
-      segments: sources.map((source) => ({
-        sourceEntryId: source.entryId, kind: "result", status: "confirmed", text: source.text, supersedes: [],
-      })),
-    }));
-  }));
-  const task = createArchiveTask({ store, model: { provider: "faux", modelId: "faux-1" } });
-  const reg = createRegistry();
-  reg.install({ name: "archive", tasks: [task] });
-  const harness = await Harness.open(await openNodeSqliteStorage(join(directory, "agent.sqlite")), {
-    models, registry: reg, settings: { compaction: { enabled: false } },
-  }, context);
-  const root = await harness.root(context, { agent: { model: { provider: "faux", modelId: "faux-1" }, instructions: "Be concise." } });
-  await initializeArchive(harness, root.id, null, "UTC", context);
-  const append = async (count: number, timestamp: number) => harness.commit(async (tx) => {
-    const ids: EntryId[] = [];
-    for (let i = 0; i < count; i += 1) {
-      ids.push((await tx.appendEntry(root.id, {
-        kind: "pi.user",
-        model: [{ role: "user", content: `event at ${timestamp} #${i}`, timestamp }],
-      })).id);
-    }
-    return ids;
-  }, context);
-  const waitTask = async (id: EntryId | null) => {
-    const taskId = await requestArchive(harness, root.id, id!, task, context);
-    assert.notEqual(taskId, null);
-    harness.resume();
-    return harness.waitForTask(taskId!, context);
-  };
-  const state = async (): Promise<ArchiveState> => (await readArchive(harness, root.id, context))!;
-  const close = async () => { await harness.close(context).catch(() => {}); };
-  return { directory, store, faux, task, harness, root, control, append, waitTask, state, close };
-}
-
-function classifyRange(state: ArchiveState, segmentsInRange: number, after: EntryId | null, through: EntryId): string {
-  void after;
-  if (state.archivedThrough !== null && state.archivedThrough >= through) {
-    return segmentsInRange > 0 ? "archived" : "confirmed-empty";
-  }
-  // A retained failed batch (pending is kept for retry) still classifies as failed-pending:
-  // it has been attempted, it is the gap, and it is distinguishable from a merely queued range.
-  if (state.failure !== null) return "pending-failed";
-  return "pending";
-}
-
-async function segmentsInRange(store: DailyStore, after: EntryId | null, through: EntryId): Promise<MemorySegment[]> {
-  const search = await searchDaily(store, {});
-  return search.hits
-    .map((hit) => hit.segment)
-    .filter((segment) => (after === null || segment.sources.through > after) && segment.sources.through <= through);
-}
-
-test("08-C: archive ranges classify as pending / archived / confirmed-empty and never cross a failure gap", { timeout: 300_000 }, async () => {
-  const f = await openArchiveFixture();
-  const day1 = Date.parse("2026-10-24T12:00:00Z");
-  try {
-    // Range 1: real content, archived with segments traceable to the original entries.
-    const first = await f.append(3, day1);
-    await f.waitTask(first.at(-1)!);
-    let state = await f.state();
-    let segments = await segmentsInRange(f.store, null, first.at(-1)!);
-    assert.equal(classifyRange(state, segments.length, null, first.at(-1)!), "archived");
-    assert.equal(segments.length, 3);
-    for (const segment of segments) {
-      assert.ok(first.includes(segment.sources.through), "each segment cites an original entry of the range");
-      const found = await readSegment(f.store, { id: segment.id, date: segment.date });
-      assert.ok(found.found, "the segment reads back from its file");
-    }
-
-    // Range 2: extraction retains nothing — confirmed-empty, distinct from archived.
-    f.control.mode = "empty";
-    const second = await f.append(2, day1 + 3_600_000);
-    await f.waitTask(second.at(-1)!);
-    state = await f.state();
-    segments = await segmentsInRange(f.store, first.at(-1)!, second.at(-1)!);
-    assert.equal(classifyRange(state, segments.length, first.at(-1)!, second.at(-1)!), "confirmed-empty");
-    assert.equal(state.archivedThrough, second.at(-1));
-
-    // Range 3: extraction keeps failing — the range stays pending-failed and the cursor
-    // does not move; a target beyond the gap is not reached either.
-    f.control.mode = "invalid";
-    const third = await f.append(3, day1 + 7_200_000);
-    const failedTask = await requestArchive(f.harness, f.root.id, third.at(-1)!, f.task, context);
-    assert.notEqual(failedTask, null);
-    f.harness.resume();
-    await until(async () => {
-      const current = await f.state();
-      return current.failure !== null && current.activeTask === null;
-    }, "archive failure persisted", 120_000);
-    state = await f.state();
-    segments = await segmentsInRange(f.store, second.at(-1)!, third.at(-1)!);
-    assert.equal(classifyRange(state, segments.length, second.at(-1)!, third.at(-1)!), "pending-failed");
-    assert.equal(state.archivedThrough, second.at(-1), "the cursor never crosses the failed batch");
-    const beyond = await f.append(1, day1 + 10_800_000);
-    const beyondTask = await requestArchive(f.harness, f.root.id, beyond.at(-1)!, f.task, context);
-    assert.equal(beyondTask, null,
-      "with a failure retained, a farther target is recorded but no new task starts (startIn refuses)");
-    state = await f.state();
-    assert.ok((state.target ?? 0) >= beyond.at(-1)!, "the farther target is durably recorded");
-    assert.equal(state.archivedThrough, second.at(-1), "the gap is not crossed from the far side either");
-    assert.equal((await segmentsInRange(f.store, second.at(-1)!, beyond.at(-1)!)).length, 0, "nothing past the gap was published");
-
-    // An extraction citing an unknown source is a failure (missing-evidence), not a success.
-    f.control.mode = "unknown-source";
-    const retried = await retryArchive(f.harness, f.root.id, f.task, context);
-    assert.notEqual(retried, null);
-    f.harness.resume();
-    await until(async () => {
-      const current = await f.state();
-      return current.activeTask === null && current.failure?.code === "missing-evidence";
-    }, "unknown-source extraction recorded as missing-evidence failure", 120_000);
-    state = await f.state();
-    assert.equal(state.archivedThrough, second.at(-1), "an unknown citation never advances the cursor");
-
-    // With a sound extraction the same ranges heal in order — coverage is continuous.
-    f.control.mode = "echo";
-    const healed = await retryArchive(f.harness, f.root.id, f.task, context);
-    assert.notEqual(healed, null);
-    assert.equal((await f.harness.waitForTask(healed!, context)).state.outcome.status, "completed");
-    state = await f.state();
-    assert.equal(state.archivedThrough, beyond.at(-1));
-    segments = await segmentsInRange(f.store, second.at(-1)!, beyond.at(-1)!);
-    assert.equal(classifyRange(state, segments.length, second.at(-1)!, beyond.at(-1)!), "archived");
-    assert.equal(segments.length, 4, "the three gap entries and the one beyond are all archived after healing");
-  } finally {
-    await f.close();
-    await rm(f.directory, { recursive: true, force: true });
-  }
-});
-
-// ---------------------------------------------------------------------------
 // 08-D: a preference correction and then a revocation stay effective across
-// several compaction cycles and restarts. A legacy daily record that still
-// states the old preference remains what it is — a dated historical event —
-// and never re-enters the working state or a later snapshot baseline.
+// several compaction cycles and restarts, and the newest published snapshot
+// baseline never carries the revoked preference.
 // ---------------------------------------------------------------------------
 
-test("08-D: correction and revocation survive cycles and restarts; old daily memory does not reactivate them", { timeout: 600_000 }, async () => {
+test("08-D: correction and revocation survive cycles and restarts", { timeout: 600_000 }, async () => {
   const fixture = await openRawV("mem08-d-", { budget: { evaluateAfterUserTurns: 2, recentVerbatimTokens: 512 } });
   const directory = fixture.directory;
   let current = fixture;
@@ -764,7 +582,7 @@ test("08-D: correction and revocation survive cycles and restarts; old daily mem
     current = await openRawV("mem08-d-", { budget: { evaluateAfterUserTurns: 2, recentVerbatimTokens: 512 }, dataDir: directory });
   };
   try {
-    // A legacy daily record stating the old preference, published directly as MEM-04 allows.
+    // A backdated user entry documenting the original preference.
     const evidence = await current.harness.commit(
       async (tx) => (await tx.appendEntry(current.root.id, {
         kind: "pi.user",
@@ -772,15 +590,6 @@ test("08-D: correction and revocation survive cycles and restarts; old daily mem
       })).id,
       context,
     );
-    const store = openDaily(directory);
-    await publishSegments(store, [{
-      version: 1, id: "legacy-reply-style", date: "2026-10-24", timezone: "UTC", page: 1,
-      kind: "user-requirement", status: "confirmed",
-      text: "On 2026-10-24 the user asked to always answer in Chinese.",
-      sources: { conversationId: current.root.id, after: null, through: evidence },
-      supersedes: [], supersededBy: null,
-    }]);
-
     await driveRequest(current, "d-1", "Start.");
     await applyWorkingUpdate(current.harness, {
       conversationId: current.root.id, operationId: "d-put-1", expectedRevision: 1,
@@ -838,15 +647,6 @@ test("08-D: correction and revocation survive cycles and restarts; old daily mem
     assert.equal(baseline.preferences.some((p) => p.id === "reply-style"), false,
       "the newest published baseline has no revoked preference");
 
-    // The legacy daily record is still there as dated evidence — and a search surfaces it
-    // as exactly that (a 2026-10-24 event), while the working authority stays empty.
-    const search = await searchDaily(store, {});
-    const legacy = search.hits.find((hit) => hit.segment.id === "legacy-reply-style");
-    assert.ok(legacy !== undefined, "the historical daily record is preserved, not deleted");
-    assert.equal(legacy.segment.date, "2026-10-24");
-    state = await readWorking(current.harness, current.root.id, context);
-    assert.equal(state.preferences.some((p) => p.id === "reply-style"), false,
-      "the old daily record never reactivates the revoked preference");
   } finally {
     await disposeRawV(current);
   }
@@ -884,7 +684,7 @@ test("08-E: the real OpenAI adapter's request bodies keep a byte-stable prefix w
     }
     // The same stability at the fingerprint level the application itself uses (06-G):
     // instructions, snapshot and tools digests are all unchanged inside the cycle.
-    const toolNames = ["current_time", "memory_read", "memory_search", "working_read", "working_update"];
+    const toolNames = ["current_time", "working_read", "working_update"];
     void toolNames;
     const firstCall = fixture.trace.main[0]!;
     const secondCall = fixture.trace.main[1]!;
@@ -899,16 +699,16 @@ test("08-E: the real OpenAI adapter's request bodies keep a byte-stable prefix w
 
 // ---------------------------------------------------------------------------
 // 08-H: dependency review as a rerunnable static check over the sources.
-// It proves the shape the design froze (§4): Context is pure (no I/O imports
-// at all), Daily Memory never touches the durable SDK, Working manages no
-// base execution state (types only, no submissions/tasks), the application
-// reaches memory only through the composition root, delivery-side modules
-// stay memory-free, and no memory source imports anything beyond Node
-// builtins, the SDK packages (pi-ai, pi-durable, pi-schema), typebox and
-// relative paths — no event bus, database service or plugin framework crept in.
+// It proves the shape the design froze (§4): Context and the activity digest
+// are pure (no I/O, no clock), Working manages no base execution state (types
+// only, no submissions/tasks), the application reaches memory only through
+// the composition root, delivery-side modules stay memory-free, and no memory
+// source imports anything beyond Node builtins, the SDK packages (pi-ai,
+// pi-durable, pi-schema), typebox and relative paths — no event bus, database
+// service or plugin framework crept in.
 // ---------------------------------------------------------------------------
 
-test("08-H: dependency review — pure Context, Harness-free Daily, state-only Working, one composition seam", async () => {
+test("08-H: dependency review — pure Context and activity, state-only Working, one composition seam", async () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const read = async (path: string) => readFile(join(root, path), "utf8");
   const importsOf = (source: string) => [...source.matchAll(/^\s*(?:import|export)\s[^;]*?from\s+"([^"]+)"/gm)].map((match) => match[1]!);
@@ -920,18 +720,14 @@ test("08-H: dependency review — pure Context, Harness-free Daily, state-only W
     "Context imports only types from the durable SDK (no Harness, no runtime surface)");
   assert.ok(!/fetch\(|XMLHttpRequest/.test(contextSource), "Context performs no network I/O");
 
-  const dailySource = await read("src/memory/daily.ts");
-  assert.ok(!dailySource.includes("pi-durable"), "Daily Memory does not import the durable SDK at all");
-  assert.ok(!dailySource.split("\n").some((line) => /^\s*import\s/.test(line) && line.includes("Harness")),
-    "Daily Memory imports no Harness (the word survives only in its header comment)");
+  const activitySource = await read("src/memory/activity.ts");
+  assert.ok(!/node:(fs|child_process|http|https|net|dgram)/.test(activitySource), "Activity imports no I/O builtin");
+  assert.ok(!/fetch\(|XMLHttpRequest|Date\.now|new Date\(/.test(activitySource), "Activity reads no clock and performs no I/O");
 
   const workingSource = await read("src/memory/working.ts");
   assert.ok(!/^\s*import\s+(?!type)[^;]*pi-durable/m.test(workingSource), "Working imports only types from the durable SDK");
   assert.ok(!/submission|defineTask|waitForTask|scanTasks/.test(workingSource),
     "Working manages no base execution state (no submissions, no tasks)");
-
-  const archiveSource = await read("src/memory/archive.ts");
-  assert.ok(!/Harness|defineTask|defineDoc/.test(archiveSource), "the pure Archive boundary has no SDK runtime surface");
 
   const agentSource = await read("src/agent.ts");
   const agentMemoryImports = importsOf(agentSource).filter((spec) => spec.includes("memory"));
@@ -945,9 +741,8 @@ test("08-H: dependency review — pure Context, Harness-free Daily, state-only W
   const allowed = /^(node:|@earendil-works\/|typebox|\.\/|\.\.\/)/;
   for (const path of [
     "src/memory/contracts.ts", "src/memory/working.ts", "src/memory/working-tools.ts",
-    "src/memory/context.ts", "src/memory/daily.ts", "src/memory/archive.ts",
-    "src/memory/archive-task.ts", "src/memory/compaction.ts", "src/memory/memory-tools.ts",
-    "src/memory/integration.ts",
+    "src/memory/context.ts", "src/memory/activity.ts", "src/memory/dreaming.ts",
+    "src/memory/compaction.ts", "src/memory/integration.ts",
   ]) {
     for (const spec of importsOf(await read(path))) {
       assert.ok(allowed.test(spec), `${path} imports only SDK/builtin/relative modules (saw ${spec})`);

@@ -369,10 +369,6 @@ test("06-A: A/B/C rebuild from durable records after compaction; raw entries sur
     assert.equal(confirmed.status, "switched");
     assert.equal(confirmed.status === "switched" ? confirmed.entryId : undefined, head.id);
     assert.equal(confirmed.status === "switched" ? confirmed.snapshot?.baseline.revision : undefined, 2);
-    assert.deepEqual(
-      confirmed.status === "switched" ? confirmed.archiveRange : undefined,
-      { conversationId: fixture.root.id, after: firstSnapshot.sources!.through, through: snapshot.sources!.through },
-    );
     // The saved result was persisted before publication, under its stable key.
     const observed = fixture.observations.filter((item) => item.outcome === "succeeded").at(-1);
     assert.ok(observed !== undefined, "the hook reported a success");

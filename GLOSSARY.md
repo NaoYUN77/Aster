@@ -61,13 +61,17 @@ The host's structural check before a dream run applies: the index exists, every 
 from it, and every link resolves inside the wiki. It says nothing about whether facts are true.
 _Avoid_: lint, validation, review, audit
 
-**Daily archive**:
-The append-only, searchable record of what happened, grouped by day and linked to its sources.
-_Avoid_: transcript, history, log
+**Activity digest**:
+The day-grouped, redacted summary of durable conversation events since the last applied dream
+run: user and assistant text, tool-call names with argument summaries, tool results and errors.
+It is the evidence layer a dream run reads, built on demand, not a store.
+_Avoid_: daily archive, transcript, history, log
 
-**Recall**:
-Finding something in the daily archive with search. A retrieval act, not a store.
-_Avoid_: retrieval, lookup, RAG
+**Evidence cursor**:
+The entry-id watermark (`evidenceThrough`) naming the newest durable entry an applied dream run
+consumed. Entry ids are global and increasing, so one watermark covers every owner conversation
+after it; it is never a date string.
+_Avoid_: archive cursor, checkpoint, date cursor, recall
 
 **Working state**:
 The host-derived, session-scoped summary of standing goals and open work that is injected for
