@@ -157,6 +157,66 @@ test("dreaming: a threshold applies a reviewed MEMORY.md change and resets the c
 });
 
 // ---------------------------------------------------------------------------
+// 1b: the dream agent commits its own work inside the worktree
+// ---------------------------------------------------------------------------
+
+test("dreaming: a dream agent that commits inside the worktree still applies its change", { timeout: 60_000 }, async () => {
+  const { runner, fixture: f } = await fixture({
+    run: async (input) => {
+      if (input.role !== "dream") return APPLY;
+      await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
+      await git(input.cwd, ["add", "-A"]);
+      await git(input.cwd, ["-c", "user.name=dream", "-c", "user.email=dream@local", "commit", "-m", "dream agent commit", "--no-verify"]);
+      return "committed MEMORY.md";
+    },
+  });
+  try {
+    await runner.observeTurn();
+    await runner.observeTurn();
+    await runner.whenIdle();
+
+    const state = await f.state();
+    assert.equal(state.lastRun?.status, "applied", "an agent commit is a change, not a no-change");
+    assert.equal(state.turnsSinceApply, 0);
+    assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: blue\n");
+    assert.match(await git(f.memoryDir, ["log", "-1", "--format=%s"]), /^memory: dream run .* by dreaming at /);
+    assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
+    assert.deepEqual(await worktreeRuns(f.root), []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("dreaming: a committed change and a leftover edit are reviewed together", { timeout: 60_000 }, async () => {
+  const { runner, fixture: f } = await fixture({
+    run: async (input) => {
+      if (input.role !== "dream") {
+        assert.match(input.prompt, /MEMORY\.md/, "the committed file reaches review");
+        assert.match(input.prompt, /color: blue/);
+        assert.match(input.prompt, /leftover\.md/, "the leftover edit reaches review too");
+        return APPLY;
+      }
+      await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
+      await git(input.cwd, ["add", "-A"]);
+      await git(input.cwd, ["-c", "user.name=dream", "-c", "user.email=dream@local", "commit", "-m", "dream agent commit", "--no-verify"]);
+      await writeFile(join(input.cwd, "leftover.md"), "uncommitted note\n", "utf8");
+      return "committed and left an edit";
+    },
+  });
+  try {
+    await runner.observeTurn();
+    await runner.observeTurn();
+    await runner.whenIdle();
+
+    assert.equal((await f.state()).lastRun?.status, "applied");
+    assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: blue\n");
+    assert.equal(await readFile(join(f.memoryDir, "leftover.md"), "utf8"), "uncommitted note\n");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 2: review rejection discards without touching the live tree
 // ---------------------------------------------------------------------------
 

@@ -139,7 +139,9 @@ const REMINDER_LINE = "System note: a memory review is due. Consider whether any
 /** The fixed brief for the dream conversation. Evidence arrives in the prompt, never here. */
 export const DREAMING_INSTRUCTIONS = `You are Aster's dreaming pass. You are working inside an isolated git worktree of
 the owner's core-memory repository, and that worktree is your whole world.
-Use read, write, edit and bash to update the memory files. MEMORY.md is the file that is injected
+Use read, write, edit and bash to update the memory files. Leave every edit uncommitted: never run
+git commit, checkout, reset or any command that moves HEAD; the host stages, reviews and commits the
+worktree. MEMORY.md is the file that is injected
 into every future turn: keep persona, the owner's profile, standing goals and constraints there,
 organized under headings, and keep it concise. Other files are read on demand; keep them factual.
 Only record what the supplied evidence supports. Never invent events, never store credentials,
@@ -335,10 +337,16 @@ class Runner implements DreamingRunner {
       await this.#runWithRetry(signal, {
         runId, role: "dream", cwd: worktree.path, instructions: DREAMING_INSTRUCTIONS, prompt: dreamPrompt,
       }, async () => {
-        await git(worktree!.path, ["reset", "--hard", "HEAD"], signal);
+        await git(worktree!.path, ["reset", "--hard", base], signal);
         await git(worktree!.path, ["clean", "-fd"], signal);
       });
 
+      // bash is one of the dream agent's tools, so it may commit inside its worktree. Move the
+      // branch back to the run's base with --soft (index and worktree untouched) before staging:
+      // otherwise the committed change is invisible to the staged diff and the run looks empty.
+      // The host still owns the reviewed commit, so a child commit can never reach the review gate.
+      const dreamHead = (await git(worktree.path, ["rev-parse", "HEAD"], signal)).trim();
+      if (dreamHead !== base) await git(worktree.path, ["reset", "--soft", base], signal);
       await git(worktree.path, ["add", "-A"], signal);
       if ((await gitTry(worktree.path, ["diff", "--cached", "--quiet"], signal)).code === 0) {
         throw new DreamDiscard("no-change");
