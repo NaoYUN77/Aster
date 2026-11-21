@@ -76,6 +76,7 @@
   },
 
   "dependencies": {
+    "_comment": "只有 dependencies/devDependencies/optionalDependencies 的键或版本变了才要求 lockfile 同行变更;改 scripts/version/engines 等不需要。",
     "manifest": "package.json",
     "lockfile": "package-lock.json",
     "pinExact": true,
