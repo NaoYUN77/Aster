@@ -30,19 +30,16 @@ import type { ModelUsedEvent } from "../model-failover.js";
 export const WEB_APP_VERSION = "1.0.0";
 
 /**
- * Boot the web adapter next to the existing channels without touching them.
+ * Boot the web adapter, the process's only conversation surface.
  *
- * The web process never creates a HubStore, never connects Telegram/Slack, and never opens another
- * data directory than the one it was configured with. Shutdown drains the worker, ends SSE, and only
- * then closes the agent and SQLite.
+ * It never creates a HubStore and never opens another data directory than the one it was
+ * configured with. Shutdown drains the worker, ends SSE, and only then closes the agent and SQLite.
  */
 export async function runWebMode(
   config: ReturnType<typeof readConfig>,
   signal: AbortSignal,
 ): Promise<void> {
-  const web = (config as { web?: WebConfig }).web;
-  if (web === undefined) throw new ConfigurationError("CHANNEL=web requires WEB_* configuration");
-  if (config.channel.kind !== "web") throw new ConfigurationError("runWebMode called without CHANNEL=web");
+  const web: WebConfig = config.web;
 
   const authPath = join(config.dataDir, AUTH_FILE_NAME);
   let auth: PasswordRecord;

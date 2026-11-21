@@ -22,7 +22,7 @@ if (!action || !["list", "sent", "retry"].includes(action)) {
       if (!idValue || !/^\d+$/.test(idValue) || !["sent", "retry"].includes(resolution ?? "")) {
         throw new Error("Provide a numeric reminder id and either `sent` (confirmed delivered) or `retry` (re-queue once)");
       }
-      // `sent` and `retry` are explicit operator decisions after checking Telegram; the app never
+      // `sent` and `retry` are explicit operator decisions after checking the conversation; the app never
       // resends an uncertain reminder on its own.
       const reminder = store.resolve(Number(idValue), resolution as "sent" | "retry");
       console.info(`Reminder #${reminder.id} is now ${reminder.status}. A running application retries a pending row within about a minute; otherwise it is retried on the next start.`);

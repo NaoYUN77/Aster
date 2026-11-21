@@ -3,16 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { classifySendFailure, failureCode } from "../src/telegram.js";
-
-/** The scheduler only needs a channel; these are the Telegram classifications it would use live. */
-const telegram = { label: "Telegram", classifyFailure: classifySendFailure, failureCode };
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { Harness, MemoryStorage } from "@earendil-works/pi-durable";
 import type { Message } from "@earendil-works/pi-ai";
-import { GrammyError } from "grammy";
+import { errorCode } from "../src/errors.js";
 import { ConfigurationError, readReminderConfig } from "../src/config.js";
 import {
   createReminderExtension,
@@ -25,6 +21,17 @@ import {
 import { createToolRegistry } from "../src/tools.js";
 
 const context = BACKGROUND_CONTEXT;
+
+/** The scheduler only needs a channel; these mirror the web host delivery path. */
+const channel = {
+  label: "Host",
+  classifyFailure: (error: unknown) =>
+    (error as { name?: unknown } | null)?.name === "AbortError" ? "uncertain" : "failed",
+  failureCode: (error: unknown) => {
+    const code = errorCode(error);
+    return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : "HOST_DELIVERY_FAILED";
+  },
+};
 
 function fixedClock(start = "2026-11-05T00:00:00.000Z") {
   const clock = { time: new Date(start) };
@@ -181,7 +188,7 @@ test("restart recovery returns unsent rows to pending and marks interrupted send
     assert.equal(unknown?.failureCode, "PROCESS_INTERRUPTED");
 
     const sends: string[] = [];
-    const scheduler = new ReminderScheduler({ store: second, client: { ...telegram, send: async (_chat, text) => { sends.push(text); return "1"; } }, now });
+    const scheduler = new ReminderScheduler({ store: second, client: { ...channel, send: async (_chat, text) => { sends.push(text); return "1"; } }, now });
     await scheduler.runDue();
     assert.deepEqual(sends, ["提醒：unsent"], "an uncertain reminder is never resent automatically");
     assert.equal(second.resolve(interrupted.id, "sent").status, "sent");
@@ -191,7 +198,7 @@ test("restart recovery returns unsent rows to pending and marks interrupted send
   }
 });
 
-test("scheduler sends due reminders in order and records Telegram outcomes", async () => {
+test("scheduler sends due reminders in order and records delivery outcomes", async () => {
   const { clock, now } = fixedClock();
   await withStore(async (store) => {
     store.create(createInput(now, { content: "second", triggerAt: new Date(now().getTime() + 50_000).toISOString() }));
@@ -203,7 +210,7 @@ test("scheduler sends due reminders in order and records Telegram outcomes", asy
       store,
       now,
       log: () => {},
-      client: { ...telegram, send: async (chatId, text) => { sent.push({ chatId, text }); return String(7 + sent.length); } },
+      client: { ...channel, send: async (chatId, text) => { sent.push({ chatId, text }); return String(7 + sent.length); } },
     });
     assert.equal(await scheduler.runDue(), 2);
     assert.deepEqual(sent, [
@@ -215,20 +222,20 @@ test("scheduler sends due reminders in order and records Telegram outcomes", asy
   }, { now });
 });
 
-test("cancelled reminders never reach Telegram", async () => {
+test("cancelled reminders never reach the channel", async () => {
   const { clock, now } = fixedClock();
   await withStore(async (store) => {
     const reminder = store.create(createInput(now)).reminder;
     store.cancel("42", reminder.id);
     clock.time = new Date(now().getTime() + 60_000);
     let sends = 0;
-    const scheduler = new ReminderScheduler({ store, now, log: () => {}, client: { ...telegram, send: async () => { sends++; return "1"; } } });
+    const scheduler = new ReminderScheduler({ store, now, log: () => {}, client: { ...channel, send: async () => { sends++; return "1"; } } });
     await scheduler.runDue();
     assert.equal(sends, 0);
   }, { now });
 });
 
-test("explicit Telegram rejection is failed while transport failure is uncertain", async () => {
+test("an explicit rejection is failed while an interrupted send is uncertain", async () => {
   const { clock, now } = fixedClock();
   await withStore(async (store) => {
     store.create(createInput(now, { content: "rejected" }));
@@ -240,11 +247,11 @@ test("explicit Telegram rejection is failed while transport failure is uncertain
       now,
       log: () => {},
       client: {
-        ...telegram,
+        ...channel,
         send: async () => {
           calls += 1;
-          if (calls === 1) throw new GrammyError("rejected", { ok: false, error_code: 400, description: "Bad Request" }, "sendMessage", {});
-          throw Object.assign(new Error("socket closed"), { name: "TimeoutError" });
+          if (calls === 1) throw Object.assign(new Error("rejected"), { code: "WEB_400" });
+          throw Object.assign(new Error("shutting down"), { name: "AbortError", code: "ABORTED" });
         },
       },
     });
@@ -253,9 +260,9 @@ test("explicit Telegram rejection is failed while transport failure is uncertain
     const rejectedRow = rows.find(({ content }) => content === "rejected");
     const timeoutRow = rows.find(({ content }) => content === "timeout");
     assert.equal(rejectedRow?.status, "failed");
-    assert.equal(rejectedRow?.failureCode, "TELEGRAM_400");
+    assert.equal(rejectedRow?.failureCode, "WEB_400");
     assert.equal(timeoutRow?.status, "uncertain");
-    assert.equal(timeoutRow?.failureCode, "TIMEOUT");
+    assert.equal(timeoutRow?.failureCode, "ABORTED");
   }, { now });
 });
 

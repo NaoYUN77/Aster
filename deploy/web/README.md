@@ -2,13 +2,13 @@
 
 **This stack is for local/dev verification only. It must not be deployed to the production host.**
 
-The production Aster bot (Telegram/Slack) keeps running untouched. The web stack is a separate
+The production deployment is not touched by this stack. It is a separate
 Compose project (`aster-web`) with its own volume (`aster-web-data`), its own `DATA_DIR`, and
 non-standard host ports.
 
 ## What it runs
 
-- `app`: the existing Aster Node process with `CHANNEL=web`. It opens `agent.sqlite` and
+- `app`: the existing Aster Node process. It opens `agent.sqlite` and
   `web.sqlite` under `/data`, serves the Fastify API and, when present, `web/dist`.
 - `caddy`: SSE-aware reverse proxy on the internal network. Published as `8788` on the host by
   default.
@@ -32,7 +32,7 @@ Without Docker:
 
 ```bash
 DATA_DIR=./data-web npm run web:set-password
-CHANNEL=web DATA_DIR=./data-web WEB_PORT=8787 npm run dev
+DATA_DIR=./data-web WEB_PORT=8787 npm run dev
 ```
 
 `DATA_DIR` must be a fresh directory for development. Never point it at the production data

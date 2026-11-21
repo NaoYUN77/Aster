@@ -13,7 +13,6 @@ import { waitFor } from "./http-testkit.js";
 
 function config(dataDir: string) {
   return readConfig({
-    CHANNEL: "web",
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",

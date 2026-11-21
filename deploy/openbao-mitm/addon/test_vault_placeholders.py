@@ -12,9 +12,7 @@ from vault_placeholders import (
 ALLOWLIST = {
     "DEEPSEEK_API_KEY": ["api.deepseek.com"],
     "DEEPSEEK_WEB_API_KEY": ["api.deepseek.com"],
-    "TELEGRAM_BOT_TOKEN": ["api.telegram.org"],
-    "SLACK_BOT_TOKEN": ["slack.com"],
-    "SLACK_APP_TOKEN": ["slack.com"],
+    "EXA_API_KEY": ["api.exa.ai"],
     "LANGFUSE_PUBLIC_KEY": ["cloud.langfuse.com"],
     "LANGFUSE_SECRET_KEY": ["cloud.langfuse.com"],
     "MAGPIE_API_KEY": ["10.1.4.9", "100.66.135.123"],
@@ -32,11 +30,11 @@ class SubstituteTests(unittest.TestCase):
         out = substitute("Bearer __vault_DEEPSEEK_API_KEY__", "api.deepseek.com", ALLOWLIST, resolve)
         self.assertEqual(out, "Bearer resolved-openbao-deepseek_api_key")
 
-    def test_replaces_web_and_telegram_placeholders_for_allowlisted_hosts(self):
+    def test_replaces_each_provider_placeholder_for_its_own_host(self):
         web = substitute("Bearer __vault_DEEPSEEK_WEB_API_KEY__", "api.deepseek.com", ALLOWLIST, resolve)
         self.assertEqual(web, "Bearer resolved-openbao-deepseek_web_api_key")
-        tg = substitute("/bot__vault_TELEGRAM_BOT_TOKEN__/getMe", "api.telegram.org", ALLOWLIST, resolve)
-        self.assertEqual(tg, "/botresolved-openbao-telegram_bot_token/getMe")
+        exa = substitute("Bearer __vault_EXA_API_KEY__", "api.exa.ai", ALLOWLIST, resolve)
+        self.assertEqual(exa, "Bearer resolved-openbao-exa_api_key")
 
     def test_private_gateway_entry_matches_each_host_without_a_port(self):
         # A declared provider's gateway is reached over plain HTTP on an RFC1918/CGNAT address, so the
@@ -50,16 +48,10 @@ class SubstituteTests(unittest.TestCase):
             with self.subTest(host=host), self.assertRaises(PlaceholderError):
                 substitute("Bearer __vault_MAGPIE_API_KEY__", host, ALLOWLIST, resolve)
 
-    def test_slack_tokens_are_replaced_only_for_slack(self):
-        # Socket Mode's WebSocket host carries no credential header, so only slack.com is allowlisted.
-        for name in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"):
-            self.assertEqual(
-                substitute(f"Bearer __vault_{name}__", "slack.com", ALLOWLIST, resolve),
-                f"Bearer resolved-openbao-{name.lower()}",
-            )
-        for host in ("wss-primary.slack.com", "slack.com.evil.example", "api.telegram.org"):
+    def test_a_provider_key_is_replaced_only_for_its_own_host(self):
+        for host in ("api.deepseek.com.evil.example", "api.openai.com", "api.exa.ai"):
             with self.subTest(host=host), self.assertRaises(PlaceholderError):
-                substitute("Bearer __vault_SLACK_BOT_TOKEN__", host, ALLOWLIST, resolve)
+                substitute("Bearer __vault_DEEPSEEK_API_KEY__", host, ALLOWLIST, resolve)
 
     def test_host_match_is_case_insensitive_and_exact(self):
         out = substitute("__vault_DEEPSEEK_API_KEY__", "API.DeepSeek.com", ALLOWLIST, resolve)
@@ -70,8 +62,8 @@ class SubstituteTests(unittest.TestCase):
 
     def test_disallowed_host_is_refused_without_leaking_the_value(self):
         with self.assertRaises(PlaceholderError) as raised:
-            substitute("/bot__vault_TELEGRAM_BOT_TOKEN__/getMe", "attacker.example", ALLOWLIST, resolve)
-        self.assertIn("TELEGRAM_BOT_TOKEN", str(raised.exception))
+            substitute("Bearer __vault_EXA_API_KEY__", "attacker.example", ALLOWLIST, resolve)
+        self.assertIn("EXA_API_KEY", str(raised.exception))
         self.assertNotIn("resolved-openbao", str(raised.exception))
 
     def test_unknown_name_is_refused(self):
@@ -96,14 +88,14 @@ class SubstituteTests(unittest.TestCase):
         self.assertEqual(out, "resolved-openbao-deepseek_api_key;resolved-openbao-deepseek_web_api_key")
 
     def test_one_disallowed_placeholder_fails_the_whole_value(self):
-        text = "__vault_DEEPSEEK_API_KEY__ __vault_TELEGRAM_BOT_TOKEN__"
+        text = "__vault_DEEPSEEK_API_KEY__ __vault_EXA_API_KEY__"
         with self.assertRaises(PlaceholderError):
             substitute(text, "api.deepseek.com", ALLOWLIST, resolve)
 
     def test_placeholder_names_lists_every_name(self):
         self.assertEqual(
-            placeholder_names("__vault_DEEPSEEK_API_KEY__ x __vault_TELEGRAM_BOT_TOKEN__"),
-            ["DEEPSEEK_API_KEY", "TELEGRAM_BOT_TOKEN"],
+            placeholder_names("__vault_DEEPSEEK_API_KEY__ x __vault_EXA_API_KEY__"),
+            ["DEEPSEEK_API_KEY", "EXA_API_KEY"],
         )
 
 

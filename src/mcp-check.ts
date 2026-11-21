@@ -5,12 +5,12 @@ import { openGithubGate } from "./github-gate.js";
 
 /**
  * Connect every configured MCP server, list its tools, and close. This is the deployment smoke test:
- * it exercises the same command, environment, network, and token paths as the bot without Telegram or a
+ * it exercises the same command, environment, network, and token paths as the app without a running entry or a
  * model. Run it as the service user so the sandbox and file ownership match the service.
  */
 async function main(): Promise<void> {
   configureEnvProxy();
-  // Same resolution as the bot, so MCP_CONFIG and DATA_DIR are read from one place and cannot disagree.
+  // Same resolution as the app, so MCP_CONFIG and DATA_DIR are read from one place and cannot disagree.
   const { dataDir, mcpConfigPath: configPath, mcpConfigExplicit } = resolveMcpConfigPaths();
   const read = await readMcpConfig(configPath, mcpConfigExplicit);
   if (read.error !== undefined) {

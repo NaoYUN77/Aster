@@ -200,7 +200,7 @@ Request failures (`request.failed`): `MODEL_UNAVAILABLE`, `MODEL_INCOMPATIBLE`, 
 
 ## Environment (server)
 
-`CHANNEL=web`, `WEB_OWNER_ID`, `WEB_PORT`, `WEB_HOST`, `WEB_ALLOWED_ORIGINS`,
+`WEB_OWNER_ID`, `WEB_PORT`, `WEB_HOST`, `WEB_ALLOWED_ORIGINS`,
 `WEB_SESSION_TTL_DAYS`, `WEB_STATIC_DIR`, `WEB_TRUST_PROXY`, plus the existing `DATA_DIR`,
 `MODEL_PROVIDER`, `MODEL_ID`, `MODEL_FALLBACKS` and provider key. The owner password is set with
 `npm run web:set-password`, never through an environment variable.

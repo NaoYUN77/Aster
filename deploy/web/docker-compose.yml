@@ -17,7 +17,6 @@ services:
     env_file:
       - .env
     environment:
-      CHANNEL: web
       DATA_DIR: /data
       WEB_PORT: "8787"
       WEB_HOST: 0.0.0.0

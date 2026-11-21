@@ -20,7 +20,6 @@ import { SqliteWatchStore } from "../src/watchers/store.js";
 test("the web host composition exposes reminders, watches, routines and skills", async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-web-tools-"));
   const config = readConfig({
-    CHANNEL: "web",
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",

@@ -730,8 +730,7 @@ test("dreaming: one owner turn drives a real worktree run through the open agent
       fauxAssistantMessage('{"verdict":"apply","reason":"grounded","revert":[]}'),
     ]);
     const appConfig = readConfig({
-      TELEGRAM_BOT_TOKEN: "offline-test",
-      TELEGRAM_OWNER_ID: "1",
+      WEB_OWNER_ID: "1",
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",
