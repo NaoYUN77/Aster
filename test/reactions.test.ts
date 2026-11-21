@@ -11,7 +11,6 @@ import {
   type EmojiSource,
   type ReactionHost,
 } from "../src/reactions.js";
-import { buildInstructions } from "../src/agent.js";
 import { createToolRegistry } from "../src/tools.js";
 
 const API = { conversationId: 1, taskId: 2, callId: "call-1" } as ToolExecutionApi;
@@ -199,21 +198,6 @@ test("a channel that cannot list emoji registers no lookup tool", () => {
   const { host } = fakeHost();
   const extension = createReactionExtension({ host, anchor: new ReactionAnchor() });
   assert.deepEqual(extension.tools?.map(({ name }) => name), [REACTION_TOOL_NAME]);
-});
-
-test("the prompt offers the reaction tools only where they are registered", () => {
-  const base = { workingDirectory: "/data/workspace", reminders: false, browser: false };
-  const off = buildInstructions(base);
-  const on = buildInstructions({ ...base, reactions: true });
-  const custom = buildInstructions({ ...base, reactions: true, customEmoji: true });
-  assert.doesNotMatch(off, /react_to_message/);
-  assert.match(on, /react_to_message/);
-  assert.match(on, /without performing feelings/, "the reaction is a tone of voice, not simulated emotion");
-  // A channel that cannot list the workspace's emoji is not promised the lookup.
-  assert.doesNotMatch(on, /emoji_search/);
-  assert.match(custom, /emoji_search/);
-  // The lookup sentence is the only difference: the prompt stays byte-identical otherwise.
-  assert.equal(custom.replace(/ This workspace has custom emoji:.*?one exists\./, ""), on);
 });
 
 test("the anchor holds one request at a time and restores what it replaced", () => {

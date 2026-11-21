@@ -14,7 +14,7 @@ const directory = await mkdtemp(join(tmpdir(), `${project}-`));
 const images = { app: process.env.ASTER_IMAGE ?? "aster:ci" };
 const random = (name) => `ci-${name}-${randomBytes(24).toString("hex")}`;
 const credentials = {
-  telegramToken: `900001:${randomBytes(24).toString("hex")}`,
+  exaKey: random("exa"),
   modelKey: random("model"),
 };
 const file = (name) => join(directory, name).replaceAll("\\", "/");
@@ -81,11 +81,10 @@ try {
   assert.ok(process.argv.slice(2).every((value) => value === "--render-only"), "unsupported option");
   await chmod(directory, 0o755);
   await writeFile(file("empty.env"), "");
-  // Synthetic app environment: a well-formed token and owner, a real provider/model pair, and
-  // deliberately no provider key. The config-failure check below relies on exactly that gap.
+  // Synthetic app environment: one secret-shaped credential the app consumes, a real provider/model
+  // pair, and deliberately no provider key. The config-failure check below relies on exactly that gap.
   await writeFile(file("app.env"), [
-    `TELEGRAM_BOT_TOKEN=${credentials.telegramToken}`,
-    "TELEGRAM_OWNER_ID=424242",
+    `EXA_API_KEY=${credentials.exaKey}`,
     "MODEL_PROVIDER=deepseek",
     "MODEL_ID=deepseek-flash",
     "",
@@ -115,7 +114,7 @@ volumes:
     assert.ok(!app.network_mode, "the app uses direct networking");
     assert.equal(app.environment.DATA_DIR, "/data");
     // The synthetic env file is the one being read: its values are inlined by rendering.
-    assert.equal(app.environment.TELEGRAM_BOT_TOKEN, credentials.telegramToken);
+    assert.equal(app.environment.EXA_API_KEY, credentials.exaKey);
     assert.equal(app.environment.MODEL_PROVIDER, "deepseek");
     assert.equal(app.environment.DEEPSEEK_API_KEY, undefined);
     assert.deepEqual(Object.keys(config.volumes), ["personal-agent-data"]);
@@ -203,7 +202,7 @@ volumes:
       assertClean(logs.output);
     });
     console.info(`Topology acceptance passed: ${checks} checks; final image; isolated synthetic resources.`);
-    console.info("NOT COVERED: live Telegram/model business flow (needs real credentials; covered by unit tests and the production deployment); release/prod admission.");
+    console.info("NOT COVERED: live model business flow and the web login path (need real credentials; covered by unit tests and the production deployment); release/prod admission.");
   } else {
     console.info("Compose render checks passed; runtime topology was not executed.");
   }

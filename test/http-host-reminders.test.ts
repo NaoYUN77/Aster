@@ -16,7 +16,6 @@ import { SqliteRoutineStore } from "../src/routines/store.js";
 
 function webConfig(dataDir: string) {
   return readConfig({
-    CHANNEL: "web",
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",

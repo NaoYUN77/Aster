@@ -25,14 +25,14 @@ vi .env
 chmod 600 .env
 ```
 
-必填项（渠道二选一）：`MODEL_PROVIDER`（`src/providers.ts` 注册表内的 id）、`MODEL_ID`（该提供商在 pi-ai 1.5.0 模型目录中的 id）、当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`，其他提供商的 key 留空）、`CHANNEL`（可选，`telegram` 默认或 `slack`，只校验选中渠道的变量）。Telegram（默认）：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`（纯数字用户 ID，不要写用户名）。Slack（`CHANNEL=slack`）：`SLACK_BOT_TOKEN`（`xoxb-`）、`SLACK_APP_TOKEN`（`xapp-`）、`SLACK_OWNER_ID`（`U…` member ID）。`SLACK_ALLOWED_USERS` / `SLACK_ALLOWED_CHANNELS`（可选，仅 Slack）：成员 ID 与频道 ID，逗号分隔、不写空格，空着即只服务所有者单聊。`TELEGRAM_API_ROOT`（可选，仅 Telegram）：https 前缀、无 query 或 fragment，供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理，未设置时使用官方根地址。
+必填项：`MODEL_PROVIDER`（`src/providers.ts` 注册表内的 id）、`MODEL_ID`（该提供商在 pi-ai 1.5.0 模型目录中的 id）、当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`，其他提供商的 key 留空）。入口固定为 web/http，没有渠道二选一；`WEB_OWNER_ID`、`WEB_PORT` 等 `WEB_*` 全部可选，默认值见 `.env.example`。web 启动前还必须在数据目录里设置一次所有者密码（`npm run web:set-password`，`DATA_DIR` 与部署一致）；这属于 web 入口的上线步骤，本手册尚未定稿，原因和数据目录迁移检查见 [ADR 0002](../../docs/adr/0002-web-is-the-only-entry.md)。**本分支不能按本手册直接部署**：现有生产仍运行旧的 Slack DM 入口。旧版本的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*`、`STYLE_LEARNING` 不再被读取，启动时只打印一次变量名提示。
 
 只检查键是否存在，不要在终端或日志中回显值：
 
 ```sh
-grep -cE '^(TELEGRAM_BOT_TOKEN|TELEGRAM_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # Telegram 部署预期 4
-grep -cE '^(SLACK_BOT_TOKEN|SLACK_APP_TOKEN|SLACK_OWNER_ID|MODEL_PROVIDER|MODEL_ID)=.+' .env   # Slack 部署预期 5
-grep -cE '^[A-Z0-9_]*_API_KEY=.+' .env                                            # 至少 1
+grep -cE '^(MODEL_PROVIDER|MODEL_ID)=.+' .env          # 预期 2
+grep -cE '^[A-Z0-9_]*_API_KEY=.+' .env                 # 至少 1
+grep -cE '^(CHANNEL|TELEGRAM_|SLACK_|STYLE_LEARNING)' .env   # 预期 0；残留项不会报错但已无效
 ```
 
 `DATA_DIR` 由 Compose 固定为 `/data`，`.env` 中的值不生效；数据卷的显式名称是 `personal-agent-data`，不随项目目录名变化。离线配置检查不联网、不回显凭据：
@@ -41,7 +41,7 @@ grep -cE '^[A-Z0-9_]*_API_KEY=.+' .env                                          
 docker compose run --rm --no-deps personal-agent node dist/src/check-config.js
 ```
 
-预期输出 `Configuration OK: CHANNEL=telegram MODEL_PROVIDER=... MODEL_ID=... MCP_SERVERS=...`，缺失项打印 `Missing configuration: <KEY>`。Telegram 部署中 bot 已有 webhook 时应用拒绝启动，需先在原部署中停用。MCP 默认读取卷内 `/data/mcp.json`，文件不存在表示关闭；容器内绝对路径必须是卷内路径（`cwd`、stdio `command`/`args` 指向 `/data/...` 或镜像内已有程序），镜像不会自动安装 stdio server 的依赖。
+预期输出 `Configuration OK: ENTRY=web MODEL_PROVIDER=... MODEL_ID=... MCP_SERVERS=...`，缺失项打印 `Missing configuration: <KEY>`。MCP 默认读取卷内 `/data/mcp.json`，文件不存在表示关闭；容器内绝对路径必须是卷内路径（`cwd`、stdio `command`/`args` 指向 `/data/...` 或镜像内已有程序），镜像不会自动安装 stdio server 的依赖。
 
 ## 3. 构建与分发镜像
 
@@ -76,7 +76,7 @@ docker compose logs --tail 50 personal-agent
 docker compose exec personal-agent ls -la /data /data/workspace
 ```
 
-预期日志出现 `Personal agent starting; single-owner private Telegram messages enabled.`（`CHANNEL=slack` 时为 `... private Slack messages enabled.`）且无持续报错；**`docker compose ps` 显示 `running` 只表示进程存在，不代表已通过渠道验收**。用 owner 账号私聊 bot 发送「现在几点？」，预期收到与服务器 UTC 时间一致的回复、日志没有 `Agent request failed`，且 `inbox.sqlite`、`agent.sqlite`、`workspace/` 在卷中存在。
+预期日志出现 `Web adapter listening on <host>:<port>; owner <ownerId>; data <dir>`，且无持续报错；**`docker compose ps` 显示 `running` 只表示进程存在，不代表已通过入口验收**。web 入口的验收还需要浏览器/客户端登录、TLS 与端口暴露方式，这些尚未定稿（见 ADR 0002）；本分支不得按本节上线。`web.sqlite`、`agent.sqlite`、`workspace/` 应出现在卷中。
 
 ### 生产更新与回滚
 
@@ -205,7 +205,7 @@ docker compose up -d --no-build
 docker compose logs --tail 50 personal-agent
 ```
 
-迁移必须保留：`agent.sqlite` 及其 WAL/SHM（底座会话与执行恢复状态）、`inbox.sqlite` 及其 WAL/SHM（请求消费位置、身份绑定和投递状态）、`workspace/`（记忆和任务文件）、`mcp.json`（可选，MCP 配置）、`mcp-oauth/`（可选，MCP OAuth token 与动态注册信息）、`.npm/`（可选，stdio MCP 缓存）。配置迁移应在启动前完成：MCP 的 `cwd` 改为容器内路径（例如 `/data/workspace`），宿主 `/opt` 或用户目录下的命令不可直接复用、应在派生镜像中安装依赖并更新绝对路径；从 `/etc/personal-agent.env` 摘取 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`、`MODEL_PROVIDER`、`MODEL_ID` 和对应 API key 到 `.env`；不要复制 `DATA_DIR=/var/lib/personal-agent`（容器内固定 `/data`）；旧 systemd 专用的 `ProtectHome`、`MemoryMax`、`ReadWritePaths` 不再适用，资源限制由 Compose 提供。已有卷名必须保留 `personal-agent-data`；如果旧 Compose 创建的是带项目前缀的卷（如 `<目录名>_personal-agent-data`），把内容复制到显式命名的卷后再启动，不要改名或新建空卷。迁移验收通过并保留一段回滚窗口后，再删除旧 unit 和旧数据目录；在此之前不要删除 `/var/lib/personal-agent`。
+迁移必须保留：`agent.sqlite` 及其 WAL/SHM（底座会话与执行恢复状态）、`inbox.sqlite` 及其 WAL/SHM（请求消费位置、身份绑定和投递状态）、`workspace/`（记忆和任务文件）、`mcp.json`（可选，MCP 配置）、`mcp-oauth/`（可选，MCP OAuth token 与动态注册信息）、`.npm/`（可选，stdio MCP 缓存）。配置迁移应在启动前完成：MCP 的 `cwd` 改为容器内路径（例如 `/data/workspace`），宿主 `/opt` 或用户目录下的命令不可直接复用、应在派生镜像中安装依赖并更新绝对路径；从 `/etc/personal-agent.env` 摘取 `MODEL_PROVIDER`、`MODEL_ID` 和对应 API key 到 `.env`（旧的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*` 不再读取）；若目标版本是 web-only 分支，还要按 ADR 0002 设置所有者密码；不要复制 `DATA_DIR=/var/lib/personal-agent`（容器内固定 `/data`）；旧 systemd 专用的 `ProtectHome`、`MemoryMax`、`ReadWritePaths` 不再适用，资源限制由 Compose 提供。已有卷名必须保留 `personal-agent-data`；如果旧 Compose 创建的是带项目前缀的卷（如 `<目录名>_personal-agent-data`），把内容复制到显式命名的卷后再启动，不要改名或新建空卷。迁移验收通过并保留一段回滚窗口后，再删除旧 unit 和旧数据目录；在此之前不要删除 `/var/lib/personal-agent`。
 
 ## 10. CI
 
@@ -225,8 +225,9 @@ npm run release:preflight -- \
 ## 11. 常见故障【生产机】
 
 - 找不到镜像 / `pull access denied`：镜像未构建、未 `load` 或引用写错 —— 核对 `ASTER_IMAGE`，重新分发或拉取。
-- 启动即退出，`Missing configuration` 或 webhook 错误：`.env` 缺项 / bot 已有 webhook —— 补齐对应键、先停用原 webhook。
-- 启动即退出，`belongs to another ... bot or owner` / `CHANNEL must be one of` / `SLACK_* is not shaped like a Slack token`：数据卷身份冲突 / `CHANNEL` 非法 / bot 与 app token 填反 —— 换独立数据卷或确认身份后迁移、改成合法值、按 `xoxb-`／`xapp-` 前缀对调。
+- 启动即退出，`Missing configuration`：`.env` 缺项 —— 补齐对应键。
+- 启动即退出，`Web password is not configured`：数据卷里还没有所有者密码 —— 用同一 `DATA_DIR` 运行 `npm run web:set-password`。
+- 日志出现 `REMOVED_CONFIG: ...`：`.env` 里还留着旧渠道变量 —— 它们已被忽略，从文件里删掉即可，不影响启动。
 - 启动即退出，`flock` 无法加锁：同一数据卷已有实例 —— 停掉旧容器，不要并行运行。
 - `EACCES` / `Unable to open the database file`：卷内文件属主不是 uid 1000 —— `chown -R 1000:1000 /data`。
 - 容器 `running` 但无回复：模型或渠道网络失败 —— 看日志错误码、核对出网与端点可达性。
@@ -235,6 +236,6 @@ npm run release:preflight -- \
 
 ## 12. 上线判定与验证边界
 
-全部满足才算部署验收完成：配置检查输出 `Configuration OK`；owner 私聊、会话连续、工具调用、记忆跨重启、非授权隔离均通过；正常重启、执行中断、强杀三种场景通过；`deliveries.js list` 可用且输出可读；未触发 OOM、重启次数稳定；备份归档包含 SQLite、WAL、`workspace/` 和 `mcp-oauth/`、整卷还原演练成功；日志中没有凭据或完整消息内容。
+全部满足才算部署验收完成：配置检查输出 `Configuration OK`；所有者登录后的 web 会话、会话连续、工具调用、记忆跨重启均通过；正常重启、执行中断、强杀三种场景通过；`deliveries.js list` 可用且输出可读；未触发 OOM、重启次数稳定；备份归档包含 SQLite、WAL、`workspace/` 和 `mcp-oauth/`、整卷还原演练成功；日志中没有凭据或完整消息内容。
 
 仓库里能核对的范围：应用镜像可构建、基础 Compose 与 build 覆盖可渲染、主机测试和 GitHub Actions 的单服务拓扑通过。**拓扑不覆盖真实渠道／模型链路，离线预检退出 0 不构成上线授权。** 上面的清单是可选核对项，未勾选不否定已部署；生产事实以所有者确认为准。

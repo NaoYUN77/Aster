@@ -41,7 +41,7 @@ try {
   for (const warning of mcp.warnings) console.error(`MCP config warning: ${warning}`);
   const servers = mcp.config?.servers.length ?? 0;
   console.info(
-    `Configuration OK: CHANNEL=${config.channel.kind} MODEL_PROVIDER=${config.provider} MODEL_ID=${config.model} `
+    `Configuration OK: ENTRY=${config.channel.kind} MODEL_PROVIDER=${config.provider} MODEL_ID=${config.model} `
     + `MODEL_CHAIN=${chainLabel} MCP_SERVERS=${servers}`,
   );
   if (config.failover !== undefined) {

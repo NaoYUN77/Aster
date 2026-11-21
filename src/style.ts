@@ -18,6 +18,12 @@ export type StyleMode = "off" | "observe" | "ask";
 export const STYLE_MODES = ["off", "observe", "ask"] as const;
 
 /**
+ * The declared shape of reaction-feedback settings. The web-only build has no reaction event
+ * stream, so nothing reads this at startup; it stays exported for the host-less style module.
+ */
+export type StyleConfig = { readonly mode: StyleMode };
+
+/**
  * Reactions that mean "fine" plainly enough that asking about them would only be noise. The list is
  * used to decide *whether to interrupt*, never what to change: anything outside it is "ask", not
  * "the user is unhappy".

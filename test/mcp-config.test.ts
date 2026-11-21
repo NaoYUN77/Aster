@@ -10,8 +10,6 @@ const env = { GITHUB_TOKEN: "secret-token", EXTRA: "value" };
 
 test("the MCP config path defaults under DATA_DIR and can be overridden", () => {
   const base = {
-    TELEGRAM_BOT_TOKEN: "token",
-    TELEGRAM_OWNER_ID: "42",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "model",
     OPENAI_API_KEY: "key",

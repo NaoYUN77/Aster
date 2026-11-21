@@ -135,8 +135,6 @@ test("MODEL_FALLBACKS absent is off, and a timeout alone is refused", () => {
 test("a fallback provider's own key variable is required at startup", () => {
   assert.throws(
     () => readConfig({
-      TELEGRAM_BOT_TOKEN: "offline-test",
-      TELEGRAM_OWNER_ID: "1",
       MODEL_PROVIDER: "openai",
       MODEL_ID: "gpt",
       OPENAI_API_KEY: "offline-test",
@@ -665,13 +663,12 @@ test("$model is answered by the host without calling a model", async () => {
   models.setProvider(faux.provider);
   const config = {
     ...readConfig({
-      TELEGRAM_BOT_TOKEN: "offline-test",
-      TELEGRAM_OWNER_ID: "1",
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",
       MODEL_FALLBACKS: "openai:faux-2",
       DATA_DIR: directory,
+      WEB_OWNER_ID: "1",
     }),
     memory: { ...readMemoryConfig({}), enabled: false },
   };
@@ -719,13 +716,12 @@ test("one durable turn fails over, settles done and replays the same answer", as
   ]);
   const config = {
     ...readConfig({
-      TELEGRAM_BOT_TOKEN: "offline-test",
-      TELEGRAM_OWNER_ID: "1",
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",
       MODEL_FALLBACKS: "openai:faux-2",
       DATA_DIR: directory,
+      WEB_OWNER_ID: "1",
     }),
     memory: { ...readMemoryConfig({}), enabled: false },
   };
@@ -764,13 +760,12 @@ test("a sticky fallback survives a process restart", async () => {
   models.setProvider(faux.provider);
   const config = {
     ...readConfig({
-      TELEGRAM_BOT_TOKEN: "offline-test",
-      TELEGRAM_OWNER_ID: "1",
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",
       MODEL_FALLBACKS: "openai:faux-2",
       DATA_DIR: directory,
+      WEB_OWNER_ID: "1",
     }),
     memory: { ...readMemoryConfig({}), enabled: false },
   };
@@ -814,13 +809,12 @@ test("a durable turn whose whole chain fails surfaces MODEL_UNAVAILABLE", async 
   faux.setResponses([failed("429: rate limited"), failed("503: overloaded")]);
   const config = {
     ...readConfig({
-      TELEGRAM_BOT_TOKEN: "offline-test",
-      TELEGRAM_OWNER_ID: "1",
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",
       MODEL_FALLBACKS: "openai:faux-2",
       DATA_DIR: directory,
+      WEB_OWNER_ID: "1",
     }),
     memory: { ...readMemoryConfig({}), enabled: false },
   };

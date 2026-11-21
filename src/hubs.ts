@@ -6,7 +6,7 @@ import { StateError } from "./errors.js";
 /**
  * Team Hubs: one conversation per member, so two people never share a context, a memory store or a
  * tool policy. The owner's Hub is the harness root conversation, which already exists; every other
- * member gets a conversation created on first contact and remembered here, keyed by the Slack member
+ * member gets a conversation created on first contact and remembered here, keyed by the transport member
  * id the transport reported — never by anything the model or the member wrote.
  *
  * A follow-up inside one of the bot's threads is a *fork* of the member's Hub, not of the thread:
@@ -55,11 +55,12 @@ export function memberWorkspace(dataDir: string, memberId: string): string {
 /**
  * Both directories are derived from the member id, not from the conversation that happens to serve
  * it, so a Hub's memory and files stay with the member even if the conversation is ever recreated.
- * A Slack member id is the transport's own identifier; anything else is refused rather than turned
+ * A member id in the Slack shape (the only stores that exist were written by that transport) is the
+ * transport's own identifier; anything else is refused rather than turned
  * into a path component.
  */
 function memberDirectory(memberId: string): string {
-  if (!/^[UW][A-Z0-9]{6,15}$/.test(memberId)) throw new StateError("Not a Slack member id");
+  if (!/^[UW][A-Z0-9]{6,15}$/.test(memberId)) throw new StateError("Not a legacy transport member id");
   return memberId;
 }
 

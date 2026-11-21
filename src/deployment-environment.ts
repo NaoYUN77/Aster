@@ -23,9 +23,10 @@ export const EnvironmentSchema = Type.Object({
   volumes: Type.Object({
     app: VolumeName,
   }, { additionalProperties: false }),
-  // The numeric Telegram bot user ID is an identifier, not a credential. Declaring it lets the
-  // offline check reject two environments that consume the same bot; the live check (Stage A2)
-  // confirms the deployed token actually resolves to this ID.
+  // The transport identity is an identifier, not a credential. Declaring it lets the offline check
+  // reject two environments that consume the same identity; the live check (Stage A2) confirms the
+  // deployed credential actually resolves to this one. The web entry has no transport identity of
+  // its own, so this field is retained only for environments created for the removed bots.
   identity: Type.Object({
     botId: Type.String({ minLength: 1, maxLength: 20, pattern: "^[1-9]\\d*$" }),
   }, { additionalProperties: false }),

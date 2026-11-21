@@ -26,12 +26,7 @@ const SECOND_THREAD = "1700000000.000200";
  */
 function teamConfig(dataDir: string) {
   const full = {
-    CHANNEL: "slack",
-    SLACK_BOT_TOKEN: "xoxb-1234567890123456789012",
-    SLACK_APP_TOKEN: "xapp-1234567890123456789012",
-    SLACK_OWNER_ID: OWNER,
-    SLACK_ALLOWED_USERS: MEMBER,
-    SLACK_ALLOWED_CHANNELS: CHANNEL,
+    WEB_OWNER_ID: OWNER,
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
@@ -50,7 +45,7 @@ function modelFixture() {
 
 function memberRequest(over: Partial<TextRequest> = {}): TextRequest {
   return {
-    requestId: "slack:T1:Ev1",
+    requestId: "web:T1:Ev1",
     conversationId: CHANNEL,
     senderId: MEMBER,
     text: "Which deploy window did we agree on?",
@@ -79,12 +74,12 @@ test("each member answers in their own Hub, and only the owner's Hub keeps a she
 
     assert.equal(await app.reply(memberRequest(), running), "member answer");
     assert.equal(
-      await app.reply(memberRequest({ requestId: "slack:T1:Ev2", senderId: OWNER, text: "hello" }), running),
+      await app.reply(memberRequest({ requestId: "web:T1:Ev2", senderId: OWNER, text: "hello" }), running),
       "owner answer",
     );
     // The owner answers inside a thread too, but their Hub is neither forked nor capped.
     assert.equal(
-      await app.reply(memberRequest({ requestId: "slack:T1:Ev3", senderId: OWNER, threadTs: FIRST_THREAD }), running),
+      await app.reply(memberRequest({ requestId: "web:T1:Ev3", senderId: OWNER, threadTs: FIRST_THREAD }), running),
       "owner thread answer",
     );
 
@@ -125,7 +120,7 @@ test("a follow-up forks the member's Hub, and five rounds close the thread with 
     assert.equal(await app.reply(memberRequest(), running), "answer 0", "the question itself runs in the Hub");
     const hub = hubStore.member(MEMBER)!;
 
-    assert.equal(await app.reply(memberRequest({ requestId: "slack:T1:Ev2", threadTs: FIRST_THREAD }), running), "answer 1");
+    assert.equal(await app.reply(memberRequest({ requestId: "web:T1:Ev2", threadTs: FIRST_THREAD }), running), "answer 1");
     const opened = hubStore.thread(CHANNEL, FIRST_THREAD)!;
     assert.equal(opened.rounds, 1);
     assert.ok(opened.fork !== undefined, "the first follow-up opens a fork");
@@ -133,7 +128,7 @@ test("a follow-up forks the member's Hub, and five rounds close the thread with 
 
     let last = "";
     for (const event of ["Ev3", "Ev4", "Ev5", "Ev6"]) {
-      last = await app.reply(memberRequest({ requestId: `slack:T1:${event}`, threadTs: FIRST_THREAD }), running);
+      last = await app.reply(memberRequest({ requestId: `web:T1:${event}`, threadTs: FIRST_THREAD }), running);
     }
     // The last allowed answer closes the thread and carries the notice as its closing line.
     assert.equal(last, `answer 5\n\n${FORK_CLOSED_NOTICE}`);
@@ -142,11 +137,11 @@ test("a follow-up forks the member's Hub, and five rounds close the thread with 
     assert.equal(closed.closed, true);
 
     // A further follow-up is answered by the host alone: no model call, no new work.
-    assert.equal(await app.reply(memberRequest({ requestId: "slack:T1:Ev7", threadTs: FIRST_THREAD }), running), FORK_CLOSED_NOTICE);
+    assert.equal(await app.reply(memberRequest({ requestId: "web:T1:Ev7", threadTs: FIRST_THREAD }), running), FORK_CLOSED_NOTICE);
     assert.equal(calls, 6, "the notice never reaches the model");
 
     // A new question in the same channel is a new thread: it forks the Hub again and starts at round one.
-    assert.equal(await app.reply(memberRequest({ requestId: "slack:T1:Ev8", threadTs: SECOND_THREAD }), running), "answer 6");
+    assert.equal(await app.reply(memberRequest({ requestId: "web:T1:Ev8", threadTs: SECOND_THREAD }), running), "answer 6");
     const fresh = hubStore.thread(CHANNEL, SECOND_THREAD)!;
     assert.equal(fresh.rounds, 1);
     assert.equal(fresh.closed, false);
@@ -182,14 +177,14 @@ test("a closed thread hands its own turns back to its Hub, and the Hub answers f
 
     await app.reply(memberRequest(), running);
     for (const event of ["Ev2", "Ev3", "Ev4", "Ev5", "Ev6"]) {
-      await app.reply(memberRequest({ requestId: `slack:T1:${event}`, threadTs: FIRST_THREAD }), running);
+      await app.reply(memberRequest({ requestId: `web:T1:${event}`, threadTs: FIRST_THREAD }), running);
     }
     assert.equal(hubStore.thread(CHANNEL, FIRST_THREAD)!.closed, true);
 
     // The next question is asked in the Hub, not in the thread: the Hub must already know what the
     // thread settled, or "接着刚才那个话题" would depend on the member repeating themselves.
     assert.equal(
-      await app.reply(memberRequest({ requestId: "slack:T1:Ev7", text: "接着刚才那个话题" }), running),
+      await app.reply(memberRequest({ requestId: "web:T1:Ev7", text: "接着刚才那个话题" }), running),
       "continuing from the thread",
     );
     assert.match(hubTranscript, /5 轮追问已结束/);
@@ -211,7 +206,7 @@ test("a redelivered follow-up counts as one round, so a replay cannot end a thre
     app = await openAgent(teamConfig(directory), fixture.models, undefined, { hubStore });
 
     await app.reply(memberRequest(), running);
-    const followUp = memberRequest({ requestId: "slack:T1:Ev2", threadTs: FIRST_THREAD });
+    const followUp = memberRequest({ requestId: "web:T1:Ev2", threadTs: FIRST_THREAD });
     await app.reply(followUp, running);
     // Slack redelivers an envelope it never saw acknowledged; the same request id is the same round.
     await app.reply(followUp, running);

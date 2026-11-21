@@ -1,5 +1,11 @@
 # Aster 三端联通 v1 架构方案
 
+> **Status (2026-11-21): superseded where it describes the channel model.** The Telegram and Slack
+> transports and the `CHANNEL` selector were deleted; web/http is the only entry. Anything below that
+> says "add `CHANNEL=web`", "keep the old channels running" or "`CHANNEL=telegram|slack` behavior is
+> unchanged" describes the original plan, not the current tree. See
+> [ADR 0002](../adr/0002-web-is-the-only-entry.md) for the decision and its consequences.
+
 - 状态：Draft，供 Dev 1 / Dev 2 开工使用
 - 日期：2026-11-16（Asia/Shanghai）
 - 基线分支：`feat/三端联通`（从 `origin/main` 的 `8eb542a` 拉出）

@@ -299,8 +299,6 @@ test("configuration reads a declared provider's own credential variable", () => 
     catalog: { path: "/models" },
   });
   const env = {
-    TELEGRAM_BOT_TOKEN: "token",
-    TELEGRAM_OWNER_ID: "42",
     MODEL_PROVIDER: "magpie",
     MODEL_ID: "vendor/deepseek-v4-flash",
     MAGPIE_API_KEY: "__vault_MAGPIE_API_KEY__",

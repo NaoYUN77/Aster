@@ -59,8 +59,6 @@ const fetchProbe = (url: string) => `
 
 test("readConfig accepts __vault_<NAME>__ placeholders and rejects malformed placeholders or insecure TLS", () => {
   const base = {
-    TELEGRAM_BOT_TOKEN: "__vault_TELEGRAM_BOT_TOKEN__",
-    TELEGRAM_OWNER_ID: "42",
     MODEL_PROVIDER: "deepseek",
     MODEL_ID: "deepseek-chat",
     DEEPSEEK_API_KEY: "__vault_DEEPSEEK_API_KEY__",
@@ -70,7 +68,7 @@ test("readConfig accepts __vault_<NAME>__ placeholders and rejects malformed pla
     HTTP_PROXY: "http://aster-mitm:14322",
   };
   const cfg = readConfig(base);
-  assert.deepEqual(cfg.channel, { kind: "telegram", ownerId: "42", token: "__vault_TELEGRAM_BOT_TOKEN__" });
+  assert.deepEqual(cfg.channel, { kind: "web", ownerId: "owner" });
   assert.equal(cfg.deepseekWebApiKey, "__vault_DEEPSEEK_WEB_API_KEY__");
   assert.equal(cfg.exaApiKey, "__vault_EXA_API_KEY__");
   assert.equal(isVaultPlaceholder("__vault_DEEPSEEK_API_KEY__"), true);
@@ -81,7 +79,7 @@ test("readConfig accepts __vault_<NAME>__ placeholders and rejects malformed pla
     ConfigurationError,
   );
   assert.throws(
-    () => readConfig({ ...base, TELEGRAM_BOT_TOKEN: "__vault_lowercase__" }),
+    () => readConfig({ ...base, EXA_API_KEY: "__vault_lowercase__" }),
     ConfigurationError,
   );
   assert.throws(
@@ -135,7 +133,7 @@ test("withProxyToken injects proxy credentials from the token file and fails clo
   }
 });
 
-test("LLM fetch, web_search/web_fetch/exa_search, and TelegramClient tunnel through HTTPS_PROXY and trust NODE_EXTRA_CA_CERTS", { timeout: 30_000 }, async () => {
+test("LLM fetch, web_search/web_fetch/exa_search tunnel through HTTPS_PROXY and trust NODE_EXTRA_CA_CERTS", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-mitm-tls-"));
   const sockets = new Set<Duplex>();
   const tunnels: string[] = [];
@@ -158,7 +156,7 @@ test("LLM fetch, web_search/web_fetch/exa_search, and TelegramClient tunnel thro
       [
         "req", "-config", opensslConfig, "-x509", "-newkey", "rsa:2048", "-nodes",
         "-keyout", key, "-out", ca, "-days", "1", "-subj", "/CN=aster-mitm-test",
-        "-addext", "subjectAltName=DNS:api.deepseek.com,DNS:api.exa.ai,DNS:api.telegram.org",
+        "-addext", "subjectAltName=DNS:api.deepseek.com,DNS:api.exa.ai",
       ],
       { timeout: 10_000 },
     );
@@ -207,10 +205,6 @@ test("LLM fetch, web_search/web_fetch/exa_search, and TelegramClient tunnel thro
             ],
           }),
         );
-      } else if (req.url?.endsWith("/getMe")) {
-        res.end(JSON.stringify({ ok: true, result: { id: 777000, is_bot: true, first_name: "Aster" } }));
-      } else if (req.url?.endsWith("/getWebhookInfo")) {
-        res.end(JSON.stringify({ ok: true, result: { url: "", has_custom_certificate: false, pending_update_count: 0 } }));
       } else {
         res.writeHead(404).end();
       }
@@ -264,7 +258,6 @@ test("LLM fetch, web_search/web_fetch/exa_search, and TelegramClient tunnel thro
     const probeScript = `
       import assert from "node:assert/strict";
       import { configureEnvProxy } from "./src/config.ts";
-      import { TelegramClient } from "./src/telegram.ts";
       import { searchWeb } from "./src/web-search.ts";
       import { fetchWeb } from "./src/web-fetch.ts";
       import { searchExa } from "./src/exa-search.ts";
@@ -286,10 +279,6 @@ test("LLM fetch, web_search/web_fetch/exa_search, and TelegramClient tunnel thro
 
       const exaOut = await searchExa({ query: "aster" }, { apiKey: "__vault_EXA_API_KEY__" });
       assert.equal(exaOut.ok, true);
-
-      const tg = new TelegramClient("__vault_TELEGRAM_BOT_TOKEN__");
-      const botId = await tg.identity(AbortSignal.timeout(10_000));
-      assert.equal(botId, "777000");
     `;
 
     await exec(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probeScript], {
@@ -300,7 +289,6 @@ test("LLM fetch, web_search/web_fetch/exa_search, and TelegramClient tunnel thro
 
     assert.ok(tunnels.includes("api.deepseek.com:443"), "DeepSeek requests must tunnel through HTTPS_PROXY");
     assert.ok(tunnels.includes("api.exa.ai:443"), "Exa requests must tunnel through HTTPS_PROXY");
-    assert.ok(tunnels.includes("api.telegram.org:443"), "Telegram Bot API requests must tunnel through HTTPS_PROXY");
     assert.ok(proxyAuth.length >= 2, "each tunnel must present proxy credentials");
     assert.deepEqual([...new Set(proxyAuth)], [expectedAuth], "every CONNECT must carry the proxy token");
     assert.deepEqual(seenRequests, [
@@ -308,8 +296,6 @@ test("LLM fetch, web_search/web_fetch/exa_search, and TelegramClient tunnel thro
       { method: "POST", url: "/v1/tools/search", auth: "Bearer __vault_DEEPSEEK_WEB_API_KEY__" },
       { method: "POST", url: "/v1/tools/fetch", auth: "Bearer __vault_DEEPSEEK_WEB_API_KEY__" },
       { method: "POST", url: "/search", auth: "Bearer __vault_EXA_API_KEY__" },
-      { method: "POST", url: "/bot__vault_TELEGRAM_BOT_TOKEN__/getMe" },
-      { method: "POST", url: "/bot__vault_TELEGRAM_BOT_TOKEN__/getWebhookInfo" },
     ]);
   } finally {
     for (const socket of sockets) socket.destroy();
@@ -355,7 +341,6 @@ test("deployment example, MITM overlay, and allowlist stay aligned without real 
       `${name} must be blank or __vault_${name}__ in .env.example`,
     );
   }
-  assert.equal(seenSecrets.get("TELEGRAM_BOT_TOKEN"), "__vault_TELEGRAM_BOT_TOKEN__");
   assert.equal(seenSecrets.get("DEEPSEEK_API_KEY"), "__vault_DEEPSEEK_API_KEY__");
   assert.equal(seenSecrets.get("DEEPSEEK_WEB_API_KEY"), "__vault_DEEPSEEK_WEB_API_KEY__");
   assert.equal(seenSecrets.get("EXA_API_KEY"), "__vault_EXA_API_KEY__");
@@ -371,11 +356,6 @@ test("deployment example, MITM overlay, and allowlist stay aligned without real 
   assert.deepEqual(allowlist.EXA_API_KEY, ["api.exa.ai"]);
   // A declared provider's key is allowlisted by host (no port), one entry per network entrance.
   assert.deepEqual(allowlist.MAGPIE_API_KEY, ["10.1.4.9", "100.66.135.123"]);
-  assert.deepEqual(allowlist.TELEGRAM_BOT_TOKEN, ["api.telegram.org"]);
-  // Socket Mode dials wss-primary.slack.com with a single-use ticket in the URL and no credential
-  // header, so only the Web API host has to be reachable through the proxy.
-  assert.deepEqual(allowlist.SLACK_BOT_TOKEN, ["slack.com"]);
-  assert.deepEqual(allowlist.SLACK_APP_TOKEN, ["slack.com"]);
 
   const raw = await readFile(join(root, "docker-compose.mitm.yml"), "utf8");
   const overlay = raw

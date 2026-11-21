@@ -10,8 +10,6 @@ import { readConfig } from "../src/config.js";
 
 function config(dataDir: string) {
   return readConfig({
-    TELEGRAM_BOT_TOKEN: "offline-test",
-    TELEGRAM_OWNER_ID: "1",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
@@ -22,7 +20,6 @@ function config(dataDir: string) {
 
 function webConfig(dataDir: string) {
   return readConfig({
-    CHANNEL: "web",
     WEB_OWNER_ID: "owner",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",

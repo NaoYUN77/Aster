@@ -19,12 +19,7 @@ const CHANNEL = "C0CHANNEL12";
 
 function teamConfig(dataDir: string) {
   const full = {
-    CHANNEL: "slack",
-    SLACK_BOT_TOKEN: "xoxb-1234567890123456789012",
-    SLACK_APP_TOKEN: "xapp-1234567890123456789012",
-    SLACK_OWNER_ID: OWNER,
-    SLACK_ALLOWED_USERS: MEMBER,
-    SLACK_ALLOWED_CHANNELS: CHANNEL,
+    WEB_OWNER_ID: OWNER,
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
@@ -36,7 +31,7 @@ function teamConfig(dataDir: string) {
 
 function memberRequest(over: Partial<TextRequest> = {}): TextRequest {
   return {
-    requestId: "slack:T1:Ev1",
+    requestId: "web:T1:Ev1",
     conversationId: CHANNEL,
     senderId: MEMBER,
     text: "What did we agree on?",
@@ -81,7 +76,7 @@ test("memory work runs in the member's Hub, and the owner's still runs in the ro
     // which is a different context from the Hub even though it reads the Hub's long-term memory.
     lines.length = 0;
     const anchor = "1700000000.000100";
-    assert.equal(await app.reply(memberRequest({ requestId: "slack:T1:Ev9", threadTs: anchor }), running), "an answer");
+    assert.equal(await app.reply(memberRequest({ requestId: "web:T1:Ev9", threadTs: anchor }), running), "an answer");
     const forkId = hubStore.thread(CHANNEL, anchor)?.fork;
     assert.ok(forkId !== undefined && forkId !== hub.conversationId, "the follow-up opened its own fork");
     assert.deepEqual(conversationsIn(lines, "memory.prepare"), [forkId], "the follow-up prepared against the fork");
@@ -90,7 +85,7 @@ test("memory work runs in the member's Hub, and the owner's still runs in the ro
 
     lines.length = 0;
     assert.equal(
-      await app.reply(memberRequest({ requestId: "slack:T1:Ev2", senderId: OWNER, text: "hello" }), running),
+      await app.reply(memberRequest({ requestId: "web:T1:Ev2", senderId: OWNER, text: "hello" }), running),
       "an answer",
     );
     const ownerWork = conversationsIn(lines, "memory.prepare");

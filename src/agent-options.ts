@@ -6,9 +6,8 @@ import type { ReminderStore } from "./reminders.js";
 import type { SkillIndex } from "./skills.js";
 
 /**
- * Host-owned capabilities a channel can hand to the agent. The channel decides which of these it
- * has; this composition step only decides how they become `OpenAgentOptions`, so the Telegram/Slack
- * path and the web path cannot drift apart.
+ * Host-owned capabilities the host can hand to the agent. The host decides which of these it has;
+ * this composition step only decides how they become `OpenAgentOptions`.
  */
 export type AgentHostComposition = {
   /** Durable reminders; when present the reminder tools are registered. */
@@ -19,11 +18,6 @@ export type AgentHostComposition = {
   readonly extraExtensions?: readonly Extension[];
   /** Installed skills, indexed at startup. */
   readonly skills?: SkillIndex;
-  /**
-   * Slack reaction feedback. It is intentionally accepted only on a Slack channel: other channels
-   * have no equivalent event stream, and a reaction tool that can never work must not be exposed.
-   */
-  readonly reactions?: OpenAgentOptions["reactions"];
 };
 
 type AgentRuntimeOptions = Pick<
@@ -38,26 +32,21 @@ type AgentRuntimeOptions = Pick<
 
 /**
  * Build the one options object `openAgent` receives. Every optional group is omitted when absent
- * instead of being passed as `undefined`, so both channels produce the same shape for the same
- * capabilities.
+ * instead of being passed as `undefined`, so the same capabilities always produce the same shape.
  */
 export function buildAgentOptions(
-  config: ReturnType<typeof readConfig>,
+  _config: ReturnType<typeof readConfig>,
   host: AgentHostComposition = {},
   runtime: AgentRuntimeOptions = {},
 ): OpenAgentOptions {
   const extensions = host.extraExtensions === undefined
     ? []
     : host.extraExtensions.filter((extension) => extension !== undefined);
-  // Reactions are a Slack-only capability. A caller that supplies them on another channel is
-  // ignored rather than trusted, which keeps the tool surface identical to the event stream.
-  const reactions = config.channel.kind === "slack" ? host.reactions : undefined;
   return {
     ...runtime,
     ...(host.reminderStore === undefined ? {} : { reminderStore: host.reminderStore }),
     ...(host.hubStore === undefined ? {} : { hubStore: host.hubStore }),
     ...(extensions.length === 0 ? {} : { extraExtensions: extensions }),
     ...(host.skills === undefined ? {} : { skills: host.skills }),
-    ...(reactions === undefined ? {} : { reactions }),
   };
 }

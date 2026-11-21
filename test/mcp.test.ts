@@ -540,8 +540,6 @@ test("an MCP tool is hidden until tool_search loads it, then callable", { timeou
     ]);
 
     const appConfig = readConfig({
-      TELEGRAM_BOT_TOKEN: "offline-test",
-      TELEGRAM_OWNER_ID: "1",
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",
@@ -637,7 +635,7 @@ test("MCP health filters native search and blocks loaded calls without changing 
       },
     ]);
     const appConfig = { ...readConfig({
-      TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai", MODEL_ID: "faux-1",
+      MODEL_PROVIDER: "openai", MODEL_ID: "faux-1",
       OPENAI_API_KEY: "test", DATA_DIR: directory,
     }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
     app = await openAgent(appConfig, models, storage, { mcp: host });
@@ -655,8 +653,6 @@ test("an explicitly configured MCP file that cannot be read fails startup", { ti
     const models = createModels();
     models.setProvider(faux.provider);
     const appConfig = readConfig({
-      TELEGRAM_BOT_TOKEN: "offline-test",
-      TELEGRAM_OWNER_ID: "1",
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",

@@ -1,4 +1,4 @@
-// Conversation-aware memory (Slack hubs): one MemoryIntegration serving many conversations, each
+// Conversation-aware memory (legacy hubs): one MemoryIntegration serving many conversations, each
 // with its own long-term daily store, chosen by the conversation an operation belongs to.
 //
 // Two fixtures styles are used here:

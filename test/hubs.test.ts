@@ -55,13 +55,13 @@ test("a thread records its Hub, its fork and its rounds exactly once per request
     store.setFork(CHANNEL, "1700000000.000100", FORK);
     assert.equal(store.thread(CHANNEL, "1700000000.000100")?.fork, FORK);
 
-    const first = store.recordRound(CHANNEL, "1700000000.000100", "slack:T1:Ev1");
+    const first = store.recordRound(CHANNEL, "1700000000.000100", "web:T1:Ev1");
     assert.equal(first.rounds, 1);
     // Slack redelivers an unacknowledged envelope and recovery replays an unfinished request: the same
     // request id is one round, so a replay cannot end a thread early.
-    assert.equal(store.recordRound(CHANNEL, "1700000000.000100", "slack:T1:Ev1").rounds, 1);
-    for (const event of ["Ev2", "Ev3", "Ev4"]) store.recordRound(CHANNEL, "1700000000.000100", `slack:T1:${event}`);
-    const capped = store.recordRound(CHANNEL, "1700000000.000100", "slack:T1:Ev5");
+    assert.equal(store.recordRound(CHANNEL, "1700000000.000100", "web:T1:Ev1").rounds, 1);
+    for (const event of ["Ev2", "Ev3", "Ev4"]) store.recordRound(CHANNEL, "1700000000.000100", `web:T1:${event}`);
+    const capped = store.recordRound(CHANNEL, "1700000000.000100", "web:T1:Ev5");
     assert.equal(capped.rounds, MAX_FORK_ROUNDS);
     assert.equal(capped.closed, false, "reaching the cap does not close the thread by itself");
 
@@ -81,7 +81,7 @@ test("threads and members survive a restart, and unknown keys stay unknown", asy
     first.adopt("U0MEMBER123", MEMBER_HUB);
     first.openThread(CHANNEL, "1700000000.000100", MEMBER_HUB);
     first.setFork(CHANNEL, "1700000000.000100", FORK);
-    first.recordRound(CHANNEL, "1700000000.000100", "slack:T1:Ev1");
+    first.recordRound(CHANNEL, "1700000000.000100", "web:T1:Ev1");
     first.close();
     const reopened = new HubStore(path);
     assert.equal(reopened.member("U0MEMBER123")?.conversationId, MEMBER_HUB);
@@ -100,8 +100,8 @@ test("a Hub keeps its own memory store root and workspace, derived from its memb
   assert.equal(memberMemoryRoot("/data", "U0MEMBER123"), "/data/memory/members/U0MEMBER123");
   assert.equal(memberWorkspace("/data", "U0MEMBER123"), "/data/workspace/members/U0MEMBER123");
   // Paths are built from the transport's id shape only: a member id can never be a path traversal.
-  assert.throws(() => memberMemoryRoot("/data", "../../etc"), /Not a Slack member id/);
-  assert.throws(() => memberWorkspace("/data", "U0MEMBER123/../.."), /Not a Slack member id/);
+  assert.throws(() => memberMemoryRoot("/data", "../../etc"), /Not a legacy transport member id/);
+  assert.throws(() => memberWorkspace("/data", "U0MEMBER123/../.."), /Not a legacy transport member id/);
   // The notice is host text, never a model output, and says exactly one thing.
   assert.equal(FORK_CLOSED_NOTICE, "该问题循环过多，请不要再回复。");
 });

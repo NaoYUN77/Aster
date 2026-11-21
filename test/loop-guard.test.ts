@@ -26,8 +26,6 @@ const request: TextRequest = {
 
 function appConfig(dataDir: string, env: NodeJS.ProcessEnv = {}) {
   const full = {
-    TELEGRAM_BOT_TOKEN: "offline-test",
-    TELEGRAM_OWNER_ID: "1",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",

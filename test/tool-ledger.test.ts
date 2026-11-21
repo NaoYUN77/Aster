@@ -311,7 +311,7 @@ test("openAgent persists tool governance on the production storage path", { time
     models.setProvider(faux.provider);
     faux.setResponses([fauxAssistantMessage("done")]);
     const app = await openAgent(readConfig({
-      TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai", MODEL_ID: "faux-1",
+      MODEL_PROVIDER: "openai", MODEL_ID: "faux-1",
       OPENAI_API_KEY: "test", DATA_DIR: directory,
     }), models);
     try {
