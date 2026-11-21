@@ -61,8 +61,7 @@ $DATA_DIR/memory-fs/            # git repository, branch main
 | `DREAMING_TURNS` | `20` | Completed owner turns between runs. |
 | `DREAMING_ON_COMPACTION` | `1` | Also run after a context compaction. |
 | `DREAMING_BEHAVIOR` | `auto-launch` | `auto-launch` (background write) or `reminder` (nudge only). |
-| `DREAMING_REVIEW` | `1` | Second background pass over the diff before apply. |
-| `DREAMING_DRY_RUN` | `0` | Compute and review, but never merge. |
+| `DREAMING_DRY_RUN` | `0` | Compute and check the layout, but never merge. |
 | `DREAMING_TIMEOUT_MS` | `120000` | One run's hard limit. |
 
 There is no switch for the MEM-07 memory system itself: working state, the daily archive,
@@ -100,14 +99,17 @@ render.
 - **Input**: the last K turns of the owner conversation plus the daily archive since the last
   run's cursor, bounded by tokens. No member Hubs exist to read.
 - **Run**: one background subagent in an isolated `git worktree`, with the ordinary tools, using
-  the main model. It reviews recent experience and edits memory files, including `MEMORY.md` and
-  its persona/human sections.
-- **Review** (`DREAMING_REVIEW=1`): a second background conversation reads the worktree diff and
-  the cited transcript range, and may revert files or reject the run. No human approval gate.
+  the main model. It consolidates recent experience into notes and maintains `MEMORY.md` as a
+  wiki index: `## Core` for facts that must be injected every turn, `## Index` linking every note.
+  The number, names and structure of notes are the model's decision.
+- **Layout check**: before anything is applied, the host verifies that `MEMORY.md` exists, that
+  every note is linked from `## Index`, and that every index link resolves to a note inside the
+  repository. A broken layout discards the run (`layout-invalid`); there is no second model pass.
+  A Core fact that evidence contradicts is demoted to a note or deleted by the dream pass itself.
 - **Apply**: the host commits the worktree (actor `dreaming`), commits the live tree if dirty,
-  rebases the reviewed commit onto the live HEAD if live advanced meanwhile, then
-  `git merge --ff-only`. A rebase conflict, timeout or rejection discards the worktree and branch;
-  the live directory is never touched and a forced merge is never used.
+  rebases the dream commit onto the live HEAD if live advanced meanwhile, then
+  `git merge --ff-only`. A rebase conflict, timeout or invalid layout discards the worktree and
+  branch; the live directory is never touched and a forced merge is never used.
 - **Reminder** (opt-in): a one-line "memory review due" note on the next request. The counter
   toward the next reminder is persisted in `.aster/dreaming.json`, so a restart continues it.
 - **Dry run**: the full pipeline runs, apply is skipped, and the turn counter restarts as after an
@@ -122,8 +124,8 @@ Dreaming is asynchronous, not a separate daemon:
   in the reply path.
 - A "turn" is a completed owner request. Aster does not expose pi-durable's internal tool rounds,
   so this approximates Letta's step count and the documentation says so.
-- A run has one hard timeout (`DREAMING_TIMEOUT_MS`) that covers both model turns, every git
-  command, review and apply; expiry discards the run like any other abort. One retry on a
+- A run has one hard timeout (`DREAMING_TIMEOUT_MS`) that covers the model turn, every git
+  command and apply; expiry discards the run like any other abort. One retry on a
   transient model failure, then backoff. No unbounded loops.
 - State lives in `.aster/dreaming.json`: both counters, last run, last applied commit, failure
   reason. `dreaming status` prints it; logs use `dreaming.*` events.
@@ -148,19 +150,19 @@ The Hub / multi-tenant isolation predates the single-owner goal and is removed h
 2. Every change is committed with actor (`owner`, `agent`, `dreaming`) and reason; `git log` is
    the undo path.
 3. A failed or conflicting dream run is discarded without touching the live directory.
-4. Auto-launch is the default, exactly as in Letta; the review pass and `DREAMING_DRY_RUN` are the
-   safety rails.
+4. Auto-launch is the default, exactly as in Letta; the host-side layout check and
+   `DREAMING_DRY_RUN` are the safety rails.
 5. Working memory, the derived profile pipeline, the daily archive and the existing tool set are
    unchanged.
-6. Credentials are never stored in memory; the prompt says so and the review pass checks it.
+6. Credentials are never stored in memory; the prompt says so and no tool or host path stores them.
 
 ## 8. Milestones and tests
 
 - **M1 (PR #88)**: repository init, render, instruction refresh, turn-boundary commits, config,
   `git` in the runtime image, nine tests. Being adjusted to inject only `MEMORY.md`.
-- **M2 (same PR)**: Hub/thread removal, the dreaming runner, triggers, review, worktree apply,
-  dry run, status, and scripted fake-model tests covering trigger → worktree → review → apply,
-  rejection, conflict, timeout, and the single-owner routing.
+- **M2 (same PR)**: Hub/thread removal, the dreaming runner, triggers, worktree apply, the
+  wiki layout check, dry run, status, and scripted fake-model tests covering trigger → worktree →
+  apply, layout rejection, conflict, timeout, and the single-owner routing.
 - Every step runs `npm run check` and `npm test` with no new skips.
 
 ## 9. Deliberate differences from Letta

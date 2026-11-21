@@ -48,7 +48,6 @@ function config(overrides: Partial<DreamingConfig> = {}): DreamingConfig {
     turns: 2,
     onCompaction: true,
     behavior: "auto-launch",
-    review: true,
     dryRun: false,
     timeoutMs: 30_000,
     ...overrides,
@@ -117,23 +116,18 @@ async function fixture(options: {
   };
 }
 
-const APPLY = '{"verdict":"apply","reason":"grounded","revert":[]}';
-
 function writingRun(body = "color: blue\n"): DreamingTurn {
   return async (input) => {
-    if (input.role === "dream") {
-      await writeFile(join(input.cwd, "MEMORY.md"), body, "utf8");
-      return "updated MEMORY.md";
-    }
-    return APPLY;
+    await writeFile(join(input.cwd, "MEMORY.md"), body, "utf8");
+    return "updated MEMORY.md";
   };
 }
 
 // ---------------------------------------------------------------------------
-// 1: threshold -> worktree -> edit -> review -> fast-forward apply
+// 1: threshold -> worktree -> edit -> layout check -> fast-forward apply
 // ---------------------------------------------------------------------------
 
-test("dreaming: a threshold applies a reviewed MEMORY.md change and resets the counter", { timeout: 60_000 }, async () => {
+test("dreaming: a threshold applies a MEMORY.md change and resets the counter", { timeout: 60_000 }, async () => {
   const { runner, fixture: f } = await fixture({ run: writingRun() });
   try {
     await runner.observeTurn();
@@ -150,21 +144,19 @@ test("dreaming: a threshold applies a reviewed MEMORY.md change and resets the c
     assert.match(await git(f.memoryDir, ["log", "-1", "--format=%s"]), /^memory: dream run .* by dreaming at /);
     assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
     assert.equal(f.events.filter((event) => event === "dreaming.run.applied").length, 1);
-    assert.equal((await f.calls.filter((call) => call.role === "review")).length, 1);
   } finally {
     await f.cleanup();
   }
 });
 
-// ---------------------------------------------------------------------------
-// 2: review rejection discards without touching the live tree
-// ---------------------------------------------------------------------------
-
-test("dreaming: a rejected review discards the worktree and does not consume the counter", { timeout: 60_000 }, async () => {
+test("dreaming: a dream agent that commits inside the worktree still applies its change", { timeout: 60_000 }, async () => {
   const { runner, fixture: f } = await fixture({
-    run: async (input) => input.role === "dream"
-      ? (await writeFile(join(input.cwd, "MEMORY.md"), "color: red\n", "utf8"), "updated")
-      : '{"verdict":"reject","reason":"ungrounded","revert":[]}',
+    run: async (input) => {
+      await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
+      await git(input.cwd, ["add", "-A"]);
+      await git(input.cwd, ["-c", "user.name=dream", "-c", "user.email=dream@local", "commit", "-m", "dream"]);
+      return "committed and done";
+    },
   });
   try {
     await runner.observeTurn();
@@ -172,12 +164,37 @@ test("dreaming: a rejected review discards the worktree and does not consume the
     await runner.whenIdle();
 
     const state = await f.state();
-    assert.equal(state.turnsSinceApply, 2, "only an applied run consumes the counter");
+    assert.equal(state.lastRun?.status, "applied");
+    assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: blue\n");
+    assert.equal((await git(f.memoryDir, ["log", "--format=%s"])).includes("dream run"), true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 2: a note the index does not link is a broken layout, not memory
+// ---------------------------------------------------------------------------
+
+test("dreaming: an unindexed note discards the run", { timeout: 60_000 }, async () => {
+  const { runner, fixture: f } = await fixture({
+    run: async (input) => {
+      await writeFile(join(input.cwd, "MEMORY.md"), "# Memory\n\n## Index\n- [Projects](projects.md)\n", "utf8");
+      await writeFile(join(input.cwd, "projects.md"), "Aster.\n", "utf8");
+      await writeFile(join(input.cwd, "stray.md"), "not in the index\n", "utf8");
+      return "updated";
+    },
+  });
+  try {
+    await runner.observeTurn();
+    await runner.observeTurn();
+    await runner.whenIdle();
+
+    const state = await f.state();
+    assert.equal(state.turnsSinceApply, 2);
     assert.equal(state.lastRun?.status, "discarded");
-    assert.equal(state.lastRun?.reason, "review-rejected");
+    assert.equal(state.lastRun?.reason, "layout-invalid");
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "");
-    assert.equal(f.events.includes("dreaming.run.discarded"), true);
-    assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
     assert.deepEqual(await worktreeRuns(f.root), []);
   } finally {
     await f.cleanup();
@@ -192,7 +209,6 @@ test("dreaming: a conflicting live change discards the run and leaves the live b
   const { runner, fixture: f } = await fixture({
     initialMemory: "color: unknown\n",
     run: async (input) => {
-      if (input.role !== "dream") return APPLY;
       await writeFile(join(input.cwd, "MEMORY.md"), "color: red\n", "utf8");
       // The owner edits the live tree while the run works.
       await writeFile(join(f.memoryDir, "MEMORY.md"), "color: green\n", "utf8");
@@ -225,7 +241,6 @@ test("dreaming: a timeout discards the run and the runner stays usable", { timeo
   const { runner, fixture: f } = await fixture({
     overrides: { turns: 1, timeoutMs: 3_000 },
     run: async (input) => {
-      if (input.role === "review") return APPLY;
       if (!timedOutOnce) {
         timedOutOnce = true;
         return new Promise<string>((_resolve, reject) => {
@@ -267,7 +282,6 @@ test("dreaming: a transient failure retries once and then applies", { timeout: 6
   const { runner, fixture: f } = await fixture({
     overrides: { turns: 1 },
     run: async (input) => {
-      if (input.role === "review") return APPLY;
       dreamAttempts += 1;
       if (dreamAttempts === 1) throw new Error("transient provider failure");
       await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
@@ -287,7 +301,7 @@ test("dreaming: a transient failure retries once and then applies", { timeout: 6
 });
 
 // ---------------------------------------------------------------------------
-// 6: dry run reviews but never merges
+// 6: dry run evaluates the layout but never merges
 // ---------------------------------------------------------------------------
 
 test("dreaming: a dry run applies nothing and restarts the counter", { timeout: 60_000 }, async () => {
@@ -303,7 +317,7 @@ test("dreaming: a dry run applies nothing and restarts the counter", { timeout: 
     assert.equal(state.lastAppliedCommit, null);
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "");
     assert.equal((await git(f.memoryDir, ["log", "--format=%s"])).includes("dream run"), false);
-    assert.equal(f.calls.filter((call) => call.role === "review").length, 1, "review still runs");
+    assert.equal(f.calls.length, 1, "one dream turn per dry run");
     assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
 
     // The next run needs a full threshold again: one turn must not trigger anything.
@@ -317,7 +331,7 @@ test("dreaming: a dry run applies nothing and restarts the counter", { timeout: 
     state = await f.state();
     assert.equal(state.lastRun?.status, "dry-run");
     assert.equal(state.turnsSinceApply, 0);
-    assert.equal(f.calls.filter((call) => call.role === "review").length, 2);
+    assert.equal(f.calls.length, 2);
   } finally {
     await f.cleanup();
   }
@@ -351,7 +365,6 @@ test("dreaming: triggers during a run coalesce into one pending run", { timeout:
   const { runner, fixture: f } = await fixture({
     overrides: { turns: 50 },
     run: async (input) => {
-      if (input.role === "review") return APPLY;
       dreamRuns += 1;
       if (dreamRuns === 1) {
         await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
@@ -388,7 +401,6 @@ test("dreaming: configuration defaults, bounds and invalid values", () => {
     turns: 20,
     onCompaction: true,
     behavior: "auto-launch",
-    review: true,
     dryRun: false,
     timeoutMs: 120_000,
   });
@@ -397,7 +409,6 @@ test("dreaming: configuration defaults, bounds and invalid values", () => {
     DREAMING_TURNS: "5",
     DREAMING_ON_COMPACTION: "0",
     DREAMING_BEHAVIOR: "reminder",
-    DREAMING_REVIEW: "0",
     DREAMING_DRY_RUN: "1",
     DREAMING_TIMEOUT_MS: "5000",
   });
@@ -406,7 +417,6 @@ test("dreaming: configuration defaults, bounds and invalid values", () => {
     turns: 5,
     onCompaction: false,
     behavior: "reminder",
-    review: false,
     dryRun: true,
     timeoutMs: 5_000,
   });
@@ -419,7 +429,6 @@ test("dreaming: configuration defaults, bounds and invalid values", () => {
     { DREAMING_TIMEOUT_MS: "999" },
     { DREAMING_TIMEOUT_MS: "600001" },
     { DREAMING_TIMEOUT_MS: "fast" },
-    { DREAMING_REVIEW: "2" },
     { DREAMING_DRY_RUN: "true" },
     // A disabled feature still validates every other value.
     { DREAMING_ENABLED: "0", DREAMING_TURNS: "0" },
@@ -523,21 +532,17 @@ test("dreaming: a state file from before reminderTurns loads with a zero counter
 });
 
 // ---------------------------------------------------------------------------
-// Whole-run deadline: both model turns and apply share one clock
+// Whole-run deadline: the model turn and apply share one clock
 // ---------------------------------------------------------------------------
 
-test("dreaming: one deadline covers dream and review together", { timeout: 60_000 }, async () => {
+test("dreaming: one deadline covers the whole run", { timeout: 60_000 }, async () => {
   const { runner, fixture: f } = await fixture({
     overrides: { turns: 1, timeoutMs: 1_200 },
     run: async (input) => {
-      if (input.role === "dream") {
-        await delay(300, undefined, { signal: input.signal });
-        await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
-        return "updated";
-      }
-      // The two turns together (300 + 1000) exceed the 1200 ms run deadline.
-      await delay(1_000, undefined, { signal: input.signal });
-      return APPLY;
+      // The turn outlives the 1200 ms run deadline, so nothing is staged in time.
+      await delay(2_000, undefined, { signal: input.signal });
+      await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
+      return "updated";
     },
   });
   try {
@@ -550,47 +555,6 @@ test("dreaming: one deadline covers dream and review together", { timeout: 60_00
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "");
     assert.deepEqual(await worktreeRuns(f.root), [], "the worktree is gone, not half-applied");
     assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
-  } finally {
-    await f.cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Review details: single-file revert, and review disabled
-// ---------------------------------------------------------------------------
-
-test("dreaming: the review may revert a single file and still apply the rest", { timeout: 60_000 }, async () => {
-  const { runner, fixture: f } = await fixture({
-    overrides: { turns: 1 },
-    run: async (input) => {
-      if (input.role === "dream") {
-        await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
-        await writeFile(join(input.cwd, "notes.md"), "ungrounded note\n", "utf8");
-        return "updated two files";
-      }
-      return '{"verdict":"apply","reason":"one file","revert":["notes.md"]}';
-    },
-  });
-  try {
-    await runner.observeTurn();
-    await runner.whenIdle();
-    assert.equal((await f.state()).lastRun?.status, "applied");
-    assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: blue\n");
-    await assert.rejects(stat(join(f.memoryDir, "notes.md")), /ENOENT/);
-    assert.equal((await git(f.memoryDir, ["status", "--porcelain"])).trim(), "");
-  } finally {
-    await f.cleanup();
-  }
-});
-
-test("dreaming: DREAMING_REVIEW=0 applies without opening a review turn", { timeout: 60_000 }, async () => {
-  const { runner, fixture: f } = await fixture({ overrides: { turns: 1, review: false }, run: writingRun() });
-  try {
-    await runner.observeTurn();
-    await runner.whenIdle();
-    assert.equal((await f.state()).lastRun?.status, "applied");
-    assert.equal(f.calls.filter((call) => call.role === "review").length, 0, "no review conversation at all");
-    assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: blue\n");
   } finally {
     await f.cleanup();
   }
@@ -652,7 +616,7 @@ test("dreaming: initialization prunes branches whose worktree is gone and keeps 
 });
 
 // ---------------------------------------------------------------------------
-// Status CLI: project only the reviewed fields
+// Status CLI: project only the durable fields
 // ---------------------------------------------------------------------------
 
 test("dreaming status: an absent state file is an empty report", { timeout: 30_000 }, async () => {
