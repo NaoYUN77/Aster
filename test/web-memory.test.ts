@@ -10,6 +10,7 @@ import { openAgent } from "../src/agent.js";
 import { buildAgentOptions } from "../src/agent-options.js";
 import { readConfig } from "../src/config.js";
 import { ensureMemoryFs } from "../src/memory-fs.js";
+import { waitFor } from "./http-testkit.js";
 
 function webConfig(dataDir: string, memoryDir: string) {
   return readConfig({
@@ -21,7 +22,8 @@ function webConfig(dataDir: string, memoryDir: string) {
     DATA_DIR: dataDir,
     MEMORY_FS_ENABLED: "1",
     MEMORY_FS_DIR: memoryDir,
-    DREAMING_TURNS: "10000",
+    // Startup is past this time, so the web composition catches up one nightly trigger.
+    DREAMING_AT: "00:00",
   });
 }
 
@@ -44,10 +46,17 @@ test("the web composition carries core memory into the prompt and arms dreaming"
     const memoryFs = await ensureMemoryFs(config.memoryFs);
     assert.ok(memoryFs !== undefined, "MEMORY_FS_ENABLED=1 creates the repository");
     await writeFile(join(memoryDir, "MEMORY.md"), "# Owner\n\nDeploy checklist: blue first.\n");
-    faux.setResponses([(context: TranscriptContext) => {
+    let dreamTurns = 0;
+    const router = (context: TranscriptContext): ReturnType<typeof fauxAssistantMessage> => {
+      const system = JSON.stringify(context.messages.filter((message) => message.role === "system"));
+      if (system.includes("Aster's dreaming pass")) {
+        dreamTurns += 1;
+        return fauxAssistantMessage("No memory changes.");
+      }
       contextAtAnswer = context.messages;
       return fauxAssistantMessage("noted");
-    }]);
+    };
+    faux.setResponses(Array.from({ length: 4 }, () => router));
     app = await openAgent(config, models, undefined,
       buildAgentOptions(config, { memoryFs }, { signal: new AbortController().signal }));
 
@@ -67,11 +76,17 @@ test("the web composition carries core memory into the prompt and arms dreaming"
     assert.match(system, /<memory-files>/, "the memory section is in the web agent's prompt");
     assert.match(system, /Deploy checklist: blue first\./, "MEMORY.md is reproduced in the prompt");
 
-    // Dreaming is gated on the same option: one completed owner turn is persisted to its state.
+    // Dreaming is gated on the same option: the web composition armed the nightly timer and a
+    // process started after DREAMING_AT caught up the night through the real runner.
+    await waitFor(() => dreamTurns >= 1, 10_000);
+    await app.dreamingIdle();
     const state = JSON.parse(await readFile(join(memoryDir, ".aster", "dreaming.json"), "utf8")) as {
-      turnsSinceApply?: number;
+      lastNightlyDate?: string | null;
+      lastRun?: { status?: string; reason?: string | null } | null;
     };
-    assert.equal(state.turnsSinceApply, 1, "the web agent's turn reached the dreaming runner");
+    assert.match(state.lastNightlyDate ?? "", /^\d{4}-\d{2}-\d{2}$/u, "the web agent's runner claimed the night");
+    assert.equal(state.lastRun?.status, "discarded");
+    assert.equal(state.lastRun?.reason, "no-change", "the web agent's dream turn reached the real runner");
   } finally {
     await app?.close();
     await rm(directory, { recursive: true, force: true });

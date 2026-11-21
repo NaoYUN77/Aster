@@ -218,7 +218,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
  * Variables an upgraded deployment may still carry: the Telegram/Slack builds, and the memory
  * switch that no longer exists because the memory system is always composed.
  */
-const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING", "MEMORY_ENABLED", "DREAMING_REVIEW"] as const;
+const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING", "MEMORY_ENABLED", "DREAMING_REVIEW", "DREAMING_TURNS"] as const;
 const REMOVED_ENV_PREFIXES = ["TELEGRAM_", "SLACK_"] as const;
 
 /**
@@ -234,7 +234,7 @@ export function removedConfigKeys(env: NodeJS.ProcessEnv = process.env): readonl
 }
 
 /** The one startup line printed when {@link removedConfigKeys} finds anything. Names only. */
-export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED, DREAMING_REVIEW are no longer read";
+export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED, DREAMING_REVIEW, DREAMING_TURNS are no longer read";
 
 /** At most this many fallbacks; the first batch intentionally keeps the chain short. */
 const MAX_MODEL_FALLBACKS = 5;
@@ -886,9 +886,14 @@ export function readDreamingConfig(env: NodeJS.ProcessEnv = process.env): Dreami
   if (behaviorRaw !== undefined && behaviorRaw !== "" && !behaviors.includes(behaviorRaw as DreamingBehavior)) {
     throw new ConfigurationError(`DREAMING_BEHAVIOR must be one of: ${behaviors.join(", ")}`);
   }
+  const atRaw = env.DREAMING_AT?.trim();
+  // Strict 24-hour HH:MM: 4:00, 04:60, 24:00 and 04:00:00 are configuration errors, not guesses.
+  if (atRaw !== undefined && atRaw !== "" && !/^([01]\d|2[0-3]):[0-5]\d$/u.test(atRaw)) {
+    throw new ConfigurationError("DREAMING_AT must be HH:MM on the 24-hour clock");
+  }
   return {
     enabled: flag("DREAMING_ENABLED", DREAMING_DEFAULTS.enabled),
-    turns: boundedInteger(env, "DREAMING_TURNS", DREAMING_DEFAULTS.turns, 1, 10_000),
+    at: atRaw === undefined || atRaw === "" ? DREAMING_DEFAULTS.at : atRaw,
     onCompaction: flag("DREAMING_ON_COMPACTION", DREAMING_DEFAULTS.onCompaction),
     behavior: (behaviorRaw === undefined || behaviorRaw === "" ? DREAMING_DEFAULTS.behavior : behaviorRaw) as DreamingBehavior,
     dryRun: flag("DREAMING_DRY_RUN", DREAMING_DEFAULTS.dryRun),

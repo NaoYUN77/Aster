@@ -32,6 +32,7 @@ export {
   DREAMING_DEFAULTS,
   parseDreamingState,
   type DreamingBehavior,
+  type DreamingClock,
   type DreamingConfig,
   type DreamingInput,
   type DreamingLogEvent,
@@ -221,7 +222,6 @@ export class MemoryIntegration {
           ...(event.runId === undefined ? {} : { runId: event.runId }),
           ...(event.action === undefined ? {} : { action: event.action }),
           ...(event.code === undefined ? {} : { code: event.code }),
-          ...(event.turns === undefined ? {} : { turns: event.turns }),
           ...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
         }),
       });
@@ -338,7 +338,14 @@ export class MemoryIntegration {
    * delegation to `initializeConversation`; existing callers keep root-bound meaning.
    */
   async initialize(context: Context): Promise<void> {
-    return this.initializeConversation(this.#conversation(), context);
+    await this.initializeConversation(this.#conversation(), context);
+    // Arm the nightly schedule only after the root conversation is usable: a restart after
+    // DREAMING_AT catches up the missed night, and the run's evidence needs the attached root.
+    if (this.#dreaming !== undefined) {
+      void this.#dreaming.start().catch((error: unknown) => {
+        this.#log({ event: "dreaming.clock", action: "failed", code: safeCode(error) });
+      });
+    }
   }
 
   /**
@@ -517,15 +524,6 @@ export class MemoryIntegration {
     } catch (error) {
       if (!(error instanceof MemoryError)) throw error;
       this.#log({ event: "memory.count", conversationId: root.id, requestId, action: "failed", code: error.appCode });
-    }
-    // A completed owner turn is the dreaming counter's unit. The threshold check enqueues work and
-    // returns; the run itself is never awaited on the reply path.
-    if (counted !== undefined && root.id === this.#rootConversationId && this.#dreaming !== undefined) {
-      try {
-        await this.#dreaming.observeTurn();
-      } catch (error) {
-        this.#log({ event: "dreaming.observe", conversationId: root.id, requestId, action: "failed", code: safeCode(error) });
-      }
     }
     if (counted?.shouldEvaluate === true) {
       const view = await root.context(context);
