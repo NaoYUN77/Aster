@@ -1,174 +1,164 @@
-# Letta-style memory for Aster (MemFS + dreaming)
+# Letta-style memory for Aster (core memory + dreaming)
 
 Status: implementation branch `feat/letta-memory`, forked from `main` at `36ee572`.
-Planning only on this branch: no merge, no deploy, no production or test-instance changes.
+Borrows Letta's architecture, not its code: Aster keeps its own working state and daily
+archive, and gains a git-backed core memory plus a background consolidation pass.
 
 ## 1. Goal
 
-Port [Letta](https://docs.letta.com)'s memory architecture onto Aster's single-owner agent:
+Aster is a single-owner, single-conversation personal agent. Three ideas are ported from
+[Letta](https://docs.letta.com):
 
-1. **Core memory** — Markdown files at the root of a git-backed memory repository, injected into
-   the system prompt on every turn.
-2. **Signposts** — directories with their own `MEMORY.md` stay out of context; the agent reads
-   them on demand.
-3. **Dreaming** — a background reflection subagent that reviews recent conversations and updates
-   memory files, triggered by a step count or by context compaction.
+1. **Core memory** — a git-backed repository whose root `MEMORY.md` is injected into the system
+   prompt on every turn, and that the agent edits with its ordinary tools.
+2. **On-demand memory** — other files and subdirectories stay out of context and are read when
+   needed.
+3. **Dreaming** — a background consolidation run that reviews recent experience and updates core
+   memory, without blocking the conversation.
 
-Reference: Letta's [Memory & dreaming](https://docs.letta.com/configuration/memory/),
-[MemFS](https://docs.letta.com/concepts/memfs/), and
-[Agent SDK memory](https://docs.letta.com/agent-sdk/memory/).
+Not ported: Letta's code, its memory blocks API, its archival vector store, or its multi-agent
+model. Aster's existing working state and daily archive are unchanged.
 
 ## 2. How this fits Aster's existing memory
 
-Aster already has three distinct things; MemFS does not replace any of them:
-
 | Existing | Role | Relationship |
 | --- | --- | --- |
-| Working state (block B, `src/memory/working.ts`) | Session-scoped standing state, host-validated from transcripts | Unchanged. Still injected through the memory projection. |
-| Daily archive (`src/memory/daily.ts`) | Append-only recall store with `memory_search` / `memory_read` | Unchanged. Becomes the **recall** layer and one of dreaming's inputs. |
-| Profile (`src/memory/profile.ts`) | Derived preference profile | Unchanged, and never written by dreaming. |
+| Working state (block B, `src/memory/working.ts`) | Session-scoped standing state, host-validated from transcripts | Unchanged. Not written by dreaming. |
+| Daily archive (`src/memory/daily.ts`) | Append-only recall store with `memory_search` / `memory_read` | Unchanged. One of dreaming's inputs. |
+| Profile (`src/memory/profile.ts`) | Derived preference profile | Unchanged. |
+| **Memory core (`$DATA_DIR/memory-fs`)** | **New.** Durable, explicitly authored core memory | The only store dreaming writes. |
 
-MemFS is the **core memory** layer: durable, explicitly authored (owner or agent), versioned, and
-small enough to sit in the prompt.
+Revisiting whether working state should become a host-maintained section of `MEMORY.md` is a
+separate project, deliberately out of scope.
 
 ## 3. Repository layout
 
 ```
 $DATA_DIR/memory-fs/            # git repository, branch main
-├── MEMORY.md                   # root index, in context
-├── persona.md                  # in context
-├── human.md                    # in context
-├── <topic>.md                  # in context
-├── reference/
-│   ├── MEMORY.md               # index line in context, body on demand
+├── MEMORY.md                   # the only file injected into the prompt
+├── reference/                  # read on demand
+│   ├── MEMORY.md               # its index line is a signpost, not content
 │   └── project-notes.md
-├── skills/                     # reserved (M3); existing skills system unchanged
-└── .aster/                     # gitignored: dreaming state, render cache
+├── skills/                     # reserved; existing skills system unchanged
+└── .aster/                     # gitignored: dreaming state
 ```
 
-Rules (mirroring Letta):
-
-- `*.md` files at the repository root are rendered into the system prompt every turn.
-- A subdirectory is in context only through its `MEMORY.md` index entry; the bodies are read on
-  demand with the ordinary file tools.
-- `.git/`, `.aster/`, non-`*.md` files, and symlinks are never rendered. The agent can still reach
+- **`MEMORY.md` only.** Persona, the owner's profile, standing goals and constraints live as
+  sections inside it. Every other file is read on demand with `read` / `bash`.
+- A subdirectory is discoverable only through its own `MEMORY.md` index entry.
+- `.git/`, `.aster/`, non-`*.md` files and symlinks are never rendered. The agent can still reach
   them with `bash`, the same exposure Letta has.
-- The host commits dirty work at turn boundaries; history is the undo mechanism.
+- The host commits dirty work at turn boundaries; `git log` is the undo path.
 
 ## 4. Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MEMORY_FS_ENABLED` | `1` | Master switch. `0` restores exactly the pre-branch prompt. |
-| `MEMORY_FS_DIR` | `$DATA_DIR/memory-fs` | Repository path. |
-| `MEMORY_FS_CORE_TOKENS` | `4096` | Budget for the rendered core section. |
-| `DREAMING_TRIGGER` | `step-count` | `off` \| `step-count` \| `compaction`. |
-| `DREAMING_STEP_COUNT` | `25` | Steps between dreaming runs. |
-| `DREAMING_BEHAVIOR` | `auto-launch` | `reminder` (nudge the agent, no write) \| `auto-launch` (background subagent writes). |
-| `DREAMING_REVIEW` | `1` | Second review pass over proposals before applying. |
+| `MEMORY_FS_ENABLED` | `1` | Master switch. `0` restores the pre-branch prompt exactly. |
+| `MEMORY_FS_DIR` | `$DATA_DIR/memory-fs` | Absolute repository path. |
+| `MEMORY_FS_CORE_TOKENS` | `4096` | Budget for the injected `MEMORY.md`. |
+| `DREAMING_ENABLED` | `1` | Master switch for background consolidation. |
+| `DREAMING_TURNS` | `20` | Completed owner turns between runs. |
+| `DREAMING_ON_COMPACTION` | `1` | Also run after a context compaction. |
+| `DREAMING_BEHAVIOR` | `auto-launch` | `auto-launch` (background write) or `reminder` (nudge only). |
+| `DREAMING_REVIEW` | `1` | Second background pass over the diff before apply. |
+| `DREAMING_DRY_RUN` | `0` | Compute and review, but never merge. |
+| `DREAMING_TIMEOUT_MS` | `120000` | One run's hard limit. |
 
-`MEMORY_FS_DIR` is resolved once at startup; a relative path is rejected.
+Dreaming uses the main model chain; there is no separate dreaming model.
 
 ## 5. Runtime model
 
 ### 5.1 Injection
 
-- `buildInstructions()` gains an optional `memoryFiles` string. The rendered section is appended
-  as a labelled, fenced data block: files are **data, not instructions**.
-- Rendering is deterministic: root `*.md` sorted by name, `MEMORY.md` first, each file capped,
-  total capped by `MEMORY_FS_CORE_TOKENS`. Truncation is announced in the section, never silent.
-- On session open and before each request, the host renders the section, hashes it, and calls
-  `session.configure({ agent: { instructions } })` only when the hash changed. This gives
-  Letta's "files in the prompt every turn" without a write per turn.
-- The base prompt (identity, tool guidance, delivery rules) is unchanged and comes first.
+- `buildInstructions()` gains an optional `memoryFiles` section: the absolute directory plus the
+  fenced content of `MEMORY.md`, wrapped as data, never instructions. A line that could close the
+  fence is indented.
+- The section is budgeted by `MEMORY_FS_CORE_TOKENS`; truncation is announced, never silent.
+- On session open and before each request the host renders the section, hashes it, and calls
+  `configure({ instructions })` only when the hash changed.
+- Only the owner's conversation receives it. There are no member Hubs and no routine injection.
 
-### 5.2 Memory directory and tools
+### 5.2 Tools
 
-Following Letta, the agent edits memory with the **ordinary tools it already has** — `read`,
-`write`, `edit` and `bash` — against the absolute memory path. No dedicated `memory_file_*`
-tools are registered, and no path sandbox is imposed beyond the container itself.
-
-- The system prompt names the directory (`$MEMORY_FS_DIR`) and states that root `*.md` files are
-  already included, that other files are read on demand, and that credentials must never be
-  stored there.
-- Versioning does not depend on intercepting writes: the host commits dirty work at turn
-  boundaries (`git add -A` + commit when the tree changed) and before each render. Tool calls may
-  therefore write freely, exactly as in Letta; `git log` and `git diff` remain the undo path.
-- Dreaming runs get the same ordinary tools inside an isolated `git worktree`, so a background
-  edit never races the live directory.
+The agent edits memory with the ordinary `read`, `write`, `edit` and `bash` tools against the
+absolute path — no dedicated memory tools, no path sandbox beyond the container. Versioning does
+not intercept writes: the host commits the tree at each successful turn boundary and before a
+render.
 
 ### 5.3 Dreaming
 
-- **Trigger**: after `DREAMING_STEP_COUNT` completed agent steps, or when the memory integration
-  compacts the context. Counter and last-run state live in `.aster/state.json`.
-- **Auto-launch** (default, as in Letta): when a trigger fires, the host starts a background
-  subagent in an isolated `git worktree`. It reads the recent transcript and daily archive with
-  ordinary tools, then edits memory files — including `persona.md` and `human.md` — with the same
-  `read` / `write` / `edit` / `bash` tools the live agent uses. When the run finishes, the host
-  commits the worktree and fast-forwards `main`; a conflict discards the worktree and the next
-  trigger retries. The live conversation is never blocked.
-- **Reminder** (opt-in): the next request carries a short host note that memory review is due;
-  nothing is written automatically.
-- **Review pass** (`DREAMING_REVIEW=1`): a second background conversation re-reads the diff against
-  the cited transcript range and drops unsupported changes before apply, mirroring Letta's
-  "agent reviews before applying".
-- The background run is asynchronous: it starts when a trigger fires, not inside the reply path.
+- **Trigger**: every `DREAMING_TURNS` completed owner turns, or after a compaction when enabled.
+  One global counter; a trigger during a run coalesces into one pending run. The counter resets
+  only after a run is applied; a failed run does not consume it.
+- **Input**: the last K turns of the owner conversation plus the daily archive since the last
+  run's cursor, bounded by tokens. No member Hubs exist to read.
+- **Run**: one background subagent in an isolated `git worktree`, with the ordinary tools, using
+  the main model. It reviews recent experience and edits memory files, including `MEMORY.md` and
+  its persona/human sections.
+- **Review** (`DREAMING_REVIEW=1`): a second background conversation reads the worktree diff and
+  the cited transcript range, and may revert files or reject the run. No human approval gate.
+- **Apply**: the host commits the worktree, commits the live tree if dirty, then
+  `git merge --ff-only`. A conflict, timeout or rejection discards the worktree and branch; the
+  live directory is never touched.
+- **Reminder** (opt-in): a one-line "memory review due" note on the next request; nothing is
+  written.
+- **Dry run**: the full pipeline runs, but apply is skipped.
 
 ### 5.4 Background execution model
 
 Dreaming is asynchronous, not a separate daemon:
 
-- One in-process runner per memory directory. States: `idle -> running -> idle`; at most one run
-  at a time. A trigger that fires while a run is active is coalesced into a single pending run.
-- The trigger check runs **after** a reply is delivered (step counter) or after compaction
-  completes; it never sits in the reply path. `void runner.kick(reason).catch(log)`.
-- A "step" is a completed agent request; Aster does not expose pi-durable's internal tool rounds,
-  so the counter approximates Letta's step count and the documentation says so.
-- A run: create `git worktree add <tmp> -b dream/<id>` from the memory repository, run one
-  subagent with `cwd` = the worktree and the ordinary tools, then have the host commit the
-  worktree. Live conversations never wait on it.
-- The subagent's instructions: review recent transcript and daily archive; update memory files;
-  `persona.md` / `human.md` are allowed; never store credentials; do not commit; the host owns
-  git.
-- Apply: if the live tree is dirty, commit it first, then `git merge --ff-only dream/<id>`. Any
-  conflict or review rejection discards the worktree and branch and records the failure in state;
-  the next trigger may retry. A failed run never touches the live directory.
-- Review pass (`DREAMING_REVIEW=1`): a second background conversation reads the worktree diff and
-  the cited transcript range, and may revert files or reject the run before apply.
-- Timeout and output caps are enforced on the subagent; transient model failures get one retry,
-  then backoff. There is no unbounded retry loop.
-- `reminder` behavior instead records a one-line "memory review due" note that the next request
-  includes; nothing is written.
+- One in-process runner. At most one run at a time, globally; triggers during a run coalesce.
+- The trigger check runs after a reply is delivered or after compaction completes; it never sits
+  in the reply path.
+- A "turn" is a completed owner request. Aster does not expose pi-durable's internal tool rounds,
+  so this approximates Letta's step count and the documentation says so.
+- A run has a hard timeout, one retry on transient model failure, and then backoff. No unbounded
+  loops.
+- State lives in `.aster/dreaming.json`: turn counter, last run, last applied commit, failure
+  reason. `dreaming status` prints it; logs use `dreaming.*` events.
 
-## 6. Safety invariants
+## 6. Single-owner cleanup (same change set)
 
-1. Dreaming may write any memory file, including `persona.md` and `human.md`, exactly as in
-   Letta. The owner approved this on 2026-11-21; the previous "never touch profile" rule applied
-   to the old auto-extracted preference profile, which is unchanged.
-2. The memory directory is an ordinary directory inside the container; the container is the
-   boundary. No path sandbox is claimed.
-3. Every change is committed by the host at turn boundaries and after dreaming runs, with actor
-   (`owner`, `agent`, `dreaming`) in the message; `git log` is the undo path.
-4. Dreaming runs asynchronously; a failed or conflicting run is discarded without touching the
-   live directory.
-5. No change to working memory, the derived profile pipeline, the daily archive, or the existing
-   tool set.
+The Hub / multi-tenant isolation predates the single-owner goal and is removed here:
 
-## 7. Milestones
+- `src/hubs.ts`, `HubStore`, member Hubs, per-member memory roots and workspaces, member tool
+  policy, and thread forks are deleted.
+- A message from anyone other than the owner is ignored and logged; no reply is sent.
+- Slack thread anchors are no longer used for routing or state; replies are flat. There is one
+  conversation.
+- `ownerId` remains the only identity. No user keys, no multi-user directories.
 
-- **M1 — memory core**: store, repository init, turn-boundary commits, render, instruction
-  refresh, memory-path prompt section, config parsing, unit tests. No dreaming yet.
-- **M2 — dreaming**: trigger counters, asynchronous auto-launch subagent using the ordinary tools
-  in a worktree, review pass, merge/discard, reminder path, tests.
-- **M3 — quality**: memory doctor (duplication, placement, token audit), explicit `/remember`
-  path, optional semantic search, HTTP surface on the web branch.
+## 7. Safety invariants
 
-Each milestone must pass `npm run check` and `npm test` with no new skips.
+1. Dreaming may write any file in the memory repository, including the persona/human sections of
+   `MEMORY.md` and `MEMORY.md` itself. Nothing outside the repository is writable by it.
+2. Every change is committed with actor (`owner`, `agent`, `dreaming`) and reason; `git log` is
+   the undo path.
+3. A failed or conflicting dream run is discarded without touching the live directory.
+4. Auto-launch is the default, exactly as in Letta; the review pass and `DREAMING_DRY_RUN` are the
+   safety rails.
+5. Working memory, the derived profile pipeline, the daily archive and the existing tool set are
+   unchanged.
+6. Credentials are never stored in memory; the prompt says so and the review pass checks it.
 
-## 8. Explicit deviations from Letta
+## 8. Milestones and tests
+
+- **M1 (PR #88)**: repository init, render, instruction refresh, turn-boundary commits, config,
+  `git` in the runtime image, nine tests. Being adjusted to inject only `MEMORY.md`.
+- **M2 (same PR)**: Hub/thread removal, the dreaming runner, triggers, review, worktree apply,
+  dry run, status, and scripted fake-model tests covering trigger → worktree → review → apply,
+  rejection, conflict, timeout, and the single-owner routing.
+- Every step runs `npm run check` and `npm test` with no new skips.
+
+## 9. Deliberate differences from Letta
 
 | Letta | This branch | Why |
 | --- | --- | --- |
-| Conversation-history search is a separate store | Existing daily archive + `memory_search` | Already implemented and tested; no second transcript store. |
-| Skills live in MemFS | Reserved directory only | Existing skills system stays the source of truth in M1/M2. |
-| Every tool edit is committed by the harness | Host commits dirty work at turn boundaries | Aster's `read`/`write`/`edit` belong to pi-durable and cannot be intercepted per call. |
+| Several core-memory files in the prompt | One `MEMORY.md` with sections | Prompt economy; the owner asked for it. |
+| Memory blocks API | Git repository + ordinary tools | Aster stores memory as files, not blocks. |
+| Conversation-history search is a separate store | Existing daily archive + `memory_search` | Already implemented and tested. |
+| Skills live in MemFS | Reserved directory only | Existing skills system stays authoritative. |
+| Multi-agent / multi-tenant memory | Single owner, one conversation | The product is a personal agent. |
+| Harness commits each edit | Host commits at turn boundaries | pi-durable's file tools cannot be intercepted per call. |
