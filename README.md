@@ -10,14 +10,14 @@
 
 ## 架构
 
-一条消息的路径：web 客户端请求（`/api/v1/messages`）→ 密码会话校验 → `web.sqlite` 落盘 → 单所有者会话 → 记忆层组装上下文 → 模型层调用提供商 → 工具层执行 → 回复落盘并经 SSE 送回；提醒、事件与定时任务作为 host message 写入同一份历史。
+一条消息的路径：web 客户端请求（`/api/v1/messages`）→ 密码会话校验 → `web.sqlite` 落盘 → 唯一所有者会话（常驻任务各有自己的会话）→ 记忆层组装上下文（core memory 来自 `$MEMORY_FS_DIR` 的 git 仓库，只注入 `MEMORY.md`）→ 模型层调用提供商 → 工具层执行 → 回复落盘并经 SSE 送回；提醒、事件与定时任务作为 host message 写入同一份历史。
 
 ```mermaid
 flowchart TB
   client["Web 客户端 / WebView"] --> http["Fastify HTTP + SSE<br/>密码会话 / CORS / 速率限制"]
   http --> store["web.sqlite<br/>请求队列 · 会话 · 历史"]
-  store --> runtime["pi-durable Session（agent.sqlite）<br/>单所有者会话"]
-  runtime --> memory["记忆：working / daily / 快照"]
+  store --> runtime["pi-durable Session（agent.sqlite）<br/>唯一所有者会话 + 每个常驻任务自己的会话"]
+  runtime --> memory["记忆：daily store + core memory<br/>MEMORY_FS_DIR 的 MEMORY.md"]
   runtime --> tools["常驻工具 / Web / MCP / 浏览器"]
   memory --> model["模型提供商"]
   tools --> runtime
@@ -33,13 +33,12 @@ flowchart TB
 | --- | --- | --- |
 | 入口与部署 | 组合接线、部署渲染、环境预检、发布清单 | `src/main.ts`、`src/deployment-*.ts`、`src/release-*.ts` |
 | 入口 | web/http 是唯一入口：Fastify REST/SSE、密码登录、请求队列与历史；主动投递（提醒、事件、定时任务）走共享的 `DeliveryChannel` | `src/http/`、`src/channel.ts`、`src/main.ts` |
-| 团队 Hub | 成员 ↔ 会话映射、线程 ↔ fork 记账与回合上限；旧渠道遗留能力，web 入口不创建 HubStore | `src/hubs.ts` |
-| 运行时 | 基于 pi-durable 的 Session：durable 执行、checkpoint、replay 恢复；按请求选择会话（root / Hub / fork） | `src/agent.ts` |
-| 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具；store 按会话解析，因此每人一份 | `src/memory/` |
-| 工具 | 工具注册表（常驻 + deferred）、MCP 接入与 OAuth 凭据保管 | `src/tools.ts`、`src/mcp*.ts` |
+| 运行时 | 基于 pi-durable 的 Session：durable 执行、checkpoint、replay 恢复；唯一的所有者会话，常驻任务各有自己的会话 | `src/agent.ts` |
+| 记忆 | 归档、工作状态、压缩、上下文规划与快照、生命周期接入与记忆工具；core memory 是 `MEMORY_FS_DIR` 的 git 仓库，只注入 `MEMORY.md`；后台 dreaming 在隔离 worktree 里整理它 | `src/memory/`、`src/memory/fs/` |
+| 工具 | 工具注册表（常驻 + deferred）、MCP 接入与 OAuth 凭据保管、connector 运行时 | `src/tools.ts`、`src/mcp*.ts`、`src/connectors/` |
 | 模型 | 提供商注册表、声明文件解析、模型目录拉取与解析、启动前目录校验 | `src/providers.ts`、`src/provider-config.ts`、`src/provider-catalog.ts` |
-| 配置 | `.env` 解析与严格校验（缺项/错项启动前失败），含频道白名单 | `src/config.ts` |
-| 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`web.sqlite`、`inbox.sqlite`、`hubs.sqlite` |
+| 配置 | `.env` 解析与严格校验（缺项/错项启动前失败） | `src/config.ts` |
+| 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`web.sqlite`、`inbox.sqlite`、`memory-fs/` |
 
 数据目录：
 
@@ -48,6 +47,7 @@ flowchart TB
 | `agent.sqlite`（及 WAL） | 底座会话与执行恢复状态；记忆系统的 working 状态、周期快照投影、归档进度与轮数计数 |
 | `web.sqlite`（及 WAL） | web 请求队列、登录会话与历史（web 入口的唯一请求存储） |
 | `inbox.sqlite`（及 WAL） | 旧渠道收件箱与投递状态；`deliveries` CLI 与恢复测试仍使用 |
+| `memory-fs/` | core memory 的 git 仓库：根目录 `MEMORY.md` 注入提示词，其它文件按需读取 |
 | `workspace/` | agent 的任务文件 |
 | `memory/daily/YYYY-MM-DD.md` | 每日事件记忆：归档任务从已确认的会话范围增量提取 |
 | `mcp.json`（可选） | MCP server 配置 |
@@ -135,7 +135,7 @@ npm start
 - `MODEL_REQUEST_TIMEOUT_MS` 默认 90000：单次模型请求超过 90 秒就换下一个。超时切换和错误切换一样会变成粘性选择。
 - **切换成功后会话保持粘性**：后续请求直接从该 fallback 开始，主模型不再被重试；即使下一次请求时主模型已经恢复，也不会自动切回。选择写入 `DATA_DIR/model-selection.json`，进程重启后继续生效；启动日志会打印当前粘在哪个 fallback 上。
 - 只有手动切回才会回到主模型：发 `$model primary`（或整句「切回主模型」「切回默认模型」），或删除 `DATA_DIR/model-selection.json`。选择在每次请求时重新读取，因此从另一个实例清除会立刻生效，不需要重启进程。粘性模型如果不在当前链里（例如 fallback 被删掉），启动时会告警并回到主模型。
-- **对话框手动切换（`$model`，仅 owner）**：`$model` 查看当前模型与默认链；`$model list [opencode|commandcode]` 列出当前目录里可切的模型；`$model <model id>` 指定模型；`$model primary` 切回主模型。别名 `opencode`/`commandcode` 指向该供应商默认的 DeepSeek Flash。可切范围只有 OpenCode（`opencode-go/`）与 Command Code（`commandcode/`）目录中、应用能映射成聊天模型的 DeepSeek、GLM、Gemini Flash；速度变体（Fast / Ultra Fast / HighSpeed / UltraSpeed）不开放；id 每次按实时目录校验，不硬编码。命令由宿主机直接答复，不调用模型、不写 durable turn，因此当前模型不可用时也能切走；其他成员发同样文字按普通聊天处理。
+- **对话框手动切换（`$model`，仅 owner）**：`$model` 查看当前模型与默认链；`$model list [opencode|commandcode]` 列出当前目录里可切的模型；`$model <model id>` 指定模型；`$model primary` 切回主模型。别名 `opencode`/`commandcode` 指向该供应商默认的 DeepSeek Flash。可切范围只有 OpenCode（`opencode-go/`）与 Command Code（`commandcode/`）目录中、应用能映射成聊天模型的 DeepSeek、GLM、Gemini Flash；速度变体（Fast / Ultra Fast / HighSpeed / UltraSpeed）不开放；id 每次按实时目录校验，不硬编码。命令由宿主机直接答复，不调用模型、不写 durable turn，因此当前模型不可用时也能切走；非 owner 发同样文字会被静默忽略。
 - 手动指定同样是粘性的：写同一个 `model-selection.json`（`kind: "manual"`），跨请求、跨重启生效，直到再次 `$model primary` 或指定别的模型。选中模型 429/超时/不可访问时仍按默认链降级，并在该次回复末尾提示「（<选中的模型> 不可用，本次由 <实际模型> 回答）」；降级成功的实际模型记为自动粘性。用户未手动指定时的自动切换仍然完全静默。手动选中的纯文本模型收到图片请求时直接拒绝并说明，不会静默换模型。
 - 切换只写进程日志（模型、原因、截断后的错误文本），自动切换不在聊天里提示；`$model` 主动切换回一行确认。整条链都失败时，聊天只显示「模型暂时不可用」，细节留在日志；全链失败不会清除已有的粘性选择。
 - 跨模型重放历史时，会去掉上一家 provider/model 私有的 thinking 签名；图片请求不会切到只接受文本的 fallback；`maxTokens` 与 reasoning 参数按目标模型收窄。
@@ -147,6 +147,8 @@ npm start
 - `WEB_OWNER_ID` / `WEB_PORT` / `WEB_HOST` / `WEB_ALLOWED_ORIGINS` / `WEB_SESSION_TTL_DAYS` / `WEB_STATIC_DIR` / `WEB_TRUST_PROXY`：web 入口的可选项，默认值见 `.env.example`。`WEB_OWNER_ID` 只是 agent 看到的内部 sender id，不是登录名。
 - 旧版本的 `CHANNEL`、`TELEGRAM_*`、`SLACK_*`、`STYLE_LEARNING` 不再读取；启动时只打印一次变量名提示，值不会出现在日志里。
 - `MEMORY_ENABLED`：记忆系统总开关，默认开；设 `0` 整体关闭。其余 `MEMORY_*` 为预算、时区与归档超时。
+- `MEMORY_FS_ENABLED` / `MEMORY_FS_DIR` / `MEMORY_FS_CORE_TOKENS`：core memory 的总开关（默认开）、git 仓库绝对路径（默认 `DATA_DIR/memory-fs`）与注入 `MEMORY.md` 的 token 预算（默认 4096，范围 256..65536）。
+- `DREAMING_*`：后台记忆整理。`DREAMING_ENABLED`（默认 1，`MEMORY_FS_ENABLED=0` 时无可写仓库，自动不跑）、`DREAMING_TURNS`（每多少个已完成的 owner turn 触发一次，默认 20）、`DREAMING_ON_COMPACTION`（压缩完成后也触发，默认 1）、`DREAMING_BEHAVIOR`（`auto-launch` 后台写 / `reminder` 只在下一次请求提示一行）、`DREAMING_REVIEW`（应用前跑二次 review，默认 1）、`DREAMING_DRY_RUN`（全流程但不 merge，默认 0）、`DREAMING_TIMEOUT_MS`（整轮硬超时，覆盖两次模型调用、git 与 apply，默认 120000）。
 - `MCP_CONFIG`：MCP 配置文件路径，默认 `DATA_DIR/mcp.json`。
 - `PROVIDERS_CONFIG`：自定义提供商声明文件路径，默认 `DATA_DIR/providers.json`；默认文件缺失表示没有自定义提供商。
 - `DEEPSEEK_WEB_API_KEY`：可选；设置后启用内置 `web_search` 与 `web_fetch`，与模型 key 分开配置。
@@ -165,7 +167,26 @@ npm start
 | `memory_search` | 按关键词与日期范围检索每日事件记忆 |
 | `memory_read` | 按日期 + 段落 id 精确读取一条每日事件 |
 
-已确认的会话范围由后台归档任务增量提取为 `memory/daily/*.md`。归档失败只记录状态，不影响聊天。检索超限返回明确错误，不静默截断。早期的 `workspace/MEMORY.md` 已退役。
+已确认的会话范围由后台归档任务增量提取为 `memory/daily/*.md`。归档失败只记录状态，不影响聊天。检索超限返回明确错误，不静默截断。
+
+core memory 是 `$MEMORY_FS_DIR` 下的 git 仓库。只有根目录的 `MEMORY.md` 注入提示词，persona、所有者画像、长期目标和约束都是它的 section；其它文件（包括子目录的 `MEMORY.md` 索引）用普通 `read` / `bash` 按需读取。agent 用现有的 `read`、`write`、`edit`、`bash` 直接编辑仓库，宿主在每轮成功回复后提交脏树并注明 actor，`git log` 是回滚路径。早期的 `workspace/MEMORY.md` 已退役。
+
+### Dreaming
+
+dreaming 是后台的记忆整理，不阻塞聊天：每 `DREAMING_TURNS` 个完成的 owner turn（或一次压缩完成）后检查阈值，只把任务入队，绝不等在回复路径上。进程内同一时刻最多一个 run，期间的再次触发合并成一个 pending，不排队。
+
+一次 run 的流程：
+
+1. 从 memory 仓库开一个 git worktree，分支 `dreaming/<UTC 时间戳>`，路径在 `$DATA_DIR/dreaming/worktrees/<runId>`（不在仓库里，避免被 ignore/清理规则扫到）。
+2. 后台子代理只用 `read` / `write` / `edit` / `bash` 在 worktree 里整理文件，可改 `MEMORY.md` 和仓库内任意文件；输入是最近若干轮 owner 对话与上次应用以来的 daily archive，按 token 裁剪。复用主模型链。
+3. `DREAMING_REVIEW=1` 时，第二个后台会话读 staged diff 与同一段 transcript，返回一个 JSON 裁决：`apply` 或 `reject`，并可 revert 单个文件。裁决无法解析按 reject 处理（fail closed）。
+4. 应用：宿主提交 worktree（actor `dreaming`）→ 若 live 树有脏改动先提交 → 必要时把 review 过的提交 rebase 到 live HEAD → `git merge --ff-only`。rebase 冲突、超时、review 拒绝都丢弃 worktree 和分支，live 文件一个字节都不动，永远不做 forced merge。
+5. 超时是**整轮**的：`DREAMING_TIMEOUT_MS` 从 run 开始计时，dream、review、git、worktree 创建与清理、apply 共用同一个 signal，到点统一按丢弃处理并清掉计时器。
+6. `DREAMING_DRY_RUN=1` 跑完整流程（含 review）但不提交、不 merge；完成后计数同样归零，下一次仍要攒满 `DREAMING_TURNS`。
+
+状态在仓库内被 gitignore 的 `.aster/dreaming.json`：`turnsSinceApply`、`reminderTurns`、`lastRun`、`lastAppliedCommit`、`failure`、`archiveThrough`。应用成功或 dry run 完成会把 `turnsSinceApply` 清零；超时、丢弃、失败都不消耗。`reminderTurns` 持久化，重启后从上次进度继续。模型瞬时失败重试一次，再失败记录并按失败次数退避，不无限重试。`DREAMING_BEHAVIOR=reminder` 时不下发任何后台任务，只在下一次 owner 请求里附一行「memory review due」，计数写回 0。启动时 runner 会清理崩溃残留：`git worktree prune`，并删除没有对应存活 worktree 的 `dreaming/*` 分支。
+
+查看状态：`npm run dreaming -- status`（只读，不打印消息正文或凭据）。日志事件为 `dreaming.trigger` / `dreaming.run.start` / `dreaming.run.review` / `dreaming.run.applied` / `dreaming.run.discarded` / `dreaming.run.failed`，只含 runId、动作、状态、计数与耗时。
 
 ## 工具
 

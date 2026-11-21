@@ -681,13 +681,13 @@ test("$model is answered by the host without calling a model", async () => {
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
     app = await openAgent(config, models);
-    assert.match(await app.reply(base, signal), /当前模型：openai\/faux-1/);
+    assert.match(await app.reply(base, signal) ?? "", /当前模型：openai\/faux-1/);
     assert.match(
-      await app.reply({ ...base, requestId: "telegram:model-command:2", text: "$model primary" }, signal),
+      await app.reply({ ...base, requestId: "telegram:model-command:2", text: "$model primary" }, signal) ?? "",
       /已经是主模型/,
     );
     assert.match(
-      await app.reply({ ...base, requestId: "telegram:model-command:3", text: "$model list" }, signal),
+      await app.reply({ ...base, requestId: "telegram:model-command:3", text: "$model list" }, signal) ?? "",
       /没有可切的模型/,
     );
     assert.equal(faux.state.callCount, 0);

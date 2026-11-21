@@ -77,7 +77,7 @@ async function ledger(storage: Storage) {
 test("production startup keeps declaration order when server configuration order changes", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "tool-pin-order-"));
   const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   let storage: Storage | undefined;
   let declarations: string | undefined;
@@ -114,7 +114,7 @@ test("pin changes preserve a committed memory projection whose input was not adm
   const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
     args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
   const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({}) };
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({}) };
   const request = { requestId: "telegram:pin:projection", conversationId: "test", senderId: "1", text: "hello" };
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   let storage: Storage | undefined;
@@ -181,7 +181,7 @@ test("unchanged pins persist the resident catalog without advancing the declarat
   for (const enabled of [false, true]) {
     const directory = await mkdtemp(join(tmpdir(), "tool-pin-catalog-"));
     const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }),
+      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }),
       memory: readMemoryConfig({ MEMORY_ENABLED: enabled ? "1" : "0" }) };
     let app: Awaited<ReturnType<typeof openAgent>> | undefined;
     let storage: Storage | undefined;
@@ -221,7 +221,7 @@ test("startup reconciles a published compaction before considering a pin boundar
   const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
     args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
   const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }),
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }),
     memory: readMemoryConfig({ MEMORY_RECENT_VERBATIM_TOKENS: "512", MEMORY_EVALUATE_AFTER_USER_TURNS: "1" }) };
   const gate = Promise.withResolvers<void>();
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
@@ -299,7 +299,7 @@ test("pin changes settle on the next restart and never rewrite recorded load sna
       args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }],
       tools: { mcp__s__echo: { pin: priorPin } }, residentToolBudgetTokens: 8_192 };
     const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
     const request = { requestId: "web:pin:initial", conversationId: "test", senderId: "1", text: "load env" };
     let app: Awaited<ReturnType<typeof openAgent>> | undefined;
     let storage: Storage | undefined;
@@ -365,7 +365,7 @@ test("file pins settle on idle restart, allow direct calls and leave the active 
   const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
     args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
   const config = { ...readConfig({ MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
   const request = (id: number) => ({ requestId: `telegram:pin:${id}`, conversationId: "test", senderId: "1", text: "echo" });
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   let storage: Storage | undefined;

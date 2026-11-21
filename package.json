@@ -19,6 +19,7 @@
     "deployment:volume-preflight": "node dist/src/deployment-volume-preflight.js",
     "deliveries": "node --env-file-if-exists=.env dist/src/deliveries.js",
     "reminders": "node --env-file-if-exists=.env dist/src/reminders-cli.js",
+    "dreaming": "node --env-file-if-exists=.env dist/src/dreaming-cli.js",
     "mcp:auth": "node --env-file-if-exists=.env dist/src/mcp-auth.js",
     "mcp:check": "node --env-file-if-exists=.env dist/src/mcp-check.js"
   },

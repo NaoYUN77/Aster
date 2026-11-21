@@ -76,8 +76,6 @@ export type StyleEvent = {
   readonly emoji: string;
   /** `positive` never asks; `other` may. There is no "negative". */
   readonly polarity: "positive" | "other";
-  /** Reply inside a thread: the question belongs in that same thread. */
-  readonly threadTs?: string;
 };
 
 /** A stored signal, with what the host did about it. */
@@ -235,12 +233,11 @@ export class StyleStore {
   }
 }
 
-/** How one question is sent: the channel's own send, so a member id resolves exactly as a reply's. */
+/** How one question is sent through the channel's own send, exactly as a reply is. */
 export type StyleAskSender = (
   channel: string,
   text: string,
   signal: AbortSignal,
-  threadTs?: string,
 ) => Promise<string>;
 
 export type StyleLearningOptions = {
@@ -328,7 +325,7 @@ export class StyleLearning {
       return;
     }
     try {
-      await this.#send(event.channel, STYLE_ASK_TEXT, signal, event.threadTs);
+      await this.#send(event.channel, STYLE_ASK_TEXT, signal);
     } catch (error) {
       // The question did not reach anybody, so the scope is not marked as asked: the next reaction
       // may try again. A failure here never touches the delivered reply or the stored signal.

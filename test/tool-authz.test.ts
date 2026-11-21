@@ -263,7 +263,7 @@ test("production host enforces restricted authority and reads authz alongside pi
           return fauxAssistantMessage("done");
         },
       ]);
-      const config = { ...readConfig({ MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }),
+      const config = { ...readConfig({ MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }),
         memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
       app = await openAgent(config, fixture.models, undefined, { toolAuthority: authority, toolReviewLog: audit.log });
       assert.equal(await app.reply({ requestId: "telegram:authz", conversationId: "test", senderId: "1", text: "read and write" }, new AbortController().signal), "done");

@@ -2,6 +2,7 @@ import { ConfigurationError, readConfig, resolveProviderConfigPath } from "./con
 import { readMcpConfig } from "./mcp-config.js";
 import { readProviderConfig } from "./provider-config.js";
 import { MODEL_UNAVAILABLE_MESSAGE, modelLabel } from "./model-failover.js";
+import { resolveOptionalEnvSecrets } from "./secret-env.js";
 import {
   createModelPool,
   PROVIDER_IDS,
@@ -22,7 +23,10 @@ try {
     PROVIDER_IDS,
   );
   if (providerConfig.error !== undefined) throw new ConfigurationError(providerConfig.error);
-  const config = readConfig(process.env, providerConfig.providers);
+  // Matches the runtime: optional provider keys come from the broker in cf mode, and a broker
+  // failure leaves them unset instead of failing the check.
+  const env = await resolveOptionalEnvSecrets(process.env);
+  const config = readConfig(env, providerConfig.providers);
   const fallbacks = config.failover?.fallbacks ?? [];
   const models = createModelPool(config.provider, fallbacks, providerConfig.providers);
   await refreshProviderCatalogs(models, config.provider, fallbacks, providerConfig.providers);

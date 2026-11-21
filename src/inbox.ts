@@ -64,8 +64,6 @@ export class Inbox {
     // instead of backfilling them with a time the process never observed.
     addColumn(this.db, "inbox", "receivedAt", "TEXT");
     addColumn(this.db, "inbox", "repliedAt", "TEXT");
-    // A reply is only in the right place if the thread anchor survives a restart; NULL is a flat reply.
-    addColumn(this.db, "inbox", "threadTs", "TEXT");
     // The received message itself, kept so a reaction can still be attached after a restart.
     addColumn(this.db, "inbox", "messageTs", "TEXT");
     addColumn(this.db, "deliveries", "createdAt", "TEXT");
@@ -91,19 +89,16 @@ export class Inbox {
   accept(nextOffset: number, request?: TextRequest): void {
     this.transaction(() => {
       if (request) {
-        const existing = this.db.prepare("SELECT * FROM inbox WHERE requestId = ?").get(request.requestId) as
-          | { text: string; conversationId: string; senderId: string; threadTs: string | null }
+        const existing = this.db.prepare("SELECT text, conversationId, senderId FROM inbox WHERE requestId = ?").get(request.requestId) as
+          | { text: string; conversationId: string; senderId: string }
           | undefined;
-        // A row written before the thread column existed has no anchor to compare; it keeps its meaning.
-        const anchorChanged = existing !== undefined && existing.threadTs !== null
-          && existing.threadTs !== (request.threadTs ?? null);
         if (existing && (existing.text !== request.text || existing.conversationId !== request.conversationId
-          || existing.senderId !== request.senderId || anchorChanged)) {
+          || existing.senderId !== request.senderId)) {
           throw new Error("Request ID reused with different content");
         }
-        this.db.prepare(`INSERT OR IGNORE INTO inbox (requestId, conversationId, senderId, text, threadTs, messageTs, receivedAt)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(request.requestId, request.conversationId, request.senderId, request.text,
-          request.threadTs ?? null, request.messageTs ?? null, timestamp());
+        this.db.prepare(`INSERT OR IGNORE INTO inbox (requestId, conversationId, senderId, text, messageTs, receivedAt)
+          VALUES (?, ?, ?, ?, ?, ?)`).run(request.requestId, request.conversationId, request.senderId, request.text,
+          request.messageTs ?? null, timestamp());
       }
       // A transport may reset its cursor; the stored value is the only authority, never MAX(offset).
       this.db.prepare("UPDATE checkpoint SET offset = ? WHERE id = 1").run(nextOffset);
@@ -111,12 +106,17 @@ export class Inbox {
   }
 
   next(): Job | undefined {
-    const row = this.db.prepare("SELECT * FROM inbox WHERE status IN ('pending', 'ready') ORDER BY rowid LIMIT 1").get() as
-      | (Omit<Job, "threadTs" | "messageTs"> & { threadTs: string | null; messageTs: string | null }) | undefined;
+    const row = this.db.prepare(`SELECT requestId, conversationId, senderId, text, status, reply, receivedAt, repliedAt, messageTs
+      FROM inbox WHERE status IN ('pending', 'ready') ORDER BY rowid LIMIT 1`).get() as
+      | (Omit<Job, "messageTs"> & { messageTs: string | null }) | undefined;
     if (row === undefined) return undefined;
-    // SQLite has no undefined: a stored NULL means "flat reply", not "unknown thread", and a request
-    // whose channel cannot address its own message stays that way instead of inventing an anchor.
-    return { ...row, threadTs: row.threadTs ?? undefined, messageTs: row.messageTs ?? undefined };
+    // SQLite has no undefined: a stored NULL means this channel cannot address the message it received.
+    return { ...row, messageTs: row.messageTs ?? undefined };
+  }
+
+  /** A request the agent refused to answer: forget it, so it is never delivered and never retried. */
+  discard(requestId: string): void {
+    this.db.prepare("DELETE FROM inbox WHERE requestId = ? AND status = 'pending'").run(requestId);
   }
 
   saveReply(requestId: string, reply: string, errorCode?: string): void {
@@ -170,18 +170,18 @@ export class Inbox {
     readonly part: number;
     readonly conversationId: string;
     readonly senderId: string;
-    readonly threadTs?: string;
   } | undefined {
-    const row = this.db.prepare(`SELECT d.requestId, d.part, i.conversationId, i.senderId, i.threadTs
+    const row = this.db.prepare(`SELECT d.requestId, d.part, i.conversationId, i.senderId
       FROM deliveries d JOIN inbox i ON i.requestId = d.requestId
       WHERE d.messageId = ? AND d.status = 'sent' ORDER BY d.part LIMIT 1`).get(messageId) as
-      | { requestId: string; part: number; conversationId: string; senderId: string; threadTs: string | null }
+      | { requestId: string; part: number; conversationId: string; senderId: string }
       | undefined;
-    // SQLite has no undefined: a stored NULL means "flat reply", not "unknown thread", so the question
-    // goes where the reply went instead of inventing an anchor.
-    if (row === undefined) return undefined;
-    const threadTs = row.threadTs ?? undefined;
-    return { requestId: row.requestId, part: row.part, conversationId: row.conversationId, senderId: row.senderId, ...(threadTs === undefined ? {} : { threadTs }) };
+    return row === undefined ? undefined : {
+      requestId: row.requestId,
+      part: row.part,
+      conversationId: row.conversationId,
+      senderId: row.senderId,
+    };
   }
 
   diagnostics() {

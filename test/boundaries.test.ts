@@ -206,33 +206,33 @@ test("opening a database written before timestamps keeps the old rows unknown", 
   }
 });
 
-test("a thread anchor is part of the request and survives a restart", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "pa-inbox-thread-"));
+test("a request is identified by its content, survives a restart, and can be discarded", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pa-inbox-identity-"));
   const path = join(directory, "inbox.sqlite");
   let inbox = new Inbox(path);
   try {
-    const threaded = {
-      requestId: "web:1",
-      conversationId: "owner",
-      senderId: "owner",
+    const request = {
+      requestId: "slack:T1:Ev1",
+      conversationId: "C0CHANNEL12",
+      senderId: "U0OWNER123",
       text: "and then?",
-      threadTs: "1700000000.000100",
     };
-    inbox.accept(1, threaded);
-    // The anchor is content, not decoration: a redelivery that lost it would answer outside the thread.
-    assert.throws(() => inbox.accept(1, { ...threaded, threadTs: "1700000000.000999" }), /different content/);
+    inbox.accept(1, request);
+    // A redelivery of the same request is the same request; changing its content is a different one.
+    inbox.accept(1, request);
+    assert.throws(() => inbox.accept(1, { ...request, text: "something else" }), /different content/);
 
-    // The anchor has to outlive the process: a reply whose anchor was lost would leave the thread.
     inbox.close();
     inbox = new Inbox(path);
-    assert.equal(inbox.next()?.threadTs, "1700000000.000100");
+    const stored = inbox.next();
+    assert.equal(stored?.requestId, "slack:T1:Ev1");
+    assert.equal(stored?.conversationId, "C0CHANNEL12");
+    assert.equal(stored?.senderId, "U0OWNER123");
+    assert.equal(stored?.text, "and then?");
 
-    inbox.saveReply(threaded.requestId, "an answer");
-    inbox.beginPart(threaded.requestId, 0);
-    inbox.confirmPart(threaded.requestId, 0, "1700000000.000200");
-    // A flat request keeps no anchor, and reading it back does not invent one.
-    inbox.accept(2, { requestId: "web:2", conversationId: "owner", senderId: "owner", text: "flat" });
-    assert.equal(inbox.next()?.threadTs, undefined);
+    // A refused request is forgotten: it is neither delivered nor retried.
+    inbox.discard("slack:T1:Ev1");
+    assert.equal(inbox.next(), undefined);
   } finally {
     inbox.close();
     await rm(directory, { recursive: true, force: true });

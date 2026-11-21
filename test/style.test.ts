@@ -55,18 +55,18 @@ function rig(options: {
   readonly start?: number;
   readonly failing?: boolean;
 } = {}) {
-  const asked: { channel: string; text: string; threadTs?: string }[] = [];
+  const asked: { channel: string; text: string }[] = [];
   const lines: string[] = [];
   let time = options.start ?? Date.parse("2026-11-11T00:00:00.000Z");
   const learning = new StyleLearning({
     mode: options.mode ?? "ask",
     ...(options.store === undefined ? {} : { store: options.store }),
     ...(options.inert === undefined ? {} : { inert: options.inert }),
-    send: async (channel, text, _signal, threadTs) => {
+    send: async (channel, text, _signal) => {
       if (options.failing === true) {
         throw Object.assign(new Error("host send was refused (NOT_IN_CHANNEL)"), { code: "HOST_NOT_IN_CHANNEL" });
       }
-      asked.push({ channel, text, threadTs });
+      asked.push({ channel, text });
       return "1700000000.000500";
     },
     log: (line) => lines.push(line),
@@ -149,9 +149,9 @@ test("a stored signal asks once per scope per window, and silence is never chase
     rig_.advance(2);
     await rig_.learning.handle(signal({ eventId: "style:T1:Ev4" }), shutdown);
     assert.equal(rig_.asked.length, 2);
-    // Another scope is its own budget: asking the owner says nothing about the member.
+    // Another scope is its own budget: asking in one conversation says nothing about another.
     await rig_.learning.handle(signal({
-      eventId: "style:T1:Ev5", channel: CHANNEL, subjectId: MEMBER, reactorId: MEMBER,
+      eventId: "style:T1:Ev5", channel: CHANNEL, subjectId: OWNER, reactorId: OWNER,
     }), shutdown);
     assert.equal(rig_.asked.length, 3);
   });

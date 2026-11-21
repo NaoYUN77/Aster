@@ -10,6 +10,7 @@ import { readConfig } from "../src/config.js";
 
 function config(dataDir: string) {
   return readConfig({
+    WEB_OWNER_ID: "1",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
@@ -47,7 +48,7 @@ test("history reads the durable transcript, projects messages and pages by entry
     const ask = (id: string, text: string) => app!.reply({
       requestId: `web:test:${id}`,
       conversationId: "owner",
-      senderId: "owner",
+      senderId: "1",
       text,
     }, signal);
     assert.equal(await ask("1", "first question"), "first answer");
@@ -175,6 +176,7 @@ test("$model stays host-side: no model call and no durable user row", async () =
       senderId: "owner",
       text: "$model",
     }, new AbortController().signal);
+    assert.ok(typeof reply === "string", "the owner's host command is answered");
     assert.match(reply, /faux-1/);
     assert.equal(faux.state.callCount, 0, "a host command does not call a model");
     const history = await app.history({ limit: 10 });

@@ -1,8 +1,11 @@
 import { join } from "node:path";
 import { openAgent } from "../agent.js";
 import { buildAgentOptions } from "../agent-options.js";
+import { openConnectors, type OpenConnectorsResult } from "../connectors/index.js";
+import { createConnectorExtension } from "../connectors/tools.js";
 import { ConfigurationError, type readConfig, type WebConfig } from "../config.js";
 import { ReminderScheduler, ReminderStore } from "../reminders.js";
+import { ensureMemoryFs } from "../memory-fs.js";
 import { createRoutines, type RoutinesRuntime } from "../routines/runtime.js";
 import { SqliteRoutineStore } from "../routines/store.js";
 import { createRoutinesExtension } from "../routines/tools.js";
@@ -65,6 +68,7 @@ export async function runWebMode(
   let watchers: WatchersRuntime | undefined;
   let routinesStore: SqliteRoutineStore | undefined;
   let routines: RoutinesRuntime | undefined;
+  let connectors: OpenConnectorsResult | undefined;
   let sessionCleanup: NodeJS.Timeout | undefined;
   let modelVersion = 0;
   let runtime: { notifyModelChanged: () => void } | undefined;
@@ -120,17 +124,40 @@ export async function runWebMode(
     const skills = config.skills === undefined
       ? undefined
       : await SkillIndex.scan(config.skills.dir, { log: (line) => console.error(line) });
+    connectors = config.connectors === undefined
+      ? undefined
+      : openConnectors({
+          dataDir: config.dataDir,
+          ownerId,
+          config: config.connectors,
+          hub,
+        });
+    // A one-shot, opt-in copy of local ciphertext into the broker; failures abort startup and leave
+    // the local rows untouched. Only counts are logged.
+    if (connectors !== undefined && config.connectors?.migrateCredentials === true) {
+      const migration = await connectors.migrateCredentials();
+      console.info(
+        `Connector credential migration: ${migration.migrated}/${migration.total} moved to the secret broker`,
+      );
+    }
+    const connectorExtension = connectors === undefined ? undefined : createConnectorExtension(connectors.service, ownerId);
+    // Local stdio connectors are host-managed MCP servers: persisted rows are re-validated against the
+    // allowlist and started here, on boot, not per client request.
+    const stdioServers = connectors === undefined ? [] : await connectors.service.stdioServers();
 
+    const extraExtensions = [
+      ...(watchers?.extension === undefined ? [] : [watchers.extension]),
+      ...(routinesExtension === undefined ? [] : [routinesExtension]),
+      ...(connectorExtension === undefined ? [] : [connectorExtension]),
+    ];
+    // Core memory is initialized before the agent opens, exactly as the Telegram/Slack entry does:
+    // an unusable directory is a startup error, and MEMORY_FS_ENABLED=0 creates nothing.
+    const memoryFs = await ensureMemoryFs(config.memoryFs);
     agent = await openAgent(config, undefined, undefined, buildAgentOptions(config, {
+      ...(memoryFs === undefined ? {} : { memoryFs }),
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
-      ...(watchers?.extension === undefined && routinesExtension === undefined
-        ? {}
-        : {
-            extraExtensions: [
-              ...(watchers?.extension === undefined ? [] : [watchers.extension]),
-              ...(routinesExtension === undefined ? [] : [routinesExtension]),
-            ],
-          }),
+      ...(extraExtensions.length === 0 ? {} : { extraExtensions }),
+      ...(stdioServers.length === 0 ? {} : { mcpServers: stdioServers }),
       ...(skills === undefined ? {} : { skills }),
     }, {
       signal,
@@ -172,6 +199,7 @@ export async function runWebMode(
       agent,
       modelService,
       modelVersion: () => modelVersion,
+      ...(connectors === undefined ? {} : { connectors: connectors.service }),
     });
     await app.listen({ port: web.port, host: web.host });
     worker.start();
@@ -237,6 +265,7 @@ export async function runWebMode(
       console.error(`Agent close failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     store.close();
+    connectors?.close();
     watchersStore?.close();
     routinesStore?.close();
     reminders?.close();

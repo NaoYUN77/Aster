@@ -31,11 +31,12 @@ import type { TextRequest } from "../src/messages.js";
 const request: TextRequest = { requestId: "telegram:test:1", conversationId: "telegram:test", senderId: "1", text: "Remember that my color is blue." };
 const running = new AbortController().signal;
 function appConfig(dataDir: string) {
-  return readConfig({ MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "offline-test", DATA_DIR: dataDir });
+  return readConfig({ WEB_OWNER_ID: "1", MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "offline-test", DATA_DIR: dataDir });
 }
 
 function webAppConfig(dataDir: string) {
   return readConfig({
+    WEB_OWNER_ID: "1",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1", OPENAI_API_KEY: "offline-test", DEEPSEEK_WEB_API_KEY: "web-test", DATA_DIR: dataDir,
   });
@@ -142,6 +143,27 @@ test("agent file tools survive reopening and completed requests are not executed
       },
     ]);
     assert.equal(await app.reply({ ...request, requestId: "telegram:test:2", text: "What is my color?" }, running), "Your color is blue.");
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("only the configured owner is answered; anyone else is ignored before the model", { timeout: 15_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-single-owner-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    const fixture = modelFixture("openai");
+    fixture.faux.setResponses([fauxAssistantMessage("answered")]);
+    app = await openAgent(appConfig(directory), fixture.models);
+    const ignored = await app.reply(
+      { requestId: "slack:test:other", conversationId: "C0CHANNEL12", senderId: "U0OTHER123", text: "hello" },
+      running,
+    );
+    assert.equal(ignored, undefined, "a non-owner request produces no reply");
+    assert.equal(fixture.faux.state.callCount, 0, "and never reaches the model");
+    // The ignored request leaves no turn behind: the owner's next request is answered normally.
+    assert.equal(await app.reply({ ...request, requestId: "telegram:test:owner" }, running), "answered");
+    assert.equal(fixture.faux.state.callCount, 1);
   } finally {
     try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
   }

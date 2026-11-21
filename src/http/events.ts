@@ -8,12 +8,17 @@ import type { ServerResponse } from "node:http";
 export type SseEventName =
   | "snapshot"
   | "request.queued"
+  | "queue.changed"
   | "request.running"
   | "request.done"
   | "request.failed"
   | "request.aborted"
+  | "request.steered"
+  | "steer.done"
   | "model.changed"
   | "host.message"
+  | "connector.changed"
+  | "credential.request"
   | "heartbeat";
 
 type Client = { readonly id: number; readonly res: ServerResponse };

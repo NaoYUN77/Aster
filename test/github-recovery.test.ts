@@ -42,7 +42,7 @@ function host(approval?: string, present = true): McpHost {
 }
 function config(directory: string) {
   return { ...readConfig({ MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
 }
 async function rootId(storage: Storage) {
   return (await storage.scanConversations({}, 100, undefined, context)).items[0]!.id;

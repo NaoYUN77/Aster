@@ -543,6 +543,7 @@ test("an MCP tool is hidden until tool_search loads it, then callable", { timeou
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",
+      WEB_OWNER_ID: "1",
       DATA_DIR: directory,
     });
     app = await openAgent(appConfig, models, undefined, { mcp: host });
@@ -636,7 +637,7 @@ test("MCP health filters native search and blocks loaded calls without changing 
     ]);
     const appConfig = { ...readConfig({
       MODEL_PROVIDER: "openai", MODEL_ID: "faux-1",
-      OPENAI_API_KEY: "test", DATA_DIR: directory,
+      OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory,
     }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
     app = await openAgent(appConfig, models, storage, { mcp: host });
     assert.equal(await app.reply({ requestId: "telegram:health:1", conversationId: "test", senderId: "1", text: "use alpha" }, new AbortController().signal), "recovered");
@@ -656,6 +657,7 @@ test("an explicitly configured MCP file that cannot be read fails startup", { ti
       MODEL_PROVIDER: "openai",
       MODEL_ID: "faux-1",
       OPENAI_API_KEY: "offline-test",
+      WEB_OWNER_ID: "1",
       DATA_DIR: directory,
     });
     await assert.rejects(

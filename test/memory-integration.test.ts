@@ -51,6 +51,7 @@ type AppConfig = ReturnType<typeof readConfig>;
 
 function appConfig(dataDir: string, env: NodeJS.ProcessEnv = {}): AppConfig {
   const full = {
+    WEB_OWNER_ID: "1",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",

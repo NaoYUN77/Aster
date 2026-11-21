@@ -50,16 +50,46 @@ export function message(overrides: Partial<UiMessage> = {}): UiMessage {
 }
 
 export function fakeAgent(options: {
-  reply: (request: { requestId: string; text: string }, signal: AbortSignal) => Promise<string>;
+  reply: (request: { requestId: string; text: string }, signal: AbortSignal) => Promise<string | undefined>;
+  steer?: (request: { requestId: string; text: string }) => Promise<{
+    steerId: string;
+    done: Promise<UiMessage | undefined>;
+    submission: {
+      status(): Promise<"queued" | "placed" | "done" | "unanswered">;
+      abort(): Promise<"aborted" | "already_placed" | "settled">;
+    };
+  }>;
   history?: (options?: { before?: string; limit?: number }) => Promise<HistoryPage>;
   service: WebAgent["modelService"];
   abort?: () => Promise<void>;
 }): WebAgent {
   return {
     reply: (request, signal) => options.reply(request, signal),
+    steer: options.steer ?? (async (request) => {
+      throw Object.assign(new Error(`No request is running for ${request.requestId}`), { code: "NO_ACTIVE_REQUEST" });
+    }),
     abort: options.abort ?? (async () => {}),
     history: options.history ?? (async () => ({ messages: [], nextCursor: null, hasMore: false })),
     modelService: options.service,
+  };
+}
+
+/** A steer result whose durable submission defaults to "already settled". */
+export function steerHandle(
+  steerId: string,
+  done: Promise<UiMessage | undefined>,
+  submission: Partial<{
+    status(): Promise<"queued" | "placed" | "done" | "unanswered">;
+    abort(): Promise<"aborted" | "already_placed" | "settled">;
+  }> = {},
+) {
+  return {
+    steerId,
+    done,
+    submission: {
+      status: submission.status ?? (async () => "done" as const),
+      abort: submission.abort ?? (async () => "settled" as const),
+    },
   };
 }
 
