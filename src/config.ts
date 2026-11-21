@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
 import { MODEL_FAILOVER_DEFAULTS, type ModelRef } from "./model-failover.js";
 import type { WatchersConfig } from "./watchers/protocol.js";
+import { MEMORY_LIMITS } from "./memory/fs/contracts.js";
+import { DREAMING_DEFAULTS, type DreamingBehavior, type DreamingConfig } from "./memory/dreaming.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
 import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
 import { STYLE_MODES } from "./style.js";
@@ -208,12 +210,14 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(skills.enabled ? { skills } : {}),
     ...(browser === undefined ? {} : { browser }),
     style,
+    memoryFs: readMemoryFsConfig(env),
+    dreaming: readDreamingConfig(env),
     trace: readTraceConfig(env),
     // Memory is part of the configuration every channel sees, so an explicit MEMORY_ENABLED=0 is
     // honored rather than silently replaced by defaults when the agent is composed.
     memory: readMemoryConfig(env),
     // Only a web deployment reads WEB_*; an unused variable in a Telegram deployment stays inert.
-    ...(channelKind === "web" ? { web: readWebConfig(env) } : {}),
+    ...(channelKind === "web" ? { web: readWebConfig(env), connectors: readConnectorsConfig(env) } : {}),
   };
 }
 
@@ -373,8 +377,9 @@ export function readStyleConfig(env: NodeJS.ProcessEnv = process.env): StyleConf
 }
 
 /**
- * Event tracking (WATCHERS_*). Off by default: no outbound request is made while no watcher exists,
- * and every malformed bound fails startup rather than being discovered at the first check.
+ * Event tracking (WATCHERS_*). On by default, matching `.env.example`: no outbound request is made
+ * while no watcher exists. `WATCHERS_ENABLED=0` disables the loop entirely. Every malformed bound
+ * fails startup rather than being discovered at the first check.
  */
 export function readWatchersConfig(env: NodeJS.ProcessEnv = process.env): WatchersConfig {
   const enabledRaw = env.WATCHERS_ENABLED?.trim();
@@ -527,8 +532,6 @@ export type ChannelConfig =
     readonly ownerId: string;
     readonly botToken: string;
     readonly appToken: string;
-    /** Members allowed to drive the bot besides the owner. Empty keeps the owner-only DM behaviour. */
-    readonly allowedUsers: readonly string[];
     /** Channels the bot answers in. Empty keeps the owner-only DM behaviour. */
     readonly allowedChannels: readonly string[];
     /** Emoji the bot attaches to a message while it works, and the ones that can replace it. */
@@ -605,6 +608,180 @@ export function readWebConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
     sessionTtlDays: boundedInteger(env, "WEB_SESSION_TTL_DAYS", 30, 1, 3_650),
     staticDir: env.WEB_STATIC_DIR?.trim() || "web/dist",
     trustProxy: rawTrustProxy === "1",
+  };
+}
+
+export type SecretBackend = "file" | "cf";
+
+/** Cloudflare Worker secret broker access: URL plus the Cloudflare Access service token. */
+export type SecretBrokerConfig = {
+  readonly url: string;
+  readonly accessClientId?: string;
+  readonly accessClientSecret?: string;
+  /** Two-line file (client id, client secret); takes precedence over the two env values. */
+  readonly accessTokenFile?: string;
+};
+
+/** Connector MVP settings. Secret values come from the file directory or the CF broker. */
+export type ConnectorsConfig = {
+  readonly enabled: boolean;
+  /** Directory of read-only secret files, used only when `secretBackend` is `file`. */
+  readonly secretDir: string;
+  /** Where connector secrets and OAuth tokens live; `file` (default) or `cf`. */
+  readonly secretBackend: SecretBackend;
+  readonly broker?: SecretBrokerConfig;
+  /** Public origin the OAuth provider redirects to; the callback path is appended. */
+  readonly redirectBaseUrl?: string;
+  /**
+   * Optional app URL shown on the OAuth success page. When set, the page offers a button and a
+   * meta refresh to it; when unset (the default) the page stays in the browser.
+   */
+  readonly oauthReturnUrl?: string;
+  /** One-shot migration of local ciphertext into the broker at startup. */
+  readonly migrateCredentials: boolean;
+  readonly httpTimeoutMs: number;
+  readonly oauthStateTtlMs: number;
+  readonly leaseTtlMs: number;
+  /** Commands allowed for a local `mcp_stdio` connector; empty denies every command. */
+  readonly stdioAllowlist: readonly string[];
+};
+
+function readSecretBackend(env: NodeJS.ProcessEnv): SecretBackend {
+  const raw = env.ASTER_SECRET_BACKEND?.trim();
+  if (raw === undefined || raw === "") return "file";
+  if (raw !== "file" && raw !== "cf") {
+    throw new ConfigurationError("ASTER_SECRET_BACKEND must be file or cf");
+  }
+  return raw;
+}
+
+function readSecretBroker(env: NodeJS.ProcessEnv): SecretBrokerConfig {
+  const raw = env.ASTER_SECRET_BROKER_URL?.trim();
+  if (raw === undefined || raw === "") {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL is required when ASTER_SECRET_BACKEND=cf");
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an absolute http(s) URL");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an absolute http(s) URL");
+  }
+  // Host secrets and tokens must not travel in clear text; loopback is the local test exception.
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+  if (url.protocol === "http:" && !loopback) {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must use https outside loopback");
+  }
+  if (url.search !== "" || url.hash !== "" || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an origin without a path");
+  }
+  const accessTokenFile = env.ASTER_CF_ACCESS_TOKEN_FILE?.trim() || undefined;
+  if (accessTokenFile !== undefined && (accessTokenFile.length > 4_096 || accessTokenFile.includes("\0"))) {
+    throw new ConfigurationError("ASTER_CF_ACCESS_TOKEN_FILE is not a valid path");
+  }
+  const accessClientId = env.ASTER_CF_ACCESS_CLIENT_ID?.trim() || undefined;
+  const accessClientSecret = env.ASTER_CF_ACCESS_CLIENT_SECRET?.trim() || undefined;
+  for (const [key, value] of [
+    ["ASTER_CF_ACCESS_CLIENT_ID", accessClientId],
+    ["ASTER_CF_ACCESS_CLIENT_SECRET", accessClientSecret],
+  ] as const) {
+    if (value !== undefined && value.length > 4_096) {
+      throw new ConfigurationError(`${key} is too long`);
+    }
+  }
+  if (accessTokenFile === undefined && (accessClientId === undefined || accessClientSecret === undefined)) {
+    throw new ConfigurationError(
+      "ASTER_CF_ACCESS_TOKEN_FILE or both ASTER_CF_ACCESS_CLIENT_ID and ASTER_CF_ACCESS_CLIENT_SECRET are required when ASTER_SECRET_BACKEND=cf",
+    );
+  }
+  return {
+    url: url.origin,
+    ...(accessClientId === undefined ? {} : { accessClientId }),
+    ...(accessClientSecret === undefined ? {} : { accessClientSecret }),
+    ...(accessTokenFile === undefined ? {} : { accessTokenFile }),
+  };
+}
+
+function readOAuthReturnUrl(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.CONNECTOR_OAUTH_RETURN_URL?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  if (raw.length > 2_048) throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL is too long");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must be an absolute URL");
+  }
+  if (!["aster:", "http:", "https:"].includes(url.protocol)) {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must use aster:, http: or https:");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must not contain credentials");
+  }
+  return url.toString();
+}
+
+export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): ConnectorsConfig {
+  const enabledRaw = env.CONNECTORS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("CONNECTORS_ENABLED must be 0 or 1");
+  }
+  const secretDir = env.ASTER_CONNECTOR_SECRET_DIR?.trim() || "/run/secrets/aster-connectors";
+  if (secretDir.length > 4_096 || secretDir.includes("\0")) {
+    throw new ConfigurationError("ASTER_CONNECTOR_SECRET_DIR is not a valid directory");
+  }
+  const redirectRaw = env.CONNECTOR_OAUTH_REDIRECT_BASE?.trim();
+  if (redirectRaw !== undefined && redirectRaw !== "") {
+    let parsed: URL;
+    try {
+      parsed = new URL(redirectRaw);
+    } catch {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an absolute http(s) URL");
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an absolute http(s) URL");
+    }
+    if (parsed.search !== "" || parsed.hash !== "" || (parsed.pathname !== "/" && parsed.pathname !== "")) {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an origin without a path");
+    }
+  }
+  const secretBackend = readSecretBackend(env);
+  const broker = secretBackend === "cf" ? readSecretBroker(env) : undefined;
+  const oauthReturnUrl = readOAuthReturnUrl(env);
+  const migrateRaw = env.ASTER_CONNECTOR_MIGRATE?.trim();
+  if (migrateRaw !== undefined && migrateRaw !== "" && migrateRaw !== "0" && migrateRaw !== "1") {
+    throw new ConfigurationError("ASTER_CONNECTOR_MIGRATE must be 0 or 1");
+  }
+  const migrateCredentials = migrateRaw === "1";
+  if (migrateCredentials && secretBackend !== "cf") {
+    throw new ConfigurationError("ASTER_CONNECTOR_MIGRATE requires ASTER_SECRET_BACKEND=cf");
+  }
+  const allowlist = (env.CONNECTOR_STDIO_ALLOWLIST ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+  for (const command of allowlist) {
+    // A relative path would make the basename match ambiguous; only a bare name or absolute path.
+    const bareName = /^[A-Za-z0-9._-]{1,256}$/.test(command);
+    const absolutePath = command.startsWith("/") && /^[A-Za-z0-9._/-]{1,256}$/.test(command);
+    if (!bareName && !absolutePath) {
+      throw new ConfigurationError("CONNECTOR_STDIO_ALLOWLIST must list bare command names or absolute paths");
+    }
+  }
+  return {
+    enabled: enabledRaw !== "0",
+    secretDir,
+    secretBackend,
+    ...(broker === undefined ? {} : { broker }),
+    ...(redirectRaw === undefined || redirectRaw === "" ? {} : { redirectBaseUrl: redirectRaw.replace(/\/+$/, "") }),
+    ...(oauthReturnUrl === undefined ? {} : { oauthReturnUrl }),
+    migrateCredentials,
+    httpTimeoutMs: boundedInteger(env, "CONNECTOR_HTTP_TIMEOUT_MS", 15_000, 1_000, 120_000),
+    oauthStateTtlMs: boundedInteger(env, "CONNECTOR_OAUTH_STATE_TTL_MS", 600_000, 60_000, 3_600_000),
+    leaseTtlMs: boundedInteger(env, "CONNECTOR_LEASE_TTL_MS", 30_000, 1_000, 300_000),
+    stdioAllowlist: [...new Set(allowlist)],
   };
 }
 
@@ -713,8 +890,7 @@ function readChannelCredentials(
       ownerId,
       botToken,
       appToken,
-      // Both lists are optional: an empty one is the owner-only private behaviour, not an open door.
-      allowedUsers: readSlackIdList(env, "SLACK_ALLOWED_USERS", SLACK_OWNER_ID_SHAPE, "Slack member IDs"),
+      // Optional: an empty list is the owner-only private behaviour, not an open door.
       allowedChannels: readSlackIdList(env, "SLACK_ALLOWED_CHANNELS", SLACK_CHANNEL_ID_SHAPE, "Slack channel IDs"),
       receipts: {
         ...(working === undefined ? {} : { working }),
@@ -822,6 +998,73 @@ export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryCo
     reserveTokens: memoryInteger(env, "MEMORY_RESERVE_TOKENS", 16_384, 1, 1_048_576),
     timezone,
     archiveTimeoutMs: memoryInteger(env, "MEMORY_ARCHIVE_TIMEOUT_MS", 60_000, 1, 300_000),
+  };
+}
+
+/** MemFS (M1): the git-backed core-memory repository. */
+export type MemoryFsConfig = {
+  readonly enabled: boolean;
+  /** Absolute repository path; `main` creates it lazily and fails startup if it cannot. */
+  readonly dir: string;
+  /** Token budget for the core section injected into the owner's prompt. */
+  readonly coreTokens: number;
+};
+
+/**
+ * All MemFS settings are validated even when the switch is off, so a malformed value cannot surface
+ * later when somebody flips MEMORY_FS_ENABLED. Relative paths are refused: the repository path is
+ * resolved once, at startup, and must not depend on the process working directory.
+ */
+export function readMemoryFsConfig(env: NodeJS.ProcessEnv = process.env): MemoryFsConfig {
+  const enabledRaw = env.MEMORY_FS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("MEMORY_FS_ENABLED must be 0 or 1");
+  }
+  const rawDir = env.MEMORY_FS_DIR?.trim();
+  const dir = rawDir === undefined || rawDir === ""
+    ? join(resolve(env.DATA_DIR || "data"), "memory-fs")
+    : isAbsolute(rawDir)
+      ? resolve(rawDir)
+      : (() => { throw new ConfigurationError("MEMORY_FS_DIR must be an absolute path"); })();
+  return {
+    enabled: enabledRaw !== "0",
+    dir,
+    coreTokens: boundedInteger(
+      env,
+      "MEMORY_FS_CORE_TOKENS",
+      MEMORY_LIMITS.coreTokens,
+      MEMORY_LIMITS.minCoreTokens,
+      MEMORY_LIMITS.maxCoreTokens,
+    ),
+  };
+}
+
+/**
+ * Dreaming (M2): the background consolidation pass over core memory. Every value is validated even
+ * when the pass is disabled, so a malformed setting cannot surface later after DREAMING_ENABLED is
+ * flipped. An unknown behavior is a startup error rather than a silent fallback: a reminder-only
+ * deployment and an auto-launch one are different promises to the owner.
+ */
+export function readDreamingConfig(env: NodeJS.ProcessEnv = process.env): DreamingConfig {
+  const flag = (key: string, fallback: boolean): boolean => {
+    const raw = env[key]?.trim();
+    if (raw === undefined || raw === "") return fallback;
+    if (raw !== "0" && raw !== "1") throw new ConfigurationError(`${key} must be 0 or 1`);
+    return raw === "1";
+  };
+  const behaviorRaw = env.DREAMING_BEHAVIOR?.trim().toLowerCase();
+  const behaviors: readonly DreamingBehavior[] = ["auto-launch", "reminder"];
+  if (behaviorRaw !== undefined && behaviorRaw !== "" && !behaviors.includes(behaviorRaw as DreamingBehavior)) {
+    throw new ConfigurationError(`DREAMING_BEHAVIOR must be one of: ${behaviors.join(", ")}`);
+  }
+  return {
+    enabled: flag("DREAMING_ENABLED", DREAMING_DEFAULTS.enabled),
+    turns: boundedInteger(env, "DREAMING_TURNS", DREAMING_DEFAULTS.turns, 1, 10_000),
+    onCompaction: flag("DREAMING_ON_COMPACTION", DREAMING_DEFAULTS.onCompaction),
+    behavior: (behaviorRaw === undefined || behaviorRaw === "" ? DREAMING_DEFAULTS.behavior : behaviorRaw) as DreamingBehavior,
+    review: flag("DREAMING_REVIEW", DREAMING_DEFAULTS.review),
+    dryRun: flag("DREAMING_DRY_RUN", DREAMING_DEFAULTS.dryRun),
+    timeoutMs: boundedInteger(env, "DREAMING_TIMEOUT_MS", DREAMING_DEFAULTS.timeoutMs, 1_000, 600_000),
   };
 }
 

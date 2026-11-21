@@ -12,9 +12,8 @@ export interface DeliveryChannel {
   /** Operator-facing name for log lines. */
   readonly label: string;
   /**
-   * Sends one already-segmented message part and returns the channel's message id. `threadTs` is the
-   * anchor to answer inside when the request arrived in a thread; a channel that has no threads
-   * ignores it, and an absent anchor means a flat message.
+   * Sends one already-segmented message part and returns the channel's message id. `threadTs` is a
+   * delivery anchor for host-initiated sends (watchers); replies to the owner's requests are flat.
    */
   send(
     target: string,
@@ -47,7 +46,8 @@ export type DeliveryReactions = {
   readonly anchor?: ReactionAnchor;
 };
 
-export type ReplyFn = (request: TextRequest, signal: AbortSignal) => Promise<string>;
+/** `undefined` means the host refused the request: nothing is delivered and nothing is retried. */
+export type ReplyFn = (request: TextRequest, signal: AbortSignal) => Promise<string | undefined>;
 
 /** A single inbound request may carry this much text before the host refuses it. */
 export const MAX_REQUEST_CHARS = 16_000;
@@ -67,7 +67,7 @@ export async function deliverNext(
   const job = inbox.next();
   if (!job) return false;
   // The anchor lives exactly as long as this request may run, so the model's reaction tool can only
-  // ever reach the message this request arrived on — including from a fork answering inside a thread.
+  // ever reach the message this request arrived on.
   const release = reactions.anchor?.hold(target(job));
   const react = reactionSender(channel, job, signal, channel.react);
   const unreact = reactionSender(channel, job, signal, channel.unreact);
@@ -76,7 +76,7 @@ export async function deliverNext(
     // The acknowledgement comes first: while a long run works, it is the only signal the sender has.
     await quietly(channel, working === undefined ? undefined : () => react!(working));
     let errorCode: string | undefined;
-    let text: string;
+    let text: string | undefined;
     if (job.status === "pending") {
       try {
         text = job.text.length > MAX_REQUEST_CHARS
@@ -102,6 +102,11 @@ export async function deliverNext(
                   ? "检测到重复调用循环，已停止本次处理。已执行的操作可能仍然生效，请调整请求后重试。"
                   : "本次处理未能完成。已执行的操作可能仍然生效，请先核对结果。";
       }
+      // A refused request was never answered: forget it instead of sending an empty or invented reply.
+      if (text === undefined) {
+        inbox.discard(job.requestId);
+        return true;
+      }
       inbox.saveReply(job.requestId, text, errorCode);
     }
     if (signal.aborted) return true;
@@ -111,8 +116,7 @@ export async function deliverNext(
       inbox.beginPart(job.requestId, part.part);
       let messageId: string;
       try {
-        // Every part of one reply carries the same anchor, so a segmented answer stays in one thread.
-        messageId = await channel.send(job.conversationId, part.text, signal, job.threadTs);
+        messageId = await channel.send(job.conversationId, part.text, signal);
       } catch (error) {
         // An explicit rejection means not sent. Transport failures remain ambiguous.
         const status = channel.classifyFailure(error);

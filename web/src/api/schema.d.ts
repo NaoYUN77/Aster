@@ -615,7 +615,7 @@ export interface components {
             /** @enum {string} */
             transport: "oauth" | "stdio";
             defaultScopes: string[];
-            /** @description Read-only model tool names this provider can expose. */
+            /** @description Model tool names this provider can expose. Read tools are governed as read; the create/send/update tools are governed as write. No delete tool exists. */
             tools: string[];
         };
         ConnectorConnection: {

@@ -23,8 +23,28 @@
 // Observation carries identifiers, versions, counts, durations and safe error codes only —
 // never memory text (design §11).
 
+// Core memory (MemFS) shares this composition entry so the application keeps exactly one memory
+// import (the 07-G/08-H boundary checks); the host reaches the factory through `src/memory-fs.ts`.
+export { MEMORY_LIMITS } from "./fs/contracts.js";
+export { createMemoryFs, type MemoryFs } from "./fs/store.js";
+export {
+  createDreamingRunner,
+  DREAMING_DEFAULTS,
+  parseDreamingState,
+  type DreamingBehavior,
+  type DreamingConfig,
+  type DreamingInput,
+  type DreamingLogEvent,
+  type DreamingRunRecord,
+  type DreamingRunStatus,
+  type DreamingState,
+  type DreamingRunner,
+  type DreamingTurn,
+  type DreamingTurnInput,
+} from "./dreaming.js";
+
 import { createHash } from "node:crypto";
-import type { Context } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
@@ -57,7 +77,9 @@ import {
 import { readWorking } from "./working.js";
 import { requireCurrentProfileEvidence } from "./profile.js";
 import { createWorkingExtension } from "./working-tools.js";
-import { openDaily, type DailyStore } from "./daily.js";
+import { openDaily, searchDaily, type DailyStore } from "./daily.js";
+import { createDreamingRunner, type DreamingConfig, type DreamingRunner, type DreamingTurn } from "./dreaming.js";
+import type { MemoryFs } from "./fs/store.js";
 import { createArchiveTask, initializeArchive, readArchive, reconcileArchive, requestArchive, type ArchiveTask } from "./archive-task.js";
 import {
   confirmCompactionCycle,
@@ -87,12 +109,24 @@ export type MemoryIntegrationOptions = {
   readonly profile?: boolean;
   /** Identifiers-and-codes-only observation; defaults to a one-line stderr log. */
   readonly log?: (event: MemoryLogEvent) => void;
+  /**
+   * Background consolidation (dreaming). Present only when core memory exists and the host enabled
+   * it; without a memory repository there is nothing for a dream run to write.
+   */
+  readonly dreaming?: {
+    readonly config: DreamingConfig;
+    readonly memory: MemoryFs;
+    readonly dataDir: string;
+    /** One background turn in a worktree, using the host's main model chain. */
+    readonly run: DreamingTurn;
+  };
 };
 
 export type MemoryLogEvent = {
   readonly event: string;
   readonly conversationId?: number;
   readonly requestId?: string;
+  readonly runId?: string;
   readonly action?: string;
   readonly code?: string | null;
   readonly turns?: number;
@@ -150,7 +184,7 @@ export class MemoryIntegration {
   readonly #log: (event: MemoryLogEvent) => void;
   /** The attached root's store; every other conversation maps to a root in `#conversationRoots`. */
   readonly #rootStore: DailyStore;
-  /** One store handle per resolved root; a hub and its forks therefore share one. */
+  /** One store handle per resolved root; conversations registered to the same root thus share one. */
   readonly #stores = new Map<string, DailyStore>();
   /** Conversation id to resolved root; the attached root conversation is not listed (it is `#rootStore`). */
   readonly #conversationRoots = new Map<ConversationId, string>();
@@ -160,6 +194,7 @@ export class MemoryIntegration {
   #harness: Harness | undefined;
   #root: Conversation | undefined;
   #rootConversationId: ConversationId | undefined;
+  #dreaming: DreamingRunner | undefined;
   #closed = false;
 
   constructor(options: MemoryIntegrationOptions) {
@@ -173,6 +208,24 @@ export class MemoryIntegration {
       ...(options.archiveTimeoutMs === undefined ? {} : { timeoutMs: options.archiveTimeoutMs }),
       ...(options.profile === undefined ? {} : { profile: options.profile }),
     });
+    if (options.dreaming !== undefined) {
+      this.#dreaming = createDreamingRunner({
+        config: options.dreaming.config,
+        memory: options.dreaming.memory,
+        dataDir: options.dreaming.dataDir,
+        timezone: options.timezone,
+        run: options.dreaming.run,
+        input: (cursor) => this.#dreamingInput(cursor),
+        log: (event) => this.#log({
+          event: event.event,
+          ...(event.runId === undefined ? {} : { runId: event.runId }),
+          ...(event.action === undefined ? {} : { action: event.action }),
+          ...(event.code === undefined ? {} : { code: event.code }),
+          ...(event.turns === undefined ? {} : { turns: event.turns }),
+          ...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
+        }),
+      });
+    }
   }
 
   /**
@@ -180,7 +233,7 @@ export class MemoryIntegration {
    * the store lives under `<root>/memory/daily`. Idempotent for the same pair. A different root for
    * an already registered conversation is a programming error. Registering the attached root
    * conversation is a no-op: it already maps to `options.root`. Store handles open lazily and are
-   * cached by root, so a hub and its forks share one store.
+   * cached by root, so conversations registered to one root share a store.
    */
   registerConversationStore(conversationId: ConversationId, root: string): void {
     const resolved = openDaily(root).root;
@@ -203,7 +256,7 @@ export class MemoryIntegration {
   /**
    * The store for one conversation: never a model parameter, always the durable conversation the
    * operation belongs to. An unregistered conversation is an explicit error, never a fallback to
-   * another hub's (or the owner's) memory.
+   * another conversation's memory.
    */
   #storeFor(conversationId: ConversationId): DailyStore {
     const root = this.#conversationRoots.get(conversationId)
@@ -247,13 +300,22 @@ export class MemoryIntegration {
         model: this.#options.model,
         budget: this.#options.budget,
         facts: () => this.currentFacts(),
-        onResult: (observation) => this.#log({
-          event: "compaction.result",
-          conversationId: observation.conversationId,
-          action: observation.outcome,
-          code: observation.errorCode,
-          turns: observation.attempts,
-        }),
+        onResult: (observation) => {
+          this.#log({
+            event: "compaction.result",
+            conversationId: observation.conversationId,
+            action: observation.outcome,
+            code: observation.errorCode,
+            turns: observation.attempts,
+          });
+          // A completed compaction is a natural consolidation point. The check only enqueues a run;
+          // the hook itself never waits for a model.
+          if (observation.outcome === "succeeded" && observation.conversationId === this.#rootConversationId) {
+            void this.#dreaming?.compactionCompleted().catch((error: unknown) => {
+              this.#log({ event: "dreaming.trigger", action: "failed", code: safeCode(error) });
+            });
+          }
+        },
       }),
       { name: "memory-archive", tasks: [this.#archiveTask] },
     ];
@@ -286,9 +348,8 @@ export class MemoryIntegration {
    * that contradicts the initialized archive is a `revision-conflict`, not a silent change.
    * Archive state is keyed by `conversation.id` in durable storage, so conversations never share it.
    *
-   * A fork has no archive of its own: its inherited history belongs to the Hub, and it reaches the
-   * Hub's long-term memory only through the shared store it was registered with. Its lifecycle is
-   * marked initialized so the request path does not fault; archive boundary work skips it (no state).
+   * A conversation registered to a shared store still has archive state of its own, keyed by its
+   * own id; the shared store only decides where its daily files live.
    */
   async initializeConversation(conversation: Conversation, context: Context): Promise<void> {
     if (this.#initialized.has(conversation.id)) return;
@@ -301,31 +362,23 @@ export class MemoryIntegration {
         });
       }
     } else {
-      const forked = await session.commit(
-        async (tx) => (await tx.conversation(conversation.id))?.parent !== undefined,
-        context,
-      );
-      if (forked) {
-        this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: "fork" });
-      } else {
-        const tail = await session.commit(async (tx) => {
-          const page = await tx.scanEntries({ conversationId: conversation.id, order: "descending" }, 1);
-          return page.items[0]?.id ?? null;
-        }, context);
-        await session.commit(async (tx) => {
-          const slot = await tx.doc(MigrationDoc, conversation.id, "v1", UNSET_MIGRATION);
-          if ((slot as MigrationRecord).at === UNSET_MIGRATION.at) {
-            Object.assign(slot, {
-              version: MEMORY_SCHEMA_VERSION,
-              archiveOrigin: tail,
-              hadHistory: tail !== null,
-              at: Date.now(),
-            } satisfies MigrationRecord);
-          }
-        }, context);
-        await initializeArchive(session, conversation.id, tail, this.#options.timezone, context);
-        this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: tail === null ? "fresh" : "origin-at-tail" });
-      }
+      const tail = await session.commit(async (tx) => {
+        const page = await tx.scanEntries({ conversationId: conversation.id, order: "descending" }, 1);
+        return page.items[0]?.id ?? null;
+      }, context);
+      await session.commit(async (tx) => {
+        const slot = await tx.doc(MigrationDoc, conversation.id, "v1", UNSET_MIGRATION);
+        if ((slot as MigrationRecord).at === UNSET_MIGRATION.at) {
+          Object.assign(slot, {
+            version: MEMORY_SCHEMA_VERSION,
+            archiveOrigin: tail,
+            hadHistory: tail !== null,
+            at: Date.now(),
+          } satisfies MigrationRecord);
+        }
+      }, context);
+      await initializeArchive(session, conversation.id, tail, this.#options.timezone, context);
+      this.#log({ event: "memory.upgrade", conversationId: conversation.id, action: tail === null ? "fresh" : "origin-at-tail" });
     }
     this.#initialized.add(conversation.id);
     await this.#rescanIn(conversation, context);
@@ -465,6 +518,15 @@ export class MemoryIntegration {
       if (!(error instanceof MemoryError)) throw error;
       this.#log({ event: "memory.count", conversationId: root.id, requestId, action: "failed", code: error.appCode });
     }
+    // A completed owner turn is the dreaming counter's unit. The threshold check enqueues work and
+    // returns; the run itself is never awaited on the reply path.
+    if (counted !== undefined && root.id === this.#rootConversationId && this.#dreaming !== undefined) {
+      try {
+        await this.#dreaming.observeTurn();
+      } catch (error) {
+        this.#log({ event: "dreaming.observe", conversationId: root.id, requestId, action: "failed", code: safeCode(error) });
+      }
+    }
     if (counted?.shouldEvaluate === true) {
       const view = await root.context(context);
       const decision = evaluateCompaction({
@@ -512,6 +574,17 @@ export class MemoryIntegration {
    */
   close(): void {
     this.#closed = true;
+    this.#dreaming?.close();
+  }
+
+  /** The one-line "memory review due" note, when reminder behavior owes one. */
+  reminderLine(): string | undefined {
+    return this.#dreaming?.reminderLine();
+  }
+
+  /** Resolves when no dream run is active or pending; the host uses it for shutdown and tests. */
+  whenDreamingIdle(): Promise<void> {
+    return this.#dreaming?.whenIdle() ?? Promise.resolve();
   }
 
   /**
@@ -536,8 +609,8 @@ export class MemoryIntegration {
   async #rescanIn(conversation: Conversation, context: Context): Promise<void> {
     const session = this.#session();
     const root = conversation;
-    // Boundary work is archive work. A conversation with no archive state (an uninitialized
-    // member, or a fork whose inherited history belongs to its Hub) has nothing to re-scan.
+    // Boundary work is archive work. A conversation with no archive state (one whose initialization
+    // has not completed) has nothing to re-scan.
     let initialized = false;
     try {
       initialized = (await readArchive(session, root.id, context))?.initialized === true;
@@ -583,6 +656,41 @@ export class MemoryIntegration {
         return;
       }
     }
+  }
+
+  /**
+   * The bounded evidence one dream run receives: the owner's most recent turns and the daily archive
+   * since the last applied run. Token-bounded on both sides; never memoized, because a run starts
+   * after the trigger and should see the newest facts.
+   */
+  async #dreamingInput(cursor: { readonly archiveThrough: string | null }): Promise<{ transcript: string; archive: string; archiveThrough: string | null }> {
+    const conversation = this.#conversation();
+    const view = await conversation.context(BACKGROUND_CONTEXT);
+    const transcript = boundFromEnd(transcriptExcerpt(view.entries, view.contributions), DREAMING_EVIDENCE_TOKENS);
+    const archive = await this.#archiveExcerpt(cursor.archiveThrough);
+    return {
+      transcript,
+      archive: archive.text,
+      archiveThrough: archive.through ?? cursor.archiveThrough,
+    };
+  }
+
+  async #archiveExcerpt(from: string | null): Promise<{ text: string; through: string | null }> {
+    const search = await searchDaily(this.#rootStore, {
+      ...(from === null || from === "" ? {} : { from }),
+      limit: 100,
+    });
+    const lines: string[] = [];
+    let through = from;
+    for (const hit of search.hits) {
+      const segment = hit.segment;
+      lines.push(`[${segment.date} ${segment.kind}] ${segment.text}`);
+      // A record with an unknown date cannot be a cursor: rescanned is safer than skipped.
+      if (DREAMING_CURSOR_DATE.test(segment.date) && (through === null || !DREAMING_CURSOR_DATE.test(through) || segment.date > through)) {
+        through = segment.date;
+      }
+    }
+    return { text: boundFromEnd(lines.join("\n"), DREAMING_EVIDENCE_TOKENS), through };
   }
 
   #session(): Harness {
@@ -701,6 +809,59 @@ function compactableTokens(
     else compactable += tokens;
   }
   return compactable;
+}
+
+/** Dreaming evidence bounds: each side of the prompt is capped independently. */
+const DREAMING_EVIDENCE_TOKENS = 8_000;
+/** Only a real calendar date can be an archive cursor; `unknown` is rescanned. */
+const DREAMING_CURSOR_DATE = /^\d{4}-\d{2}-\d{2}$/u;
+const DREAMING_TRANSCRIPT_TURNS = 20;
+
+/**
+ * The owner's last turns as plain `role: text` lines, oldest first. A turn ends at a user message;
+ * tool traffic is already represented in the assistant text the harness keeps.
+ */
+function transcriptExcerpt(
+  entries: readonly { readonly kind: string }[],
+  contributions: readonly (readonly Message[])[],
+): string {
+  const lines: string[] = [];
+  let turns = 0;
+  for (let index = entries.length - 1; index >= 0 && turns <= DREAMING_TRANSCRIPT_TURNS; index -= 1) {
+    for (const message of contributions[index] ?? []) {
+      if (message.role === "user") {
+        turns += 1;
+        if (turns > DREAMING_TRANSCRIPT_TURNS) break;
+      }
+      if (message.role !== "user" && message.role !== "assistant") continue;
+      const text = messageText([message]).trim();
+      if (text === "") continue;
+      lines.push(`${message.role}: ${text}`);
+    }
+  }
+  lines.reverse();
+  return lines.join("\n");
+}
+
+/** Keep the newest part of a bounded evidence block, cutting at a line boundary. */
+function boundFromEnd(text: string, tokens: number): string {
+  if (estimateTextTokens(text) <= tokens) return text;
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  let used = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!;
+    const cost = estimateTextTokens(`${line}\n`);
+    if (used + cost > tokens) break;
+    used += cost;
+    kept.push(line);
+  }
+  return kept.reverse().join("\n");
+}
+
+function safeCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code.slice(0, 64) : "DREAMING_ERROR";
 }
 
 function messageText(messages: readonly Message[]): string {

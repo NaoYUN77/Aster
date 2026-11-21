@@ -1,0 +1,20 @@
+{
+  "name": "aster-connector-broker",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker that brokers connector secrets and OAuth tokens for Aster.",
+  "scripts": {
+    "check": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "tsx --test test/unit.test.ts test/jwt.test.ts test/refresh.test.ts",
+    "test:integration": "tsx --test test/integration.test.ts",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261118.1",
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.164.0"
+  }
+}

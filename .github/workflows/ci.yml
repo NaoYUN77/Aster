@@ -2,21 +2,20 @@ name: CI
 
 on:
   pull_request:
-    # Documentation and repository metadata cannot change a build input: the
-    # Dockerfiles exclude docs/ and never copy markdown. Path filters stay off
-    # for anything that can affect an image, test or workflow.
-    paths-ignore:
+    # Markdown and repository metadata cannot change a build input: neither
+    # Dockerfile copies them. Everything else still runs the full pipeline.
+    # The same list is reused by push through a YAML anchor instead of being
+    # repeated (and drifting) in two places.
+    paths-ignore: &ignored_paths
       - "**/*.md"
-      - "docs/**"
       - "LICENSE"
       - ".gitignore"
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE"
-      - ".gitignore"
+    paths-ignore: *ignored_paths
+  # Keep parity with gate-policy.yml: a merge queue merges with merge_group,
+  # and without this trigger the queue would have no CI result to wait for.
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -58,6 +57,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
+          cache: npm
       - name: Build application image
         run: docker build --tag "$ASTER_IMAGE" .
       - name: Verify offline volume preflight on Linux
