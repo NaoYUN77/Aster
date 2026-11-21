@@ -5,7 +5,7 @@ export interface TextRequest {
   senderId: string;
   text: string;
   /**
-   * The inbound message's own id at the channel (`ts` on Slack), when the channel has one. It is what
+   * The inbound message's own id at the channel, when the channel has one. It is what
    * a reaction is attached to; absent means the channel cannot address the message it received.
    */
   messageTs?: string;

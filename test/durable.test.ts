@@ -31,12 +31,13 @@ import type { TextRequest } from "../src/messages.js";
 const request: TextRequest = { requestId: "telegram:test:1", conversationId: "telegram:test", senderId: "1", text: "Remember that my color is blue." };
 const running = new AbortController().signal;
 function appConfig(dataDir: string) {
-  return readConfig({ TELEGRAM_BOT_TOKEN: "offline-test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "offline-test", DATA_DIR: dataDir });
+  return readConfig({ WEB_OWNER_ID: "1", MODEL_PROVIDER: "openai", MODEL_ID: "faux-1", OPENAI_API_KEY: "offline-test", DATA_DIR: dataDir });
 }
 
 function webAppConfig(dataDir: string) {
   return readConfig({
-    TELEGRAM_BOT_TOKEN: "offline-test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
+    WEB_OWNER_ID: "1",
+    MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1", OPENAI_API_KEY: "offline-test", DEEPSEEK_WEB_API_KEY: "web-test", DATA_DIR: dataDir,
   });
 }
@@ -228,8 +229,8 @@ test("a length-limited answer is reported as truncated with its partial text", {
   }
 });
 
-// Leaves a submitted request whose in-process generation was cancelled by close(), so a reopen must recover it.
-async function leaveUnfinishedRequest(directory: string): Promise<void> {
+// Leaves a request whose turn the web adapter stopped: the durable turn is discarded, not resumed.
+async function leaveStoppedRequest(directory: string): Promise<void> {
   const first = modelFixture("openai");
   const started = Promise.withResolvers<void>();
   first.faux.setResponses([async (_transcript, options) => {
@@ -247,24 +248,27 @@ async function leaveUnfinishedRequest(directory: string): Promise<void> {
   await app.close();
 }
 
-test("reopening does not start recovered work until a reply is waiting", { timeout: 20_000 }, async () => {
+test("a stopped turn is not restarted when the app reopens", { timeout: 20_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "personal-agent-resume-timing-test-"));
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
-    await leaveUnfinishedRequest(directory);
+    await leaveStoppedRequest(directory);
     const second = modelFixture("openai");
-    second.faux.setResponses([fauxAssistantMessage("Recovered inside reply.")]);
+    second.faux.setResponses([fauxAssistantMessage("A fresh answer.")]);
     app = await openAgent(appConfig(directory), second.models);
     await delay(200);
-    assert.equal(second.faux.state.callCount, 0, "opening must not run recovered work without a waiter");
-    assert.equal(await app.reply(request, running), "Recovered inside reply.");
+    assert.equal(second.faux.state.callCount, 0, "opening must not run work nobody asked for");
+    // The web adapter discards a stopped turn, so replaying it reports the stop instead of resuming.
+    await assert.rejects(app.reply(request, running), { code: "AGENT_UNANSWERED", message: /aborted/ });
+    assert.equal(second.faux.state.callCount, 0);
+    assert.equal(await app.reply({ ...request, requestId: "telegram:test:fresh" }, running), "A fresh answer.");
     assert.equal(second.faux.state.callCount, 1);
   } finally {
     try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
   }
 });
 
-test("a recovered task is bounded by the waiting reply's timeout", { timeout: 20_000 }, async (t) => {
+test("a reply after reopening is bounded by the request timeout", { timeout: 20_000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "personal-agent-resume-timeout-test-"));
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   const timeout = new AbortController();
@@ -273,7 +277,7 @@ test("a recovered task is bounded by the waiting reply's timeout", { timeout: 20
     return timeout.signal;
   });
   try {
-    await leaveUnfinishedRequest(directory);
+    await leaveStoppedRequest(directory);
     const second = modelFixture("openai");
     const started = Promise.withResolvers<void>();
     let cancelled = false;
@@ -286,14 +290,15 @@ test("a recovered task is bounded by the waiting reply's timeout", { timeout: 20
     app = await openAgent(appConfig(directory), second.models);
     await delay(200);
     assert.equal(second.faux.state.callCount, 0);
-    const reply = assert.rejects(app.reply(request, running), { code: "AGENT_TIMEOUT" });
+    const fresh = { ...request, requestId: "telegram:test:after-reopen" };
+    const reply = assert.rejects(app.reply(fresh, running), { code: "AGENT_TIMEOUT" });
     await started.promise;
     timeout.abort(new DOMException("Request timed out", "TimeoutError"));
     await reply;
-    assert.equal(cancelled, true, "the timeout must cancel the recovered generation");
+    assert.equal(cancelled, true, "the timeout must cancel the generation");
     t.mock.restoreAll();
     // The durable outcome is settled: retrying reports it instead of starting a second generation.
-    await assert.rejects(app.reply(request, running), { code: "AGENT_UNANSWERED", message: /aborted/ });
+    await assert.rejects(app.reply(fresh, running), { code: "AGENT_UNANSWERED", message: /aborted/ });
     assert.equal(second.faux.state.callCount, 1);
   } finally {
     try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
@@ -382,7 +387,7 @@ test("request timeout cancels provider work before reporting AGENT_TIMEOUT", { t
   }
 });
 
-test("shutdown stops waiting while close preserves an unfinished request for reopening", { timeout: 15_000 }, async () => {
+test("shutdown stops the waiting turn and reopening serves only fresh work", { timeout: 15_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "personal-agent-shutdown-test-"));
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   try {
@@ -401,15 +406,17 @@ test("shutdown stops waiting while close preserves an unfinished request for reo
     await started.promise;
     shutdown.abort();
     await reply;
-    assert.equal(cancelled, false, "stopping the host wait must leave the durable request recoverable");
+    // The web adapter cancels the generation and discards the turn; nothing is left to resume.
+    assert.equal(cancelled, true, "the stop must cancel the in-process provider invocation");
     await app.close();
     app = undefined;
-    assert.equal(cancelled, true, "close must cancel the in-process provider invocation");
 
     const second = modelFixture("openai");
-    second.faux.setResponses([fauxAssistantMessage("Recovered after shutdown.")]);
+    second.faux.setResponses([fauxAssistantMessage("Fresh after shutdown.")]);
     app = await openAgent(appConfig(directory), second.models);
-    assert.equal(await app.reply(request, running), "Recovered after shutdown.");
+    await assert.rejects(app.reply(request, running), { code: "AGENT_UNANSWERED", message: /aborted/ });
+    assert.equal(second.faux.state.callCount, 0);
+    assert.equal(await app.reply({ ...request, requestId: "fresh-after-shutdown" }, running), "Fresh after shutdown.");
     assert.equal(second.faux.state.callCount, 1);
     const alreadyStopped = AbortSignal.abort();
     await assert.rejects(app.reply({ ...request, requestId: "never-admitted" }, alreadyStopped));

@@ -76,8 +76,8 @@ async function ledger(storage: Storage) {
 
 test("production startup keeps declaration order when server configuration order changes", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "tool-pin-order-"));
-  const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+  const config = { ...readConfig({ MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   let storage: Storage | undefined;
   let declarations: string | undefined;
@@ -113,8 +113,8 @@ test("pin changes preserve a committed memory projection whose input was not adm
   const directory = await mkdtemp(join(tmpdir(), "tool-pin-memory-"));
   const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
     args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
-  const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({}) };
+  const config = { ...readConfig({ MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({}) };
   const request = { requestId: "telegram:pin:projection", conversationId: "test", senderId: "1", text: "hello" };
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   let storage: Storage | undefined;
@@ -180,8 +180,8 @@ test("pin changes preserve a committed memory projection whose input was not adm
 test("unchanged pins persist the resident catalog without advancing the declaration epoch", { timeout: 30_000 }, async () => {
   for (const enabled of [false, true]) {
     const directory = await mkdtemp(join(tmpdir(), "tool-pin-catalog-"));
-    const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
-      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }),
+    const config = { ...readConfig({ MODEL_PROVIDER: "openai",
+      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }),
       memory: readMemoryConfig({ MEMORY_ENABLED: enabled ? "1" : "0" }) };
     let app: Awaited<ReturnType<typeof openAgent>> | undefined;
     let storage: Storage | undefined;
@@ -220,8 +220,8 @@ test("startup reconciles a published compaction before considering a pin boundar
   const directory = await mkdtemp(join(tmpdir(), "tool-pin-archive-"));
   const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
     args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
-  const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }),
+  const config = { ...readConfig({ MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }),
     memory: readMemoryConfig({ MEMORY_RECENT_VERBATIM_TOKENS: "512", MEMORY_EVALUATE_AFTER_USER_TURNS: "1" }) };
   const gate = Promise.withResolvers<void>();
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
@@ -291,72 +291,67 @@ test("startup reconciles a published compaction before considering a pin boundar
   }
 });
 
-test("pin changes wait through recovery and preserve loaded tools and their sequences", { timeout: 30_000 }, async () => {
+test("pin changes settle on the next restart and never rewrite recorded load snapshots", { timeout: 30_000 }, async () => {
   for (const priorPin of [false, true]) {
     const directory = await mkdtemp(join(tmpdir(), "tool-pin-recovery-"));
     const path = join(directory, "mcp.json");
     const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
       args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }],
       tools: { mcp__s__echo: { pin: priorPin } }, residentToolBudgetTokens: 8_192 };
-    const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
-      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
-    const request = { requestId: "telegram:pin:recover", conversationId: "test", senderId: "1", text: "load env" };
+    const config = { ...readConfig({ MODEL_PROVIDER: "openai",
+      MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+    const request = { requestId: "web:pin:initial", conversationId: "test", senderId: "1", text: "load env" };
     let app: Awaited<ReturnType<typeof openAgent>> | undefined;
     let storage: Storage | undefined;
     try {
       await writeFile(path, JSON.stringify(raw));
       const first = models();
-      const started = Promise.withResolvers<void>();
-      let declarations: string;
       first.faux.setResponses([
         fauxAssistantMessage(fauxToolCall("tool_search", { query: "env", limit: 1 }), { stopReason: "toolUse" }),
-        async (transcript, options) => {
-          declarations = JSON.stringify(getCurrentTools(transcript.messages));
-          started.resolve();
-          await new Promise<void>((resolve) => options!.signal!.addEventListener("abort", () => resolve(), { once: true }));
-          return fauxAssistantMessage("", { stopReason: "aborted" });
+        (transcript) => {
+          assert.ok(getCurrentTools(transcript.messages).some(({ name }) => name === "mcp__s__env"),
+            "tool_search makes the matching deferred tool available in the turn");
+          return fauxAssistantMessage("first answer");
         },
       ]);
       storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
       app = await openAgent(config, first.models, storage);
-      const shutdown = new AbortController();
-      const pending = assert.rejects(app.reply(request, shutdown.signal));
-      await started.promise;
+      assert.equal(await app.reply(request, new AbortController().signal), "first answer");
       const before = await ledger(storage);
-      assert.equal(before?.sequence, 1);
-      shutdown.abort(); await pending;
+      assert.ok(before !== undefined);
       await app.close(); app = undefined; storage = undefined;
+
+      // Flip the pin and force a budget that only admits one state, then restart idle.
       raw.tools.mcp__s__echo.pin = !priorPin;
       raw.residentToolBudgetTokens = priorPin ? 1 : 8_192;
       await writeFile(path, JSON.stringify(raw));
 
       const second = models();
       second.faux.setResponses([(transcript) => {
-        assert.equal(JSON.stringify(getCurrentTools(transcript.messages)), declarations, "recovery retains original declaration bytes and order");
-        return fauxAssistantMessage("recovered");
+        assert.equal(getCurrentTools(transcript.messages).some(({ name }) => name === "mcp__s__echo"), !priorPin,
+          "the next turn sees the newly settled pin");
+        return fauxAssistantMessage("second answer");
       }]);
       storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
       app = await openAgent(config, second.models, storage);
-      assert.equal(second.faux.state.callCount, 0, "startup keeps recovered tasks paused");
       const page = await storage.scanConversations({}, 10, undefined, context);
-      assert.deepEqual(await readResidentTools(storage, page.items[0]!.id, context), priorPin ? ["mcp__s__echo"] : []);
-      assert.deepEqual(await ledger(storage), before);
-      assert.equal(await app.reply(request, new AbortController().signal), "recovered");
-      assert.deepEqual(await ledger(storage), before);
-      await app.close(); app = undefined; storage = undefined;
+      // The tool was promoted by tool_search in the completed turn; the restart settles the flipped
+      // pin, so residence follows the new pin rather than the promotion.
+      assert.deepEqual(await readResidentTools(storage, page.items[0]!.id, context), priorPin ? [] : ["mcp__s__echo"]);
+      const settled = await ledger(storage);
+      assert.equal(settled?.epoch, before!.epoch + 1);
+      assert.equal(settled?.sequence, before!.sequence);
+      assert.deepEqual(settled?.loads, before!.loads, "pin settlement never rewrites prior load snapshots");
+      assert.equal(await app.reply({ ...request, requestId: "web:pin:next" }, new AbortController().signal), "second answer");
+      assert.deepEqual(await ledger(storage), settled, "a completed turn does not settle the pin again");
 
-      const third = models();
-      third.faux.setResponses([(transcript) => {
-        assert.equal(getCurrentTools(transcript.messages).some(({ name }) => name === "mcp__s__echo"), !priorPin);
-        return fauxAssistantMessage("settled");
-      }]);
+      await app.close(); app = undefined; storage = undefined;
       storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
-      app = await openAgent(config, third.models, storage);
+      app = await openAgent(config, models().models, storage);
       const after = await ledger(storage);
-      assert.equal(after?.epoch, before!.epoch + 1);
-      assert.equal(after?.sequence, before!.sequence);
-      assert.deepEqual(after?.loads, before!.loads, "pin settlement never rewrites prior load snapshots");
-      assert.equal(await app.reply({ ...request, requestId: "telegram:pin:next" }, new AbortController().signal), "settled");
+      assert.equal(after?.epoch, settled!.epoch, "a settled pin is not settled again on the next restart");
+      assert.equal(after?.sequence, settled!.sequence);
+      assert.deepEqual(after?.loads, settled!.loads);
     } finally {
       if (app) await app.close(); else await storage?.close(context);
       await rm(directory, { recursive: true, force: true });
@@ -369,8 +364,8 @@ test("file pins settle on idle restart, allow direct calls and leave the active 
   const path = join(directory, "mcp.json");
   const raw = { servers: [{ name: "s", transport: "stdio", command: process.execPath,
     args: [join(import.meta.dirname, "fixtures", "mcp-server.mjs")] }], tools: { mcp__s__echo: { pin: false } } };
-  const config = { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+  const config = { ...readConfig({ MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
   const request = (id: number) => ({ requestId: `telegram:pin:${id}`, conversationId: "test", senderId: "1", text: "echo" });
   let app: Awaited<ReturnType<typeof openAgent>> | undefined;
   let storage: Storage | undefined;

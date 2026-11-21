@@ -4,8 +4,6 @@ import { buildInstructions } from "../src/agent.js";
 import { readBrowserConfig, readConfig } from "../src/config.js";
 
 const env = {
-  TELEGRAM_BOT_TOKEN: "token",
-  TELEGRAM_OWNER_ID: "42",
   MODEL_PROVIDER: "deepseek",
   MODEL_ID: "deepseek-flash",
   DEEPSEEK_API_KEY: "secret",

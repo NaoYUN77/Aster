@@ -51,8 +51,7 @@ type AppConfig = ReturnType<typeof readConfig>;
 
 function appConfig(dataDir: string, env: NodeJS.ProcessEnv = {}): AppConfig {
   const full = {
-    TELEGRAM_BOT_TOKEN: "offline-test",
-    TELEGRAM_OWNER_ID: "1",
+    WEB_OWNER_ID: "1",
     MODEL_PROVIDER: "openai",
     MODEL_ID: "faux-1",
     OPENAI_API_KEY: "offline-test",
@@ -155,6 +154,30 @@ test("07-F: memory configuration defaults, overrides and invalid values", () => 
   for (const env of invalid) {
     assert.throws(() => readMemoryConfig(env), ConfigurationError, JSON.stringify(env));
   }
+
+  // The memory section travels with the rest of the configuration: the agent must never fall back
+  // to process defaults, so an explicit MEMORY_ENABLED=0 cannot be lost between readConfig and
+  // openAgent.
+  const base = {
+    MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1",
+    OPENAI_API_KEY: "offline-test",
+    DATA_DIR: "memory-config-test",
+  };
+  const disabled = readConfig({ ...base, MEMORY_ENABLED: "0" });
+  assert.equal(disabled.memory.enabled, false);
+  const enabled = readConfig({
+    ...base,
+    MEMORY_ENABLED: "1",
+    MEMORY_EVALUATE_AFTER_USER_TURNS: "3",
+    MEMORY_TIMEZONE: "Asia/Shanghai",
+    MEMORY_RESERVE_TOKENS: "8192",
+  });
+  assert.equal(enabled.memory.enabled, true);
+  assert.equal(enabled.memory.budget.evaluateAfterUserTurns, 3);
+  assert.equal(enabled.memory.timezone, "Asia/Shanghai");
+  assert.equal(enabled.memory.reserveTokens, 8192);
+  assert.throws(() => readConfig({ ...base, MEMORY_ENABLED: "yes" }), ConfigurationError);
 });
 
 // ---------------------------------------------------------------------------
@@ -854,7 +877,7 @@ test("07-F/11: a plan-level refusal surfaces as a MEMORY_* error, never AGENT_SE
 // 07-G: the composition boundaries hold in the source tree
 // ---------------------------------------------------------------------------
 
-test("07-G: agent.ts composes only through the integration entry; telegram/inbox/delivery stay memory-free", async () => {
+test("07-G: agent.ts composes only through the integration entry; inbox/delivery/web stay memory-free", async () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const read = (path: string) => readFile(join(root, path), "utf8");
 
@@ -865,7 +888,7 @@ test("07-G: agent.ts composes only through the integration entry; telegram/inbox
     assert.ok(!agent.includes(forbidden), `agent.ts must not contain ${forbidden}`);
   }
 
-  for (const path of ["src/telegram.ts", "src/inbox.ts", "src/deliveries.ts", "src/main.ts"]) {
+  for (const path of ["src/inbox.ts", "src/deliveries.ts", "src/main.ts", "src/http/run-web.ts"]) {
     const source = await read(path);
     assert.ok(!/from\s+"[^"]*memory\//.test(source), `${path} must not import memory internals`);
   }

@@ -9,7 +9,13 @@ const RUN_LEASE_MS = 20 * 60_000;
 const MAX_DISPATCH_PER_TICK = 10;
 const RETRYABLE = new Set(["AGENT_TIMEOUT", "AGENT_UNANSWERED", "AGENT_TRUNCATED", "EMPTY_REPLY", "MODEL_UNAVAILABLE"]);
 
-export type DeliverFn = (chatId: string, text: string, signal: AbortSignal) => Promise<string>;
+export type DeliverFn = (
+  chatId: string,
+  text: string,
+  signal: AbortSignal,
+  /** Host-side idempotency key; a web host uses it so a crash cannot repeat one run's report. */
+  deliveryKey?: string,
+) => Promise<string>;
 
 export type RoutinesRuntimeOptions = {
   readonly store: SqliteRoutineStore;
@@ -53,13 +59,18 @@ export function createRoutines(options: RoutinesRuntimeOptions): RoutinesRuntime
   let unsubscribe: (() => void) | undefined;
   let pausedLogged = false;
 
-  async function deliverText(text: string, runSignal: AbortSignal): Promise<number> {
+  async function deliverText(text: string, runSignal: AbortSignal, keyPrefix?: string): Promise<number> {
     const parts = splitReply(text.trim(), 4_000).filter((part) => part !== "");
     if (parts.length === 0) throw Object.assign(new Error("Routine produced no text"), { code: "EMPTY_REPLY" });
     let sent = 0;
     for (const part of parts) {
       if (runSignal.aborted) throw new Error("Routine delivery aborted");
-      await options.deliver(options.chatId, part, runSignal);
+      await options.deliver(
+        options.chatId,
+        part,
+        runSignal,
+        keyPrefix === undefined ? undefined : `${keyPrefix}:part:${sent}`,
+      );
       sent += 1;
     }
     return sent;
@@ -119,6 +130,7 @@ ${report}`;
           await deliverText(
             `常驻任务今日 agent 运行额度已用完（${config.maxRunsPerDay} 次），本次「${routine.title}」只记录未执行。`,
             runSignal,
+            `routine:${routine.id}:limit:${localDateKey(now(), config.timezone)}`,
           );
         }
         return { delivered: 0, failed: false };
@@ -128,7 +140,7 @@ ${report}`;
       if (routine.mode === "notify") {
         const text = renderTemplate(routine.text ?? "", routine, now());
         if (text.trim() === "") throw Object.assign(new Error("Notify routine has no text"), { code: "EMPTY_REPLY" });
-        const sent = await deliverText(text, runSignal);
+        const sent = await deliverText(text, runSignal, `routine:${routine.id}:run:${run.id}`);
         store.finish(run.id, "succeeded", { reply: text });
         store.markSuccess(routine.id);
         return { delivered: sent, failed: false };
@@ -152,7 +164,7 @@ ${report}`;
         store.markSuccess(routine.id);
         return { delivered: 0, failed: false };
       }
-      const sent = await deliverText(result.text, runSignal);
+      const sent = await deliverText(result.text, runSignal, `routine:${routine.id}:run:${run.id}`);
       store.finish(run.id, "succeeded", { reply: result.text });
       store.markSuccess(routine.id);
       return { delivered: sent, failed: false };
@@ -183,6 +195,7 @@ ${report}`;
       await deliverText(
         `常驻任务「${routine.title}」(#${routine.id}) 已连续失败 ${failures} 次：${code}。它仍会按计划重试。`,
         runSignal,
+        `routine:${routine.id}:alert:${localDateKey(now(), routine.timezone)}`,
       );
     } catch (error) {
       log(`Routine failure alert could not be delivered (${failureCode(error)})`);
@@ -212,7 +225,7 @@ ${report}`;
       const text = `常驻任务今日用量（${date}）：agent 运行 ${usage.agentRuns} 次`
         + `（成功 ${usage.agentRuns - usage.agentFailures}，失败 ${usage.agentFailures}），通知 ${usage.notifyRuns} 条。${top}`;
       try {
-        await deliverText(text, runSignal);
+        await deliverText(text, runSignal, `routine:summary:${date}`);
       } catch (error) {
         log(`Routine daily summary could not be delivered (${failureCode(error)})`);
       }
@@ -235,6 +248,7 @@ ${report}`;
             `常驻任务用量异常：今天已运行 ${usage.agentRuns} 次，过去 7 天日均 ${average.toFixed(1)} 次。`
             + "回复“停掉所有常驻任务”可以暂停。",
             runSignal,
+            `routine:anomaly:${date}`,
           );
         } catch (error) {
           log(`Routine anomaly alert could not be delivered (${failureCode(error)})`);

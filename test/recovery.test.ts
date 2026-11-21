@@ -17,7 +17,6 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { readConfig } from "../src/config.js";
 import { Inbox } from "../src/inbox.js";
 import { createToolRegistry } from "../src/tools.js";
-import { serveTelegram } from "../src/telegram.js";
 
 const context = BACKGROUND_CONTEXT;
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -143,25 +142,18 @@ test("a crash while a segment is sending quarantines it and later sends only sto
       inbox.recover();
       assert.deepEqual(inbox.blocked().map((row) => [row.part, row.status, row.error]), [[0, "uncertain", "PROCESS_INTERRUPTED"]]);
       assert.equal(inbox.next(), undefined, "an unconfirmed segment is not resent automatically");
-      assert.equal(inbox.nextPart("telegram:99:12")?.part, 1);
+      assert.equal(inbox.nextPart("web:99:12")?.part, 1);
 
-      inbox.resolvePart("telegram:99:12", 0, "retry");
+      inbox.resolvePart("web:99:12", 0, "retry");
       const sent: string[] = [];
-      const shutdown = new AbortController();
-      let executions = 0;
-      await serveTelegram(
-        "42",
-        "99",
-        inbox,
-        async () => { executions++; throw new Error("must not rerun the agent"); },
-        shutdown.signal,
-        {
-          send: async (_chat, text) => { sent.push(text); return String(100 + sent.length); },
-          updates: async () => { shutdown.abort(); return []; },
-        },
-      );
+      let part = inbox.nextPart("web:99:12");
+      while (part) {
+        sent.push(part.text);
+        inbox.beginPart("web:99:12", part.part);
+        inbox.confirmPart("web:99:12", part.part, String(100 + sent.length));
+        part = inbox.nextPart("web:99:12");
+      }
       assert.deepEqual(sent, ["a".repeat(4000), "tail"]);
-      assert.equal(executions, 0);
       assert.equal(inbox.blocked().length, 0);
     } finally {
       inbox.close();
@@ -182,26 +174,26 @@ test("delivery CLI recovers an interrupted send before listing and resolving it"
     assert.equal(list.code, 0, list.stderr);
     const output = JSON.parse(list.stdout) as { blocked: { requestId: string; status: string; part: number }[] };
     assert.deepEqual(output.blocked.map((row) => [row.requestId, row.status, row.part]),
-      [["telegram:99:12", "uncertain", 0]], "a leftover sending part must be visible to the operator");
+      [["web:99:12", "uncertain", 0]], "a leftover sending part must be visible to the operator");
 
     const inbox = new Inbox(database);
     try {
       assert.equal(inbox.next(), undefined, "a request with an unresolved interrupted part is not sent automatically");
-      assert.equal(inbox.nextPart("telegram:99:12")?.part, 1, "the unresolved interrupted part itself is not pending");
+      assert.equal(inbox.nextPart("web:99:12")?.part, 1, "the unresolved interrupted part itself is not pending");
     } finally {
       inbox.close();
     }
 
-    const retry = await runCli(directory, ["retry", "telegram:99:12", "0"]);
+    const retry = await runCli(directory, ["retry", "web:99:12", "0"]);
     assert.equal(retry.code, 0, retry.stderr);
 
     const reopened = new Inbox(database);
     try {
-      assert.equal(reopened.nextPart("telegram:99:12")?.part, 0, "retry makes the stored part pending again");
+      assert.equal(reopened.nextPart("web:99:12")?.part, 0, "retry makes the stored part pending again");
       reopened.recover();
       reopened.recover();
       assert.equal(reopened.blocked().length, 0, "recover is idempotent after resolution");
-      assert.equal(reopened.nextPart("telegram:99:12")?.part, 0);
+      assert.equal(reopened.nextPart("web:99:12")?.part, 0);
     } finally {
       reopened.close();
     }

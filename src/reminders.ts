@@ -289,7 +289,7 @@ export class ReminderStore {
     });
   }
 
-  /** Conditional `queued -> sending`; only the winner may call Telegram. */
+  /** Conditional `queued -> sending`; only the winner may hand the reminder to the transport. */
   beginSend(id: number): boolean {
     const changed = this.#db.prepare(
       "UPDATE reminders SET status = 'sending', attempts = attempts + 1 WHERE id = ? AND status = 'queued'",
@@ -307,7 +307,7 @@ export class ReminderStore {
   }
 
   /**
-   * Explicit Telegram rejection is `failed`; a transport error or shutdown, where Telegram may have
+   * An explicit transport rejection is `failed`; a transport error or shutdown, where delivery may have
    * accepted the message, is `uncertain`. Neither is retried automatically.
    */
   markFailure(id: number, status: "failed" | "uncertain", code: string): void {
@@ -325,8 +325,8 @@ export class ReminderStore {
   }
 
   /**
-   * Startup recovery. A queued row never reached Telegram, so it returns to pending. A sending row
-   * may have reached Telegram before the process died; it becomes uncertain and is never resent
+   * Startup recovery. A queued row never reached the transport, so it returns to pending. A sending
+   * row may have been delivered before the process died; it becomes uncertain and is never resent
    * automatically.
    */
   recover(): void {
@@ -337,7 +337,7 @@ export class ReminderStore {
     this.notify();
   }
 
-  /** Operator reconciliation after checking Telegram: confirm delivery or make one retry possible. */
+  /** Operator reconciliation after checking the real conversation: confirm delivery or allow one retry. */
   resolve(id: number, action: "sent" | "retry"): Reminder {
     return this.transaction(() => {
       const existing = this.#db.prepare("SELECT * FROM reminders WHERE id = ?").get(id);
@@ -438,7 +438,7 @@ export class ReminderScheduler {
 
   /**
    * One deterministic pass, exposed for tests and for an operator-triggered flush. Returns the
-   * number of reminders Telegram accepted.
+   * number of reminders the transport accepted.
    */
   async runDue(signal: AbortSignal = this.signal()): Promise<number> {
     const claimed = this.#store.claimDue(this.#now().toISOString());
@@ -447,7 +447,15 @@ export class ReminderScheduler {
       if (signal.aborted) break;
       if (!this.#store.beginSend(reminder.id)) continue;
       try {
-        const messageId = await this.#client.send(reminder.chatId, reminderText(reminder), signal);
+        // The key is stable for one reminder row, so a host that persists notifications can suppress
+        // a duplicate after a crash without changing the transport semantics for chat channels.
+        const messageId = await this.#client.send(
+          reminder.chatId,
+          reminderText(reminder),
+          signal,
+          undefined,
+          `reminder:${reminder.id}`,
+        );
         this.#store.markSent(reminder.id, messageId);
         sent += 1;
       } catch (error) {
@@ -524,7 +532,7 @@ export function createReminderExtension(store: ReminderStore, options: { readonl
   const ownerId = options.ownerId ?? options.chatId;
   const create = defineTool({
     name: "reminder_create",
-    description: "Create a one-time reminder that the host will deliver to this Telegram conversation. trigger_at must be an ISO 8601 instant with an explicit offset or Z; timezone is an IANA name such as Asia/Shanghai. The host rejects past or out-of-range times.",
+    description: "Create a one-time reminder that the host will deliver to this conversation. trigger_at must be an ISO 8601 instant with an explicit offset or Z; timezone is an IANA name such as Asia/Shanghai. The host rejects past or out-of-range times.",
     parameters: obj({
       content: str({ minLength: 1, maxLength: 2_000 }),
       trigger_at: str({ description: "ISO 8601 instant with an explicit offset or Z, e.g. 2026-11-05T09:00:00+08:00" }),

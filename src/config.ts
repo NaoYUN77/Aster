@@ -7,8 +7,6 @@ import type { WatchersConfig } from "./watchers/protocol.js";
 import { MEMORY_LIMITS } from "./memory/fs/contracts.js";
 import { DREAMING_DEFAULTS, type DreamingBehavior, type DreamingConfig } from "./memory/dreaming.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
-import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
-import { STYLE_MODES } from "./style.js";
 import type { CustomProviderDeclaration } from "./provider-config.js";
 import { ROUTINE_DEFAULTS, type RoutinesConfig } from "./routines/protocol.js";
 import { assertTimeZone, isValidTimeOfDay, normalizeTimeOfDay } from "./routines/time.js";
@@ -103,7 +101,7 @@ function validateProxyEnv(env: NodeJS.ProcessEnv): void {
  * Enable Node's global HTTP(S) proxy dispatcher from the environment when a proxy variable is set.
  * Needed when HTTPS_PROXY is loaded from --env-file=.env after Node startup; safe alongside NODE_USE_ENV_PROXY=1.
  * With ASTER_MITM_TOKEN_FILE set, the effective URLs carry the proxy credentials and are written back
- * so clients that build their own agent from process.env (TelegramClient, MCP children) use them too.
+ * so clients that build their own agent from process.env (MCP children) use them too.
  */
 export function configureEnvProxy(env: NodeJS.ProcessEnv = process.env): boolean {
   validateProxyEnv(env);
@@ -154,9 +152,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     if (!value) throw new ConfigurationError(`Missing configuration: ${key}`);
     return value;
   };
-  // The channel comes first: which variables exist, including the owner id, depends on it.
-  const channelKind = readChannelKind(env);
-  const ownerId = channelKind === "slack" ? readSlackOwnerId(env, required) : readOwnerId(env);
+  // The web adapter is the only conversation surface, so its owner id is the only channel identity.
+  const ownerId = readWebOwnerId(env);
   const provider = required("MODEL_PROVIDER");
   // A declared provider carries its own credential variable name; either kind resolves to exactly
   // one environment variable holding one explicit key.
@@ -176,9 +173,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
   const routines = readRoutinesConfig(env);
   const skills = readSkillsConfig(env);
   const browser = readBrowserConfig(env);
-  const style = readStyleConfig(env);
-  // The channel's own credentials keep their place in the error order; MODEL_ID follows them as before.
-  const channel = readChannelCredentials(env, channelKind, ownerId, required);
+  // The web adapter has no bot credential: the owner authenticates with a password, and the HTTP
+  // layer enforces that. Configuration only names the internal sender id.
+  const channel: ChannelConfig = { kind: "web", ownerId };
   const model = required("MODEL_ID");
   const failover = readModelFailoverConfig(
     env,
@@ -207,12 +204,35 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(routines.enabled ? { routines } : {}),
     ...(skills.enabled ? { skills } : {}),
     ...(browser === undefined ? {} : { browser }),
-    style,
     memoryFs: readMemoryFsConfig(env),
     dreaming: readDreamingConfig(env),
     trace: readTraceConfig(env),
+    // Memory is part of the configuration every deployment sees, so an explicit MEMORY_ENABLED=0 is
+    // honored rather than silently replaced by defaults when the agent is composed.
+    memory: readMemoryConfig(env),
+    web: readWebConfig(env),
+    connectors: readConnectorsConfig(env),
   };
 }
+
+/** Variables an upgraded deployment may still carry from the Telegram/Slack builds. */
+const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING"] as const;
+const REMOVED_ENV_PREFIXES = ["TELEGRAM_", "SLACK_"] as const;
+
+/**
+ * The names (never the values) of environment variables this build no longer reads. They are
+ * silently ignored so an existing .env keeps booting, but startup says so once so nobody believes
+ * a leftover `CHANNEL` or token still does something.
+ */
+export function removedConfigKeys(env: NodeJS.ProcessEnv = process.env): readonly string[] {
+  return Object.keys(env)
+    .filter((key) => (REMOVED_ENV_KEYS as readonly string[]).includes(key)
+      || REMOVED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix)))
+    .sort();
+}
+
+/** The one startup line printed when {@link removedConfigKeys} finds anything. Names only. */
+export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING are no longer read";
 
 /** At most this many fallbacks; the first batch intentionally keeps the chain short. */
 const MAX_MODEL_FALLBACKS = 5;
@@ -346,32 +366,10 @@ export function readReminderConfig(env: NodeJS.ProcessEnv = process.env): Remind
   };
 }
 
-/** Reaction feedback: record signals, and at most once per scope ask what to change. */
-export type StyleConfig = {
-  /**
-   * `off` (default) records nothing; `observe` records only; `ask` records and asks. Default `off`
-   * because Slack delivers reaction events only after `reactions:read` and the matching event
-   * subscriptions are added — until then any other value would look like silence.
-   */
-  readonly mode: "off" | "observe" | "ask";
-};
-
 /**
- * One variable with three states, and an unknown value is a startup error rather than a silent fall
- * back to the safest one: which of the three the deployment is in has to be a decision somebody made.
- */
-export function readStyleConfig(env: NodeJS.ProcessEnv = process.env): StyleConfig {
-  const raw = env.STYLE_LEARNING?.trim().toLowerCase();
-  if (raw === undefined || raw === "") return { mode: "off" };
-  if (!(STYLE_MODES as readonly string[]).includes(raw)) {
-    throw new ConfigurationError(`STYLE_LEARNING must be one of: ${STYLE_MODES.join(", ")}`);
-  }
-  return { mode: raw as StyleConfig["mode"] };
-}
-
-/**
- * Event tracking (WATCHERS_*). Off by default: no outbound request is made while no watcher exists,
- * and every malformed bound fails startup rather than being discovered at the first check.
+ * Event tracking (WATCHERS_*). On by default, matching `.env.example`: no outbound request is made
+ * while no watcher exists. `WATCHERS_ENABLED=0` disables the loop entirely. Every malformed bound
+ * fails startup rather than being discovered at the first check.
  */
 export function readWatchersConfig(env: NodeJS.ProcessEnv = process.env): WatchersConfig {
   const enabledRaw = env.WATCHERS_ENABLED?.trim();
@@ -513,171 +511,253 @@ function boundedInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, m
 }
 
 /**
- * The one conversation surface this process serves. Exactly one channel is active: the Inbox holds a
- * single request stream and a single identity, so two channels cannot share a data directory without
- * telling each other's messages apart. Switching the variable switches the channel.
+ * The one conversation surface this process serves. The web adapter is the only entry: one owner,
+ * one conversation, no bot credential. The discriminant stays so call sites keep reading the same
+ * `kind`, but there is nothing left to switch on.
  */
-export type ChannelConfig =
-  | { readonly kind: "telegram"; readonly ownerId: string; readonly token: string; readonly apiRoot?: string }
-  | {
-    readonly kind: "slack";
-    readonly ownerId: string;
-    readonly botToken: string;
-    readonly appToken: string;
-    /** Channels the bot answers in. Empty keeps the owner-only DM behaviour. */
-    readonly allowedChannels: readonly string[];
-    /** Emoji the bot attaches to a message while it works, and the ones that can replace it. */
-    readonly receipts: ReceiptEmojis;
-    /** How many reactions the model may spend on one message; keeps a lively answer from becoming a wall. */
-    readonly maxReactions: number;
-  };
+export type ChannelConfig = { readonly kind: "web"; readonly ownerId: string };
 
-export const CHANNELS = ["telegram", "slack"] as const;
+/** Web adapter runtime settings. */
+export type WebConfig = {
+  readonly port: number;
+  readonly host: string;
+  /** Origins allowed to call the API from a desktop/mobile WebView. Same-origin needs no entry. */
+  readonly allowedOrigins: readonly string[];
+  readonly sessionTtlDays: number;
+  /** Directory of the built frontend; relative paths resolve from the process working directory. */
+  readonly staticDir: string;
+  /** Whether to trust X-Forwarded-For from the local reverse proxy for the login rate limit. */
+  readonly trustProxy: boolean;
+};
 
-const SLACK_BOT_TOKEN_SHAPE = /^xoxb-[A-Za-z0-9-]{20,250}$/;
-const SLACK_APP_TOKEN_SHAPE = /^xapp-[A-Za-z0-9-]{20,250}$/;
-// Slack member ids: a U (or legacy W) plus the member's alphanumeric id.
-const SLACK_OWNER_ID_SHAPE = /^[UW][A-Z0-9]{6,15}$/;
-// Channel ids: C (public), G (private or legacy group) or D (direct); the bot token type decides access.
-const SLACK_CHANNEL_ID_SHAPE = /^[CGD][A-Z0-9]{6,15}$/;
+const WEB_OWNER_ID_SHAPE = /^[A-Za-z0-9._-]{1,64}$/;
+// scheme://authority, no path/query/fragment. Native WebView origins use custom schemes.
+const ORIGIN_SHAPE = /^[a-z][a-z0-9+.-]*:\/\/[^\s/?#]+$/i;
+const DEFAULT_WEB_ORIGINS = [
+  "http://localhost",
+  "http://localhost:5173",
+  // Capacitor WebView origins used by the native shells.
+  "https://localhost",
+  "http://tauri.localhost",
+  "tauri://localhost",
+  "capacitor://localhost",
+] as const;
 
 /**
- * Which channel this process serves. The default keeps every existing deployment working, and an
- * unrecognised value is a startup error rather than a silent fallback to Telegram.
+ * The web adapter is one owner. `WEB_OWNER_ID` is only the internal sender id the agent sees; it is
+ * not a login name and never creates a second user.
  */
-function readChannelKind(env: NodeJS.ProcessEnv): "telegram" | "slack" {
-  const raw = env.CHANNEL?.trim().toLowerCase();
-  if (raw !== undefined && raw !== "" && !(CHANNELS as readonly string[]).includes(raw)) {
-    throw new ConfigurationError(`CHANNEL must be one of: ${CHANNELS.join(", ")}`);
-  }
-  return raw === "slack" ? "slack" : "telegram";
-}
-
-function readSlackOwnerId(env: NodeJS.ProcessEnv, required: (key: string) => string): string {
-  const ownerId = required("SLACK_OWNER_ID");
-  if (!SLACK_OWNER_ID_SHAPE.test(ownerId)) {
-    throw new ConfigurationError("SLACK_OWNER_ID must be a Slack member ID, such as U0123ABCDEF");
+function readWebOwnerId(env: NodeJS.ProcessEnv): string {
+  const raw = env.WEB_OWNER_ID?.trim();
+  const ownerId = raw === undefined || raw === "" ? "owner" : raw;
+  if (!WEB_OWNER_ID_SHAPE.test(ownerId)) {
+    throw new ConfigurationError("WEB_OWNER_ID must be 1-64 characters of [A-Za-z0-9._-]");
   }
   return ownerId;
 }
 
-/** The emoji receipts a Slack deployment asks for by default; each one can be turned off explicitly. */
-const SLACK_RECEIPT_DEFAULTS = {
-  working: "eyes",
-  done: "white_check_mark",
-  failed: "warning",
-  lost: "x",
-} as const;
-/** A deployment that wants no receipt at all writes one of these instead of a name. */
-const RECEIPT_OFF = new Set(["none", "off", "0", "-"]);
-
-/**
- * Reads one receipt emoji. Absent means the default, an empty or explicit "none" means this receipt
- * is off, and anything Slack could not accept as an emoji name is a startup error rather than a bot
- * whose acknowledgement silently never appears.
- */
-function readReceiptEmoji(env: NodeJS.ProcessEnv, key: string, fallback: string): string | undefined {
+function readOriginList(env: NodeJS.ProcessEnv, key: string): readonly string[] {
   const raw = env[key]?.trim();
-  if (raw === undefined) return fallback;
-  if (raw === "" || RECEIPT_OFF.has(raw.toLowerCase())) return undefined;
-  const name = normalizeEmojiName(raw);
-  if (name === undefined) {
-    throw new ConfigurationError(`${key} must be a Slack emoji name, such as ${fallback}, or none`);
+  if (raw === undefined || raw === "") return DEFAULT_WEB_ORIGINS;
+  const origins = raw.split(",").map((value) => value.trim()).filter((value) => value !== "");
+  for (const origin of origins) {
+    if (!ORIGIN_SHAPE.test(origin)) {
+      throw new ConfigurationError(`${key} must list origins such as https://desktop.example (no path), comma-separated`);
+    }
   }
-  return name;
+  return [...new Set(origins)];
 }
 
-/**
- * A comma-separated allowlist. Absent or empty is not "allow everything": it is the owner-only
- * behaviour this deployment had before team channels existed. A malformed id is a startup error, so a
- * typo shows up as a refused boot instead of a member whose messages are silently ignored.
- */
-function readSlackIdList(
-  env: NodeJS.ProcessEnv,
-  key: string,
-  shape: RegExp,
-  what: string,
-): readonly string[] {
-  const raw = env[key]?.trim();
-  if (raw === undefined || raw === "") return [];
-  const ids = raw.split(",").map((value) => value.trim()).filter((value) => value !== "");
-  for (const id of ids) {
-    if (!shape.test(id)) throw new ConfigurationError(`${key} must list ${what}, comma-separated and without spaces`);
+export function readWebConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
+  const host = env.WEB_HOST?.trim() || "0.0.0.0";
+  if (/\s/.test(host)) throw new ConfigurationError("WEB_HOST must not contain whitespace");
+  const rawTrustProxy = env.WEB_TRUST_PROXY?.trim();
+  if (rawTrustProxy !== undefined && rawTrustProxy !== "" && rawTrustProxy !== "0" && rawTrustProxy !== "1") {
+    throw new ConfigurationError("WEB_TRUST_PROXY must be 0 or 1");
   }
-  return [...new Set(ids)];
+  return {
+    port: boundedInteger(env, "WEB_PORT", 8787, 1, 65_535),
+    host,
+    allowedOrigins: readOriginList(env, "WEB_ALLOWED_ORIGINS"),
+    sessionTtlDays: boundedInteger(env, "WEB_SESSION_TTL_DAYS", 30, 1, 3_650),
+    staticDir: env.WEB_STATIC_DIR?.trim() || "web/dist",
+    trustProxy: rawTrustProxy === "1",
+  };
 }
 
-/**
- * Reads the selected channel's own variables. Only the active channel's credentials are required, so
- * a Telegram deployment never needs Slack tokens and vice versa. A prefix check catches a token
- * pasted into the wrong variable; a vault placeholder is accepted wherever a credential is expected.
- */
-function readChannelCredentials(
-  env: NodeJS.ProcessEnv,
-  kind: "telegram" | "slack",
-  ownerId: string,
-  required: (key: string) => string,
-): ChannelConfig {
-  if (kind === "slack") {
-    const botToken = required("SLACK_BOT_TOKEN");
-    const appToken = required("SLACK_APP_TOKEN");
-    assertSlackToken("SLACK_BOT_TOKEN", botToken, SLACK_BOT_TOKEN_SHAPE);
-    assertSlackToken("SLACK_APP_TOKEN", appToken, SLACK_APP_TOKEN_SHAPE);
-    // Receipts need `reactions:write`; the shape is checked here so a bad name is a refused boot, and a
-    // missing scope shows up as a refused call rather than as a bot that never reacts.
-    const working = readReceiptEmoji(env, "SLACK_ACK_EMOJI", SLACK_RECEIPT_DEFAULTS.working);
-    const done = readReceiptEmoji(env, "SLACK_DONE_EMOJI", SLACK_RECEIPT_DEFAULTS.done);
-    const failed = readReceiptEmoji(env, "SLACK_FAIL_EMOJI", SLACK_RECEIPT_DEFAULTS.failed);
-    const lost = readReceiptEmoji(env, "SLACK_LOST_EMOJI", SLACK_RECEIPT_DEFAULTS.lost);
-    return {
-      kind: "slack",
-      ownerId,
-      botToken,
-      appToken,
-      // Optional: an empty list is the owner-only private behaviour, not an open door.
-      allowedChannels: readSlackIdList(env, "SLACK_ALLOWED_CHANNELS", SLACK_CHANNEL_ID_SHAPE, "Slack channel IDs"),
-      receipts: {
-        ...(working === undefined ? {} : { working }),
-        ...(done === undefined ? {} : { done }),
-        ...(failed === undefined ? {} : { failed }),
-        ...(lost === undefined ? {} : { lost }),
-      },
-      // A reaction budget per message, not per process: the model is asked to be lively, not to decorate.
-      maxReactions: boundedInteger(env, "SLACK_MAX_REACTIONS", 3, 1, 10),
-    };
+export type SecretBackend = "file" | "cf";
+
+/** Cloudflare Worker secret broker access: URL plus the Cloudflare Access service token. */
+export type SecretBrokerConfig = {
+  readonly url: string;
+  readonly accessClientId?: string;
+  readonly accessClientSecret?: string;
+  /** Two-line file (client id, client secret); takes precedence over the two env values. */
+  readonly accessTokenFile?: string;
+};
+
+/** Connector MVP settings. Secret values come from the file directory or the CF broker. */
+export type ConnectorsConfig = {
+  readonly enabled: boolean;
+  /** Directory of read-only secret files, used only when `secretBackend` is `file`. */
+  readonly secretDir: string;
+  /** Where connector secrets and OAuth tokens live; `file` (default) or `cf`. */
+  readonly secretBackend: SecretBackend;
+  readonly broker?: SecretBrokerConfig;
+  /** Public origin the OAuth provider redirects to; the callback path is appended. */
+  readonly redirectBaseUrl?: string;
+  /**
+   * Optional app URL shown on the OAuth success page. When set, the page offers a button and a
+   * meta refresh to it; when unset (the default) the page stays in the browser.
+   */
+  readonly oauthReturnUrl?: string;
+  /** One-shot migration of local ciphertext into the broker at startup. */
+  readonly migrateCredentials: boolean;
+  readonly httpTimeoutMs: number;
+  readonly oauthStateTtlMs: number;
+  readonly leaseTtlMs: number;
+  /** Commands allowed for a local `mcp_stdio` connector; empty denies every command. */
+  readonly stdioAllowlist: readonly string[];
+};
+
+function readSecretBackend(env: NodeJS.ProcessEnv): SecretBackend {
+  const raw = env.ASTER_SECRET_BACKEND?.trim();
+  if (raw === undefined || raw === "") return "file";
+  if (raw !== "file" && raw !== "cf") {
+    throw new ConfigurationError("ASTER_SECRET_BACKEND must be file or cf");
   }
-  const token = required("TELEGRAM_BOT_TOKEN");
-  assertValidCredentialShape("TELEGRAM_BOT_TOKEN", token);
-  const apiRoot = readTelegramApiRoot(env);
-  return { kind: "telegram", ownerId, token, ...(apiRoot ? { apiRoot } : {}) };
+  return raw;
 }
 
-function assertSlackToken(key: string, value: string, shape: RegExp): void {
-  assertValidCredentialShape(key, value);
-  if (isVaultPlaceholder(value)) return;
-  if (!shape.test(value)) throw new ConfigurationError(`${key} is not shaped like a Slack token`);
-}
-
-/**
- * Optional Telegram Bot API root override (a reverse proxy, e.g. a Cloudflare Worker) for hosts
- * that cannot reach api.telegram.org directly. The value is a URL prefix: the client appends
- * /bot<token>/<method> to it. It must be an https URL without query or fragment; trailing
- * slashes are dropped so the join is exact. Unset means the default api.telegram.org root.
- */
-function readTelegramApiRoot(env: NodeJS.ProcessEnv): string | undefined {
-  const raw = env.TELEGRAM_API_ROOT?.trim();
-  if (!raw) return undefined;
+function readSecretBroker(env: NodeJS.ProcessEnv): SecretBrokerConfig {
+  const raw = env.ASTER_SECRET_BROKER_URL?.trim();
+  if (raw === undefined || raw === "") {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL is required when ASTER_SECRET_BACKEND=cf");
+  }
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new ConfigurationError("TELEGRAM_API_ROOT must be a valid URL");
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an absolute http(s) URL");
   }
-  if (url.protocol !== "https:") throw new ConfigurationError("TELEGRAM_API_ROOT must be an https URL");
-  if (url.search || url.hash) throw new ConfigurationError("TELEGRAM_API_ROOT must not contain a query or fragment");
-  return url.href.replace(/\/+$/, "");
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an absolute http(s) URL");
+  }
+  // Host secrets and tokens must not travel in clear text; loopback is the local test exception.
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+  if (url.protocol === "http:" && !loopback) {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must use https outside loopback");
+  }
+  if (url.search !== "" || url.hash !== "" || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new ConfigurationError("ASTER_SECRET_BROKER_URL must be an origin without a path");
+  }
+  const accessTokenFile = env.ASTER_CF_ACCESS_TOKEN_FILE?.trim() || undefined;
+  if (accessTokenFile !== undefined && (accessTokenFile.length > 4_096 || accessTokenFile.includes("\0"))) {
+    throw new ConfigurationError("ASTER_CF_ACCESS_TOKEN_FILE is not a valid path");
+  }
+  const accessClientId = env.ASTER_CF_ACCESS_CLIENT_ID?.trim() || undefined;
+  const accessClientSecret = env.ASTER_CF_ACCESS_CLIENT_SECRET?.trim() || undefined;
+  for (const [key, value] of [
+    ["ASTER_CF_ACCESS_CLIENT_ID", accessClientId],
+    ["ASTER_CF_ACCESS_CLIENT_SECRET", accessClientSecret],
+  ] as const) {
+    if (value !== undefined && value.length > 4_096) {
+      throw new ConfigurationError(`${key} is too long`);
+    }
+  }
+  if (accessTokenFile === undefined && (accessClientId === undefined || accessClientSecret === undefined)) {
+    throw new ConfigurationError(
+      "ASTER_CF_ACCESS_TOKEN_FILE or both ASTER_CF_ACCESS_CLIENT_ID and ASTER_CF_ACCESS_CLIENT_SECRET are required when ASTER_SECRET_BACKEND=cf",
+    );
+  }
+  return {
+    url: url.origin,
+    ...(accessClientId === undefined ? {} : { accessClientId }),
+    ...(accessClientSecret === undefined ? {} : { accessClientSecret }),
+    ...(accessTokenFile === undefined ? {} : { accessTokenFile }),
+  };
 }
 
+function readOAuthReturnUrl(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.CONNECTOR_OAUTH_RETURN_URL?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  if (raw.length > 2_048) throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL is too long");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must be an absolute URL");
+  }
+  if (!["aster:", "http:", "https:"].includes(url.protocol)) {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must use aster:, http: or https:");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new ConfigurationError("CONNECTOR_OAUTH_RETURN_URL must not contain credentials");
+  }
+  return url.toString();
+}
+
+export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): ConnectorsConfig {
+  const enabledRaw = env.CONNECTORS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("CONNECTORS_ENABLED must be 0 or 1");
+  }
+  const secretDir = env.ASTER_CONNECTOR_SECRET_DIR?.trim() || "/run/secrets/aster-connectors";
+  if (secretDir.length > 4_096 || secretDir.includes("\0")) {
+    throw new ConfigurationError("ASTER_CONNECTOR_SECRET_DIR is not a valid directory");
+  }
+  const redirectRaw = env.CONNECTOR_OAUTH_REDIRECT_BASE?.trim();
+  if (redirectRaw !== undefined && redirectRaw !== "") {
+    let parsed: URL;
+    try {
+      parsed = new URL(redirectRaw);
+    } catch {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an absolute http(s) URL");
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an absolute http(s) URL");
+    }
+    if (parsed.search !== "" || parsed.hash !== "" || (parsed.pathname !== "/" && parsed.pathname !== "")) {
+      throw new ConfigurationError("CONNECTOR_OAUTH_REDIRECT_BASE must be an origin without a path");
+    }
+  }
+  const secretBackend = readSecretBackend(env);
+  const broker = secretBackend === "cf" ? readSecretBroker(env) : undefined;
+  const oauthReturnUrl = readOAuthReturnUrl(env);
+  const migrateRaw = env.ASTER_CONNECTOR_MIGRATE?.trim();
+  if (migrateRaw !== undefined && migrateRaw !== "" && migrateRaw !== "0" && migrateRaw !== "1") {
+    throw new ConfigurationError("ASTER_CONNECTOR_MIGRATE must be 0 or 1");
+  }
+  const migrateCredentials = migrateRaw === "1";
+  if (migrateCredentials && secretBackend !== "cf") {
+    throw new ConfigurationError("ASTER_CONNECTOR_MIGRATE requires ASTER_SECRET_BACKEND=cf");
+  }
+  const allowlist = (env.CONNECTOR_STDIO_ALLOWLIST ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+  for (const command of allowlist) {
+    // A relative path would make the basename match ambiguous; only a bare name or absolute path.
+    const bareName = /^[A-Za-z0-9._-]{1,256}$/.test(command);
+    const absolutePath = command.startsWith("/") && /^[A-Za-z0-9._/-]{1,256}$/.test(command);
+    if (!bareName && !absolutePath) {
+      throw new ConfigurationError("CONNECTOR_STDIO_ALLOWLIST must list bare command names or absolute paths");
+    }
+  }
+  return {
+    enabled: enabledRaw !== "0",
+    secretDir,
+    secretBackend,
+    ...(broker === undefined ? {} : { broker }),
+    ...(redirectRaw === undefined || redirectRaw === "" ? {} : { redirectBaseUrl: redirectRaw.replace(/\/+$/, "") }),
+    ...(oauthReturnUrl === undefined ? {} : { oauthReturnUrl }),
+    migrateCredentials,
+    httpTimeoutMs: boundedInteger(env, "CONNECTOR_HTTP_TIMEOUT_MS", 15_000, 1_000, 120_000),
+    oauthStateTtlMs: boundedInteger(env, "CONNECTOR_OAUTH_STATE_TTL_MS", 600_000, 60_000, 3_600_000),
+    leaseTtlMs: boundedInteger(env, "CONNECTOR_LEASE_TTL_MS", 30_000, 1_000, 300_000),
+    stdioAllowlist: [...new Set(allowlist)],
+  };
+}
 /** Memory wiring (MEM-07): budgets, the compaction reserve, the archive timezone and timeout. */
 export type MemoryConfig = {
   readonly enabled: boolean;
@@ -810,11 +890,4 @@ export function readDreamingConfig(env: NodeJS.ProcessEnv = process.env): Dreami
     dryRun: flag("DREAMING_DRY_RUN", DREAMING_DEFAULTS.dryRun),
     timeoutMs: boundedInteger(env, "DREAMING_TIMEOUT_MS", DREAMING_DEFAULTS.timeoutMs, 1_000, 600_000),
   };
-}
-
-function readOwnerId(env: NodeJS.ProcessEnv): string {
-  const ownerId = env.TELEGRAM_OWNER_ID?.trim();
-  if (!ownerId) throw new ConfigurationError("Missing configuration: TELEGRAM_OWNER_ID");
-  if (!/^[1-9]\d*$/.test(ownerId)) throw new ConfigurationError("TELEGRAM_OWNER_ID must be a positive numeric user ID");
-  return ownerId;
 }

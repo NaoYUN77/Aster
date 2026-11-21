@@ -41,8 +41,8 @@ function host(approval?: string, present = true): McpHost {
     subscribeAvailability: (listener) => { listener("github", "available"); return () => {}; }, close: async () => {} };
 }
 function config(directory: string) {
-  return { ...readConfig({ TELEGRAM_BOT_TOKEN: "test", TELEGRAM_OWNER_ID: "1", MODEL_PROVIDER: "openai",
-    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
+  return { ...readConfig({ MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1", OPENAI_API_KEY: "test", WEB_OWNER_ID: "1", DATA_DIR: directory }), memory: readMemoryConfig({ MEMORY_ENABLED: "0" }) };
 }
 async function rootId(storage: Storage) {
   return (await storage.scanConversations({}, 100, undefined, context)).items[0]!.id;
@@ -122,7 +122,7 @@ for (const catalogAdvanced of [false, true]) {
 }
 
 for (const changed of [false, true]) {
-  test(`${changed ? "changed" : "unchanged"} approval with unfinished work ${changed ? "blocks before catalog overwrite" : "resumes original declarations"}`, { timeout: 20_000 }, async () => {
+  test(`${changed ? "changed" : "unchanged"} approval after a stopped turn ${changed ? "publishes at the idle boundary" : "keeps the original declarations"}`, { timeout: 20_000 }, async () => {
     const directory = await mkdtemp(join(tmpdir(), "github-recovery-"));
     let app: Awaited<ReturnType<typeof openAgent>> | undefined;
     let storage: Storage | undefined;
@@ -144,26 +144,29 @@ for (const changed of [false, true]) {
       await started.promise;
       const id = await rootId(storage);
       const before = await readToolLedger(storage, id, context);
-      const catalog = await readToolCatalog(storage, context);
       shutdown.abort(); await pending;
       await app.close(); app = undefined; storage = undefined;
 
       const second = models();
-      second.faux.setResponses([fauxAssistantMessage("recovered")]);
+      second.faux.setResponses([fauxAssistantMessage("fresh answer")]);
       storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
       if (changed) {
-        await assert.rejects(openAgent(config(directory), second.models, storage, { mcp: host("v2") }), { code: "GITHUB_APPROVAL_RECOVERY" });
-        storage = await openNodeSqliteStorage(join(directory, "agent.sqlite"));
-        assert.deepEqual(await readToolCatalog(storage, context), catalog, "old startup catalog is retained");
-        assert.deepEqual(await readToolLedger(storage, id, context), before, "loaded snapshots are retained");
-        const entries = await storage.scanEntries({ conversationId: id }, 100, undefined, context);
-        assert.ok(!entries.items.some(({ kind }) => kind === "pi.reset"));
+        // The web adapter discards a stopped turn, so no run survives to resume under the old
+        // approval; publishing the new one at the idle boundary is safe.
+        app = await openAgent(config(directory), second.models, storage, { mcp: host("v2") });
+        assert.equal((await readToolCatalog(storage, context)).find(({ name }) => name === githubName)?.githubApproval, "v2");
+        assert.equal(second.faux.state.callCount, 0);
+        assert.equal(await app.reply(request("fresh"), signal()), "fresh answer");
+        assert.equal(second.faux.state.callCount, 1);
       } else {
         app = await openAgent(config(directory), second.models, storage, { mcp: host("v1") });
-        assert.equal(await app.reply(request("pending"), signal()), "recovered");
+        // Replaying the stopped request reports the stop; a fresh request keeps the original files.
+        await assert.rejects(app.reply(request("pending"), signal()), { code: "AGENT_UNANSWERED", message: /aborted/ });
+        assert.equal(second.faux.state.callCount, 0);
         assert.deepEqual(await readToolLedger(storage, id, context), before);
+        assert.equal(await app.reply(request("fresh"), signal()), "fresh answer");
+        assert.equal(second.faux.state.callCount, 1);
       }
-      assert.equal(second.faux.state.callCount, changed ? 0 : 1);
     } finally {
       if (app) await app.close(); else await storage?.close(context);
       await rm(directory, { recursive: true, force: true });
