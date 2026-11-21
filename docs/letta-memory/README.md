@@ -1,8 +1,9 @@
 # Letta-style memory for Aster (core memory + dreaming)
 
 Status: implementation branch `feat/letta-memory`, forked from `main` at `36ee572`.
-Borrows Letta's architecture, not its code: Aster keeps its own working state and daily
-archive, and gains a git-backed core memory plus a background consolidation pass.
+Borrows Letta's architecture, not its code: Aster keeps its own working state, and gains a
+git-backed core memory plus a background consolidation pass fed by an activity digest of the
+durable conversation.
 
 ## 1. Goal
 
@@ -17,15 +18,14 @@ Aster is a single-owner, single-conversation personal agent. Three ideas are por
    memory, without blocking the conversation.
 
 Not ported: Letta's code, its memory blocks API, its archival vector store, or its multi-agent
-model. Aster's existing working state and daily archive are unchanged.
+model. Aster's existing working state is unchanged.
 
 ## 2. How this fits Aster's existing memory
 
 | Existing | Role | Relationship |
 | --- | --- | --- |
 | Working state (block B, `src/memory/working.ts`) | Session-scoped standing state, host-validated from transcripts | Unchanged. Not written by dreaming. |
-| Daily archive (`src/memory/daily.ts`) | Append-only recall store with `memory_search` / `memory_read` | Unchanged. One of dreaming's inputs. |
-| Profile (`src/memory/profile.ts`) | Derived preference profile | Unchanged. |
+| Activity digest (`src/memory/activity.ts`) | Day-grouped, redacted evidence built from durable entries since the last applied run | One of dreaming's inputs. Built on demand, not stored. |
 | **Memory core (`$DATA_DIR/memory-fs`)** | **New.** Durable, explicitly authored core memory | The only store dreaming writes. |
 
 Revisiting whether working state should become a host-maintained section of `MEMORY.md` is a
@@ -43,7 +43,7 @@ $DATA_DIR/memory-fs/            # git repository, branch main
 └── .aster/                     # gitignored: dreaming state
 ```
 
-- **`MEMORY.md` only.** Persona, the owner's profile, standing goals and constraints live as
+- **`MEMORY.md` only.** Persona, standing goals, constraints and hard preferences live as
   sections inside it. Every other file is read on demand with `read` / `bash`.
 - A subdirectory is discoverable only through its own `MEMORY.md` index entry.
 - `.git/`, `.aster/`, non-`*.md` files and symlinks are never rendered. The agent can still reach
@@ -64,8 +64,8 @@ $DATA_DIR/memory-fs/            # git repository, branch main
 | `DREAMING_DRY_RUN` | `0` | Compute and check the layout, but never merge. |
 | `DREAMING_TIMEOUT_MS` | `120000` | One run's hard limit. |
 
-There is no switch for the MEM-07 memory system itself: working state, the daily archive,
-retrieval tools, compaction and the profile pipeline are always composed. A leftover
+There is no switch for the MEM-07 memory system itself: working state, compaction, the activity
+digest and dreaming are always composed. A leftover
 `MEMORY_ENABLED` from an older deployment is ignored and reported by name at startup; a host that
 needs the pre-MEM-07 composition injects `enabled: false` into the memory config section itself.
 
@@ -96,8 +96,12 @@ render.
   One global counter; a trigger during a run coalesces into one pending run. An applied run — and a
   completed dry run, which is also a finished cycle — resets the counter; a failed, discarded or
   timed-out run does not consume it.
-- **Input**: the last K turns of the owner conversation plus the daily archive since the last
-  run's cursor, bounded by tokens. No member Hubs exist to read.
+- **Input**: the last K turns of the owner conversation plus the activity digest: every owner
+  conversation's durable entries after the previous run's `evidenceThrough` entry-id watermark —
+  user and assistant text, tool-call names with argument summaries, tool results and errors,
+  grouped by day. Credential-shaped values are redacted before truncation; the digest is capped at
+  8000 tokens and trimmed newest-first at whole-line boundaries. Dreaming's own conversations
+  (`dreaming:` request ids) are excluded. No member Hubs exist to read.
 - **Run**: one background subagent in an isolated `git worktree`, with the ordinary tools, using
   the main model. It consolidates recent experience into notes and maintains `MEMORY.md` as a
   wiki index: `## Core` for facts that must be injected every turn, `## Index` linking every note.
@@ -152,8 +156,7 @@ The Hub / multi-tenant isolation predates the single-owner goal and is removed h
 3. A failed or conflicting dream run is discarded without touching the live directory.
 4. Auto-launch is the default, exactly as in Letta; the host-side layout check and
    `DREAMING_DRY_RUN` are the safety rails.
-5. Working memory, the derived profile pipeline, the daily archive and the existing tool set are
-   unchanged.
+5. Working memory, compaction and the existing tool set are unchanged.
 6. Credentials are never stored in memory; the prompt says so and no tool or host path stores them.
 
 ## 8. Milestones and tests
@@ -171,7 +174,7 @@ The Hub / multi-tenant isolation predates the single-owner goal and is removed h
 | --- | --- | --- |
 | Several core-memory files in the prompt | One `MEMORY.md` with sections | Prompt economy; the owner asked for it. |
 | Memory blocks API | Git repository + ordinary tools | Aster stores memory as files, not blocks. |
-| Conversation-history search is a separate store | Existing daily archive + `memory_search` | Already implemented and tested. |
+| Conversation-history search is a separate store | No separate store; the activity digest reads durable entries directly | One source of truth, nothing to keep in sync. |
 | Skills live in MemFS | Reserved directory only | Existing skills system stays authoritative. |
 | Multi-agent / multi-tenant memory | Single owner, one conversation | The product is a personal agent. |
 | Harness commits each edit | Host commits at turn boundaries | pi-durable's file tools cannot be intercepted per call. |

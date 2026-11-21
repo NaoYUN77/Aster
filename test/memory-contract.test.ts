@@ -34,7 +34,6 @@ import {
   CYCLE_BLOCK_CLOSE,
   CYCLE_BLOCK_OPEN,
   CycleSnapshotSchema,
-  dailyFileName,
   decodeCycleSnapshot,
   encodeCycleSnapshot,
   eventDate,
@@ -43,9 +42,12 @@ import {
   MEMORY_ERROR_CODES,
   MEMORY_ERROR_MAPPING,
   MEMORY_SCHEMA_VERSION,
+  migrateStoredSnapshot,
+  migrateWorkingDocument,
   MemoryError,
   rangeCovers,
   UNKNOWN_DATE,
+  WORKING_DOC_VERSION,
   WorkingAnchorSchema,
   WorkingDoc,
   WorkingReceiptDoc,
@@ -648,6 +650,18 @@ test("01-F: frozen formats, ranges, calendar rules and error mapping", () => {
   assert.throws(() => assertSchema(WorkingAnchorSchema, { version: 1, operationId: "bad id", revision: 1, changed: true, completedEntryId: null }, "invalid-input"), MemoryError);
   assert.throws(() => assertSchema(WorkingAnchorSchema, { version: 1, operationId: "op", revision: 1, changed: true }, "invalid-input"), MemoryError, "an omitted field is not a null");
 
+  // Retired profile data migrates away instead of blocking a read: a v2 working document and a
+  // stored snapshot baseline that still carry `profile` decode to their current shapes.
+  assert.equal(WORKING_DOC_VERSION, 3);
+  const legacyWorking = { ...working, version: MEMORY_SCHEMA_VERSION, profile: [{ id: "x", text: "old", sources: { after: null, through: 1 as EntryId } }] };
+  assert.deepEqual(migrateWorkingDocument(legacyWorking, 2), working, "a v2 document drops its profile");
+  assert.deepEqual(migrateWorkingDocument({ ...working, profile: [{ id: "y" }] }, 1), working, "a v1 document drops its profile");
+  assert.throws(() => migrateWorkingDocument(working, 99), (error: unknown) => error instanceof MemoryError && error.code === "unsupported-version");
+  const legacySnapshot = { revision: 1, baseline: { revision: 1, profile: [{ id: "x" }], task: null, preferences: [] } };
+  assert.deepEqual(migrateStoredSnapshot(legacySnapshot), { revision: 1, baseline: { revision: 1, task: null, preferences: [] } });
+  const cleanSnapshot = { revision: 1, baseline: { revision: 1 } };
+  assert.deepEqual(migrateStoredSnapshot(cleanSnapshot), cleanSnapshot, "a clean snapshot passes through unchanged");
+
   // Range semantics: (after, through] with an inclusive upper bound and an open lower bound.
   const id = (value: number) => value as EntryId;
   const conversationId = 1 as ConversationId;
@@ -689,12 +703,6 @@ test("01-F: frozen formats, ranges, calendar rules and error mapping", () => {
   );
 
   // File naming and event dates: the event date, not the publish date, decides the file.
-  assert.equal(dailyFileName("2026-10-25"), "2026-10-25.md");
-  assert.equal(dailyFileName("2026-10-25", 2), "2026-10-25-2.md");
-  assert.equal(dailyFileName(UNKNOWN_DATE), "unknown.md");
-  assert.throws(() => dailyFileName("2026-13-01"), MemoryError);
-  assert.throws(() => dailyFileName("2026-10-25", 0), MemoryError);
-  assert.throws(() => dailyFileName("2026-10-25", 10), MemoryError);
   const midnight = Date.parse("2026-10-25T23:30:00Z");
   assert.equal(eventDate(midnight, "UTC"), "2026-10-25");
   assert.equal(eventDate(midnight, "Asia/Shanghai"), "2026-10-26");

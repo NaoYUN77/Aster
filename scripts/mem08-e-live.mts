@@ -145,7 +145,7 @@ const probe = await drive("e10", "帮我复述一下这个项目的目标日期�
 console.log("--- probe reply ---");
 console.log(probe);
 
-// Daily archive files under the data root.
+// Markdown files under the data root (no daily archive exists any more; this lists any leftovers).
 async function listMarkdown(dir: string, prefix = ""): Promise<string[]> {
   const found: string[] = [];
   for (const entry of await readdir(dir, { withFileTypes: true })) {
@@ -156,7 +156,7 @@ async function listMarkdown(dir: string, prefix = ""): Promise<string[]> {
   return found;
 }
 const dailyFiles = await listMarkdown(directory);
-console.log("daily archive files:", dailyFiles);
+console.log("markdown files:", dailyFiles);
 for (const file of dailyFiles) {
   console.log(`--- ${file.replace(directory, "")} ---`);
   console.log((await readFile(file, "utf8")).slice(0, 4000));
