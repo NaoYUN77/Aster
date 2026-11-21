@@ -164,6 +164,33 @@ test("abort stops a running generation and a queued request is withdrawn", async
   }
 });
 
+test("a reply that returns nothing completes the request without an assistant bubble", async () => {
+  const fixture = await fixtureSelection();
+  const directory = await mkdtemp(join(tmpdir(), "aster-worker-noreply-"));
+  const store = new WebRequestStore(join(directory, "web.sqlite"));
+  const { hub, events } = recordingHub();
+  const worker = new RequestWorker({
+    store,
+    hub,
+    ownerId: "owner",
+    agent: fakeAgent({ service: fixture.service, reply: async () => undefined }),
+  });
+  try {
+    const row = store.enqueue("client-noreply", "ignored request");
+    worker.start();
+    worker.notify();
+    await waitFor(() => store.get(row.row.request_id)?.status === "done");
+    assert.equal(store.get(row.row.request_id)?.reply, "", "the row completes without an answer");
+    assert.equal(events.filter((event) => event.event === "request.done").length, 0, "no empty assistant bubble");
+    assert.equal(events.filter((event) => event.event === "request.failed").length, 0, "a refusal is not an error");
+  } finally {
+    await worker.stop();
+    store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a request left running by a crash is failed as PROCESS_INTERRUPTED on restart", async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-worker-recover-"));
   try {

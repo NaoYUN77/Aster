@@ -301,8 +301,6 @@ export function escapeSlackText(value: string): string {
 export type SlackInboundPolicy = {
   readonly ownerId: string;
   readonly botId: string;
-  /** Members allowed to drive the bot besides the owner. */
-  readonly allowedUsers: readonly string[];
   /** Channels the bot answers in. */
   readonly allowedChannels: readonly string[];
   /** Diagnostics for a dropped event: a fixed reason code, never the message text. */
@@ -311,10 +309,10 @@ export type SlackInboundPolicy = {
 
 /**
  * Maps one Events API callback to a request. Identity comes from Slack's own `user` field — the
- * transport's identifier — so no message text can claim to be someone else, and the allowlists decide
- * who may start work and where. Private DMs stay owner-only. In a channel, an explicit mention starts
- * a conversation while a reply inside a thread continues one, carrying the thread anchor so the answer
- * lands where the question was asked. Everything else is dropped with a reason code.
+ * transport's identifier — so no message text can claim to be someone else. Only the owner is heard;
+ * the allowlist decides where. In a channel, an explicit mention starts a turn, and a plain message
+ * inside a thread is a follow-up. Replies are flat: a thread is a delivery location, not a separate
+ * conversation. Everything else is dropped with a reason code.
  */
 export function toRequest(payload: unknown, policy: SlackInboundPolicy): TextRequest | undefined {
   const drop = (reason: string): undefined => {
@@ -341,24 +339,22 @@ export function toRequest(payload: unknown, policy: SlackInboundPolicy): TextReq
   } else if (event.channel_type === "channel" || event.channel_type === "group") {
     if (event.type !== "message" && event.type !== "app_mention") return;
     if (!policy.allowedChannels.includes(channel)) return drop("CHANNEL_NOT_ALLOWED");
-    if (sender !== policy.ownerId && !policy.allowedUsers.includes(sender)) return drop("SENDER_NOT_ALLOWED");
+    if (sender !== policy.ownerId) return drop("SENDER_NOT_OWNER");
     // A plain channel message counts only as a follow-up inside a thread: the mention is what starts a
-    // conversation, and requiring it keeps the bot from answering every message in the channel.
+    // turn, and requiring it keeps the bot from answering every message in the channel.
     if (!mentioned && typeof event.thread_ts !== "string") return drop("NOT_A_MENTION");
   } else return;
   // Slack addresses the bot as `<@U…>`; the model needs the request, not the address.
   const content = raw.split(`<@${policy.botId}>`).join("").trim();
   if (!content) return drop("EMPTY_TEXT");
-  const threadTs = text(event.thread_ts);
-  // The message's own timestamp is what a reaction is attached to; the thread anchor is where an
-  // answer goes. A message inside a thread has both, and they are different messages.
+  // The message's own timestamp is what a reaction is attached to. It is not a routing key and the
+  // reply does not reuse it: answers are flat in the channel.
   const messageTs = text(event.ts);
   return {
     requestId: `slack:${teamId}:${eventId}`,
     conversationId: channel,
     senderId: sender,
     text: content,
-    ...(threadTs === undefined ? {} : { threadTs }),
     ...(messageTs === undefined ? {} : { messageTs }),
   };
 }
@@ -379,8 +375,6 @@ export type StyleAttribution = {
   readonly part?: number;
   readonly conversationId: string;
   readonly senderId: string;
-  /** Where the answer landed; absent for a flat reply. The question belongs in the same place. */
-  readonly threadTs?: string;
 };
 
 export type SlackStylePolicy = SlackInboundPolicy & {
@@ -425,14 +419,12 @@ export function toStyleEvent(payload: unknown, policy: SlackStylePolicy): StyleE
   const attributed = policy.attribute(messageId);
   if (attributed === undefined) return drop("STYLE_NO_TARGET");
   const channel = attributed.conversationId;
-  // The same two allowlists the reply went through, applied to whoever reacted and to where the reply
-  // was made: only the owner and the allowed members may have feedback taken into account at all.
+  // Only the owner's feedback is learned from, and only where this bot answers: the owner's DM or an
+  // allowed channel. Slack gives DMs a `D…` id, so no extra payload field decides the exception.
   const permitted = reactorId === policy.ownerId
-    || (policy.allowedUsers.includes(reactorId) && policy.allowedChannels.includes(channel));
+    && (channel.startsWith("D") || policy.allowedChannels.includes(channel));
   if (!permitted) return drop("STYLE_NOT_ALLOWED");
-  // Who asked the reply comes from the Inbox, so no payload can claim another member's feedback: the
-  // reactor has to be that same person. Checked after the allowlists, so being unknown to this
-  // deployment is reported rather than being mistaken for reacting to the wrong reply.
+  // Who asked the reply comes from the Inbox, so no payload can claim a different person's feedback.
   if (reactorId !== attributed.senderId) return drop("STYLE_REACTOR_MISMATCH");
   const reaction = typeof event.reaction === "string" ? event.reaction : "";
   const emoji = normalizeEmojiName(reaction);
@@ -440,7 +432,6 @@ export function toStyleEvent(payload: unknown, policy: SlackStylePolicy): StyleE
   // reaction to record. Custom emoji normalize exactly like the standard ones.
   if (emoji === undefined) return drop("STYLE_EMOJI_INVALID");
   const polarity = POSITIVE_REACTIONS.has(emoji) ? "positive" : "other";
-  const threadTs = text(attributed.threadTs);
   return {
     eventId: `style:${teamId}:${eventId}`,
     kind,
@@ -452,7 +443,6 @@ export function toStyleEvent(payload: unknown, policy: SlackStylePolicy): StyleE
     ...(attributed.part === undefined ? {} : { part: attributed.part }),
     emoji,
     polarity,
-    ...(threadTs === undefined ? {} : { threadTs }),
   };
 }
 
@@ -570,9 +560,9 @@ export type SlackReactions = {
 };
 
 /**
- * Serves the allowed members' Slack traffic over Socket Mode: no inbound endpoint, so the bot works
- * behind NAT. The loop owns the socket, and shares agent work and reply delivery with every other
- * channel. `policy` decides who may drive the bot and where; it is configuration, never message text.
+ * Serves the owner's Slack traffic over Socket Mode: no inbound endpoint, so the bot works behind
+ * NAT. The loop owns the socket, and shares agent work and reply delivery with every other channel.
+ * `policy` decides where the bot answers; it is configuration, never message text.
  */
 export async function serveSlack(
   policy: SlackInboundPolicy,

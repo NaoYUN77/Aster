@@ -19,7 +19,7 @@ export type SteerSubmission = {
 };
 
 export type WebAgent = {
-  reply(request: TextRequest, signal: AbortSignal): Promise<string>;
+  reply(request: TextRequest, signal: AbortSignal): Promise<string | undefined>;
   /**
    * Join the running durable run. `done` settles with the projected assistant message, if any;
    * the worker tracks it in the background and never awaits it on shutdown. `submission` is the
@@ -229,6 +229,19 @@ export class RequestWorker {
       const text = this.gate === undefined ? await runReply() : await this.gate.run(runReply);
       // An abort (or a shutdown) wins even if the generation raced to a result.
       if (!this.store.isRunning(row.request_id)) return;
+      // The agent answers nothing when it declines a request (it ignores every non-owner sender).
+      // The web adapter always sends the owner id, so this is a defensive path: the row completes
+      // without an assistant bubble, and clients get no done event rather than an empty message.
+      if (text === undefined) {
+        this.log(`Request ${row.request_id} completed without a reply`);
+        this.store.markDone(row.request_id, "", {
+          requested: { ...requested, kind: requested.kind },
+          actual: null,
+          kind: requested.kind,
+          degraded: false,
+        });
+        return;
+      }
       const message = await this.doneMessage(row.request_id, row.client_message_id, text, requested);
       const model = modelInfo(requested, message);
       if (this.store.markDone(row.request_id, text, model)) {

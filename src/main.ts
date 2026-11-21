@@ -4,8 +4,8 @@ import { openAgent } from "./agent.js";
 import { buildAgentOptions } from "./agent-options.js";
 import { ConfigurationError, configureEnvProxy, readConfig, resolveProviderConfigPath } from "./config.js";
 import { errorCode, StateError } from "./errors.js";
-import { HubStore } from "./hubs.js";
 import { Inbox } from "./inbox.js";
+import { ensureMemoryFs } from "./memory-fs.js";
 import { readProviderConfig } from "./provider-config.js";
 import { ReactionAnchor } from "./reactions.js";
 import { PROVIDER_IDS } from "./providers.js";
@@ -64,7 +64,6 @@ try {
         }),
         policy: {
           ownerId: config.channel.ownerId,
-          allowedUsers: config.channel.allowedUsers,
           allowedChannels: config.channel.allowedChannels,
           log: (line: string) => console.error(line),
         },
@@ -93,7 +92,6 @@ try {
     ? undefined
     : await SkillIndex.scan(config.skills.dir, { log: (line) => console.error(line) });
   let reminders: ReminderStore | undefined;
-  let hubs: HubStore | undefined;
   let watchers: WatchersRuntime | undefined;
   let watchersStore: SqliteWatchStore | undefined;
   let routinesStore: SqliteRoutineStore | undefined;
@@ -139,9 +137,6 @@ try {
           config: config.routines,
           chatId: config.channel.ownerId,
         });
-    // One Hub per member is a shared-channel idea: a Slack deployment gets the bookkeeping, Telegram
-    // stays single-owner. The data directory keeps the member mappings across restarts.
-    hubs = deployment.kind === "slack" ? new HubStore(join(config.dataDir, "hubs.sqlite")) : undefined;
     // Reaction feedback is possible only where Slack delivers reaction events, and that is decided by
     // the scope Slack granted — configuration can only choose what this process does with them.
     const scopes = deployment.kind === "slack" ? await deployment.client.scopes(shutdown.signal) : [];
@@ -158,12 +153,15 @@ try {
       mode: styleStore === undefined ? "off" : config.style.mode,
       ...(styleStore === undefined ? {} : { store: styleStore }),
       inert: !canReact,
-      send: (target, body, partSignal, threadTs) => channel.send(target, body, partSignal, threadTs),
+      send: (target, body, partSignal) => channel.send(target, body, partSignal),
       log: (line) => console.error(line),
     });
+    // Core memory is initialized before the agent opens: an unusable directory is a startup error,
+    // never a quietly missing capability. With MEMORY_FS_ENABLED=0 nothing is created or read.
+    const memoryFs = await ensureMemoryFs(config.memoryFs);
     const agent = await openAgent(config, undefined, undefined, buildAgentOptions(config, {
+      ...(memoryFs === undefined ? {} : { memoryFs }),
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
-      ...(hubs === undefined ? {} : { hubStore: hubs }),
       ...(watchers?.extension === undefined && routinesExtension === undefined
         ? {}
         : {
@@ -204,8 +202,8 @@ try {
     try {
       console.info(deployment.kind === "telegram"
         ? `Personal agent starting; single-owner private ${channel.label} messages enabled.`
-        : `Personal agent starting; the owner's DM and ${deployment.policy.allowedUsers.length} allowed`
-          + ` member(s) in ${deployment.policy.allowedChannels.length} allowed channel(s) enabled.`);
+        : `Personal agent starting; the owner's DM and ${deployment.policy.allowedChannels.length}`
+          + ` allowed channel(s) enabled.`);
       if (skills !== undefined) {
         console.info(`Skills: ${skills.summaries().length} indexed (names and descriptions only; bodies load on demand).`);
       }
@@ -243,7 +241,6 @@ try {
     reminders?.close();
     watchersStore?.close();
     routinesStore?.close();
-    hubs?.close();
     styleStore?.close();
   }
   }

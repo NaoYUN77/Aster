@@ -5,6 +5,7 @@ import { openConnectors, type OpenConnectorsResult } from "../connectors/index.j
 import { createConnectorExtension } from "../connectors/tools.js";
 import { ConfigurationError, type readConfig, type WebConfig } from "../config.js";
 import { ReminderScheduler, ReminderStore } from "../reminders.js";
+import { ensureMemoryFs } from "../memory-fs.js";
 import { createRoutines, type RoutinesRuntime } from "../routines/runtime.js";
 import { SqliteRoutineStore } from "../routines/store.js";
 import { createRoutinesExtension } from "../routines/tools.js";
@@ -152,7 +153,11 @@ export async function runWebMode(
       ...(routinesExtension === undefined ? [] : [routinesExtension]),
       ...(connectorExtension === undefined ? [] : [connectorExtension]),
     ];
+    // Core memory is initialized before the agent opens, exactly as the Telegram/Slack entry does:
+    // an unusable directory is a startup error, and MEMORY_FS_ENABLED=0 creates nothing.
+    const memoryFs = await ensureMemoryFs(config.memoryFs);
     agent = await openAgent(config, undefined, undefined, buildAgentOptions(config, {
+      ...(memoryFs === undefined ? {} : { memoryFs }),
       ...(reminders === undefined ? {} : { reminderStore: reminders }),
       ...(extraExtensions.length === 0 ? {} : { extraExtensions }),
       ...(stdioServers.length === 0 ? {} : { mcpServers: stdioServers }),

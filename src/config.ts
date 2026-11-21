@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import { setGlobalProxyFromEnv } from "node:http";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { ConfigurationError } from "./errors.js";
 import { MODEL_FAILOVER_DEFAULTS, type ModelRef } from "./model-failover.js";
 import type { WatchersConfig } from "./watchers/protocol.js";
+import { MEMORY_LIMITS } from "./memory/fs/contracts.js";
+import { DREAMING_DEFAULTS, type DreamingBehavior, type DreamingConfig } from "./memory/dreaming.js";
 import { isProviderId, PROVIDER_IDS, providerApiKeyEnv } from "./providers.js";
 import { normalizeEmojiName, type ReceiptEmojis } from "./reactions.js";
 import { STYLE_MODES } from "./style.js";
@@ -208,6 +210,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
     ...(skills.enabled ? { skills } : {}),
     ...(browser === undefined ? {} : { browser }),
     style,
+    memoryFs: readMemoryFsConfig(env),
+    dreaming: readDreamingConfig(env),
     trace: readTraceConfig(env),
     // Memory is part of the configuration every channel sees, so an explicit MEMORY_ENABLED=0 is
     // honored rather than silently replaced by defaults when the agent is composed.
@@ -528,8 +532,6 @@ export type ChannelConfig =
     readonly ownerId: string;
     readonly botToken: string;
     readonly appToken: string;
-    /** Members allowed to drive the bot besides the owner. Empty keeps the owner-only DM behaviour. */
-    readonly allowedUsers: readonly string[];
     /** Channels the bot answers in. Empty keeps the owner-only DM behaviour. */
     readonly allowedChannels: readonly string[];
     /** Emoji the bot attaches to a message while it works, and the ones that can replace it. */
@@ -888,8 +890,7 @@ function readChannelCredentials(
       ownerId,
       botToken,
       appToken,
-      // Both lists are optional: an empty one is the owner-only private behaviour, not an open door.
-      allowedUsers: readSlackIdList(env, "SLACK_ALLOWED_USERS", SLACK_OWNER_ID_SHAPE, "Slack member IDs"),
+      // Optional: an empty list is the owner-only private behaviour, not an open door.
       allowedChannels: readSlackIdList(env, "SLACK_ALLOWED_CHANNELS", SLACK_CHANNEL_ID_SHAPE, "Slack channel IDs"),
       receipts: {
         ...(working === undefined ? {} : { working }),
@@ -997,6 +998,73 @@ export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryCo
     reserveTokens: memoryInteger(env, "MEMORY_RESERVE_TOKENS", 16_384, 1, 1_048_576),
     timezone,
     archiveTimeoutMs: memoryInteger(env, "MEMORY_ARCHIVE_TIMEOUT_MS", 60_000, 1, 300_000),
+  };
+}
+
+/** MemFS (M1): the git-backed core-memory repository. */
+export type MemoryFsConfig = {
+  readonly enabled: boolean;
+  /** Absolute repository path; `main` creates it lazily and fails startup if it cannot. */
+  readonly dir: string;
+  /** Token budget for the core section injected into the owner's prompt. */
+  readonly coreTokens: number;
+};
+
+/**
+ * All MemFS settings are validated even when the switch is off, so a malformed value cannot surface
+ * later when somebody flips MEMORY_FS_ENABLED. Relative paths are refused: the repository path is
+ * resolved once, at startup, and must not depend on the process working directory.
+ */
+export function readMemoryFsConfig(env: NodeJS.ProcessEnv = process.env): MemoryFsConfig {
+  const enabledRaw = env.MEMORY_FS_ENABLED?.trim();
+  if (enabledRaw !== undefined && enabledRaw !== "" && enabledRaw !== "0" && enabledRaw !== "1") {
+    throw new ConfigurationError("MEMORY_FS_ENABLED must be 0 or 1");
+  }
+  const rawDir = env.MEMORY_FS_DIR?.trim();
+  const dir = rawDir === undefined || rawDir === ""
+    ? join(resolve(env.DATA_DIR || "data"), "memory-fs")
+    : isAbsolute(rawDir)
+      ? resolve(rawDir)
+      : (() => { throw new ConfigurationError("MEMORY_FS_DIR must be an absolute path"); })();
+  return {
+    enabled: enabledRaw !== "0",
+    dir,
+    coreTokens: boundedInteger(
+      env,
+      "MEMORY_FS_CORE_TOKENS",
+      MEMORY_LIMITS.coreTokens,
+      MEMORY_LIMITS.minCoreTokens,
+      MEMORY_LIMITS.maxCoreTokens,
+    ),
+  };
+}
+
+/**
+ * Dreaming (M2): the background consolidation pass over core memory. Every value is validated even
+ * when the pass is disabled, so a malformed setting cannot surface later after DREAMING_ENABLED is
+ * flipped. An unknown behavior is a startup error rather than a silent fallback: a reminder-only
+ * deployment and an auto-launch one are different promises to the owner.
+ */
+export function readDreamingConfig(env: NodeJS.ProcessEnv = process.env): DreamingConfig {
+  const flag = (key: string, fallback: boolean): boolean => {
+    const raw = env[key]?.trim();
+    if (raw === undefined || raw === "") return fallback;
+    if (raw !== "0" && raw !== "1") throw new ConfigurationError(`${key} must be 0 or 1`);
+    return raw === "1";
+  };
+  const behaviorRaw = env.DREAMING_BEHAVIOR?.trim().toLowerCase();
+  const behaviors: readonly DreamingBehavior[] = ["auto-launch", "reminder"];
+  if (behaviorRaw !== undefined && behaviorRaw !== "" && !behaviors.includes(behaviorRaw as DreamingBehavior)) {
+    throw new ConfigurationError(`DREAMING_BEHAVIOR must be one of: ${behaviors.join(", ")}`);
+  }
+  return {
+    enabled: flag("DREAMING_ENABLED", DREAMING_DEFAULTS.enabled),
+    turns: boundedInteger(env, "DREAMING_TURNS", DREAMING_DEFAULTS.turns, 1, 10_000),
+    onCompaction: flag("DREAMING_ON_COMPACTION", DREAMING_DEFAULTS.onCompaction),
+    behavior: (behaviorRaw === undefined || behaviorRaw === "" ? DREAMING_DEFAULTS.behavior : behaviorRaw) as DreamingBehavior,
+    review: flag("DREAMING_REVIEW", DREAMING_DEFAULTS.review),
+    dryRun: flag("DREAMING_DRY_RUN", DREAMING_DEFAULTS.dryRun),
+    timeoutMs: boundedInteger(env, "DREAMING_TIMEOUT_MS", DREAMING_DEFAULTS.timeoutMs, 1_000, 600_000),
   };
 }
 

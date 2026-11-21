@@ -42,7 +42,6 @@ const ATTRIBUTED = { requestId: "slack:T1:Ev1", part: 0, conversationId: "D0DM",
 const policy = (overrides: Partial<SlackStylePolicy> = {}, log: string[] = []) => ({
   ownerId: OWNER,
   botId: BOT,
-  allowedUsers: [MEMBER],
   allowedChannels: [CHANNEL],
   log: (line: string) => log.push(line),
   attribute: () => ATTRIBUTED,
@@ -102,18 +101,18 @@ function rig(options: {
   readonly start?: number;
   readonly failing?: boolean;
 } = {}) {
-  const asked: { channel: string; text: string; threadTs?: string }[] = [];
+  const asked: { channel: string; text: string }[] = [];
   const lines: string[] = [];
   let time = options.start ?? Date.parse("2026-11-11T00:00:00.000Z");
   const learning = new StyleLearning({
     mode: options.mode ?? "ask",
     ...(options.store === undefined ? {} : { store: options.store }),
     ...(options.inert === undefined ? {} : { inert: options.inert }),
-    send: async (channel, text, _signal, threadTs) => {
+    send: async (channel, text, _signal) => {
       if (options.failing === true) {
         throw Object.assign(new Error("Slack chat.postMessage was refused (NOT_IN_CHANNEL)"), { code: "SLACK_NOT_IN_CHANNEL" });
       }
-      asked.push({ channel, text, threadTs });
+      asked.push({ channel, text });
       return "1700000000.000500";
     },
     log: (line) => lines.push(line),
@@ -174,12 +173,12 @@ test("every refusal of a reaction has its own reason code, and none carries the 
   const rejects: [string, Record<string, unknown>, Partial<SlackStylePolicy>][] = [
     ["STYLE_NOT_BOT_REPLY", reactionEvent({ item_user: MEMBER }), {}],
     ["STYLE_RECEIPT", reactionEvent({ user: BOT }), {}],
-    // The reactor is somebody the bot answers, but the Inbox says the reply was not theirs.
-    ["STYLE_REACTOR_MISMATCH", reactionEvent({ user: MEMBER }), { attribute: () => ({ ...ATTRIBUTED, conversationId: CHANNEL, senderId: OWNER }) }],
+    // The owner reacted, but the Inbox says the reply answered somebody else.
+    ["STYLE_REACTOR_MISMATCH", reactionEvent(), { attribute: () => ({ ...ATTRIBUTED, conversationId: CHANNEL, senderId: MEMBER }) }],
     ["STYLE_NOT_ALLOWED", reactionEvent({ user: STRANGER }), {}],
     ["STYLE_NO_TARGET", reactionEvent(), { attribute: () => undefined }],
-    // An allowed member reacting in a channel nobody configured is still nobody we answer to.
-    ["STYLE_NOT_ALLOWED", reactionEvent({ user: MEMBER }), { attribute: () => ({ ...ATTRIBUTED, senderId: MEMBER, conversationId: "C0ELSEWHERE1" }) }],
+    // The owner reacting in a channel nobody configured is still outside this bot's traffic.
+    ["STYLE_NOT_ALLOWED", reactionEvent(), { attribute: () => ({ ...ATTRIBUTED, senderId: OWNER, conversationId: "C0ELSEWHERE1" }) }],
   ];
   for (const [reason, payload, overrides] of rejects) {
     const log: string[] = [];
@@ -222,23 +221,18 @@ test("an accepted reaction is attributed by the host, not by anything in the pay
     polarity: "positive",
   });
   assert.deepEqual(log, []);
-  // A member's reaction in an allowed channel works the same way, and stays their own scope.
-  const member = toStyleEvent(reactionEvent({ user: MEMBER }), policy({
-    attribute: () => ({ requestId: "slack:T1:Ev9", part: 1, conversationId: CHANNEL, senderId: MEMBER }),
+  // The same owner in an allowed channel is the same scope; attribution comes from the Inbox.
+  const inChannel = toStyleEvent(reactionEvent(), policy({
+    attribute: () => ({ requestId: "slack:T1:Ev9", part: 1, conversationId: CHANNEL, senderId: OWNER }),
   }));
-  assert.deepEqual(member && { channel: member.channel, subjectId: member.subjectId, reactorId: member.reactorId },
-    { channel: CHANNEL, subjectId: MEMBER, reactorId: MEMBER });
+  assert.deepEqual(inChannel && { channel: inChannel.channel, subjectId: inChannel.subjectId, reactorId: inChannel.reactorId },
+    { channel: CHANNEL, subjectId: OWNER, reactorId: OWNER });
   // Custom emoji are named like standard ones, never appear on the positive list, and normalize.
   const custom = toStyleEvent(reactionEvent({ reaction: ":Party-Parrot:" }), policy());
   assert.equal(custom?.emoji, "party-parrot");
   assert.equal(custom?.polarity, "other");
   // Removing is recorded as itself: it withdraws, it never asks.
   assert.equal(toStyleEvent(reactionEvent({ type: "reaction_removed" }), policy())?.kind, "removed");
-  // A reaction on a threaded reply carries the thread, so the question lands where the reply was.
-  const threaded = toStyleEvent(reactionEvent(), policy({
-    attribute: () => ({ ...ATTRIBUTED, threadTs: "1700000000.000100" }),
-  }));
-  assert.equal(threaded?.threadTs, "1700000000.000100");
 });
 
 test("the positive list decides only whether to disturb the user, never what to change", () => {
@@ -300,9 +294,9 @@ test("a stored signal asks once per scope per window, and silence is never chase
     rig_.advance(2);
     await rig_.learning.handle(signal({ eventId: "style:T1:Ev4" }), shutdown);
     assert.equal(rig_.asked.length, 2);
-    // Another scope is its own budget: asking the owner says nothing about the member.
+    // Another scope is its own budget: asking in one conversation says nothing about another.
     await rig_.learning.handle(signal({
-      eventId: "style:T1:Ev5", channel: CHANNEL, subjectId: MEMBER, reactorId: MEMBER,
+      eventId: "style:T1:Ev5", channel: CHANNEL, subjectId: OWNER, reactorId: OWNER,
     }), shutdown);
     assert.equal(rig_.asked.length, 3);
   });

@@ -1,7 +1,6 @@
 import type { Extension } from "@earendil-works/pi-durable";
 import type { OpenAgentOptions } from "./agent.js";
 import type { readConfig } from "./config.js";
-import type { HubStore } from "./hubs.js";
 import type { ReminderStore } from "./reminders.js";
 import type { SkillIndex } from "./skills.js";
 
@@ -13,8 +12,8 @@ import type { SkillIndex } from "./skills.js";
 export type AgentHostComposition = {
   /** Durable reminders; when present the reminder tools are registered. */
   readonly reminderStore?: ReminderStore;
-  /** Team Hub bookkeeping; absent for a single-owner deployment. */
-  readonly hubStore?: HubStore;
+  /** Core memory repository; absent for a deployment that runs without MemFS. */
+  readonly memoryFs?: OpenAgentOptions["memoryFs"];
   /** Extensions owned by host features (watchers, routines, connectors, ...). */
   readonly extraExtensions?: readonly Extension[];
   /**
@@ -60,7 +59,7 @@ export function buildAgentOptions(
   return {
     ...runtime,
     ...(host.reminderStore === undefined ? {} : { reminderStore: host.reminderStore }),
-    ...(host.hubStore === undefined ? {} : { hubStore: host.hubStore }),
+    ...(host.memoryFs === undefined ? {} : { memoryFs: host.memoryFs }),
     ...(extensions.length === 0 ? {} : { extraExtensions: extensions }),
     ...(host.mcpServers === undefined || host.mcpServers.length === 0 ? {} : { mcpServers: host.mcpServers }),
     ...(host.skills === undefined ? {} : { skills: host.skills }),

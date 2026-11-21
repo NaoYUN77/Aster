@@ -25,7 +25,7 @@ vi .env
 chmod 600 .env
 ```
 
-必填项（渠道二选一）：`MODEL_PROVIDER`（`src/providers.ts` 注册表内的 id）、`MODEL_ID`（该提供商在 pi-ai 1.5.0 模型目录中的 id）、当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`，其他提供商的 key 留空）、`CHANNEL`（可选，`telegram` 默认或 `slack`，只校验选中渠道的变量）。Telegram（默认）：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`（纯数字用户 ID，不要写用户名）。Slack（`CHANNEL=slack`）：`SLACK_BOT_TOKEN`（`xoxb-`）、`SLACK_APP_TOKEN`（`xapp-`）、`SLACK_OWNER_ID`（`U…` member ID）。`SLACK_ALLOWED_USERS` / `SLACK_ALLOWED_CHANNELS`（可选，仅 Slack）：成员 ID 与频道 ID，逗号分隔、不写空格，空着即只服务所有者单聊。`TELEGRAM_API_ROOT`（可选，仅 Telegram）：https 前缀、无 query 或 fragment，供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理，未设置时使用官方根地址。
+必填项（渠道二选一）：`MODEL_PROVIDER`（`src/providers.ts` 注册表内的 id）、`MODEL_ID`（该提供商在 pi-ai 1.5.0 模型目录中的 id）、当前提供商对应的 API key 变量（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`，其他提供商的 key 留空）、`CHANNEL`（可选，`telegram` 默认或 `slack`，只校验选中渠道的变量）。Telegram（默认）：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_OWNER_ID`（纯数字用户 ID，不要写用户名）。Slack（`CHANNEL=slack`）：`SLACK_BOT_TOKEN`（`xoxb-`）、`SLACK_APP_TOKEN`（`xapp-`）、`SLACK_OWNER_ID`（`U…` member ID）。`SLACK_ALLOWED_CHANNELS`（可选，仅 Slack）：允许回话的频道 ID，逗号分隔、不写空格，空着即只服务所有者单聊；只有所有者能驱动 bot。`TELEGRAM_API_ROOT`（可选，仅 Telegram）：https 前缀、无 query 或 fragment，供无法直连 `api.telegram.org` 的主机把 Bot API 指到自建反向代理，未设置时使用官方根地址。
 
 只检查键是否存在，不要在终端或日志中回显值：
 

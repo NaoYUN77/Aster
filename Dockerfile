@@ -14,8 +14,8 @@ ENV NODE_ENV=production \
     DATA_DIR=/data \
     HOME=/data \
     NPM_CONFIG_CACHE=/data/.npm
-# Agent tools and operator commands use Bash; all mutable state belongs under /data.
-RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates openssh-client util-linux \
+# Agent tools and operator commands use Bash; core memory is a git repository under /data.
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data && chown node:node /data
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./

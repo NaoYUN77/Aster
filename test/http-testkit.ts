@@ -50,7 +50,7 @@ export function message(overrides: Partial<UiMessage> = {}): UiMessage {
 }
 
 export function fakeAgent(options: {
-  reply: (request: { requestId: string; text: string }, signal: AbortSignal) => Promise<string>;
+  reply: (request: { requestId: string; text: string }, signal: AbortSignal) => Promise<string | undefined>;
   steer?: (request: { requestId: string; text: string }) => Promise<{
     steerId: string;
     done: Promise<UiMessage | undefined>;

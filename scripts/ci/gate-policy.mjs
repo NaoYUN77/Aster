@@ -254,18 +254,43 @@ function checkCompose(files, head) {
   }
 }
 
-function checkDependencies(files, head) {
+const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies"];
+
+/** 依赖字段的规范投影:字段名+包名排序后拼起来,只比较依赖本身,不含 scripts/engines 等。 */
+function dependencySpecs(ref) {
+  const text = fileAt(ref, RULES.dependencies.manifest);
+  if (text === null) return null;
+  let pkg;
+  try { pkg = JSON.parse(text); } catch { return null; }
+  const out = [];
+  for (const field of DEP_FIELDS) {
+    for (const name of Object.keys(pkg[field] ?? {}).sort()) {
+      out.push(`${field}.${name}=${pkg[field][name]}`);
+    }
+  }
+  return out.join("\n");
+}
+
+function checkDependencies(files, base, head, staged) {
   const rule = RULES.dependencies;
   const touchedManifest = files.some((f) => f.path === rule.manifest);
   if (!touchedManifest) return;
   const touchedLock = files.some((f) => f.path === rule.lockfile);
-  if (!touchedLock) fail(rule.lockCode, rule.lockfile, "package.json 变了但 lockfile 没变");
+  if (!touchedLock) {
+    // 只改 scripts / version / engines 的 manifest 改动不需要 lockfile。
+    // 只有依赖字段真的变了才要求锁文件同步;staged 模式读不到 base,退化为保守要求。
+    const before = staged ? null : dependencySpecs(base);
+    const after = staged ? null : dependencySpecs(head);
+    if (staged || before === null || after === null || before !== after) {
+      fail(rule.lockCode, rule.lockfile, "依赖字段变了但 lockfile 没变");
+    }
+  }
 
   const text = fileAt(head, rule.manifest);
   if (text === null) return;
   let pkg;
   try { pkg = JSON.parse(text); } catch { fail(rule.code, rule.manifest, "package.json 不是合法 JSON"); return; }
-  for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
+  for (const field of DEP_FIELDS) {
     for (const [name, spec] of Object.entries(pkg[field] ?? {})) {
       if (typeof spec !== "string") continue;
       if (/^(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?|\d+\.\d+\.\d+\+[0-9A-Za-z.-]+)$/.test(spec)) continue;
@@ -303,10 +328,15 @@ function checkSecrets(added) {
   }
 }
 
-function checkDocsAsFix(files, testFindings) {
+function checkDocsAsFix(files, testFindings, opts) {
   // 只认"改文档 + 削弱测试"这个组合。仅仅"碰了文档也碰了测试"是绝大多数 PR 的常态,
   // 拿它报警只会把这条规则淹成噪声。
+  //
+  // 这是启发式,不是绝对禁令:删除测试却同时改文档,也可能是合法的重构(删掉一个子系统
+  // 时,文档和它的测试必须一起走)。所以和 GATE_TEST_REMOVED 一样,由仓库所有者显式加
+  // gate-change-approved 标签放行——标签表示"人已经看过这个组合",而不是规则失效。
   const rule = RULES.docsAsFix;
+  if (opts.labels.includes(RULES.protectedPaths.label)) return;
   const docsTouched = files.some((f) => rule.docsPaths.some((p) => pathMatches(f.path, p)));
   if (!docsTouched) return;
   if (testFindings.deleted) fail(rule.code, testFindings.deletedTestFiles[0], "改文档同时删测试文件");
@@ -327,10 +357,10 @@ function main() {
   checkWorkflows(files, head, added);
   const testFindings = checkTests(opts.staged ? "HEAD" : opts.base, head, added, files, opts);
   checkCompose(files, head);
-  checkDependencies(files, head);
+  checkDependencies(files, opts.staged ? "HEAD" : opts.base, head, opts.staged);
   checkTestScript(files, opts.staged ? "HEAD" : opts.base, head, opts);
   checkSecrets(added);
-  checkDocsAsFix(files, testFindings);
+  checkDocsAsFix(files, testFindings, opts);
 
   if (opts.json) {
     console.log(JSON.stringify({

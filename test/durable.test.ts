@@ -147,6 +147,27 @@ test("agent file tools survive reopening and completed requests are not executed
   }
 });
 
+test("only the configured owner is answered; anyone else is ignored before the model", { timeout: 15_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "personal-agent-single-owner-"));
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+  try {
+    const fixture = modelFixture("openai");
+    fixture.faux.setResponses([fauxAssistantMessage("answered")]);
+    app = await openAgent(appConfig(directory), fixture.models);
+    const ignored = await app.reply(
+      { requestId: "slack:test:other", conversationId: "C0CHANNEL12", senderId: "U0OTHER123", text: "hello" },
+      running,
+    );
+    assert.equal(ignored, undefined, "a non-owner request produces no reply");
+    assert.equal(fixture.faux.state.callCount, 0, "and never reaches the model");
+    // The ignored request leaves no turn behind: the owner's next request is answered normally.
+    assert.equal(await app.reply({ ...request, requestId: "telegram:test:owner" }, running), "answered");
+    assert.equal(fixture.faux.state.callCount, 1);
+  } finally {
+    try { await app?.close(); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
 function failingStorage(storage: Storage) {
   const state = { failing: false };
   const proxy = new Proxy(storage, {

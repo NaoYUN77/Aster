@@ -76,6 +76,7 @@
   },
 
   "dependencies": {
+    "_comment": "只有 dependencies/devDependencies/optionalDependencies 的键或版本变了才要求 lockfile 同行变更;改 scripts/version/engines 等不需要。",
     "manifest": "package.json",
     "lockfile": "package-lock.json",
     "pinExact": true,
@@ -84,7 +85,7 @@
   },
 
   "docsAsFix": {
-    "_comment": "同一 PR 既改文档、又删/弱化测试 —— 高度可疑:像在改文档掩盖坏掉的代码。",
+    "_comment": "同一 PR 既改文档、又删/弱化测试 —— 高度可疑:像在改文档掩盖坏掉的代码。这是启发式而非禁令:带 gate-change-approved 标签时放行(删除整个子系统时文档与测试必须一起走)。",
     "docsPaths": ["docs/", "CLAUDE.md", "README.md"],
     "code": "GATE_DOCS_AS_FIX"
   },
