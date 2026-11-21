@@ -8,8 +8,10 @@
 //
 // The runner is a process-wide singleton by construction (the integration creates exactly one):
 // at most one run is active, a trigger during a run coalesces into one pending run, and a
-// trigger check only enqueues work — it never waits for a model. State lives in the memory
-// repository's gitignored `.aster/dreaming.json`; only an applied run resets the turn counter.
+// trigger check only enqueues work — it never waits for a model. The nightly schedule
+// (`DREAMING_AT`, interpreted in the memory timezone) runs at most once per local date, and a
+// process that starts after the time catches up that same day. State lives in the memory
+// repository's gitignored `.aster/dreaming.json`.
 //
 // Observation carries run ids, actions, statuses, counts and durations only — never memory text,
 // message bodies, diffs or credentials.
@@ -22,7 +24,7 @@ import type { MemoryFs } from "./fs/store.js";
 
 export const DREAMING_DEFAULTS = {
   enabled: true,
-  turns: 20,
+  at: "04:00",
   onCompaction: true,
   behavior: "auto-launch",
   dryRun: false,
@@ -34,7 +36,8 @@ export type DreamingBehavior = "auto-launch" | "reminder";
 /** The validated host settings; every value is checked even when dreaming is disabled. */
 export type DreamingConfig = {
   readonly enabled: boolean;
-  readonly turns: number;
+  /** Local wall-clock trigger, `HH:MM` on the 24-hour clock, in the memory timezone. */
+  readonly at: string;
   readonly onCompaction: boolean;
   readonly behavior: DreamingBehavior;
   readonly dryRun: boolean;
@@ -72,14 +75,13 @@ export type DreamingRunRecord = {
 
 export type DreamingState = {
   readonly version: 1;
-  readonly turnsSinceApply: number;
+  /** Local date (`YYYY-MM-DD`) whose nightly trigger already fired; null before the first one. */
+  readonly lastNightlyDate: string | null;
   readonly lastRun: DreamingRunRecord | null;
   readonly lastAppliedCommit: string | null;
   readonly failure: { readonly at: string; readonly reason: string } | null;
   /** Newest daily-archive date a run has consumed; advanced only by an applied run. */
   readonly archiveThrough: string | null;
-  /** Completed turns toward the next reminder; persisted so a restart does not lose progress. */
-  readonly reminderTurns: number;
 };
 
 export type DreamingLogEvent = {
@@ -88,7 +90,6 @@ export type DreamingLogEvent = {
   readonly action?: string;
   readonly status?: string;
   readonly code?: string;
-  readonly turns?: number;
   readonly durationMs?: number;
   /** Layout lint only: issue codes and their count, never memory text. */
   readonly codes?: readonly string[];
@@ -105,13 +106,24 @@ export type DreamingRunnerOptions = {
   /** Bounded evidence for one run; called only when a run actually starts. */
   readonly input: (cursor: { readonly archiveThrough: string | null }) => Promise<DreamingInput>;
   readonly log?: (event: DreamingLogEvent) => void;
-  /** Test seam; production uses the wall clock. */
-  readonly now?: () => Date;
+  /** Wall clock and timers; tests inject a fake so the nightly schedule is deterministic. */
+  readonly clock?: DreamingClock;
+};
+
+export type DreamingTimerHandle = unknown;
+
+export type DreamingClock = {
+  now(): number;
+  setTimeout(callback: () => void, delayMs: number): DreamingTimerHandle;
+  clearTimeout(handle: DreamingTimerHandle): void;
 };
 
 export interface DreamingRunner {
-  /** Count one completed owner turn; triggers when the threshold is reached. Never awaits a run. */
-  observeTurn(): Promise<void>;
+  /**
+   * Load state and arm the nightly schedule. A process that starts after `DREAMING_AT` triggers
+   * the missed night once (same local date never runs twice). Never awaits a run.
+   */
+  start(): Promise<void>;
   /** A compaction completed; triggers immediately when `DREAMING_ON_COMPACTION=1`. */
   compactionCompleted(): Promise<void>;
   /** Consume the one-line reminder, when `DREAMING_BEHAVIOR=reminder` made one due. */
@@ -133,6 +145,19 @@ const RETRY_DELAY_MS = 1_000;
 const FAILURE_BACKOFF_BASE_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 60 * 60_000;
 const REMINDER_LINE = "System note: a memory review is due. Consider whether anything from this conversation belongs in MEMORY.md.";
+const AT_SHAPE = /^([01]\d|2[0-3]):[0-5]\d$/u;
+const DAY_MS = 24 * 60 * 60_000;
+
+const SYSTEM_CLOCK: DreamingClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => {
+    const timer = setTimeout(callback, delayMs);
+    // A nightly timer is background work: it must never keep the process alive by itself.
+    timer.unref();
+    return timer;
+  },
+  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
 
 /** The fixed brief for the dream conversation. Evidence arrives in the prompt, never here. */
 export const DREAMING_INSTRUCTIONS = `You are Aster's dreaming pass. You are working inside an isolated git worktree of
@@ -180,6 +205,7 @@ export function createDreamingRunner(options: DreamingRunnerOptions): DreamingRu
 class Runner implements DreamingRunner {
   readonly #options: DreamingRunnerOptions;
   readonly #log: (event: DreamingLogEvent) => void;
+  readonly #clock: DreamingClock;
   #state: DreamingState = emptyState();
   #ready: Promise<void> | undefined;
   #writeChain: Promise<unknown> = Promise.resolve();
@@ -191,9 +217,12 @@ class Runner implements DreamingRunner {
   #failureCount = 0;
   #backoffUntil = 0;
   #reminderDue = false;
+  #started = false;
+  #timer: DreamingTimerHandle | undefined;
 
   constructor(options: DreamingRunnerOptions) {
     this.#options = options;
+    this.#clock = options.clock ?? SYSTEM_CLOCK;
     this.#log = options.log ?? ((event) => console.error(`Memory ${event.event}: ${JSON.stringify(event)}`));
   }
 
@@ -202,35 +231,22 @@ class Runner implements DreamingRunner {
     return this.#state;
   }
 
-  async observeTurn(): Promise<void> {
-    if (this.#closed || !this.#options.config.enabled) return;
+  async start(): Promise<void> {
+    if (this.#closed || !this.#options.config.enabled || this.#started) return;
     await this.#load();
-    if (this.#options.config.behavior === "reminder") {
-      const reminderTurns = this.#state.reminderTurns + 1;
-      this.#state = { ...this.#state, reminderTurns };
-      await this.#persist();
-      if (reminderTurns < this.#options.config.turns) return;
-      this.#state = { ...this.#state, reminderTurns: 0 };
-      this.#reminderDue = true;
-      await this.#persist();
-      this.#log({ event: "dreaming.trigger", action: "reminder", turns: 0 });
-      return;
-    }
-    this.#state = { ...this.#state, turnsSinceApply: this.#state.turnsSinceApply + 1 };
-    await this.#persist();
-    if (this.#state.turnsSinceApply < this.#options.config.turns) return;
-    this.#schedule("turns");
+    if (this.#closed) return;
+    this.#started = true;
+    await this.#checkNightly();
+    this.#arm();
   }
 
   async compactionCompleted(): Promise<void> {
     if (this.#closed || !this.#options.config.enabled || !this.#options.config.onCompaction) return;
     await this.#load();
     if (this.#options.config.behavior === "reminder") {
-      // A compaction is an immediate nudge; any partial reminder progress is settled.
-      this.#state = { ...this.#state, reminderTurns: 0 };
+      // A compaction is an immediate nudge; it never launches a background run.
       this.#reminderDue = true;
-      await this.#persist();
-      this.#log({ event: "dreaming.trigger", action: "reminder", turns: 0 });
+      this.#log({ event: "dreaming.trigger", action: "reminder" });
       return;
     }
     this.#schedule("compaction");
@@ -250,6 +266,10 @@ class Runner implements DreamingRunner {
   close(): void {
     this.#closed = true;
     this.#pending = false;
+    if (this.#timer !== undefined) {
+      this.#clock.clearTimeout(this.#timer);
+      this.#timer = undefined;
+    }
     this.#abort?.abort();
     this.#settleIdle();
   }
@@ -263,7 +283,7 @@ class Runner implements DreamingRunner {
       this.#log({ event: "dreaming.trigger", action: reason, code: "backoff" });
       return;
     }
-    this.#log({ event: "dreaming.trigger", action: reason, turns: this.#state.turnsSinceApply });
+    this.#log({ event: "dreaming.trigger", action: reason });
     if (this.#running) {
       // One pending slot, never a queue: any number of triggers during a run coalesce.
       this.#pending = true;
@@ -295,6 +315,56 @@ class Runner implements DreamingRunner {
     for (const waiter of waiters) waiter();
   }
 
+  // --- nightly schedule -----------------------------------------------------------------------
+
+  /**
+   * Fire the night once when the process is already past `DREAMING_AT` and that local date has
+   * not run yet. A restart therefore catches up the same day; a fresh process before the time
+   * simply arms the timer.
+   */
+  async #checkNightly(): Promise<void> {
+    if (this.#closed || !this.#options.config.enabled) return;
+    const now = this.#clock.now();
+    const date = localDate(now, this.#options.timezone);
+    if (this.#state.lastNightlyDate === date) return;
+    const parts = localParts(now, this.#options.timezone);
+    const [hour, minute] = parseAt(this.#options.config.at);
+    if (parts.hour * 60 + parts.minute < hour * 60 + minute) return;
+    // Claim the date before scheduling: a day runs at most once, whatever the run's outcome.
+    this.#state = { ...this.#state, lastNightlyDate: date };
+    await this.#persist();
+    if (this.#options.config.behavior === "reminder") {
+      this.#reminderDue = true;
+      this.#log({ event: "dreaming.trigger", action: "reminder" });
+      return;
+    }
+    this.#schedule("nightly");
+  }
+
+  /** Arm one timer for the next local `HH:MM`; every firing re-checks the date and re-arms. */
+  #arm(): void {
+    if (this.#closed || !this.#started || !this.#options.config.enabled) return;
+    if (this.#timer !== undefined) this.#clock.clearTimeout(this.#timer);
+    const now = this.#clock.now();
+    const delay = Math.max(0, nextOccurrence(now, this.#options.timezone, this.#options.config.at) - now);
+    this.#timer = this.#clock.setTimeout(() => {
+      this.#timer = undefined;
+      void this.#onTimer().catch((error: unknown) => {
+        this.#log({ event: "dreaming.clock", code: errorCode(error) });
+      });
+    }, delay);
+  }
+
+  async #onTimer(): Promise<void> {
+    if (this.#closed || !this.#options.config.enabled) return;
+    try {
+      await this.#load();
+      await this.#checkNightly();
+    } finally {
+      this.#arm();
+    }
+  }
+
   // --- one run --------------------------------------------------------------------------------
 
   async #runOnce(reason: string): Promise<void> {
@@ -316,7 +386,6 @@ class Runner implements DreamingRunner {
       await this.#options.memory.ensure();
       signal.throwIfAborted();
       const input = await this.#options.input({ archiveThrough: this.#state.archiveThrough });
-      const turns = this.#state.turnsSinceApply;
       const runId = await this.#newRunId();
       const memoryDir = this.#options.memory.directory;
       const base = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
@@ -334,7 +403,7 @@ class Runner implements DreamingRunner {
       await gitTry(memoryDir, ["worktree", "prune"]);
       await gitTry(memoryDir, ["branch", "-D", worktree.branch]);
       await git(memoryDir, ["worktree", "add", "-b", worktree.branch, worktree.path, base], signal);
-      this.#log({ event: "dreaming.run.start", runId, action: reason, turns });
+      this.#log({ event: "dreaming.run.start", runId, action: reason });
 
       const dreamPrompt = buildDreamPrompt(input, this.#options.timezone);
       await this.#runWithRetry(signal, {
@@ -367,17 +436,17 @@ class Runner implements DreamingRunner {
         throw new DreamDiscard("layout-invalid");
       }
       if (config.dryRun) {
-        this.#log({ event: "dreaming.run.discarded", runId, action: "dry-run", turns });
-        // A dry run is a completed cycle: the counter restarts, so the next trigger again needs a
-        // full threshold instead of firing on every following turn.
-        await this.#record({ startedAt, status: "dry-run", commit: null, reason: null }, { turnsSinceApply: 0 });
+        this.#log({ event: "dreaming.run.discarded", runId, action: "dry-run" });
+        // A dry run is a completed night: the nightly date was already claimed when it triggered,
+        // so it never re-fires the same day.
+        await this.#record({ startedAt, status: "dry-run", commit: null, reason: null });
         return;
       }
 
       // Apply, per ADR-0001: commit the worktree, commit a dirty live tree, rebase the dream
       // commit if live advanced, then fast-forward. Never a forced merge.
       signal.throwIfAborted();
-      await git(worktree.path, ["commit", "--no-verify", "-m", commitMessage(runId, turns, this.#now())], signal);
+      await git(worktree.path, ["commit", "--no-verify", "-m", commitMessage(runId, this.#now())], signal);
       await this.#options.memory.commitDirty("owner", "pre-dreaming-apply");
       signal.throwIfAborted();
       const liveHead = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
@@ -397,7 +466,6 @@ class Runner implements DreamingRunner {
       await this.#record(
         { startedAt, status: "applied", commit, reason: null },
         {
-          turnsSinceApply: 0,
           lastAppliedCommit: commit,
           failure: null,
           ...(input.archiveThrough === null ? {} : { archiveThrough: input.archiveThrough }),
@@ -405,7 +473,7 @@ class Runner implements DreamingRunner {
       );
       this.#failureCount = 0;
       this.#backoffUntil = 0;
-      this.#log({ event: "dreaming.run.applied", runId, durationMs: this.#now().getTime() - startedMs, turns });
+      this.#log({ event: "dreaming.run.applied", runId, durationMs: this.#now().getTime() - startedMs });
     } catch (error) {
       if (error instanceof DreamDiscard) {
         this.#log({ event: "dreaming.run.discarded", runId: worktree?.runId, action: error.reason, code: error.reason });
@@ -438,7 +506,7 @@ class Runner implements DreamingRunner {
 
   async #record(
     entry: { startedAt: string; status: DreamingRunStatus; commit: string | null; reason: string | null },
-    next?: Partial<Pick<DreamingState, "turnsSinceApply" | "lastAppliedCommit" | "failure" | "archiveThrough">>,
+    next?: Partial<Pick<DreamingState, "lastAppliedCommit" | "failure" | "archiveThrough">>,
   ): Promise<void> {
     const endedAt = this.#now().toISOString();
     const lastRun: DreamingRunRecord = {
@@ -488,7 +556,7 @@ class Runner implements DreamingRunner {
   // --- state ----------------------------------------------------------------------------------
 
   #now(): Date {
-    return this.#options.now?.() ?? new Date();
+    return new Date(this.#clock.now());
   }
 
   async #load(): Promise<void> {
@@ -560,12 +628,11 @@ class Runner implements DreamingRunner {
 function emptyState(): DreamingState {
   return {
     version: STATE_VERSION,
-    turnsSinceApply: 0,
+    lastNightlyDate: null,
     lastRun: null,
     lastAppliedCommit: null,
     failure: null,
     archiveThrough: null,
-    reminderTurns: 0,
   };
 }
 
@@ -577,7 +644,11 @@ export function parseDreamingState(value: unknown): DreamingState {
   if (typeof value !== "object" || value === null) throw new Error("not an object");
   const record = value as Record<string, unknown>;
   if (record.version !== STATE_VERSION) throw new Error("unknown version");
-  const turnsSinceApply = integer(record.turnsSinceApply);
+  // State files written before the nightly schedule simply have no date yet; the old turn
+  // counters are ignored on read and never written again.
+  const lastNightlyDate = record.lastNightlyDate === undefined || record.lastNightlyDate === null
+    ? null
+    : localDateString(record.lastNightlyDate);
   const lastRun = record.lastRun === null ? null : parseRun(record.lastRun);
   const lastAppliedCommit = nullableString(record.lastAppliedCommit);
   const failure = record.failure === null
@@ -588,9 +659,7 @@ export function parseDreamingState(value: unknown): DreamingState {
         return { at: requiredString(item.at), reason: requiredString(item.reason) };
       })();
   const archiveThrough = nullableString(record.archiveThrough);
-  // A state file written before reminder behavior existed simply has no counter yet.
-  const reminderTurns = record.reminderTurns === undefined ? 0 : integer(record.reminderTurns);
-  return { version: STATE_VERSION, turnsSinceApply, lastRun, lastAppliedCommit, failure, archiveThrough, reminderTurns };
+  return { version: STATE_VERSION, lastNightlyDate, lastRun, lastAppliedCommit, failure, archiveThrough };
 }
 
 function parseRun(value: unknown): DreamingRunRecord {
@@ -609,8 +678,8 @@ function parseRun(value: unknown): DreamingRunRecord {
   };
 }
 
-function integer(value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("bad integer");
+function localDateString(value: unknown): string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) throw new Error("bad date");
   return value;
 }
 
@@ -623,6 +692,72 @@ function nullableString(value: unknown): string | null {
   if (value === null) return null;
   if (typeof value !== "string") throw new Error("bad string");
   return value;
+}
+
+
+// --- timezone ------------------------------------------------------------------------------------
+
+const FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function formatter(timezone: string): Intl.DateTimeFormat {
+  let cached = FORMATTERS.get(timezone);
+  if (cached === undefined) {
+    cached = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    FORMATTERS.set(timezone, cached);
+  }
+  return cached;
+}
+
+type LocalParts = { readonly year: number; readonly month: number; readonly day: number; readonly hour: number; readonly minute: number };
+
+/** The wall clock of `timezone` at `instantMs`; the memory timezone is validated at startup. */
+function localParts(instantMs: number, timezone: string): LocalParts {
+  const values: Record<string, number> = {};
+  for (const part of formatter(timezone).formatToParts(new Date(instantMs))) {
+    if (part.type !== "literal") values[part.type] = Number(part.value);
+  }
+  return {
+    year: values.year ?? 1970,
+    month: values.month ?? 1,
+    day: values.day ?? 1,
+    hour: values.hour ?? 0,
+    minute: values.minute ?? 0,
+  };
+}
+
+function localDate(instantMs: number, timezone: string): string {
+  const parts = localParts(instantMs, timezone);
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function parseAt(at: string): [number, number] {
+  if (!AT_SHAPE.test(at)) throw new Error(`invalid dreaming time: ${at}`);
+  const [hour, minute] = at.split(":").map(Number);
+  return [hour!, minute!];
+}
+
+/**
+ * The next instant whose wall clock in `timezone` reads `HH:MM`, strictly after `nowMs`. Scanning
+ * whole minutes keeps DST changes and half-hour offsets honest without a timezone library; the
+ * search is bounded to 26 hours because a valid `HH:MM` occurs at least once per local day.
+ */
+function nextOccurrence(nowMs: number, timezone: string, at: string): number {
+  const [hour, minute] = parseAt(at);
+  let candidate = Math.floor(nowMs / 60_000) * 60_000 + 60_000;
+  for (let step = 0; step <= 26 * 60; step += 1, candidate += 60_000) {
+    const parts = localParts(candidate, timezone);
+    if (parts.hour === hour && parts.minute === minute) return candidate;
+  }
+  // The loop only exhausts if the formatter cannot represent the zone; configuration validated it.
+  throw new Error(`cannot schedule ${at} in ${timezone}`);
 }
 
 // --- prompts ------------------------------------------------------------------------------------
@@ -682,9 +817,8 @@ function gitRun(directory: string, args: readonly string[], signal?: AbortSignal
   });
 }
 
-function commitMessage(runId: string, turns: number, now: Date): string {
-  const scope = turns > 0 ? `${turns} owner turn${turns === 1 ? "" : "s"}` : "a background review";
-  return `memory: dream run ${runId} over ${scope} by dreaming at ${now.toISOString()}`;
+function commitMessage(runId: string, now: Date): string {
+  return `memory: dream run ${runId} by dreaming at ${now.toISOString()}`;
 }
 
 // --- small helpers ----------------------------------------------------------------------------

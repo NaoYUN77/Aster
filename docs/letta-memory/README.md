@@ -58,7 +58,7 @@ $DATA_DIR/memory-fs/            # git repository, branch main
 | `MEMORY_FS_DIR` | `$DATA_DIR/memory-fs` | Absolute repository path. |
 | `MEMORY_FS_CORE_TOKENS` | `4096` | Budget for the injected `MEMORY.md`. |
 | `DREAMING_ENABLED` | `1` | Master switch for background consolidation. |
-| `DREAMING_TURNS` | `20` | Completed owner turns between runs. |
+| `DREAMING_AT` | `04:00` | Nightly trigger, `HH:MM` on the 24-hour clock in `MEMORY_TIMEZONE`. |
 | `DREAMING_ON_COMPACTION` | `1` | Also run after a context compaction. |
 | `DREAMING_BEHAVIOR` | `auto-launch` | `auto-launch` (background write) or `reminder` (nudge only). |
 | `DREAMING_DRY_RUN` | `0` | Compute and check the layout, but never merge. |
@@ -92,10 +92,11 @@ render.
 
 ### 5.3 Dreaming
 
-- **Trigger**: every `DREAMING_TURNS` completed owner turns, or after a compaction when enabled.
-  One global counter; a trigger during a run coalesces into one pending run. An applied run — and a
-  completed dry run, which is also a finished cycle — resets the counter; a failed, discarded or
-  timed-out run does not consume it.
+- **Trigger**: once per local date at `DREAMING_AT` (default `04:00`, interpreted in
+  `MEMORY_TIMEZONE`), or after a compaction when `DREAMING_ON_COMPACTION=1`. A process that starts
+  after the time catches up the missed night once; the local date is claimed when the trigger
+  fires, so the same day never runs twice whatever the outcome. A trigger during a run coalesces
+  into one pending run. The removed `DREAMING_TURNS` is reported by name at startup and never read.
 - **Input**: the last K turns of the owner conversation plus the daily archive since the last
   run's cursor, bounded by tokens. No member Hubs exist to read.
 - **Run**: one background subagent in an isolated `git worktree`, with the ordinary tools, using
@@ -110,25 +111,26 @@ render.
   rebases the dream commit onto the live HEAD if live advanced meanwhile, then
   `git merge --ff-only`. A rebase conflict, timeout or invalid layout discards the worktree and
   branch; the live directory is never touched and a forced merge is never used.
-- **Reminder** (opt-in): a one-line "memory review due" note on the next request. The counter
-  toward the next reminder is persisted in `.aster/dreaming.json`, so a restart continues it.
-- **Dry run**: the full pipeline runs, apply is skipped, and the turn counter restarts as after an
-  applied run.
+- **Reminder** (opt-in): a one-line "memory review due" note on the next request after the
+  nightly time (or a compaction). The local date is persisted in `.aster/dreaming.json`, so the
+  same day never nudges twice.
+- **Dry run**: the full pipeline runs, apply is skipped; the night still counts once, and the next
+  trigger is the next local date or a compaction.
 
 ### 5.4 Background execution model
 
 Dreaming is asynchronous, not a separate daemon:
 
 - One in-process runner. At most one run at a time, globally; triggers during a run coalesce.
-- The trigger check runs after a reply is delivered or after compaction completes; it never sits
-  in the reply path.
-- A "turn" is a completed owner request. Aster does not expose pi-durable's internal tool rounds,
-  so this approximates Letta's step count and the documentation says so.
+- The nightly check is a process timer for `DREAMING_AT` in `MEMORY_TIMEZONE`; it fires at most
+  once per local date and catches up the same date when the process starts after the time. A
+  compaction can trigger a run as well. Triggers only enqueue work; nothing sits in the reply path.
 - A run has one hard timeout (`DREAMING_TIMEOUT_MS`) that covers the model turn, every git
   command and apply; expiry discards the run like any other abort. One retry on a
   transient model failure, then backoff. No unbounded loops.
-- State lives in `.aster/dreaming.json`: both counters, last run, last applied commit, failure
-  reason. `dreaming status` prints it; logs use `dreaming.*` events.
+- State lives in `.aster/dreaming.json`: `lastNightlyDate`, last run, last applied commit, failure
+  reason. Old `turnsSinceApply`/`reminderTurns` fields are read and ignored. `dreaming status`
+  prints it; logs use `dreaming.*` events.
 - At startup the runner prunes crashed leftovers: `git worktree prune`, then delete a
   `dreaming/*` branch only when no live worktree is registered for it.
 

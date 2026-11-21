@@ -76,7 +76,7 @@ test("removedConfigKeys names what is no longer read, and nothing when the envir
     ["CHANNEL", "DREAMING_REVIEW", "MEMORY_ENABLED", "SLACK_APP_TOKEN", "SLACK_BOT_TOKEN", "STYLE_LEARNING", "TELEGRAM_API_ROOT", "TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID"],
   );
   // The startup line names families only; no value from the environment can reach it.
-  assert.equal(REMOVED_CONFIG_LINE, "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED, DREAMING_REVIEW are no longer read");
+  assert.equal(REMOVED_CONFIG_LINE, "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED, DREAMING_REVIEW, DREAMING_TURNS are no longer read");
   assert.doesNotMatch(REMOVED_CONFIG_LINE, /value-that-must-not-be-printed/);
 });
 
