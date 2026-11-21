@@ -34,8 +34,69 @@ const SELECTABLE = [
 ];
 const UNSTABLE_ID = "mock/opencode-glm";
 
-/** @type {{messages: any[], requests: any[], selection: {id: string, kind: "manual"|"auto"} | null, modelVersion: number, sessions: Map<string, {ownerId: string, expiresAt: number}>}} */
-const state = { messages: [], requests: [], selection: null, modelVersion: 1, sessions: new Map() };
+const CONNECTORS = [
+  {
+    provider: "github", displayName: "GitHub", transport: "oauth",
+    defaultScopes: ["repo", "read:user"],
+    tools: ["github.search_repositories", "github.create_issue_comment"],
+    description: "可读取仓库、Issue 与 Pull Request，也可创建 Issue 与评论。",
+    accountLabel: "aster-dev",
+  },
+  {
+    provider: "gmail", displayName: "Gmail", transport: "oauth",
+    defaultScopes: ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.send"],
+    tools: ["gmail.search", "gmail.read"],
+    description: "支持邮件检索与发送，不会删除邮件。",
+    accountLabel: "aster.demo@gmail.com",
+  },
+  {
+    provider: "outlook", displayName: "Outlook", transport: "oauth",
+    defaultScopes: ["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"],
+    tools: ["connector_outlook_list_messages", "connector_outlook_search_messages", "connector_outlook_get_message"],
+    description: "支持邮件检索、发送与回复，不会删除邮件。",
+    accountLabel: "aster.demo@outlook.com",
+  },
+  {
+    provider: "linear", displayName: "Linear", transport: "oauth",
+    defaultScopes: ["read", "write"],
+    tools: ["connector_linear_list_issues", "connector_linear_search_issues", "connector_linear_get_issue"],
+    description: "支持 Issue 读取、创建与更新，不会删除 Issue。",
+    accountLabel: "aster.demo@linear.app",
+  },
+  {
+    provider: "notion", displayName: "Notion", transport: "oauth",
+    defaultScopes: [],
+    tools: ["connector_notion_search", "connector_notion_get_page"],
+    description: "支持页面与数据库的读取与写入，不会删除内容。",
+    accountLabel: "Aster Workspace",
+  },
+  {
+    provider: "google_calendar", displayName: "Google Calendar", transport: "oauth",
+    defaultScopes: ["openid", "email", "https://www.googleapis.com/auth/calendar"],
+    tools: ["connector_google_calendar_list_events", "connector_google_calendar_get_event"],
+    description: "支持日程读取与创建，不会删除日程。",
+    accountLabel: "aster.demo@gmail.com",
+  },
+  {
+    provider: "google_drive", displayName: "Google Drive", transport: "oauth",
+    defaultScopes: ["openid", "email", "https://www.googleapis.com/auth/drive.file"],
+    tools: ["connector_google_drive_search_files", "connector_google_drive_get_file"],
+    description: "支持文件检索与读写（仅限 Aster 创建或打开的文件），不会删除文件。",
+    accountLabel: "aster.demo@gmail.com",
+  },
+];
+
+const connectorDef = (provider) => CONNECTORS.find((item) => item.provider === provider) ?? null;
+
+function freshConnectors() {
+  return {};
+}
+
+/** @type {{messages: any[], requests: any[], selection: {id: string, kind: "manual"|"auto"} | null, modelVersion: number, sessions: Map<string, {ownerId: string, expiresAt: number}>, connectors: Record<string, any>}} */
+const state = {
+  messages: [], requests: [], selection: null, modelVersion: 1, sessions: new Map(),
+  connectors: freshConnectors(),
+};
 const timers = new Map();
 const listeners = new Set();
 
@@ -162,6 +223,125 @@ function abortRequest(requestId) {
   // 与服务端一致：停止后不再追加空的 assistant 占位消息。
   emit("request.aborted", { requestId });
   return { status: 200, body: { requestId, status: "aborted" } };
+}
+
+function providerView(def) {
+  return {
+    provider: def.provider,
+    displayName: def.displayName,
+    transport: def.transport,
+    defaultScopes: [...def.defaultScopes],
+    tools: [...def.tools],
+  };
+}
+
+function connectorsResponse() {
+  return {
+    providers: CONNECTORS.map(providerView),
+    connections: Object.values(state.connectors),
+    mock: true,
+  };
+}
+
+function createConnector(provider, slug) {
+  const def = connectorDef(provider);
+  if (!def) {
+    return { status: 404, body: { error: { code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" } } };
+  }
+
+  const existing = state.connectors[slug];
+  if (existing) {
+    if (existing.provider !== provider) {
+      return { status: 409, body: { error: { code: "CONNECTOR_NOT_CONFIGURED", message: "该 slug 已被其他连接器占用" } } };
+    }
+    return { status: 200, body: { connection: existing, created: false } };
+  }
+
+  const now = new Date().toISOString();
+  const connection = {
+    id: makeId("conn"), provider: def.provider, slug, status: "pending",
+    accountLabel: null, scopes: [...def.defaultScopes], createdAt: now, updatedAt: now,
+    lastErrorCode: null,
+  };
+  state.connectors[slug] = connection;
+  emit("connector.changed", { connection });
+  return { status: 201, body: { connection, created: true } };
+}
+
+function startConnectorOAuth(slug) {
+  const connection = state.connectors[slug];
+  const def = connection ? connectorDef(connection.provider) : null;
+  if (!connection || !def) {
+    return { status: 404, body: { error: { code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" } } };
+  }
+
+  connection.status = "pending";
+  connection.updatedAt = new Date().toISOString();
+  emit("connector.changed", { connection });
+
+  const timerKey = `oauth:${slug}`;
+  const previous = timers.get(timerKey);
+  previous?.forEach((timer) => clearTimeout(timer));
+  const timer = setTimeout(() => {
+    const latest = state.connectors[slug];
+    if (!latest) return;
+    latest.status = "connected";
+    latest.accountLabel = def.accountLabel;
+    latest.scopes = [...def.defaultScopes];
+    latest.updatedAt = new Date().toISOString();
+    latest.lastErrorCode = null;
+    emit("connector.changed", { connection: latest });
+    timers.delete(timerKey);
+  }, 1200);
+  timers.set(timerKey, [timer]);
+
+  return {
+    status: 200,
+    body: {
+      url: `https://example.com/mock-oauth?provider=${encodeURIComponent(
+        connection.provider,
+      )}&slug=${encodeURIComponent(slug)}`,
+    },
+  };
+}
+
+function deleteConnector(slug) {
+  const connection = state.connectors[slug];
+  if (connection) {
+    // 取消可能仍在等待的 mock 授权回调，避免断开后又被定时器连回去。
+    const timerKey = `oauth:${slug}`;
+    timers.get(timerKey)?.forEach(clearTimeout);
+    timers.delete(timerKey);
+    // 与服务端一致：行保留为 revoked，供同一 slug 重新授权。
+    connection.status = "revoked";
+    connection.accountLabel = null;
+    connection.scopes = [];
+    connection.updatedAt = new Date().toISOString();
+    emit("connector.changed", { connection });
+  }
+  return { status: 204, body: null };
+}
+
+function requestCredential(connectorId = "github") {
+  const def = connectorDef(connectorId);
+  if (!def) return { status: 404, body: { error: { code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" } } };
+
+  const connection = state.connectors[def.provider];
+  const requestId = makeId("cred");
+  const tool =
+    def.provider === "github"
+      ? "github.create_issue_comment"
+      : def.provider === "linear"
+        ? "linear.search_issues"
+        : `${def.provider}.search`;
+  emit("credential.request", {
+    connectionId: connection?.id ?? `mock_${def.provider}`,
+    provider: def.provider,
+    slug: def.provider,
+    tool,
+    requestId,
+  });
+  return { status: 202, body: { requestId } };
 }
 
 function messagesPage(before, limit) {
@@ -321,6 +501,49 @@ const server = createServer(async (req, res) => {
     const models = modelsResponse();
     emit("model.changed", { current: models.current, version: state.modelVersion });
     json(res, 200, { ...models, effective: "next-request" });
+    return;
+  }
+
+  if (req.method === "GET" && path === "/api/v1/connectors") {
+    if (!authorized(req)) { unauthorized(res); return; }
+    json(res, 200, connectorsResponse());
+    return;
+  }
+
+  if (req.method === "POST" && path === "/api/v1/connectors") {
+    if (!authorized(req)) { unauthorized(res); return; }
+    const body = await readBody(req);
+    if (typeof body?.provider !== "string" || typeof body?.slug !== "string") {
+      fail(res, 400, "INVALID_REQUEST", "请求不合法");
+      return;
+    }
+    const result = createConnector(body.provider, body.slug);
+    json(res, result.status, result.body);
+    return;
+  }
+
+  const oauthStartMatch = /^\/api\/v1\/connectors\/([^/]+)\/oauth\/start$/.exec(path);
+  if (req.method === "POST" && oauthStartMatch) {
+    if (!authorized(req)) { unauthorized(res); return; }
+    const result = startConnectorOAuth(decodeURIComponent(oauthStartMatch[1]));
+    json(res, result.status, result.body);
+    return;
+  }
+
+  const connectorDeleteMatch = /^\/api\/v1\/connectors\/([^/]+)$/.exec(path);
+  if (req.method === "DELETE" && connectorDeleteMatch) {
+    if (!authorized(req)) { unauthorized(res); return; }
+    deleteConnector(decodeURIComponent(connectorDeleteMatch[1]));
+    res.writeHead(204); res.end();
+    return;
+  }
+
+  if (req.method === "POST" && path === "/api/v1/mock/credential-request") {
+    if (!authorized(req)) { unauthorized(res); return; }
+    const body = await readBody(req);
+    const connectorId = typeof body?.connectorId === "string" ? body.connectorId : "github";
+    const result = requestCredential(connectorId);
+    json(res, result.status, result.body);
     return;
   }
 

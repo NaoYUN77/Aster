@@ -28,6 +28,28 @@ export type MockRequest = {
 
 type Selection = { id: string; kind: "manual" | "auto" } | null;
 
+export type MockConnectorStatus = "pending" | "connected" | "error" | "revoked";
+
+/** 与后端 `ConnectorConnection` 同形；mock 也只暴露这些安全字段。 */
+export type MockConnectorConnection = {
+  id: string;
+  provider:
+    | "github"
+    | "gmail"
+    | "outlook"
+    | "linear"
+    | "notion"
+    | "google_calendar"
+    | "google_drive";
+  slug: string;
+  status: MockConnectorStatus;
+  accountLabel: string | null;
+  scopes: string[];
+  createdAt: string;
+  updatedAt: string;
+  lastErrorCode: string | null;
+};
+
 type MockState = {
   messages: UiMessage[];
   sessions: Record<string, number>;
@@ -35,7 +57,105 @@ type MockState = {
   requests: MockRequest[];
   modelVersion: number;
   seededAt: number;
+  /** 按 slug 保存；没有记录 = 尚未创建连接。 */
+  connectors: Record<string, MockConnectorConnection>;
 };
+
+const CONNECTOR_DEFS = [
+  {
+    provider: "github",
+    displayName: "GitHub",
+    transport: "oauth",
+    defaultScopes: ["repo", "read:user"],
+    tools: ["github.search_repositories", "github.create_issue_comment"],
+    description: "可读取仓库、Issue 与 Pull Request，也可创建 Issue 与评论。",
+    accountLabel: "aster-dev",
+  },
+  {
+    provider: "gmail",
+    displayName: "Gmail",
+    transport: "oauth",
+    defaultScopes: ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.send"],
+    tools: ["gmail.search", "gmail.read"],
+    description: "支持邮件检索与发送，不会删除邮件。",
+    accountLabel: "aster.demo@gmail.com",
+  },
+  {
+    provider: "outlook",
+    displayName: "Outlook",
+    transport: "oauth",
+    defaultScopes: ["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"],
+    tools: [
+      "connector_outlook_list_messages",
+      "connector_outlook_search_messages",
+      "connector_outlook_get_message",
+    ],
+    description: "支持邮件检索、发送与回复，不会删除邮件。",
+    accountLabel: "aster.demo@outlook.com",
+  },
+  {
+    provider: "linear",
+    displayName: "Linear",
+    transport: "oauth",
+    defaultScopes: ["read", "write"],
+    tools: [
+      "connector_linear_list_issues",
+      "connector_linear_search_issues",
+      "connector_linear_get_issue",
+    ],
+    description: "支持 Issue 读取、创建与更新，不会删除 Issue。",
+    accountLabel: "aster.demo@linear.app",
+  },
+  {
+    provider: "notion",
+    displayName: "Notion",
+    transport: "oauth",
+    defaultScopes: [],
+    tools: ["connector_notion_search", "connector_notion_get_page"],
+    description: "支持页面与数据库的读取与写入，不会删除内容。",
+    accountLabel: "Aster Workspace",
+  },
+  {
+    provider: "google_calendar",
+    displayName: "Google Calendar",
+    transport: "oauth",
+    defaultScopes: [
+      "openid",
+      "email",
+      "https://www.googleapis.com/auth/calendar",
+    ],
+    tools: [
+      "connector_google_calendar_list_events",
+      "connector_google_calendar_get_event",
+    ],
+    description: "支持日程读取与创建，不会删除日程。",
+    accountLabel: "aster.demo@gmail.com",
+  },
+  {
+    provider: "google_drive",
+    displayName: "Google Drive",
+    transport: "oauth",
+    defaultScopes: [
+      "openid",
+      "email",
+      "https://www.googleapis.com/auth/drive.file",
+    ],
+    tools: [
+      "connector_google_drive_search_files",
+      "connector_google_drive_get_file",
+    ],
+    description: "支持文件检索与读写（仅限 Aster 创建或打开的文件），不会删除文件。",
+    accountLabel: "aster.demo@gmail.com",
+  },
+] as const;
+
+function connectorDef(provider: string) {
+  return CONNECTOR_DEFS.find((item) => item.provider === provider) ?? null;
+}
+
+function freshConnectors(): Record<string, MockConnectorConnection> {
+  return {};
+}
 
 type MockEvent = { event: string; data: unknown };
 type Listener = (event: MockEvent) => void;
@@ -52,6 +172,7 @@ function freshState(): MockState {
     requests: [],
     modelVersion: 1,
     seededAt: now,
+    connectors: freshConnectors(),
   };
 }
 
@@ -69,6 +190,24 @@ function load(): MockState {
       requests: parsed.requests ?? [],
       selection: parsed.selection ?? null,
       modelVersion: parsed.modelVersion ?? 1,
+      connectors: Object.fromEntries(
+        Object.entries(parsed.connectors ?? {}).filter(([slug, value]) => {
+          const item = value as Partial<MockConnectorConnection> | null;
+          return (
+            item !== null &&
+            typeof item === "object" &&
+            item.slug === slug &&
+            (item.provider === "github" ||
+              item.provider === "gmail" ||
+              item.provider === "outlook" ||
+              item.provider === "linear" ||
+              item.provider === "notion" ||
+              item.provider === "google_calendar" ||
+              item.provider === "google_drive") &&
+            typeof item.status === "string"
+          );
+        }),
+      ) as Record<string, MockConnectorConnection>,
     };
     // 模拟后端重启恢复：未完成的请求置为失败，不自动重放。
     for (const request of state.requests) {
@@ -432,6 +571,157 @@ export function mockActiveRequest(): { requestId: string; status: string; client
 
 export function mockSnapshot(): { activeRequest: unknown; modelVersion: number } {
   return { activeRequest: mockActiveRequest(), modelVersion: state.modelVersion };
+}
+
+/* ------------------------------------------------------------------ */
+/* Connectors（仅 mock：状态保存在 mock 服务端，不写客户端存储）        */
+/* ------------------------------------------------------------------ */
+
+function providerView(def: (typeof CONNECTOR_DEFS)[number]) {
+  return {
+    provider: def.provider,
+    displayName: def.displayName,
+    transport: def.transport,
+    defaultScopes: [...def.defaultScopes],
+    tools: [...def.tools],
+  };
+}
+
+export function mockConnectors() {
+  return {
+    providers: CONNECTOR_DEFS.map(providerView),
+    connections: Object.values(state.connectors),
+    mock: true,
+  };
+}
+
+export function mockCreateConnector(
+  provider: string,
+  slug: string,
+):
+  | { ok: true; connection: MockConnectorConnection; created: boolean }
+  | { ok: false; status: number; code: string; message: string } {
+  const def = connectorDef(provider);
+  if (!def) {
+    return { ok: false, status: 404, code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" };
+  }
+
+  const existing = state.connectors[slug];
+  if (existing) {
+    if (existing.provider !== provider) {
+      return {
+        ok: false,
+        status: 409,
+        code: "CONNECTOR_NOT_CONFIGURED",
+        message: "该 slug 已被其他连接器占用",
+      };
+    }
+    return { ok: true, connection: existing, created: false };
+  }
+
+  const now = new Date().toISOString();
+  const connection: MockConnectorConnection = {
+    id: makeId("conn"),
+    provider: def.provider,
+    slug,
+    status: "pending",
+    accountLabel: null,
+    scopes: [...def.defaultScopes],
+    createdAt: now,
+    updatedAt: now,
+    lastErrorCode: null,
+  };
+  state.connectors[slug] = connection;
+  persist();
+  emit("connector.changed", { connection });
+  return { ok: true, connection, created: true };
+}
+
+export function mockStartConnectorOAuth(
+  slug: string,
+):
+  | { ok: true; url: string }
+  | { ok: false; status: number; code: string; message: string } {
+  const connection = state.connectors[slug];
+  const def = connection ? connectorDef(connection.provider) : null;
+  if (!connection || !def) {
+    return { ok: false, status: 404, code: "CONNECTOR_NOT_FOUND", message: "连接器不存在" };
+  }
+
+  connection.status = "pending";
+  connection.updatedAt = new Date().toISOString();
+  persist();
+  emit("connector.changed", { connection });
+
+  // Mock 浏览器回调：不依赖真实 OAuth，延时后模拟授权完成。
+  const timerKey = `oauth:${slug}`;
+  const previous = timers.get(timerKey);
+  previous?.forEach((timer) => window.clearTimeout(timer));
+  const timer = window.setTimeout(() => {
+    const latest = state.connectors[slug];
+    if (!latest) return;
+    latest.status = "connected";
+    latest.accountLabel = def.accountLabel;
+    latest.scopes = [...def.defaultScopes];
+    latest.updatedAt = new Date().toISOString();
+    latest.lastErrorCode = null;
+    persist();
+    emit("connector.changed", { connection: latest });
+    timers.delete(timerKey);
+  }, 1_200);
+  timers.set(timerKey, [timer]);
+
+  return {
+    ok: true,
+    url: `https://example.com/mock-oauth?provider=${encodeURIComponent(
+      connection.provider,
+    )}&slug=${encodeURIComponent(slug)}`,
+  };
+}
+
+export function mockDeleteConnector(
+  slug: string,
+): { ok: true } {
+  const connection = state.connectors[slug];
+  if (connection) {
+    // 取消可能仍在等待的 mock 授权回调，避免断开后又被定时器连回去。
+    const timerKey = `oauth:${slug}`;
+    timers.get(timerKey)?.forEach((timer) => window.clearTimeout(timer));
+    timers.delete(timerKey);
+    // 与服务端一致：行保留为 revoked，供同一 slug 重新授权。
+    connection.status = "revoked";
+    connection.accountLabel = null;
+    connection.scopes = [];
+    connection.updatedAt = new Date().toISOString();
+    persist();
+    emit("connector.changed", { connection });
+  }
+  return { ok: true };
+}
+
+/** 模拟服务端发起一次安全注入请求，通过 SSE 推给所有端（仅 mock）。 */
+export function mockRequestCredential(
+  connectorId = "github",
+): { requestId: string } | { error: "CONNECTOR_NOT_FOUND" } {
+  const def = connectorDef(connectorId);
+  if (!def) return { error: "CONNECTOR_NOT_FOUND" };
+
+  const connection = state.connectors[def.provider];
+  const requestId = makeId("cred");
+  const tool =
+    def.provider === "github"
+      ? "github.create_issue_comment"
+      : def.provider === "linear"
+        ? "linear.search_issues"
+        : `${def.provider}.search`;
+  emit("credential.request", {
+    connectionId: connection?.id ?? `mock_${def.provider}`,
+    provider: def.provider,
+    slug: def.provider,
+    tool,
+    requestId,
+  });
+  return { requestId };
 }
 
 export { MOCK_FALLBACK, MOCK_PRIMARY };

@@ -13,11 +13,20 @@ export function DialogContent({
   className,
   children,
   hideClose = false,
+  overlayClassName,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Content> & { hideClose?: boolean }) {
+}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  hideClose?: boolean;
+  overlayClassName?: string;
+}) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="radix-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
+      <DialogPrimitive.Overlay
+        className={cn(
+          "radix-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]",
+          overlayClassName,
+        )}
+      />
       <DialogPrimitive.Content
         className={cn(
           "radix-pop fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border bg-card p-5 shadow-2xl outline-none",
@@ -42,11 +51,19 @@ export function DialogContent({
 export function SheetContent({
   className,
   children,
+  overlayClassName,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Content>) {
+}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  overlayClassName?: string;
+}) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="radix-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
+      <DialogPrimitive.Overlay
+        className={cn(
+          "radix-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]",
+          overlayClassName,
+        )}
+      />
       <DialogPrimitive.Content
         className={cn(
           "radix-pop fixed inset-x-0 bottom-0 z-50 flex max-h-[88vh] flex-col rounded-t-2xl border-t border-border bg-card pb-[max(env(safe-area-inset-bottom),0px)] shadow-2xl outline-none",

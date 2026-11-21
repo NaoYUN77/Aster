@@ -1,15 +1,27 @@
 import type { ErrorBody } from "./types";
 
+export type ApiErrorDetails = {
+  /** 409 QUEUE_ITEM_NOT_QUEUED 时服务端给出的该行最新状态。 */
+  requestStatus?: string;
+};
+
 /** 统一的前端错误：只保留安全文案与服务端错误码，不展示堆栈。 */
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
+  readonly requestStatus?: string;
 
-  constructor(code: string, message: string, status = 0) {
+  constructor(
+    code: string,
+    message: string,
+    status = 0,
+    details: ApiErrorDetails = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
+    this.requestStatus = details.requestStatus;
   }
 }
 
@@ -52,10 +64,30 @@ export function isErrorBody(value: unknown): value is ErrorBody {
   return errorBodyOf(value) !== null;
 }
 
+/**
+ * 读取错误体里的 `requestStatus`。兼容契约的
+ * `{error:{code,message,requestStatus}}` 与扁平 `{code,message,requestStatus}`。
+ */
+export function requestStatusOf(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as { error?: unknown; requestStatus?: unknown };
+  const envelope =
+    typeof record.error === "object" && record.error !== null
+      ? (record.error as { requestStatus?: unknown })
+      : undefined;
+  const status = envelope?.requestStatus ?? record.requestStatus;
+  return typeof status === "string" && status !== "" ? status : null;
+}
+
 export function toApiError(error: unknown, status = 0): ApiError {
   if (error instanceof ApiError) return error;
   const body = errorBodyOf(error);
-  if (body) return new ApiError(body.code, body.message, status);
+  if (body) {
+    const requestStatus = requestStatusOf(error);
+    return new ApiError(body.code, body.message, status, {
+      ...(requestStatus !== null ? { requestStatus } : {}),
+    });
+  }
   if (error instanceof DOMException && error.name === "AbortError") {
     return new ApiError("TIMEOUT", "请求超时，请重试", status);
   }
@@ -82,7 +114,9 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   INVALID_CREDENTIALS: "密码错误",
   PAYLOAD_TOO_LARGE: "请求内容太大",
   REQUEST_NOT_FOUND: "请求不存在",
+  QUEUE_ITEM_NOT_QUEUED: "消息已不在队列中",
   REQUEST_NOT_ACTIVE: "请求已结束",
+  NO_ACTIVE_REQUEST: "当前没有正在回复的请求",
   UNHEALTHY: "服务器健康检查未通过",
   ABORTED: "已停止",
   EXECUTION_ERROR: "执行出错，请重试",
@@ -104,6 +138,19 @@ export const ERROR_CODE_TEXT: Record<string, string> = {
   NETWORK_ERROR: "无法连接服务器，请检查网络或服务器地址",
   TIMEOUT: "请求超时，请重试",
   TEXT_TOO_LONG: "消息太长，请缩短后重试",
+  CONNECTOR_NOT_FOUND: "连接器不存在",
+  CONNECTORS_DISABLED: "服务器未启用连接器",
+  CONNECTOR_NOT_CONFIGURED: "服务器未配置 OAuth 凭据",
+  CONNECTOR_SECRET_MISSING: "服务器未配置 OAuth 凭据",
+  SECRETS_UNAVAILABLE: "服务器暂时连不上凭据服务，请稍后重试",
+  CONNECTOR_SECRET_UNREADABLE: "服务器无法读取凭据配置",
+  CONNECTOR_MASTER_KEY_INVALID: "服务器凭据密钥配置有误",
+  CONNECTOR_OAUTH_STATE_INVALID: "授权已过期，请重试",
+  OAUTH_FAILED: "授权失败，请重试",
+  CREDENTIAL_NOT_FOUND: "凭据请求不存在或已结束",
+  CREDENTIAL_NOT_PENDING: "凭据请求已结束",
+  CREDENTIAL_EXPIRED: "凭据请求已超时，请重新发起",
+  CREDENTIAL_REJECTED: "令牌无效或已被拒绝",
 };
 
 export function errorText(code: string | null | undefined, fallback?: string | null): string {

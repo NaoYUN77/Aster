@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Google Calendar">
+  <rect x="2" y="2" width="20" height="20" rx="4" fill="#4285f4"/>
+  <rect x="5.5" y="6.5" width="13" height="12" rx="1.5" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+  <path d="M5.5 10h13M9 5v3M15 5v3" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="12" cy="14.2" r="1.6" fill="#ffffff"/>
+</svg>

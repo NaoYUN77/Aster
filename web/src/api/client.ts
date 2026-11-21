@@ -1,6 +1,12 @@
 import createClient from "openapi-fetch";
 import type { paths } from "./schema";
-import { ApiError, errorBodyOf, statusError, toApiError } from "./errors";
+import {
+  ApiError,
+  errorBodyOf,
+  requestStatusOf,
+  statusError,
+  toApiError,
+} from "./errors";
 import type {
   HealthResponse,
   LoginResponse,
@@ -8,6 +14,9 @@ import type {
   MessagePage,
   ModelsResponse,
   ModelSelectResponse,
+  PromoteResponse,
+  QueueResponse,
+  SteerResponse,
 } from "./types";
 
 export type ApiClient = ReturnType<typeof createClient<paths>>;
@@ -30,6 +39,11 @@ export function getApiConfig(): Readonly<ApiConfig> {
 
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
+}
+
+/** 非 openapi-fetch 的临时接口（如 Connectors）遇到 401 时复用全局会话失效处理。 */
+export function notifyUnauthorized(): void {
+  unauthorizedHandler?.();
 }
 
 export function createApiClient(options: ApiConfig): ApiClient {
@@ -75,7 +89,10 @@ async function unwrap<T>(
 
   const body = errorBodyOf(error);
   if (body) {
-    throw new ApiError(body.code, body.message, response.status);
+    const requestStatus = requestStatusOf(error);
+    throw new ApiError(body.code, body.message, response.status, {
+      ...(requestStatus !== null ? { requestStatus } : {}),
+    });
   }
   throw statusError(response.status);
 }
@@ -134,6 +151,28 @@ export async function me(): Promise<MeResponse> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 队列                                                                */
+/* ------------------------------------------------------------------ */
+
+export async function getQueue(): Promise<QueueResponse> {
+  return unwrap<QueueResponse>(
+    api().GET("/api/v1/queue", {
+      signal: timeout(15_000),
+    }) as Promise<FetchResult<QueueResponse>>,
+  );
+}
+
+/** 把一条 queued 消息插入当前 run；没有运行中请求时由服务端直接开始执行。 */
+export async function promoteRequest(requestId: string): Promise<PromoteResponse> {
+  return unwrap<PromoteResponse>(
+    api().POST("/api/v1/requests/{requestId}/promote", {
+      params: { path: { requestId } },
+      signal: timeout(20_000),
+    }) as Promise<FetchResult<PromoteResponse>>,
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* 消息                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -155,6 +194,23 @@ export async function sendMessage(input: {
       body: input,
       signal: timeout(20_000),
     }) as Promise<FetchResult<{ requestId: string; status: "queued" }>>,
+  );
+}
+
+/**
+ * 向正在运行的请求插话。只有 `activeStatus === "running"` 时才能调用；
+ * 没有运行中的请求会得到 409 NO_ACTIVE_REQUEST，调用方应回退到 sendMessage。
+ */
+export async function steerRequest(
+  requestId: string,
+  input: { clientMessageId: string; text: string },
+): Promise<SteerResponse> {
+  return unwrap<SteerResponse>(
+    api().POST("/api/v1/requests/{requestId}/steer", {
+      params: { path: { requestId } },
+      body: input,
+      signal: timeout(20_000),
+    }) as Promise<FetchResult<SteerResponse>>,
   );
 }
 

@@ -3,13 +3,18 @@ import {
   mockAbort,
   mockActiveRequest,
   mockAuthorized,
+  mockConnectors,
+  mockCreateConnector,
+  mockDeleteConnector,
   mockLogin,
   mockLogout,
   mockMessages,
   mockModels,
+  mockRequestCredential,
   mockSelectModel,
   mockSendMessage,
   mockSnapshot,
+  mockStartConnectorOAuth,
   subscribeMockEvents,
 } from "./store";
 
@@ -148,6 +153,54 @@ export const handlers = [
     }
 
     return apiError("INVALID_REQUEST", "action 不合法", 400);
+  }),
+
+  http.get(`${API}/connectors`, async ({ request }) => {
+    await delay(160);
+    if (!authorized(request)) return unauthorized();
+    return HttpResponse.json(mockConnectors());
+  }),
+
+  http.post(`${API}/connectors`, async ({ request }) => {
+    await delay(260);
+    if (!authorized(request)) return unauthorized();
+    const body = (await request.json().catch(() => null)) as
+      | { provider?: unknown; slug?: unknown }
+      | null;
+    if (typeof body?.provider !== "string" || typeof body.slug !== "string") {
+      return apiError("INVALID_REQUEST", "请求不合法", 400);
+    }
+    const result = mockCreateConnector(body.provider, body.slug);
+    if (!result.ok) return apiError(result.code, result.message, result.status);
+    return HttpResponse.json(
+      { connection: result.connection, created: result.created },
+      { status: result.created ? 201 : 200 },
+    );
+  }),
+
+  http.post(`${API}/connectors/:slug/oauth/start`, async ({ request, params }) => {
+    await delay(180);
+    if (!authorized(request)) return unauthorized();
+    const result = mockStartConnectorOAuth(String(params.slug));
+    if (!result.ok) return apiError(result.code, result.message, result.status);
+    return HttpResponse.json({ url: result.url });
+  }),
+
+  http.delete(`${API}/connectors/:slug`, async ({ request, params }) => {
+    await delay(220);
+    if (!authorized(request)) return unauthorized();
+    mockDeleteConnector(String(params.slug));
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post(`${API}/mock/credential-request`, async ({ request }) => {
+    await delay(120);
+    if (!authorized(request)) return unauthorized();
+    const body = (await request.json().catch(() => null)) as { connectorId?: unknown } | null;
+    const connectorId = typeof body?.connectorId === "string" ? body.connectorId : "github";
+    const result = mockRequestCredential(connectorId);
+    if ("error" in result) return apiError(result.error, "连接器不存在", 404);
+    return HttpResponse.json(result, { status: 202 });
   }),
 
   http.get(`${API}/events`, async ({ request }) => {

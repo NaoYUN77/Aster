@@ -106,6 +106,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List queued messages in worker order
+         * @description Returns `web_requests` rows with status `queued`, in the same order the
+         *     worker claims them (`created_at`, then insertion order). A row that was
+         *     promoted has left the queue and is not returned. This is a single-owner,
+         *     single-conversation adapter, so the queue is not paginated; at most 100
+         *     items are returned.
+         */
+        get: operations["listQueue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/requests/{requestId}/abort": {
         parameters: {
             query?: never;
@@ -125,6 +149,90 @@ export interface paths {
          *     before any visible token leaves no empty assistant message.
          */
         post: operations["abortRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/requests/{requestId}/steer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Inject text into the currently running request
+         * @description Steer, not queue: when `requestId` is the request that is running now,
+         *     `text` joins that same agent run and is seen by the model at its next
+         *     tool boundary. It does not create a `web_requests` row and does not
+         *     produce a separate `request.done`; the original request's final answer
+         *     covers it. If the steer arrives after the last tool boundary, the
+         *     durable runtime starts one more run, and the answer is broadcast as
+         *     `steer.done`.
+         *
+         *     Idempotent per `clientMessageId`: a replay returns the same `steerId`
+         *     and injects nothing new. The durable submission id is
+         *     `steer:<clientMessageId>`.
+         *
+         *     With no running request the server answers `409 NO_ACTIVE_REQUEST` and
+         *     the client falls back to a normal `POST /api/v1/messages`. A path
+         *     `requestId` that is not the running request answers `409
+         *     REQUEST_NOT_ACTIVE`, which protects a late steer from landing on a
+         *     newer request.
+         *
+         *     Known v1 limitation: a steer that starts one more run does not run
+         *     Memory's per-request prepare/after-request hooks for that run.
+         */
+        post: operations["steerRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/requests/{requestId}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a queued message now or inject it into the running request
+         * @description Removes one queued message from the FIFO and makes it take effect
+         *     immediately.
+         *
+         *     If a request is running, the promoted text joins that same agent run
+         *     through the existing steer path, with durable id
+         *     `steer:<clientMessageId>`, and the queue row becomes `promoted`.
+         *     If nothing is running, the row becomes `running` at once, ahead of older
+         *     queued messages, and starts a new run.
+         *
+         *     The decision is idempotent: promoting an already-promoted row returns the
+         *     same `mode: steered` and `steerId` without injecting anything again. If
+         *     the run finishes between the decision and the injection, the server
+         *     starts the message immediately instead of rejecting it.
+         *
+         *     An aborted run whose teardown is still in flight is not a steer target:
+         *     the server waits for it to settle and then starts the message
+         *     (`mode: "started"`). If the steer's durable submission is withdrawn
+         *     without an answer, the row returns to `queued` and the worker runs it as
+         *     a normal request, so a promote never leaves a message without a run.
+         *
+         *     `409 QUEUE_ITEM_NOT_QUEUED` means the row is no longer queued (it is
+         *     running, done, failed or aborted); the client should refresh
+         *     `GET /api/v1/queue`. The error carries `requestStatus` with that status,
+         *     or `null` when the row is unknown, so a client can show "已开始执行" for
+         *     `running` instead of re-adding the message. A malformed `requestId` is
+         *     `400`.
+         */
+        post: operations["promoteQueuedRequest"];
         delete?: never;
         options?: never;
         head?: never;
@@ -205,6 +313,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/connectors/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Disconnect a connector and delete its stored credential
+         * @description Deletes the encrypted OAuth credential and marks the connection `revoked` in
+         *     one transaction. The row and its slug remain, so
+         *     `POST /api/v1/connectors/{slug}/oauth/start` can authorize the same
+         *     connection again. Until it is re-authorized, tools of that provider refuse
+         *     to run with `409 CONNECTOR_NOT_CONNECTED`; the change is broadcast as
+         *     `connector.changed`. Repeating the call on an already revoked, pending or
+         *     error row is still `204`. A local `mcp_stdio` row is revoked the same way
+         *     and its server stops on the next boot.
+         */
+        delete: operations["disconnectConnector"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/connectors/{slug}/oauth/start": {
         parameters: {
             query?: never;
@@ -220,6 +355,19 @@ export interface paths {
          *     state and PKCE verifier; the provider redirects the browser to the
          *     server callback. Access and refresh tokens stay on the server, encrypted
          *     with AES-256-GCM in connectors.sqlite.
+         *
+         *     The connection must exist first (`POST /api/v1/connectors`); an unknown
+         *     slug is `404 CONNECTOR_NOT_FOUND`. A revoked connection can start again.
+         *
+         *     Server-side secret files in the connector secret directory:
+         *     `github_client_id` / `github_client_secret` (GitHub) and
+         *     `google_client_id` / `google_client_secret` (Gmail), plus
+         *     `credential_master_key` for token encryption. The OAuth app's callback
+         *     URL must be
+         *     `{CONNECTOR_OAUTH_REDIRECT_BASE}/api/v1/connectors/oauth/callback`.
+         *     Missing files or an unset redirect base return
+         *     `CONNECTOR_SECRET_MISSING`, `CONNECTOR_NOT_CONFIGURED` or
+         *     `CONNECTOR_OAUTH_DISABLED` (`409`).
          */
         post: operations["startConnectorOAuth"];
         delete?: never;
@@ -301,13 +449,52 @@ export interface components {
             /** Format: date-time */
             expiresAt: string;
         };
+        SteerRequest: {
+            /** @description Client-generated idempotency key; the steer id becomes `steer:<clientMessageId>`. */
+            clientMessageId: string;
+            text: string;
+        };
+        SteerResponse: {
+            /** @description `steer:<clientMessageId>`; stable across replays. */
+            steerId: string;
+            /** @description The running request the steer joined. */
+            requestId: string;
+            /** @enum {string} */
+            status: "accepted";
+        };
         SubmitMessageRequest: {
             /** @description Client-generated id; the idempotency key. */
             clientMessageId: string;
             text: string;
         };
         /** @enum {string} */
-        RequestStatus: "queued" | "running" | "done" | "failed" | "aborted";
+        RequestStatus: "queued" | "running" | "promoted" | "done" | "failed" | "aborted";
+        QueuedRequest: {
+            requestId: string;
+            clientMessageId: string;
+            text: string;
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            createdAt: number;
+        };
+        QueueResponse: {
+            /** @description Queued messages in worker claim order, oldest first. */
+            items: components["schemas"]["QueuedRequest"][];
+        };
+        PromoteResponse: {
+            /** @description The promoted queue row. */
+            requestId: string;
+            /**
+             * @description `steered`: injected into the request that was already running.
+             *     `started`: no request was running, so this message started one.
+             * @enum {string}
+             */
+            mode: "steered" | "started";
+            /** @description Present when `mode` is `steered`; `steer:<clientMessageId>`. */
+            steerId?: string;
+        };
         SubmitMessageResponse: {
             requestId: string;
             status: components["schemas"]["RequestStatus"];
@@ -419,7 +606,7 @@ export interface components {
             degraded: boolean;
         };
         /** @enum {string} */
-        ConnectorProvider: "github" | "gmail" | "mcp_stdio";
+        ConnectorProvider: "github" | "gmail" | "outlook" | "linear" | "notion" | "google_calendar" | "google_drive" | "mcp_stdio";
         /** @enum {string} */
         ConnectorStatus: "pending" | "connected" | "error" | "revoked";
         ConnectorDefinition: {
@@ -428,7 +615,7 @@ export interface components {
             /** @enum {string} */
             transport: "oauth" | "stdio";
             defaultScopes: string[];
-            /** @description Read-only model tool names this provider can expose. */
+            /** @description Model tool names this provider can expose. Read tools are governed as read; the create/send/update tools are governed as write. No delete tool exists. */
             tools: string[];
         };
         ConnectorConnection: {
@@ -476,6 +663,8 @@ export interface components {
                 activeRequest: components["schemas"]["ActiveRequest"] | null;
                 /** @description Monotonic selection version; changes on every applied model change. */
                 modelVersion: number;
+                /** @description The pending queue at connection time, same shape and order as `GET /api/v1/queue`. */
+                queue: components["schemas"]["QueuedRequest"][];
             };
         } | {
             /** @constant */
@@ -483,6 +672,18 @@ export interface components {
             data: {
                 requestId: string;
                 clientMessageId: string;
+            };
+        } | {
+            /** @constant */
+            event: "queue.changed";
+            /**
+             * @description The full pending queue after an enqueue, a worker claim (queued
+             *     to running), a successful promote, or an abort of a queued row.
+             *     Clients replace their queue list with `items`; `promoted` rows
+             *     are not included.
+             */
+            data: {
+                items: components["schemas"]["QueuedRequest"][];
             };
         } | {
             /** @constant */
@@ -512,6 +713,38 @@ export interface components {
             event: "request.aborted";
             data: {
                 requestId: string;
+            };
+        } | {
+            /** @constant */
+            event: "request.steered";
+            /**
+             * @description A steer was admitted into the running request. `requestId` is the
+             *     original running request; other clients show this text as the
+             *     owner's message. A replay of the same `clientMessageId` carries
+             *     the same `steerId`, so clients should dedupe by it.
+             */
+            data: {
+                requestId: string;
+                steerId: string;
+                clientMessageId: string;
+                text: string;
+                /** @description Unix epoch milliseconds. */
+                createdAt: number;
+            };
+        } | {
+            /** @constant */
+            event: "steer.done";
+            /**
+             * @description The steer's submission settled and produced an assistant answer.
+             *     If the original run consumed the steer, `message.id` is the
+             *     original answer, so a client that already applied `request.done`
+             *     can dedupe by message id. If the steer started one more run, this
+             *     is the only event carrying that answer.
+             */
+            data: {
+                requestId: string;
+                steerId: string;
+                message: components["schemas"]["UiMessage"];
             };
         } | {
             /** @constant */
@@ -577,6 +810,13 @@ export interface components {
         };
         ErrorResponse: {
             error: {
+                /**
+                 * @description Present on `409 QUEUE_ITEM_NOT_QUEUED`: the web request's current
+                 *     status, or `null` when the request row is unknown. `running` means
+                 *     the worker already claimed the message and it is executing.
+                 * @enum {string|null}
+                 */
+                requestStatus?: "running" | "done" | "failed" | "aborted" | null;
                 /**
                  * @description Stable machine-readable code. Auth/transport codes: INVALID_REQUEST,
                  *     TEXT_TOO_LONG, UNAUTHORIZED, RATE_LIMITED, REQUEST_NOT_FOUND,
@@ -787,6 +1027,27 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
+    listQueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pending queue, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueueResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
     abortRequest: {
         parameters: {
             query?: never;
@@ -810,6 +1071,76 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             /** @description The request already reached a terminal status. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    steerRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SteerRequest"];
+            };
+        };
+        responses: {
+            /** @description Steer admitted (new or idempotent replay). */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SteerResponse"];
+                };
+            };
+            400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description No running request, or the path request is not the running one. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    promoteQueuedRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The message was injected into the run or started immediately. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromoteResponse"];
+                };
+            };
+            400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description The row left the queue before it could be promoted. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -922,7 +1253,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
-            /** @description Connectors are disabled on this server. */
+            /** @description Connectors are disabled on this server (`CONNECTORS_DISABLED`). */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -976,6 +1307,45 @@ export interface operations {
                 };
             };
             /** @description Connectors are disabled on this server. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    disconnectConnector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disconnected; the response has no body. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description No connection with this slug belongs to the owner. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Connectors are disabled on this server (`CONNECTORS_DISABLED`). */
             503: {
                 headers: {
                     [name: string]: unknown;

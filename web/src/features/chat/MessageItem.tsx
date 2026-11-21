@@ -41,10 +41,13 @@ export function MessageItem({
   message: DisplayMessage;
   onRetry: (message: DisplayMessage) => void;
 }) {
+  // 工具元数据优先于 role：后端把工具结果投影成
+  // `role:"assistant", text:"", tool:{...}`，不能当普通空气泡渲染。
+  if (message.tool) {
+    return <ToolRow name={message.tool.name} status={message.tool.status} />;
+  }
+
   if (message.role === "system") {
-    if (message.tool) {
-      return <ToolRow name={message.tool.name} status={message.tool.status} />;
-    }
     if (message.text.trim() === "") return null;
     return (
       <p className="my-2 text-center text-xs text-muted-foreground">{message.text}</p>
@@ -58,6 +61,9 @@ export function MessageItem({
         <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-bubble-user px-4 py-2.5 text-[15px] leading-relaxed text-bubble-user-foreground shadow-sm">
           {message.text}
         </div>
+        {message.steer && (
+          <span className="pr-1 text-[11px] text-muted-foreground/80">插话 · 本轮</span>
+        )}
         {message.status === "sending" && (
           <span className="flex items-center gap-1 pr-1 text-[11px] text-muted-foreground">
             <Spinner className="size-3" /> 发送中
