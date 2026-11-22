@@ -379,9 +379,8 @@ export function buildSnapshot(facts: {
 }
 
 /**
- * Render B: the narrative, then the exact state at the boundary, including the profile section.
- * Deterministic — no clock, no per-write timestamp (state or profile item), no iteration over
- * unordered maps — so the same snapshot always renders to the same bytes and a cached prefix stays
+ * Render B: the narrative, then the exact state at the boundary.
+ * Deterministic — no clock, no per-write timestamp, no iteration over unordered maps — so the same snapshot always renders to the same bytes and a cached prefix stays
  * valid. The rendered text is still refused when it exceeds `snapshotTokens` or `snapshotText`.
  *
  * The bound is on the rendered text, not on each field: narrative and baseline share it, and an

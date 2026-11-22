@@ -4,8 +4,6 @@
 //
 //   window 2  working commit durable, tool result not        (fixtures/crash-working.ts)
 //   window 3  compaction summary persisted, not yet published (fixtures/crash-compaction-publish.ts)
-//   window 4  Markdown file replaced, publication unconfirmed (fixtures/crash-archive.ts @ published)
-//   window 5  archive confirmed, cursor not yet advanced      (fixtures/crash-archive.ts @ before-cursor)
 //
 // Windows 1 (projection) and 6 (reply saved) are in memory-verification.test.ts: their
 // barriers are a resolved prepare and a settled submission, which an abandoned instance
@@ -43,8 +41,6 @@ import {
   type CompactionObservation,
 } from "../src/memory/compaction.js";
 import { workingExtension } from "../src/memory/working-tools.js";
-import { createArchiveTask, initializeArchive, readArchive } from "../src/memory/archive-task.js";
-import { openDaily, searchDaily } from "../src/memory/daily.js";
 
 const context = BACKGROUND_CONTEXT;
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -62,11 +58,6 @@ async function until(check: () => Promise<boolean>, label: string, timeoutMs = 6
 async function allEntries(harness: Harness, root: Conversation): Promise<EntryRecord[]> {
   const page = await root.entries({ order: "ascending" }, 2_000, undefined, context);
   return [...page.items];
-}
-
-function messageText(message: Message): string {
-  if (typeof message.content === "string") return message.content;
-  return (message.content ?? []).filter((part) => part.type === "text").map((part) => part.text).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -261,97 +252,3 @@ test("08-B/3: SIGKILL after the summary is persisted — recovery reuses it and 
     await rm(directory, { recursive: true, force: true }).catch(() => {});
   }
 });
-
-// ---------------------------------------------------------------------------
-// 08-B windows 4 and 5: archive publication windows, driven by the existing
-// MEM-05 crash fixture (IPC barrier inside the archive task).
-//   published     — the Markdown file has been replaced on disk; the
-//                   publication is not yet confirmed in the archive state.
-//   before-cursor — every segment is confirmed; the cursor commit has not
-//                   run, so coverage still shows the old position.
-// ---------------------------------------------------------------------------
-
-async function openArchiveRecovery(directory: string) {
-  const store = openDaily(directory);
-  const faux = fauxProvider({ provider: "faux" });
-  const models = createModels();
-  models.setProvider(faux.provider);
-  let extractionCalls = 0;
-  faux.setResponses(Array.from({ length: 16 }, () => (transcript: { messages: readonly Message[] }) => {
-    extractionCalls += 1;
-    const user = transcript.messages.find((message) => message.role === "user")!;
-    const sources = JSON.parse(messageText(user)) as { entryId: number; text: string }[];
-    return fauxAssistantMessage(JSON.stringify({
-      segments: sources.map((source) => ({
-        sourceEntryId: source.entryId, kind: "result", status: "confirmed", text: `saved body ${source.entryId}`, supersedes: [],
-      })),
-    }));
-  }));
-  const task = createArchiveTask({ store, model: { provider: "faux", modelId: "faux-1" } });
-  const registry = createRegistry();
-  registry.install({ name: "archive", tasks: [task] });
-  const harness = await Harness.open(await openNodeSqliteStorage(join(directory, "agent.sqlite")), {
-    models, registry,
-  }, context);
-  const root = await harness.root(context, { agent: { model: { provider: "faux", modelId: "faux-1" } } });
-  await initializeArchive(harness, root.id, null, "UTC", context);
-  return { store, harness, root, extractionCalls: () => extractionCalls };
-}
-
-for (const boundary of ["published", "before-cursor"] as const) {
-  test(`08-B/${boundary === "published" ? 4 : 5}: SIGKILL at the archive ${boundary} barrier recovers exactly once`, { timeout: 300_000 }, async () => {
-    const directory = await mkdtemp(join(tmpdir(), `mem08-b-${boundary}-`));
-    const child = spawn(process.execPath, ["--import", "tsx", join(fixturesDir, "crash-archive.ts"), directory, boundary], {
-      cwd: projectRoot, stdio: ["ignore", "ignore", "pipe", "ipc"], windowsHide: true,
-    });
-    let stderr = "";
-    child.stderr!.on("data", (chunk) => { stderr += chunk; });
-    const exited = once(child, "exit");
-    let recovery: Awaited<ReturnType<typeof openArchiveRecovery>> | undefined;
-    try {
-      const [message] = await Promise.race([
-        once(child, "message"),
-        exited.then(() => { throw new Error(`archive child exited before the barrier: ${stderr}`); }),
-        delay(240_000).then(() => { throw new Error(`timed out waiting for the ${boundary} barrier: ${stderr}`); }),
-      ]);
-      assert.deepEqual(message, { boundary });
-      child.kill("SIGKILL");
-      await exited;
-      assert.equal(await readFile(join(directory, "model-attempts.txt"), "utf8"), "call\n",
-        "exactly one extraction call happened before the kill");
-
-      recovery = await openArchiveRecovery(directory);
-      const { harness, root, store } = recovery;
-      const before = (await readArchive(harness, root.id, context))!;
-      assert.equal(before.archivedThrough, null, "the cursor has not advanced at either barrier");
-      assert.ok(before.target !== null && before.pending !== null, "the batch is retained for recovery");
-      const hitsBefore = (await searchDaily(store, {})).hits;
-      if (boundary === "published") {
-        assert.equal(before.pending!.confirmed.length, 0, "the replaced file is not yet confirmed in the state");
-        assert.equal(hitsBefore.length, 1, "the first segment is already on disk (the file was replaced)");
-      } else {
-        assert.equal(before.pending!.confirmed.length, 2, "both segments are confirmed; only the cursor commit is missing");
-        assert.equal(hitsBefore.length, 2, "both segments are on disk");
-      }
-
-      harness.resume();
-      const settled = await harness.waitForTask(before.activeTask!, context);
-      assert.equal(settled.state.outcome.status, "completed");
-      assert.equal(recovery.extractionCalls(), 0, "recovery re-extracts nothing: the saved body is reused");
-      const after = (await readArchive(harness, root.id, context))!;
-      assert.equal(after.archivedThrough, before.target, "the cursor advances exactly to the batch target");
-      const hits = (await searchDaily(store, {})).hits;
-      assert.equal(hits.length, 2, "both dates are filed after recovery");
-      assert.equal(new Set(hits.map((hit) => hit.segment.id)).size, 2, "no segment was duplicated by the recovery publication");
-      // The file bytes themselves carry each segment id exactly once (no double append).
-      for (const hit of hits) {
-        const fileText = await readFile(join(directory, "memory", "daily", `${hit.segment.date}.md`), "utf8");
-        assert.equal(fileText.split(hit.segment.id).length - 1, 1, `segment ${hit.segment.id} appears once in ${hit.segment.date}.md`);
-      }
-    } finally {
-      child.kill("SIGKILL");
-      await recovery?.harness.close(context).catch(() => {});
-      await rm(directory, { recursive: true, force: true }).catch(() => {});
-    }
-  });
-}

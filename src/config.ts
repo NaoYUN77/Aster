@@ -218,7 +218,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env, customProviders
  * Variables an upgraded deployment may still carry: the Telegram/Slack builds, and the memory
  * switch that no longer exists because the memory system is always composed.
  */
-const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING", "MEMORY_ENABLED"] as const;
+const REMOVED_ENV_KEYS = ["CHANNEL", "STYLE_LEARNING", "MEMORY_ENABLED", "DREAMING_REVIEW", "DREAMING_TURNS"] as const;
 const REMOVED_ENV_PREFIXES = ["TELEGRAM_", "SLACK_"] as const;
 
 /**
@@ -234,7 +234,7 @@ export function removedConfigKeys(env: NodeJS.ProcessEnv = process.env): readonl
 }
 
 /** The one startup line printed when {@link removedConfigKeys} finds anything. Names only. */
-export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED are no longer read";
+export const REMOVED_CONFIG_LINE = "REMOVED_CONFIG: CHANNEL, TELEGRAM_*, SLACK_*, STYLE_LEARNING, MEMORY_ENABLED, DREAMING_REVIEW, DREAMING_TURNS are no longer read";
 
 /** At most this many fallbacks; the first batch intentionally keeps the chain short. */
 const MAX_MODEL_FALLBACKS = 5;
@@ -760,7 +760,7 @@ export function readConnectorsConfig(env: NodeJS.ProcessEnv = process.env): Conn
     stdioAllowlist: [...new Set(allowlist)],
   };
 }
-/** Memory wiring (MEM-07): budgets, the compaction reserve, the archive timezone and timeout. */
+/** Memory wiring (MEM-07): budgets, the compaction reserve and the activity timezone. */
 export type MemoryConfig = {
   /**
    * Injection-only. `readMemoryConfig` always returns true because the memory system is part of the
@@ -770,9 +770,8 @@ export type MemoryConfig = {
   readonly budget: MemoryBudget;
   /** Tokens kept free for the model's answer; the compaction thresholds derive from it. */
   readonly reserveTokens: number;
-  /** Zone archive dates are computed in. Default UTC; never the machine's local zone. */
+  /** Zone activity dates are computed in. Default UTC; never the machine's local zone. */
   readonly timezone: string;
-  readonly archiveTimeoutMs: number;
 };
 
 function memoryInteger(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
@@ -802,13 +801,8 @@ export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryCo
     snapshotTokens: memoryInteger(env, "MEMORY_SNAPSHOT_TOKENS", MEMORY_BUDGET_DEFAULTS.snapshotTokens, 256, 262_144),
     narrativeTokens: memoryInteger(env, "MEMORY_NARRATIVE_TOKENS", MEMORY_BUDGET_DEFAULTS.narrativeTokens, 128, 262_144),
     instructionsTokens: memoryInteger(env, "MEMORY_INSTRUCTIONS_TOKENS", MEMORY_BUDGET_DEFAULTS.instructionsTokens, 256, 1_048_576),
-    searchResultTokens: memoryInteger(env, "MEMORY_SEARCH_RESULT_TOKENS", MEMORY_BUDGET_DEFAULTS.searchResultTokens, 128, 65_536),
-    requestSearchTokens: memoryInteger(env, "MEMORY_REQUEST_SEARCH_TOKENS", MEMORY_BUDGET_DEFAULTS.requestSearchTokens, 128, 262_144),
     evaluateAfterUserTurns: memoryInteger(env, "MEMORY_EVALUATE_AFTER_USER_TURNS", MEMORY_BUDGET_DEFAULTS.evaluateAfterUserTurns, 1, 1_000),
   };
-  if (budget.requestSearchTokens < budget.searchResultTokens) {
-    throw new ConfigurationError("MEMORY_REQUEST_SEARCH_TOKENS must be at least MEMORY_SEARCH_RESULT_TOKENS");
-  }
   try {
     assertSchema<MemoryBudget>(MemoryBudgetSchema, budget, "invalid-input");
   } catch (error) {
@@ -826,7 +820,6 @@ export function readMemoryConfig(env: NodeJS.ProcessEnv = process.env): MemoryCo
     budget,
     reserveTokens: memoryInteger(env, "MEMORY_RESERVE_TOKENS", 16_384, 1, 1_048_576),
     timezone,
-    archiveTimeoutMs: memoryInteger(env, "MEMORY_ARCHIVE_TIMEOUT_MS", 60_000, 1, 300_000),
   };
 }
 
@@ -886,12 +879,16 @@ export function readDreamingConfig(env: NodeJS.ProcessEnv = process.env): Dreami
   if (behaviorRaw !== undefined && behaviorRaw !== "" && !behaviors.includes(behaviorRaw as DreamingBehavior)) {
     throw new ConfigurationError(`DREAMING_BEHAVIOR must be one of: ${behaviors.join(", ")}`);
   }
+  const atRaw = env.DREAMING_AT?.trim();
+  // Strict 24-hour HH:MM: 4:00, 04:60, 24:00 and 04:00:00 are configuration errors, not guesses.
+  if (atRaw !== undefined && atRaw !== "" && !/^([01]\d|2[0-3]):[0-5]\d$/u.test(atRaw)) {
+    throw new ConfigurationError("DREAMING_AT must be HH:MM on the 24-hour clock");
+  }
   return {
     enabled: flag("DREAMING_ENABLED", DREAMING_DEFAULTS.enabled),
-    turns: boundedInteger(env, "DREAMING_TURNS", DREAMING_DEFAULTS.turns, 1, 10_000),
+    at: atRaw === undefined || atRaw === "" ? DREAMING_DEFAULTS.at : atRaw,
     onCompaction: flag("DREAMING_ON_COMPACTION", DREAMING_DEFAULTS.onCompaction),
     behavior: (behaviorRaw === undefined || behaviorRaw === "" ? DREAMING_DEFAULTS.behavior : behaviorRaw) as DreamingBehavior,
-    review: flag("DREAMING_REVIEW", DREAMING_DEFAULTS.review),
     dryRun: flag("DREAMING_DRY_RUN", DREAMING_DEFAULTS.dryRun),
     timeoutMs: boundedInteger(env, "DREAMING_TIMEOUT_MS", DREAMING_DEFAULTS.timeoutMs, 1_000, 600_000),
   };

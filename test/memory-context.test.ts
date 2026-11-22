@@ -58,7 +58,6 @@ function state(overrides: Partial<WorkingState> = {}): WorkingState {
     revision: 1,
     task: { status: "none" },
     preferences: [],
-    profile: [],
     updatedAt: 0,
     ...overrides,
   };
