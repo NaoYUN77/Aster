@@ -148,7 +148,7 @@ export function ApprovalActionBody({
           type="button"
           disabled={submitting !== null}
           onClick={() => void handleDecision("deny")}
-          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-full px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-full bg-destructive/10 px-3.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/18 disabled:opacity-50"
         >
           {submitting === "deny" && <Spinner className="size-3" />}
           拒绝
