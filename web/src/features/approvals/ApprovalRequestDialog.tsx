@@ -1,14 +1,12 @@
 import { useEffect, useState } from "react";
-import { Bot, Check, CheckCheck, ShieldAlert, Terminal, X } from "lucide-react";
 import { toast } from "sonner";
+import asterIdleUrl from "@/assets/companion/aster-idle.png";
 import {
   resolveApproval,
   type ApprovalDecision,
   type ApprovalRequestView,
 } from "@/api/approvals";
 import { errorText, toApiError } from "@/api/errors";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -16,18 +14,23 @@ import {
   DialogTitle,
   SheetContent,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { playCue } from "@/lib/sound";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { cn } from "@/lib/utils";
 import { useApprovalStore } from "@/store/approvals";
 
-const RULE_LABELS: Record<ApprovalRequestView["rule"], string> = {
-  destructive_shell: "危险 Shell 命令",
-  workspace_escape: "工作区越界写入",
-  external_write: "外部写操作",
-  subagent_write_escalation: "Sub-agent 写权限越界",
+const RULE_COPY: Record<
+  ApprovalRequestView["rule"],
+  { title: string; tag: string }
+> = {
+  destructive_shell: { title: "确认执行这条命令？", tag: "危险 Shell 命令" },
+  workspace_escape: { title: "确认写入工作区外？", tag: "工作区越界写入" },
+  external_write: { title: "确认执行外部写操作？", tag: "外部写操作" },
+  subagent_write_escalation: {
+    title: "确认授权子任务写入？",
+    tag: "Sub-agent 写权限越界",
+  },
 };
 
 function formatArgs(toolName: string, args: unknown): string {
@@ -77,6 +80,7 @@ export function ApprovalRequestDialog() {
   const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   const urgent = remainingMs > 0 && remainingMs <= 60_000;
 
+  const copy = RULE_COPY[current.rule];
   const callerLabel =
     current.caller.kind === "main"
       ? "Main Agent"
@@ -92,11 +96,11 @@ export function ApprovalRequestDialog() {
       });
       removeApproval(current.id);
       if (decision === "deny") {
-        toast.info("已拒绝敏感操作");
+        toast.info("已拒绝该操作");
       } else {
         playCue("success");
         toast.success(
-          decision === "approve_similar" ? "已批准（本次任务同类免批）" : "已批准一次",
+          decision === "approve_similar" ? "已批准（本次任务同类免批）" : "已批准执行",
         );
       }
     } catch (error) {
@@ -113,114 +117,106 @@ export function ApprovalRequestDialog() {
   };
 
   const body = (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <div className="flex items-start gap-3 pr-6">
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-warning/15 text-warning">
-          <ShieldAlert className="size-5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <DialogTitle className="text-base font-semibold">敏感操作审批</DialogTitle>
-            {pendingList.length > 1 && (
-              <Badge variant="warning" className="whitespace-nowrap">
-                待处理 1 / {pendingList.length}
-              </Badge>
+    <div className="flex min-h-0 flex-1 flex-col gap-5">
+      {/* Meta Muse quiet eyebrow: source + timer + queue counter */}
+      <div className="flex items-center justify-between gap-3 text-[12px] text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-hidden />
+          <span className="truncate font-medium text-foreground/80">{callerLabel}</span>
+          <span className="opacity-40">·</span>
+          <span
+            className={cn(
+              "font-mono tabular-nums",
+              urgent ? "font-medium text-destructive" : "text-muted-foreground",
             )}
-          </div>
-          <DialogDescription className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          >
+            {clock}
+          </span>
+        </div>
+        {pendingList.length > 1 && (
+          <span className="shrink-0 rounded-full bg-muted px-2.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+            1 / {pendingList.length}
+          </span>
+        )}
+      </div>
+
+      {/* Hero: floating 3D Aster companion + serene editorial headline */}
+      <div className="flex items-start gap-3.5">
+        <img
+          src={asterIdleUrl}
+          alt="Aster"
+          className="size-11 shrink-0 select-none object-contain"
+          draggable={false}
+        />
+        <div className="min-w-0 flex-1 pt-0.5">
+          <DialogTitle className="text-[17px] font-semibold tracking-[-0.015em] text-foreground">
+            {copy.title}
+          </DialogTitle>
+          <DialogDescription className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
             {current.reason}
           </DialogDescription>
+          {current.caller.kind === "subagent" && (
+            <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+              子任务：<span className="text-foreground/85">{current.caller.task}</span>
+            </p>
+          )}
         </div>
       </div>
 
-      <div className="space-y-2.5 rounded-2xl border border-border bg-muted/40 p-3.5 text-xs">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant="outline" className="gap-1 whitespace-nowrap">
-              <Bot className="size-3" />
-              {callerLabel}
-            </Badge>
-            <Badge variant="outline" className="gap-1 whitespace-nowrap font-mono">
-              <Terminal className="size-3" />
-              {current.toolName}
-            </Badge>
-            <Badge variant="warning" className="whitespace-nowrap">
-              {RULE_LABELS[current.rule]}
-            </Badge>
-          </div>
-          <span
-            className={cn(
-              "font-mono text-[11px] tabular-nums",
-              urgent ? "font-semibold text-destructive" : "text-muted-foreground",
-            )}
-          >
-            剩余 {clock}
-          </span>
+      {/* Single soft tonal surface — no nested border clutter */}
+      <div className="rounded-2xl bg-muted/80 px-4 py-3.5">
+        <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
+          <span className="font-mono font-medium text-foreground/75">{current.toolName}</span>
+          <span className="text-warning">{copy.tag}</span>
         </div>
-
-        {current.caller.kind === "subagent" && (
-          <div className="text-[11px] text-muted-foreground">
-            子任务目标：<span className="text-foreground">{current.caller.task}</span>
-          </div>
-        )}
-
-        <pre className="max-h-48 overflow-auto rounded-xl border border-border/80 bg-background/90 p-2.5 font-mono text-[11px] leading-relaxed text-foreground whitespace-pre-wrap break-all">
+        <pre className="m-0 max-h-44 overflow-auto font-mono text-[12.5px] leading-relaxed text-foreground whitespace-pre-wrap break-all">
           {formatArgs(current.toolName, current.args)}
         </pre>
       </div>
 
-      <div className="space-y-1.5">
-        <label htmlFor="approval-deny-reason" className="text-xs text-muted-foreground">
-          拒绝原因（可选，将反馈给 Agent 以便改用安全方案）
-        </label>
-        <Input
-          id="approval-deny-reason"
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="例如：不要删目录，只清理 .tmp 文件"
-          disabled={submitting !== null}
-          className="rounded-2xl"
-        />
-      </div>
+      {/* Whisper-quiet optional deny note */}
+      <input
+        id="approval-deny-reason"
+        type="text"
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        placeholder="可选：补充拒绝原因，告诉 Aster 改用什么方案…"
+        disabled={submitting !== null}
+        className="w-full rounded-2xl border border-transparent bg-muted/55 px-3.5 py-2.5 text-[13px] text-foreground placeholder:text-muted-foreground/70 transition-colors focus:border-border focus:bg-background focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+      />
 
-      <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-        <Button
+      {/* Muse action bar: quiet deny on left, soft secondary + Meta Blue primary on right */}
+      <div className="flex items-center justify-between gap-2 pt-0.5">
+        <button
           type="button"
-          variant="outline"
           disabled={submitting !== null}
           onClick={() => void handleDecision("deny")}
-          className="rounded-full"
+          className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full px-3.5 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
         >
-          {submitting === "deny" ? <Spinner className="size-3.5" /> : <X className="size-3.5" />}
+          {submitting === "deny" && <Spinner className="size-3.5" />}
           拒绝
-        </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={submitting !== null}
-          onClick={() => void handleDecision("approve_similar")}
-          className="rounded-full"
-        >
-          {submitting === "approve_similar" ? (
-            <Spinner className="size-3.5" />
-          ) : (
-            <CheckCheck className="size-3.5" />
-          )}
-          本次任务同类免批
-        </Button>
-        <Button
-          type="button"
-          disabled={submitting !== null}
-          onClick={() => void handleDecision("approve_once")}
-          className="rounded-full"
-        >
-          {submitting === "approve_once" ? (
-            <Spinner className="size-3.5" />
-          ) : (
-            <Check className="size-3.5" />
-          )}
-          批准一次
-        </Button>
+        </button>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={submitting !== null}
+            onClick={() => void handleDecision("approve_similar")}
+            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full bg-secondary px-4 text-[13px] font-medium text-secondary-foreground transition-colors hover:bg-secondary/75 disabled:opacity-50"
+          >
+            {submitting === "approve_similar" && <Spinner className="size-3.5" />}
+            本次同类免批
+          </button>
+          <button
+            type="button"
+            disabled={submitting !== null}
+            onClick={() => void handleDecision("approve_once")}
+            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full bg-primary px-5 text-[13px] font-medium text-primary-foreground shadow-sm transition-opacity hover:opacity-92 disabled:opacity-50"
+          >
+            {submitting === "approve_once" && <Spinner className="size-3.5" />}
+            批准一次
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -229,7 +225,9 @@ export function ApprovalRequestDialog() {
     <Dialog open={true}>
       {isDesktop ? (
         <DialogContent
-          className="max-w-lg rounded-3xl p-6"
+          hideClose
+          overlayClassName="bg-black/25 backdrop-blur-md"
+          className="max-w-[460px] rounded-[28px] border border-border/80 bg-card p-6 shadow-[0_24px_64px_-16px_rgba(0,0,0,0.18)] sm:p-7"
           onPointerDownOutside={(e) => e.preventDefault()}
           onEscapeKeyDown={(e) => e.preventDefault()}
         >
@@ -237,11 +235,12 @@ export function ApprovalRequestDialog() {
         </DialogContent>
       ) : (
         <SheetContent
-          className="rounded-t-3xl p-5"
+          overlayClassName="bg-black/25 backdrop-blur-md"
+          className="rounded-t-[28px] border-t border-border/80 bg-card px-5 pb-[max(env(safe-area-inset-bottom),20px)] pt-3 shadow-[0_-16px_48px_-12px_rgba(0,0,0,0.16)]"
           onPointerDownOutside={(e) => e.preventDefault()}
           onEscapeKeyDown={(e) => e.preventDefault()}
         >
-          {body}
+          <div className="pt-2">{body}</div>
         </SheetContent>
       )}
     </Dialog>
