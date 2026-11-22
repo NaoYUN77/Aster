@@ -1,6 +1,8 @@
 export {
   evaluateSensitiveOperation,
+  extractShellWriteTargets,
   isOutsideWorkspace,
+  isSafeReadOnlyShellCommand,
   type ApprovalCaller,
   type ApprovalEvaluation,
   type ApprovalPolicyContext,

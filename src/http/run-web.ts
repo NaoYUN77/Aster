@@ -60,6 +60,7 @@ export async function runWebMode(
   const approvals = new ApprovalService({
     dbPath: join(config.dataDir, "approvals.sqlite"),
     hub,
+    shutdownSignal: signal,
   });
   // One serialization point for the durable writer: user turns, routine runs and host messages.
   const gate = new AgentGate();

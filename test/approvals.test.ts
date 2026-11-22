@@ -10,6 +10,7 @@ import {
   ApprovalService,
   evaluateSensitiveOperation,
   isOutsideWorkspace,
+  isSafeReadOnlyShellCommand,
 } from "../src/approvals/index.js";
 import { createToolRegistry } from "../src/tools.js";
 
@@ -66,6 +67,100 @@ test("evaluateSensitiveOperation detects all 4 sensitive categories and allows s
   const escalation = evaluateSensitiveOperation("edit", { path: "src/app.ts" }, builtinWrite, subNoWriteCtx);
   assert.equal(escalation.sensitive, true);
   assert.equal(escalation.rule, "subagent_write_escalation");
+
+  // Read-only bash commands on a non-writing sub-agent should not spam approval modals.
+  assert.equal(isSafeReadOnlyShellCommand("ls -la | wc -l"), true);
+  assert.equal(isSafeReadOnlyShellCommand("find . -maxdepth 2 2>/dev/null"), true);
+  assert.equal(isSafeReadOnlyShellCommand("git status && git log -n 5"), true);
+  assert.equal(isSafeReadOnlyShellCommand("echo hi > out.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("touch out.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("find . -delete"), false);
+  assert.equal(isSafeReadOnlyShellCommand("ls $(touch pwn)"), false);
+
+  const subReadLs = evaluateSensitiveOperation("bash", { command: "ls -la" }, builtinWrite, subNoWriteCtx);
+  assert.equal(subReadLs.sensitive, false);
+
+  const subWriteTouch = evaluateSensitiveOperation("bash", { command: "touch sub-test.txt" }, builtinWrite, subNoWriteCtx);
+  assert.equal(subWriteTouch.sensitive, true);
+  assert.equal(subWriteTouch.rule, "subagent_write_escalation");
+
+  // 5. Shell workspace-escape detection (E2E-04 regression)
+  const bashRedirectOutside = evaluateSensitiveOperation(
+    "bash",
+    { command: "echo hello > /tmp/aster-e2e-escape.txt" },
+    builtinWrite,
+    mainCtx,
+  );
+  assert.equal(bashRedirectOutside.sensitive, true);
+  assert.equal(bashRedirectOutside.rule, "workspace_escape");
+
+  const bashTeeOutside = evaluateSensitiveOperation(
+    "bash",
+    { command: "echo hello | tee -a ../escape.log" },
+    builtinWrite,
+    mainCtx,
+  );
+  assert.equal(bashTeeOutside.sensitive, true);
+  assert.equal(bashTeeOutside.rule, "workspace_escape");
+
+  const bashCpOutside = evaluateSensitiveOperation(
+    "bash",
+    { command: "cp notes.txt ~/Desktop/leak.txt" },
+    builtinWrite,
+    mainCtx,
+  );
+  assert.equal(bashCpOutside.sensitive, true);
+  assert.equal(bashCpOutside.rule, "workspace_escape");
+
+  const bashRedirectInside = evaluateSensitiveOperation(
+    "bash",
+    { command: "echo ok > ./e2e-ok.txt" },
+    builtinWrite,
+    mainCtx,
+  );
+  assert.equal(bashRedirectInside.sensitive, false);
+
+  const bashDevNull = evaluateSensitiveOperation(
+    "bash",
+    { command: "ls missing 2>/dev/null" },
+    builtinWrite,
+    mainCtx,
+  );
+  assert.equal(bashDevNull.sensitive, false);
+});
+
+test("ApprovalService records interrupted when process shutdownSignal aborts a pending wait (E2E-07)", async () => {
+  const shutdownAc = new AbortController();
+  const reqAc = new AbortController();
+  const service = new ApprovalService({
+    dbPath: ":memory:",
+    defaultTimeoutMs: 5_000,
+    shutdownSignal: shutdownAc.signal,
+    log: () => {},
+  });
+  try {
+    const p = service.requestApproval({
+      runScopeId: "conv-shutdown",
+      caller: { kind: "main", conversationId: "conv-shutdown" },
+      toolName: "bash",
+      args: { command: "rm -rf ./e2e-keep.txt" },
+      evaluation: {
+        sensitive: true,
+        rule: "destructive_shell",
+        reason: "命中危险 Shell 规则",
+        categoryKey: "bash:destructive_shell",
+        summary: "bash: rm -rf ./e2e-keep.txt",
+      },
+    }, reqAc.signal);
+    const [pending] = service.listPending();
+    assert.ok(pending);
+    shutdownAc.abort(new Error("SIGTERM"));
+    reqAc.abort(new Error("request aborted by shutdown"));
+    await assert.rejects(p);
+    assert.equal(service.get(pending.id)?.status, "interrupted");
+  } finally {
+    service.close();
+  }
 });
 
 test("ApprovalService supports approve_once, approve_similar caching, deny with reason, timeout, abort, and restart fail-safe", async () => {

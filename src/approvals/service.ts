@@ -53,6 +53,8 @@ export type ApprovalServiceOptions = {
   readonly defaultTimeoutMs?: number;
   /** Notified whenever the count of active approval waits transitions 0 <-> >0. */
   readonly onWaitActiveChange?: (waiting: boolean) => void;
+  /** Process shutdown signal: aborts occurring after shutdown starts are recorded as `interrupted`. */
+  readonly shutdownSignal?: AbortSignal;
   readonly log?: (line: string) => void;
 };
 
@@ -140,6 +142,7 @@ export class ApprovalService {
   private readonly hub: EventHub | undefined;
   private readonly defaultTimeoutMs: number;
   private readonly onWaitActiveChange: ((waiting: boolean) => void) | undefined;
+  private readonly shutdownSignal: AbortSignal | undefined;
   private readonly log: (line: string) => void;
   private readonly pending = new Map<string, PendingWaiter>();
   private readonly runAllowlists = new Map<string, Set<string>>();
@@ -154,6 +157,7 @@ export class ApprovalService {
     this.hub = options.hub;
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
     this.onWaitActiveChange = options.onWaitActiveChange;
+    this.shutdownSignal = options.shutdownSignal;
     this.log = options.log ?? ((line) => console.error(line));
     this.initSchema();
     this.markStalePendingInterrupted();
@@ -320,7 +324,11 @@ export class ApprovalService {
 
       const onAbort = () => {
         if (!this.pending.has(id)) return;
-        finalize("aborted", "Execution aborted before approval");
+        const shuttingDown = this.closed || this.shutdownSignal?.aborted === true;
+        finalize(
+          shuttingDown ? "interrupted" : "aborted",
+          shuttingDown ? "Process shutting down before approval was resolved" : "Execution aborted before approval",
+        );
         rejectPromise(createAbortError(signal));
       };
 
