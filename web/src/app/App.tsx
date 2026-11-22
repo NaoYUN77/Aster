@@ -11,6 +11,7 @@ import { CredentialRequestDialog } from "@/features/connectors/CredentialRequest
 import { useConnectorResumeRefresh } from "@/features/connectors/use-connector-resume";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { SetupPage } from "@/features/settings/SetupPage";
+import { UsagePage } from "@/features/usage/UsagePage";
 import { initNotificationListeners } from "@/lib/notifications";
 import { platform } from "@/lib/platform";
 import { initAudioUnlock } from "@/lib/sound";
@@ -134,6 +135,7 @@ export function App() {
       <Route element={<RequireAuth />}>
         <Route path="/" element={<ChatPage />} />
         <Route path="/connectors" element={<ConnectorsPage />} />
+        <Route path="/usage" element={<UsagePage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
       {/* RequireAuth 内部渲染 AuthenticatedShell + Outlet，两页共用同一个 SSE 连接。 */}

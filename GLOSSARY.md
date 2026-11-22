@@ -164,3 +164,27 @@ A pending decision surfaced to the owner in the conversation when a sensitive op
 intercepted before execution, allowing the owner to approve once, allow similar operations for the
 current run, or deny with an optional reason.
 _Avoid_: gate, confirm dialog, prompt
+
+### Usage and budgets
+
+**Token ledger**:
+The durable record of every model generation across all execution sources (conversation,
+sub-agent runs, dreaming, routines, and compaction), retained independently of disposable
+sub-agent storage.
+_Avoid_: model usage, billing log, trace
+
+**Usage record**:
+One completed model call's accounted token counts (`input`, `output`, `cacheRead`, `cacheWrite`,
+optional `reasoning`) and optional cost estimate, tagged with its execution source, model, and
+timestamp.
+_Avoid_: model usage, consumption event
+
+**Context occupancy**:
+The fraction of the active model's context window currently filled by the owner's conversation,
+derived from the latest committed turn's token usage.
+_Avoid_: context size, memory usage, prompt length
+
+**Daily budget threshold**:
+An optional owner-configured daily token ceiling that emits a single soft host reminder when
+crossed for the first time on a local calendar day, without halting execution.
+_Avoid_: hard limit, quota, rate limit

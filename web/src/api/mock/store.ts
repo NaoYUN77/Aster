@@ -1,4 +1,5 @@
 import type { ModelRef, ModelUsage, ModelsResponse, SelectableModel, UiMessage } from "../types";
+import type { UsageBudgetState, UsageRange, UsageSummaryResponse } from "../usage";
 import {
   MOCK_FALLBACK,
   MOCK_OWNER_ID,
@@ -859,6 +860,166 @@ export function mockResolveApproval(
     }
   }
   return { ok: true, approval: updated };
+}
+
+let mockDailyTokenBudget: number | null = null;
+
+export function mockUsageSummary(range: UsageRange): UsageSummaryResponse {
+  const model = activeModelRef();
+  const now = Date.now();
+  const budget: UsageBudgetState = {
+    dailyTokenBudget: mockDailyTokenBudget,
+    todayTokens: 194_200,
+    lastAlertDate:
+      mockDailyTokenBudget !== null && 194_200 >= mockDailyTokenBudget
+        ? new Date(now).toISOString().slice(0, 10)
+        : null,
+  };
+  const contextOccupancy = {
+    usedTokens: 41_200,
+    contextWindow: 128_000,
+    ratio: 0.322,
+    provider: model.provider,
+    modelId: model.id,
+    updatedAt: now - 45_000,
+  };
+
+  if (range === "1d") {
+    return {
+      range: "1d",
+      timezone: "Asia/Shanghai",
+      contextOccupancy,
+      totals: {
+        calls: 27,
+        inputTokens: 45_200,
+        outputTokens: 32_000,
+        cacheReadTokens: 117_000,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        totalTokens: 194_200,
+        cacheHitRate: 0.721,
+        costUsd: 0.24,
+      },
+      trend: [
+        { key: "00h", label: "00h", calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, costUsd: null },
+        { key: "03h", label: "03h", calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, costUsd: null },
+        { key: "06h", label: "06h", calls: 2, inputTokens: 4_800, outputTokens: 2_200, cacheReadTokens: 11_000, totalTokens: 18_000, costUsd: 0.02 },
+        { key: "09h", label: "09h", calls: 5, inputTokens: 8_400, outputTokens: 5_600, cacheReadTokens: 20_000, totalTokens: 34_000, costUsd: 0.04 },
+        { key: "12h", label: "12h", calls: 4, inputTokens: 6_200, outputTokens: 4_800, cacheReadTokens: 17_000, totalTokens: 28_000, costUsd: 0.03 },
+        { key: "15h", label: "15h", calls: 9, inputTokens: 14_800, outputTokens: 11_200, cacheReadTokens: 38_000, totalTokens: 64_000, costUsd: 0.09 },
+        { key: "18h", label: "18h", calls: 5, inputTokens: 7_400, outputTokens: 5_800, cacheReadTokens: 23_000, totalTokens: 36_200, costUsd: 0.04 },
+        { key: "21h", label: "21h", calls: 2, inputTokens: 3_600, outputTokens: 2_400, cacheReadTokens: 8_000, totalTokens: 14_000, costUsd: 0.02 },
+      ],
+      bySource: [
+        { source: "main", calls: 15, inputTokens: 26_200, outputTokens: 18_000, cacheReadTokens: 68_000, totalTokens: 112_200, share: 0.578, costUsd: 0.14 },
+        { source: "subagent", calls: 7, inputTokens: 11_000, outputTokens: 9_000, cacheReadTokens: 34_000, totalTokens: 54_000, share: 0.278, costUsd: 0.07 },
+        { source: "dreaming", calls: 3, inputTokens: 4_800, outputTokens: 3_200, cacheReadTokens: 10_000, totalTokens: 18_000, share: 0.093, costUsd: 0.02 },
+        { source: "routine", calls: 2, inputTokens: 3_200, outputTokens: 1_800, cacheReadTokens: 5_000, totalTokens: 10_000, share: 0.051, costUsd: 0.01 },
+      ],
+      byModel: [
+        { provider: model.provider, modelId: model.id, calls: 19, inputTokens: 31_000, outputTokens: 22_200, cacheReadTokens: 83_000, cacheHitRate: 0.728, totalTokens: 136_200, share: 0.701, costUsd: 0.16 },
+        { provider: "anthropic", modelId: "claude-sonnet-4-6", calls: 6, inputTokens: 10_200, outputTokens: 7_800, cacheReadTokens: 26_000, cacheHitRate: 0.718, totalTokens: 44_000, share: 0.227, costUsd: 0.06 },
+        { provider: "openai", modelId: "gpt-5.4-mini", calls: 2, inputTokens: 4_000, outputTokens: 2_000, cacheReadTokens: 8_000, cacheHitRate: 0.667, totalTokens: 14_000, share: 0.072, costUsd: 0.02 },
+      ],
+      budget,
+    };
+  }
+
+  if (range === "30d") {
+    return {
+      range: "30d",
+      timezone: "Asia/Shanghai",
+      contextOccupancy,
+      totals: {
+        calls: 742,
+        inputTokens: 1_660_000,
+        outputTokens: 950_000,
+        cacheReadTokens: 3_250_000,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        totalTokens: 5_860_000,
+        cacheHitRate: 0.662,
+        costUsd: 7.42,
+      },
+      trend: [
+        { key: "b1", label: "10-28", calls: 98, inputTokens: 210_000, outputTokens: 120_000, cacheReadTokens: 410_000, totalTokens: 740_000, costUsd: 0.94 },
+        { key: "b2", label: "11-02", calls: 126, inputTokens: 280_000, outputTokens: 160_000, cacheReadTokens: 550_000, totalTokens: 990_000, costUsd: 1.26 },
+        { key: "b3", label: "11-07", calls: 152, inputTokens: 340_000, outputTokens: 195_000, cacheReadTokens: 675_000, totalTokens: 1_210_000, costUsd: 1.54 },
+        { key: "b4", label: "11-12", calls: 118, inputTokens: 265_000, outputTokens: 155_000, cacheReadTokens: 510_000, totalTokens: 930_000, costUsd: 1.18 },
+        { key: "b5", label: "11-17", calls: 134, inputTokens: 305_000, outputTokens: 175_000, cacheReadTokens: 610_000, totalTokens: 1_090_000, costUsd: 1.38 },
+        { key: "b6", label: "近5日", calls: 114, inputTokens: 260_000, outputTokens: 145_000, cacheReadTokens: 495_000, totalTokens: 900_000, costUsd: 1.12 },
+      ],
+      bySource: [
+        { source: "main", calls: 398, inputTokens: 890_000, outputTokens: 510_000, cacheReadTokens: 1_760_000, totalTokens: 3_160_000, share: 0.539, costUsd: 4.02 },
+        { source: "subagent", calls: 196, inputTokens: 450_000, outputTokens: 260_000, cacheReadTokens: 870_000, totalTokens: 1_580_000, share: 0.27, costUsd: 2.01 },
+        { source: "dreaming", calls: 84, inputTokens: 200_000, outputTokens: 110_000, cacheReadTokens: 393_000, totalTokens: 703_000, share: 0.12, costUsd: 0.88 },
+        { source: "routine", calls: 44, inputTokens: 82_000, outputTokens: 48_000, cacheReadTokens: 162_000, totalTokens: 292_000, share: 0.05, costUsd: 0.36 },
+        { source: "compaction", calls: 20, inputTokens: 38_000, outputTokens: 22_000, cacheReadTokens: 65_000, totalTokens: 125_000, share: 0.021, costUsd: 0.15 },
+      ],
+      byModel: [
+        { provider: model.provider, modelId: model.id, calls: 486, inputTokens: 1_080_000, outputTokens: 610_000, cacheReadTokens: 2_120_000, cacheHitRate: 0.663, totalTokens: 3_810_000, share: 0.65, costUsd: 4.62 },
+        { provider: "anthropic", modelId: "claude-sonnet-4-6", calls: 184, inputTokens: 410_000, outputTokens: 245_000, cacheReadTokens: 805_000, cacheHitRate: 0.663, totalTokens: 1_460_000, share: 0.249, costUsd: 2.15 },
+        { provider: "openai", modelId: "gpt-5.4-mini", calls: 72, inputTokens: 170_000, outputTokens: 95_000, cacheReadTokens: 325_000, cacheHitRate: 0.657, totalTokens: 590_000, share: 0.101, costUsd: 0.65 },
+      ],
+      budget,
+    };
+  }
+
+  return {
+    range: "7d",
+    timezone: "Asia/Shanghai",
+    contextOccupancy,
+    totals: {
+      calls: 186,
+      inputTokens: 373_000,
+      outputTokens: 241_000,
+      cacheReadTokens: 807_000,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 1_421_000,
+      cacheHitRate: 0.684,
+      costUsd: 1.84,
+    },
+    trend: [
+      { key: "d1", label: "11-16", calls: 22, inputTokens: 44_000, outputTokens: 28_000, cacheReadTokens: 93_000, totalTokens: 165_000, costUsd: 0.21 },
+      { key: "d2", label: "11-17", calls: 31, inputTokens: 63_000, outputTokens: 41_000, cacheReadTokens: 134_000, totalTokens: 238_000, costUsd: 0.31 },
+      { key: "d3", label: "11-18", calls: 24, inputTokens: 48_000, outputTokens: 31_000, cacheReadTokens: 103_000, totalTokens: 182_000, costUsd: 0.24 },
+      { key: "d4", label: "11-19", calls: 40, inputTokens: 82_000, outputTokens: 53_000, cacheReadTokens: 177_000, totalTokens: 312_000, costUsd: 0.41 },
+      { key: "d5", label: "11-20", calls: 26, inputTokens: 54_000, outputTokens: 34_000, cacheReadTokens: 116_000, totalTokens: 204_000, costUsd: 0.26 },
+      { key: "d6", label: "11-21", calls: 16, inputTokens: 36_800, outputTokens: 22_000, cacheReadTokens: 67_000, totalTokens: 125_800, costUsd: 0.17 },
+      { key: "d7", label: "今日", calls: 27, inputTokens: 45_200, outputTokens: 32_000, cacheReadTokens: 117_000, totalTokens: 194_200, costUsd: 0.24 },
+    ],
+    bySource: [
+      { source: "main", calls: 102, inputTokens: 210_000, outputTokens: 135_000, cacheReadTokens: 450_000, totalTokens: 795_000, share: 0.559, costUsd: 1.03 },
+      { source: "subagent", calls: 48, inputTokens: 96_000, outputTokens: 63_000, cacheReadTokens: 210_000, totalTokens: 369_000, share: 0.26, costUsd: 0.48 },
+      { source: "dreaming", calls: 21, inputTokens: 40_000, outputTokens: 26_000, cacheReadTokens: 90_000, totalTokens: 156_000, share: 0.11, costUsd: 0.2 },
+      { source: "routine", calls: 10, inputTokens: 17_000, outputTokens: 11_000, cacheReadTokens: 37_000, totalTokens: 65_000, share: 0.046, costUsd: 0.08 },
+      { source: "compaction", calls: 5, inputTokens: 10_000, outputTokens: 6_000, cacheReadTokens: 20_000, totalTokens: 36_000, share: 0.025, costUsd: 0.05 },
+    ],
+    byModel: [
+      { provider: model.provider, modelId: model.id, calls: 124, inputTokens: 242_000, outputTokens: 158_000, cacheReadTokens: 542_000, cacheHitRate: 0.691, totalTokens: 942_000, share: 0.663, costUsd: 1.18 },
+      { provider: "anthropic", modelId: "claude-sonnet-4-6", calls: 44, inputTokens: 94_000, outputTokens: 61_000, cacheReadTokens: 193_000, cacheHitRate: 0.672, totalTokens: 348_000, share: 0.245, costUsd: 0.49 },
+      { provider: "openai", modelId: "gpt-5.4-mini", calls: 18, inputTokens: 37_000, outputTokens: 22_000, cacheReadTokens: 72_000, cacheHitRate: 0.661, totalTokens: 131_000, share: 0.092, costUsd: 0.17 },
+    ],
+    budget,
+  };
+}
+
+export function mockUpdateDailyTokenBudget(
+  dailyTokenBudget: number | null,
+): { budget: UsageBudgetState } {
+  mockDailyTokenBudget = dailyTokenBudget && dailyTokenBudget > 0 ? Math.trunc(dailyTokenBudget) : null;
+  const now = Date.now();
+  return {
+    budget: {
+      dailyTokenBudget: mockDailyTokenBudget,
+      todayTokens: 194_200,
+      lastAlertDate:
+        mockDailyTokenBudget !== null && 194_200 >= mockDailyTokenBudget
+          ? new Date(now).toISOString().slice(0, 10)
+          : null,
+    },
+  };
 }
 
 export { MOCK_FALLBACK, MOCK_PRIMARY };
