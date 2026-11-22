@@ -17,25 +17,25 @@ const STATUS_BADGE = {
   connected: {
     label: "已连接",
     variant: "success" as const,
-    tone: "border-success/50 bg-success/5",
+    tone: "bg-secondary ring-1 ring-success/25",
     icon: CircleCheck,
   },
   pending: {
     label: "等待授权…",
     variant: "warning" as const,
-    tone: "border-warning/50 bg-warning/5",
+    tone: "bg-secondary ring-1 ring-warning/30",
     icon: Clock3,
   },
   disconnected: {
     label: "未连接",
     variant: "outline" as const,
-    tone: "border-border bg-card",
+    tone: "bg-secondary",
     icon: Link2,
   },
   error: {
     label: "连接异常",
     variant: "destructive" as const,
-    tone: "border-destructive/50 bg-destructive/5",
+    tone: "bg-secondary ring-1 ring-destructive/30",
     icon: CircleAlert,
   },
 };
@@ -81,98 +81,105 @@ export function ConnectorCard({
   return (
     <div
       className={cn(
-        "group flex w-full cursor-pointer flex-col gap-3 rounded-xl border p-4 text-left shadow-sm transition-colors",
+        "group flex w-full cursor-pointer flex-col justify-between gap-3.5 rounded-3xl p-4 text-left transition-all hover:brightness-[0.985] dark:hover:brightness-110",
         status.tone,
       )}
       onClick={handleCardClick}
       data-status={connector.status}
     >
-      <div className="flex w-full items-start gap-3">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-white p-1.5 shadow-xs">
-          <img src={meta.icon} alt="" className="size-full object-contain" aria-hidden />
-        </span>
+      <div>
+        <div className="flex w-full items-start gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl border border-border bg-white p-2 shadow-2xs">
+            <img src={meta.icon} alt="" className="size-full object-contain" aria-hidden />
+          </span>
 
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-semibold">{connector.name}</span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-sm font-semibold">{connector.name}</span>
+              <Badge variant={status.variant} className="shrink-0 gap-1 whitespace-nowrap rounded-full">
+                <StatusIcon className="size-3 shrink-0" />
+                {status.label}
+              </Badge>
+            </div>
+            <p className="mt-0.5 truncate text-[11.5px] text-muted-foreground">
+              {connector.status === "connected" && connector.account
+                ? connector.account.label
+                : connector.status === "pending"
+                  ? "在浏览器完成授权后自动刷新"
+                  : connector.status === "error"
+                    ? connector.lastError
+                    : "未授权"}
+            </p>
           </div>
-          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{meta.tagline}</p>
         </div>
 
-        <button
-          type="button"
-          aria-label={`查看 ${connector.name} 详情`}
-          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={onOpen}
-        >
-          <ChevronRight className="size-4" />
-        </button>
+        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+          {meta.tagline}
+        </p>
       </div>
 
-      <div className="flex w-full items-center gap-2 border-t border-border/60 pt-2.5">
-        <Badge variant={status.variant} className="gap-1">
-          <StatusIcon className="size-3" />
-          {status.label}
-        </Badge>
+      <div className="flex w-full items-center justify-between gap-2 pt-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            aria-label={`查看 ${connector.name} 详情`}
+            className="inline-flex h-9 items-center gap-0.5 rounded-full px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-card hover:text-foreground sm:h-8"
+            onClick={onOpen}
+          >
+            <span>详情</span>
+            <ChevronRight className="size-3.5" />
+          </button>
 
-        <span className="ml-auto min-w-0 truncate text-right text-[11px] text-muted-foreground">
-          {connector.status === "connected" && connector.account
-            ? connector.account.label
-            : connector.status === "pending"
-              ? "在浏览器完成授权后自动刷新"
-              : connector.status === "error"
-                ? connector.lastError
-                : "点击连接并在浏览器中授权"}
-        </span>
-      </div>
+          {connector.status === "pending" && manualAuthUrl && (
+            <a
+              href={manualAuthUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="truncate text-xs font-medium text-primary underline underline-offset-2"
+            >
+              打开授权页
+            </a>
+          )}
+        </div>
 
-      <div className="flex w-full items-center justify-end gap-2">
-        {connector.status === "pending" && manualAuthUrl && (
-          <a
-            href={manualAuthUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mr-auto text-[11px] font-medium text-primary underline underline-offset-2"
-          >
-            打开授权页
-          </a>
-        )}
-        {connector.status === "connected" ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-8 px-3 text-[11px]"
-            disabled={busy}
-            onClick={onDisconnect}
-          >
-            {disconnecting && <Spinner className="size-3" />}
-            断开
-          </Button>
-        ) : connector.status === "pending" ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-8 px-3 text-[11px]"
-            disabled={busy}
-            onClick={onCancel}
-          >
-            {cancelling && <Spinner className="size-3" />}
-            取消
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            size="sm"
-            className="h-8 px-3 text-[11px]"
-            disabled={busy}
-            onClick={onConnect}
-          >
-            {connecting && <Spinner className="size-3" />}
-            {connector.status === "error" ? "重试" : "连接"}
-          </Button>
-        )}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {connector.status === "connected" ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-9 rounded-full bg-card px-4 text-xs shadow-2xs sm:h-8 sm:px-3.5"
+              disabled={busy}
+              onClick={onDisconnect}
+            >
+              {disconnecting && <Spinner className="size-3" />}
+              断开
+            </Button>
+          ) : connector.status === "pending" ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-9 rounded-full bg-card px-4 text-xs shadow-2xs sm:h-8 sm:px-3.5"
+              disabled={busy}
+              onClick={onCancel}
+            >
+              {cancelling && <Spinner className="size-3" />}
+              取消
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              className="h-9 rounded-full px-4 text-xs sm:h-8"
+              disabled={busy}
+              onClick={onConnect}
+            >
+              {connecting && <Spinner className="size-3" />}
+              {connector.status === "error" ? "重试" : "连接"}
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -404,6 +404,15 @@ function nextReply(text: string): { text: string; tool?: { name: string; status:
     return { text: `没有找到模型 ${target}。发 $model list 查看可切模型。` };
   }
 
+  if (command === "$demo subagent") {
+    mockTriggerSubagentDemo();
+    return { text: "已启动 2 个演示子任务：一个正在读取工作区，一个正在等待审批。可以点击输入框上方的胶囊条展开或中止。" };
+  }
+  if (command === "$demo approval") {
+    mockTriggerApprovalDemo();
+    return { text: "已触发一次敏感操作审批演示弹窗。" };
+  }
+
   const reply = REPLY_POOL[replyIndex % REPLY_POOL.length]!;
   replyIndex += 1;
   const withTool = replyIndex % 4 === 0;
@@ -722,6 +731,107 @@ export function mockRequestCredential(
     requestId,
   });
   return { requestId };
+}
+
+const mockSubagents = new Map<
+  string,
+  {
+    id: string;
+    task: string;
+    status: "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
+    currentTool: string | null;
+    startedAt: number;
+    finishedAt: number | null;
+  }
+>();
+
+const mockApprovals = new Map<string, Record<string, unknown>>();
+
+export function mockTriggerSubagentDemo(): void {
+  const now = Date.now();
+  const sub1 = {
+    id: "sub_demo_read",
+    task: "巡检 workspace 文件结构并汇总关键改动",
+    status: "running" as const,
+    currentTool: "read",
+    startedAt: now - 8_000,
+    finishedAt: null,
+  };
+  const sub2 = {
+    id: "sub_demo_write",
+    task: "修复测试断言并生成 sub-test.txt",
+    status: "waiting_approval" as const,
+    currentTool: "write",
+    startedAt: now - 14_000,
+    finishedAt: null,
+  };
+  mockSubagents.set(sub1.id, sub1);
+  mockSubagents.set(sub2.id, sub2);
+  emit("subagent.updated", sub1);
+  emit("subagent.updated", sub2);
+}
+
+export function mockTriggerApprovalDemo(): void {
+  const now = Date.now();
+  const id = `apr_demo_${now.toString(36)}`;
+  const approval = {
+    id,
+    status: "pending",
+    caller: { kind: "subagent", subagentId: "sub_demo_write", task: "修复测试断言并生成 sub-test.txt" },
+    toolName: "bash",
+    args: { command: "echo hello > /tmp/aster-e2e-escape.txt" },
+    rule: "workspace_escape",
+    reason: "Shell 命令试图写入工作区 (/data/workspace) 之外的路径：/tmp/aster-e2e-escape.txt",
+    categoryKey: "bash:workspace_escape",
+    summary: "bash -> /tmp/aster-e2e-escape.txt",
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 30 * 60_000).toISOString(),
+    resolvedAt: null,
+    decisionReason: null,
+  };
+  mockApprovals.set(id, approval);
+  emit("approval.requested", approval);
+}
+
+export function mockCancelSubagent(id: string): { ok: boolean; status: string } {
+  const item = mockSubagents.get(id);
+  if (!item) return { ok: false, status: "not_found" };
+  if (item.status !== "running" && item.status !== "waiting_approval") {
+    return { ok: false, status: item.status };
+  }
+  const updated = {
+    ...item,
+    status: "cancelled" as const,
+    currentTool: null,
+    finishedAt: Date.now(),
+  };
+  mockSubagents.set(id, updated);
+  emit("subagent.updated", updated);
+  return { ok: true, status: "cancelled" };
+}
+
+export function mockResolveApproval(
+  id: string,
+  decision: "approve_once" | "approve_similar" | "deny",
+  reason?: string,
+): { ok: true; approval: Record<string, unknown> } | { ok: false } {
+  const item = mockApprovals.get(id);
+  if (!item) return { ok: false };
+  const status =
+    decision === "approve_once"
+      ? "approved_once"
+      : decision === "approve_similar"
+        ? "approved_similar"
+        : "denied";
+  const updated = {
+    ...item,
+    status,
+    resolvedAt: new Date().toISOString(),
+    decisionReason: reason ?? null,
+  };
+  mockApprovals.delete(id);
+  emit("approval.resolved", updated);
+  return { ok: true, approval: updated };
 }
 
 export { MOCK_FALLBACK, MOCK_PRIMARY };

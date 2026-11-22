@@ -1,5 +1,7 @@
 import { z } from "zod";
+import type { ApprovalRequestView } from "./approvals";
 import type { CredentialRequest } from "./connectors";
+import type { SubagentSnapshot } from "./subagents";
 import type {
   ModelKind,
   ModelRef,
@@ -60,6 +62,50 @@ const queuedRequestSchema = z.object({
   createdAt: z.number(),
 });
 
+const approvalCallerSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("main"), conversationId: z.string() }),
+  z.object({ kind: z.literal("subagent"), subagentId: z.string(), task: z.string() }),
+]);
+
+const approvalRequestSchema = z.object({
+  id: z.string(),
+  status: z.enum([
+    "pending",
+    "approved_once",
+    "approved_similar",
+    "denied",
+    "expired",
+    "aborted",
+    "interrupted",
+  ]),
+  caller: approvalCallerSchema,
+  toolName: z.string(),
+  args: z.unknown(),
+  rule: z.enum([
+    "destructive_shell",
+    "workspace_escape",
+    "external_write",
+    "subagent_write_escalation",
+  ]),
+  reason: z.string(),
+  categoryKey: z.string(),
+  summary: z.string(),
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  resolvedAt: z.string().nullable(),
+  decisionReason: z.string().nullable(),
+});
+
+const subagentSnapshotSchema = z.object({
+  id: z.string(),
+  task: z.string(),
+  status: z.enum(["running", "waiting_approval", "completed", "failed", "cancelled"]),
+  currentTool: z.string().nullable(),
+  startedAt: z.number(),
+  finishedAt: z.number().nullable(),
+  error: z.string().optional(),
+});
+
 const snapshotSchema = z.object({
   activeRequest: z
     .object({
@@ -70,6 +116,8 @@ const snapshotSchema = z.object({
     .nullish(),
   queue: z.array(queuedRequestSchema).optional(),
   modelVersion: z.number().optional(),
+  pendingApprovals: z.array(approvalRequestSchema).optional(),
+  activeSubagents: z.array(subagentSnapshotSchema).optional(),
 });
 
 const queueChangedSchema = z.object({
@@ -151,6 +199,8 @@ export type ParsedServerEvent =
       } | null;
       modelVersion?: number;
       queue?: QueuedRequest[];
+      pendingApprovals?: ApprovalRequestView[];
+      activeSubagents?: SubagentSnapshot[];
     }
   | { type: "queue.changed"; items: QueuedRequest[] }
   | { type: "request.queued"; requestId: string; clientMessageId: string }
@@ -170,6 +220,9 @@ export type ParsedServerEvent =
   | { type: "model.changed"; current: ModelRef; version?: number }
   | { type: "connector.changed" }
   | { type: "credential.request"; request: CredentialRequest }
+  | { type: "approval.requested"; approval: ApprovalRequestView }
+  | { type: "approval.resolved"; approval: ApprovalRequestView }
+  | { type: "subagent.updated"; subagent: SubagentSnapshot }
   | { type: "ignored"; event: string };
 
 function fallbackUsage(message: UiMessage): ModelUsage {
@@ -198,6 +251,12 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
           ? { modelVersion: parsed.data.modelVersion }
           : {}),
         ...(parsed.data.queue !== undefined ? { queue: parsed.data.queue } : {}),
+        ...(parsed.data.pendingApprovals !== undefined
+          ? { pendingApprovals: parsed.data.pendingApprovals as ApprovalRequestView[] }
+          : {}),
+        ...(parsed.data.activeSubagents !== undefined
+          ? { activeSubagents: parsed.data.activeSubagents as SubagentSnapshot[] }
+          : {}),
       };
     }
     case "queue.changed": {
@@ -295,6 +354,21 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
           accountHint: null,
         },
       };
+    }
+    case "approval.requested": {
+      const parsed = approvalRequestSchema.safeParse(data);
+      if (!parsed.success) return { type: "ignored", event };
+      return { type: "approval.requested", approval: parsed.data as ApprovalRequestView };
+    }
+    case "approval.resolved": {
+      const parsed = approvalRequestSchema.safeParse(data);
+      if (!parsed.success) return { type: "ignored", event };
+      return { type: "approval.resolved", approval: parsed.data as ApprovalRequestView };
+    }
+    case "subagent.updated": {
+      const parsed = subagentSnapshotSchema.safeParse(data);
+      if (!parsed.success) return { type: "ignored", event };
+      return { type: "subagent.updated", subagent: parsed.data as SubagentSnapshot };
     }
     default:
       return { type: "ignored", event };

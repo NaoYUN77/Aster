@@ -32,6 +32,9 @@ type AgentRuntimeOptions = Pick<
   | "toolReviewLog"
   | "onModelUsed"
   | "onModelSelectionChanged"
+  | "approvals"
+  | "hub"
+  | "enableSubagents"
 >;
 
 /**

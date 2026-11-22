@@ -6,6 +6,7 @@ import { ChatPage } from "@/features/chat/ChatPage";
 import { useChatEvents } from "@/features/chat/use-chat-events";
 import { LoginPage } from "@/features/auth/LoginPage";
 import { ConnectorsPage } from "@/features/connectors/ConnectorsPage";
+import { ApprovalRequestDialog } from "@/features/approvals/ApprovalRequestDialog";
 import { CredentialRequestDialog } from "@/features/connectors/CredentialRequestDialog";
 import { useConnectorResumeRefresh } from "@/features/connectors/use-connector-resume";
 import { SettingsPage } from "@/features/settings/SettingsPage";
@@ -16,6 +17,7 @@ import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
 import { useConnectionStore } from "@/store/connection";
 import { useSoundStore } from "@/store/sound";
+import { AppShell } from "./AppShell";
 import { Splash } from "./Splash";
 
 let lastUnauthorizedAt = 0;
@@ -92,10 +94,11 @@ function AuthenticatedShell() {
   }, []);
 
   return (
-    <>
+    <AppShell>
       <Outlet />
+      <ApprovalRequestDialog />
       <CredentialRequestDialog />
-    </>
+    </AppShell>
   );
 }
 
