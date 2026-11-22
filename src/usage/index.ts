@@ -5,6 +5,7 @@ export {
   type UsageBudgetState,
   type UsageByModelItem,
   type UsageBySourceItem,
+  type UsageCallItem,
   type UsageLedgerOptions,
   type UsageRange,
   type UsageRecordInput,

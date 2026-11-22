@@ -8,7 +8,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import type { WebConfig } from "../config.js";
 import type { ApprovalDecision, ApprovalService } from "../approvals/index.js";
 import type { SubagentManager } from "../subagents/index.js";
-import type { UsageLedger, UsageRange } from "../usage/index.js";
+import type { UsageLedger, UsageRange, UsageSource } from "../usage/index.js";
 import { ModelSelectionError, type ModelSelectionService } from "../model-control.js";
 import { ConnectorError, connectorCode, safeConnectorMessage } from "../connectors/errors.js";
 import type { ConnectorService } from "../connectors/service.js";
@@ -521,17 +521,31 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   });
 
   // ------------------------------------------------------------------ usage
+  const VALID_USAGE_SOURCES = new Set<UsageSource>(["main", "subagent", "dreaming", "routine", "compaction"]);
   app.get("/api/v1/usage", async (request, reply) => {
     if (options.usageLedger === undefined) {
       return reply.code(503).send(errorBody("USAGE_DISABLED", "用量统计服务未启用"));
     }
-    const query = request.query as { range?: unknown };
+    const query = request.query as { range?: unknown; model?: unknown; source?: unknown };
     const rawRange = query.range === undefined || query.range === "" ? "7d" : query.range;
     if (rawRange !== "1d" && rawRange !== "7d" && rawRange !== "30d") {
       return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的时间范围，仅支持 1d、7d 或 30d"));
     }
     const range: UsageRange = rawRange;
-    return options.usageLedger.querySummary(range, options.usageContextInfo?.());
+    const rawSource = query.source === undefined || query.source === "" ? undefined : query.source;
+    if (rawSource !== undefined && (typeof rawSource !== "string" || !VALID_USAGE_SOURCES.has(rawSource as UsageSource))) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的来源筛选参数"));
+    }
+    const rawModel = query.model === undefined || query.model === "" ? undefined : query.model;
+    if (rawModel !== undefined && (typeof rawModel !== "string" || rawModel.length > 200)) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的模型筛选参数"));
+    }
+    const ctxInfo = options.usageContextInfo?.();
+    return options.usageLedger.querySummary(range, {
+      ...(ctxInfo === undefined ? {} : ctxInfo),
+      ...(rawModel === undefined ? {} : { model: rawModel }),
+      ...(rawSource === undefined ? {} : { source: rawSource as UsageSource }),
+    });
   });
 
   app.post("/api/v1/usage/budget", async (request, reply) => {

@@ -31,6 +31,11 @@ export type ContextOccupancySnapshot = {
   readonly provider: string | null;
   readonly modelId: string | null;
   readonly updatedAt: number | null;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly reasoningTokens: number;
 };
 
 export type UsageTotals = {
@@ -52,6 +57,7 @@ export type UsageTrendPoint = {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
   readonly totalTokens: number;
   readonly costUsd: number | null;
 };
@@ -62,6 +68,7 @@ export type UsageBySourceItem = {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
   readonly totalTokens: number;
   readonly share: number;
   readonly costUsd: number | null;
@@ -80,6 +87,24 @@ export type UsageByModelItem = {
   readonly costUsd: number | null;
 };
 
+export type UsageCallItem = {
+  readonly id: number;
+  readonly timestamp: number;
+  readonly source: UsageSource;
+  readonly subagentId: string | null;
+  readonly provider: string;
+  readonly modelId: string;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly reasoningTokens: number;
+  readonly totalTokens: number;
+  readonly costUsd: number | null;
+  readonly durationMs: number | null;
+  readonly contextWindow: number | null;
+};
+
 export type UsageBudgetState = {
   readonly dailyTokenBudget: number | null;
   readonly todayTokens: number;
@@ -94,6 +119,8 @@ export type UsageSummaryResponse = {
   readonly trend: UsageTrendPoint[];
   readonly bySource: UsageBySourceItem[];
   readonly byModel: UsageByModelItem[];
+  readonly availableModels: { readonly provider: string; readonly modelId: string }[];
+  readonly recentCalls: UsageCallItem[];
   readonly budget: UsageBudgetState;
 };
 
@@ -113,9 +140,11 @@ export type UsageLedgerOptions = {
 };
 
 type UsageRow = {
+  readonly id: number;
   readonly timestamp: number;
   readonly local_date: string;
   readonly source: UsageSource;
+  readonly subagent_id: string | null;
   readonly provider: string;
   readonly model_id: string;
   readonly input_tokens: number;
@@ -125,6 +154,7 @@ type UsageRow = {
   readonly reasoning_tokens: number;
   readonly total_tokens: number;
   readonly cost_usd: number | null;
+  readonly duration_ms: number | null;
 };
 
 const BUDGET_KEY = "daily_token_budget";
@@ -188,6 +218,11 @@ export class UsageLedger {
     provider: string;
     modelId: string;
     updatedAt: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    reasoningTokens: number;
   } | null = null;
   private closed = false;
 
@@ -235,7 +270,7 @@ export class UsageLedger {
 
   private hydrateLastMainContext(): void {
     const row = this.db.prepare(`
-      SELECT timestamp, provider, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens
+      SELECT timestamp, provider, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens
       FROM usage_records
       WHERE source = 'main' AND total_tokens > 0
       ORDER BY timestamp DESC, id DESC
@@ -248,6 +283,7 @@ export class UsageLedger {
       output_tokens: number;
       cache_read_tokens: number;
       cache_write_tokens: number;
+      reasoning_tokens: number;
       total_tokens: number;
     } | undefined;
     if (row !== undefined) {
@@ -257,6 +293,11 @@ export class UsageLedger {
         provider: row.provider,
         modelId: row.model_id,
         updatedAt: row.timestamp,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+        cacheReadTokens: row.cache_read_tokens,
+        cacheWriteTokens: row.cache_write_tokens,
+        reasoningTokens: row.reasoning_tokens,
       };
     }
   }
@@ -325,6 +366,11 @@ export class UsageLedger {
         provider: input.provider,
         modelId: input.modelId,
         updatedAt: timestamp,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        reasoningTokens,
       };
     }
 
@@ -381,6 +427,8 @@ export class UsageLedger {
     range: UsageRange,
     options: {
       readonly now?: number;
+      readonly model?: string;
+      readonly source?: UsageSource;
       readonly resolveContextWindow?: (provider: string, modelId: string) => number | null;
       readonly activeModel?: { readonly provider: string; readonly modelId: string; readonly contextWindow: number | null };
     } = {},
@@ -390,25 +438,44 @@ export class UsageLedger {
     const days = range === "1d" ? 1 : range === "7d" ? 7 : 30;
     const sinceTs = now - days * DAY_MS;
 
-    const rows = (
+    const rawRows = (
       range === "1d"
         ? this.db.prepare(`
-            SELECT timestamp, local_date, source, provider, model_id,
+            SELECT id, timestamp, local_date, source, subagent_id, provider, model_id,
                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                   reasoning_tokens, total_tokens, cost_usd
+                   reasoning_tokens, total_tokens, cost_usd, duration_ms
             FROM usage_records
             WHERE local_date = ?
-            ORDER BY timestamp ASC
+            ORDER BY timestamp ASC, id ASC
           `).all(todayDate)
         : this.db.prepare(`
-            SELECT timestamp, local_date, source, provider, model_id,
+            SELECT id, timestamp, local_date, source, subagent_id, provider, model_id,
                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                   reasoning_tokens, total_tokens, cost_usd
+                   reasoning_tokens, total_tokens, cost_usd, duration_ms
             FROM usage_records
             WHERE timestamp >= ?
-            ORDER BY timestamp ASC
+            ORDER BY timestamp ASC, id ASC
           `).all(sinceTs)
     ) as UsageRow[];
+
+    const availableModelMap = new Map<string, { readonly provider: string; readonly modelId: string }>();
+    for (const row of rawRows) {
+      const key = `${row.provider}/${row.model_id}`;
+      if (!availableModelMap.has(key)) {
+        availableModelMap.set(key, { provider: row.provider, modelId: row.model_id });
+      }
+    }
+    const availableModels = [...availableModelMap.values()];
+
+    const modelFilter = options.model?.trim() || undefined;
+    const sourceFilter = options.source;
+    const rows = rawRows.filter((row) => {
+      if (sourceFilter !== undefined && row.source !== sourceFilter) return false;
+      if (modelFilter !== undefined && row.model_id !== modelFilter && `${row.provider}/${row.model_id}` !== modelFilter) {
+        return false;
+      }
+      return true;
+    });
 
     let inputTokens = 0;
     let outputTokens = 0;
@@ -420,7 +487,7 @@ export class UsageLedger {
     let hasCost = false;
 
     const sourceMap = new Map<UsageSource, {
-      calls: number; input: number; output: number; cacheRead: number; total: number; cost: number; hasCost: boolean;
+      calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number; hasCost: boolean;
     }>();
     const modelMap = new Map<string, {
       provider: string; modelId: string; calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number; hasCost: boolean;
@@ -438,11 +505,12 @@ export class UsageLedger {
         hasCost = true;
       }
 
-      const src = sourceMap.get(row.source) ?? { calls: 0, input: 0, output: 0, cacheRead: 0, total: 0, cost: 0, hasCost: false };
+      const src = sourceMap.get(row.source) ?? { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, hasCost: false };
       src.calls += 1;
       src.input += row.input_tokens;
       src.output += row.output_tokens;
       src.cacheRead += row.cache_read_tokens;
+      src.cacheWrite += row.cache_write_tokens;
       src.total += row.total_tokens;
       if (row.cost_usd !== null && row.cost_usd > 0) {
         src.cost += row.cost_usd;
@@ -476,6 +544,7 @@ export class UsageLedger {
         inputTokens: agg.input,
         outputTokens: agg.output,
         cacheReadTokens: agg.cacheRead,
+        cacheWriteTokens: agg.cacheWrite,
         totalTokens: agg.total,
         share: totalTokens > 0 ? Math.round((agg.total / totalTokens) * 1000) / 1000 : 0,
         costUsd: agg.hasCost ? Math.round(agg.cost * 10000) / 10000 : null,
@@ -496,6 +565,27 @@ export class UsageLedger {
         costUsd: agg.hasCost ? Math.round(agg.cost * 10000) / 10000 : null,
       }))
       .sort((a, b) => b.totalTokens - a.totalTokens);
+
+    const recentCalls: UsageCallItem[] = [...rows]
+      .reverse()
+      .slice(0, 20)
+      .map((row) => ({
+        id: row.id,
+        timestamp: row.timestamp,
+        source: row.source,
+        subagentId: row.subagent_id,
+        provider: row.provider,
+        modelId: row.model_id,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+        cacheReadTokens: row.cache_read_tokens,
+        cacheWriteTokens: row.cache_write_tokens,
+        reasoningTokens: row.reasoning_tokens,
+        totalTokens: row.total_tokens,
+        costUsd: row.cost_usd !== null && row.cost_usd > 0 ? Math.round(row.cost_usd * 10000) / 10000 : null,
+        durationMs: row.duration_ms,
+        contextWindow: options.resolveContextWindow?.(row.provider, row.model_id) ?? null,
+      }));
 
     const ctx = this.lastMainContext;
     const ctxProvider = ctx?.provider ?? options.activeModel?.provider ?? null;
@@ -519,6 +609,11 @@ export class UsageLedger {
         provider: ctxProvider,
         modelId: ctxModelId,
         updatedAt: ctx?.updatedAt ?? null,
+        inputTokens: ctx?.inputTokens ?? 0,
+        outputTokens: ctx?.outputTokens ?? 0,
+        cacheReadTokens: ctx?.cacheReadTokens ?? 0,
+        cacheWriteTokens: ctx?.cacheWriteTokens ?? 0,
+        reasoningTokens: ctx?.reasoningTokens ?? 0,
       },
       totals: {
         calls: rows.length,
@@ -534,6 +629,8 @@ export class UsageLedger {
       trend,
       bySource,
       byModel,
+      availableModels,
+      recentCalls,
       budget: this.getBudgetSettings(now),
     };
   }
@@ -550,6 +647,7 @@ export class UsageLedger {
           inputTokens: 0,
           outputTokens: 0,
           cacheReadTokens: 0,
+          cacheWriteTokens: 0,
           totalTokens: 0,
           cost: 0,
           hasCost: false,
@@ -562,6 +660,7 @@ export class UsageLedger {
         b.inputTokens += row.input_tokens;
         b.outputTokens += row.output_tokens;
         b.cacheReadTokens += row.cache_read_tokens;
+        b.cacheWriteTokens += row.cache_write_tokens;
         b.totalTokens += row.total_tokens;
         if (row.cost_usd !== null && row.cost_usd > 0) {
           b.cost += row.cost_usd;
@@ -576,14 +675,14 @@ export class UsageLedger {
 
     if (range === "7d") {
       const bucketList: {
-        key: string; label: string; calls: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; totalTokens: number; cost: number; hasCost: boolean;
+        key: string; label: string; calls: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalTokens: number; cost: number; hasCost: boolean;
       }[] = [];
       const byDate = new Map<string, typeof bucketList[number]>();
       for (let offset = 6; offset >= 0; offset--) {
         const dateStr = formatLocalDate(now - offset * DAY_MS, this.timezone);
-        const label = offset === 0 ? "今日" : dateStr.slice(5);
+        const label = offset === 0 ? "今日" : dateStr.slice(5).replace("-", "/");
         const entry = {
-          key: dateStr, label, calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, cost: 0, hasCost: false,
+          key: dateStr, label, calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, cost: 0, hasCost: false,
         };
         bucketList.push(entry);
         byDate.set(dateStr, entry);
@@ -595,6 +694,7 @@ export class UsageLedger {
         b.inputTokens += row.input_tokens;
         b.outputTokens += row.output_tokens;
         b.cacheReadTokens += row.cache_read_tokens;
+        b.cacheWriteTokens += row.cache_write_tokens;
         b.totalTokens += row.total_tokens;
         if (row.cost_usd !== null && row.cost_usd > 0) {
           b.cost += row.cost_usd;
@@ -615,13 +715,14 @@ export class UsageLedger {
       const endDate = formatLocalDate(now - endDayOffset * DAY_MS, this.timezone);
       return {
         key: `${startDate}..${endDate}`,
-        label: idx === 5 ? "近5日" : endDate.slice(5),
+        label: idx === 5 ? "近5日" : endDate.slice(5).replace("-", "/"),
         startTs: now - (startDayOffset + 1) * DAY_MS,
         endTs: now - endDayOffset * DAY_MS + DAY_MS,
         calls: 0,
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
+        cacheWriteTokens: 0,
         totalTokens: 0,
         cost: 0,
         hasCost: false,
@@ -635,6 +736,7 @@ export class UsageLedger {
       b.inputTokens += row.input_tokens;
       b.outputTokens += row.output_tokens;
       b.cacheReadTokens += row.cache_read_tokens;
+      b.cacheWriteTokens += row.cache_write_tokens;
       b.totalTokens += row.total_tokens;
       if (row.cost_usd !== null && row.cost_usd > 0) {
         b.cost += row.cost_usd;

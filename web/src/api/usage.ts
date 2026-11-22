@@ -11,6 +11,11 @@ export type ContextOccupancySnapshot = {
   provider: string | null;
   modelId: string | null;
   updatedAt: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
 };
 
 export type UsageTotals = {
@@ -32,6 +37,7 @@ export type UsageTrendPoint = {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   totalTokens: number;
   costUsd: number | null;
 };
@@ -42,6 +48,7 @@ export type UsageBySourceItem = {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   totalTokens: number;
   share: number;
   costUsd: number | null;
@@ -60,6 +67,24 @@ export type UsageByModelItem = {
   costUsd: number | null;
 };
 
+export type UsageCallItem = {
+  id: number;
+  timestamp: number;
+  source: UsageSource;
+  subagentId: string | null;
+  provider: string;
+  modelId: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+  durationMs: number | null;
+  contextWindow: number | null;
+};
+
 export type UsageBudgetState = {
   dailyTokenBudget: number | null;
   todayTokens: number;
@@ -74,6 +99,8 @@ export type UsageSummaryResponse = {
   trend: UsageTrendPoint[];
   bySource: UsageBySourceItem[];
   byModel: UsageByModelItem[];
+  availableModels: { provider: string; modelId: string }[];
+  recentCalls: UsageCallItem[];
   budget: UsageBudgetState;
 };
 
@@ -108,11 +135,16 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   throw statusError(response.status);
 }
 
-export async function getUsageSummary(range: UsageRange): Promise<UsageSummaryResponse> {
-  return requestJson<UsageSummaryResponse>(
-    `/api/v1/usage?range=${encodeURIComponent(range)}`,
-    { method: "GET" },
-  );
+export async function getUsageSummary(
+  range: UsageRange,
+  filters: { model?: string; source?: UsageSource } = {},
+): Promise<UsageSummaryResponse> {
+  const params = new URLSearchParams({ range });
+  if (filters.model) params.set("model", filters.model);
+  if (filters.source) params.set("source", filters.source);
+  return requestJson<UsageSummaryResponse>(`/api/v1/usage?${params.toString()}`, {
+    method: "GET",
+  });
 }
 
 export async function updateDailyTokenBudget(

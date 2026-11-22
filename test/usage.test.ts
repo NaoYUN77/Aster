@@ -125,6 +125,17 @@ test("UsageLedger records all 5 sources, computes totals/cacheHitRate/costUsd an
     assert.equal(summary7d.bySource[0]!.source, "main");
     assert.equal(summary7d.byModel.length, 2);
     assert.equal(summary7d.byModel[0]!.modelId, "claude-sonnet-4-6");
+    assert.equal(summary7d.availableModels.length, 2);
+    assert.equal(summary7d.recentCalls.length, 4);
+    assert.equal(summary7d.contextOccupancy.cacheReadTokens, 15_000);
+
+    // Filter by source & model while keeping availableModels intact
+    const filtered = ledger.querySummary("7d", { now, source: "subagent", model: "gpt-5.4" });
+    assert.equal(filtered.totals.calls, 1);
+    assert.equal(filtered.totals.totalTokens, 3_000);
+    assert.equal(filtered.availableModels.length, 2);
+    assert.equal(filtered.recentCalls.length, 1);
+    assert.equal(filtered.recentCalls[0]!.subagentId, "sub_abc");
 
     const summary30d = ledger.querySummary("30d", { now });
     assert.equal(summary30d.totals.calls, 5);
@@ -351,7 +362,7 @@ test("HTTP /api/v1/usage and /api/v1/usage/budget enforce auth, validate inputs,
     staticDir: join(dir, "web-dist"),
     trustProxy: false,
   };
-  const agent = fakeAgent({ service: fixture.service });
+  const agent = fakeAgent({ service: fixture.service, reply: async () => "ok" });
   const worker = new RequestWorker({ store, hub, ownerId: "owner", agent });
   const app = await createWebServer({
     config,

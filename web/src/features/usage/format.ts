@@ -5,7 +5,7 @@ export function formatCompactTokens(tokens: number): string {
   if (tokens < 1_000) return String(Math.trunc(tokens));
   if (tokens < 1_000_000) {
     const val = tokens / 1_000;
-    return `${val >= 100 ? val.toFixed(0) : val.toFixed(1).replace(/\.0$/, "")}k`;
+    return `${val >= 100 ? val.toFixed(0) : val.toFixed(1).replace(/\.0$/, "")}K`;
   }
   if (tokens < 1_000_000_000) {
     const val = tokens / 1_000_000;
@@ -30,8 +30,8 @@ export function formatUsd(costUsd: number | null): string {
 }
 
 const SOURCE_LABELS: Record<UsageSource, string> = {
-  main: "主对话",
-  subagent: "子任务",
+  main: "对话",
+  subagent: "后台子任务",
   dreaming: "记忆整理",
   routine: "定时任务",
   compaction: "上下文压缩",
@@ -41,14 +41,47 @@ export function formatSourceLabel(source: UsageSource): string {
   return SOURCE_LABELS[source] ?? source;
 }
 
-const RANGE_TREND_SUBTITLE: Record<UsageRange, string> = {
-  "1d": "今日按 3 小时分段",
-  "7d": "近 7 天每日用量",
-  "30d": "近 30 天每 5 日汇总",
+const RANGE_LABELS: Record<UsageRange, string> = {
+  "1d": "今日",
+  "7d": "最近 7 天",
+  "30d": "最近 30 天",
 };
 
-export function formatTrendSubtitle(range: UsageRange): string {
-  return RANGE_TREND_SUBTITLE[range];
+export function formatRangeLabel(range: UsageRange): string {
+  return RANGE_LABELS[range];
+}
+
+const RANGE_TREND_TITLE: Record<UsageRange, string> = {
+  "1d": "分时用量",
+  "7d": "每日用量",
+  "30d": "阶段用量",
+};
+
+export function formatTrendTitle(range: UsageRange): string {
+  return RANGE_TREND_TITLE[range];
+}
+
+/**
+ * Compute a clean 4-step Y-axis ceiling and ticks (e.g. max 322K -> ceiling 400K, ticks [400K, 300K, 200K, 100K, 0]).
+ */
+export function computeChartAxis(maxValue: number): {
+  ceiling: number;
+  ticks: number[];
+} {
+  if (!Number.isFinite(maxValue) || maxValue <= 0) {
+    return { ceiling: 4_000, ticks: [4_000, 3_000, 2_000, 1_000, 0] };
+  }
+  const rawStep = maxValue / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const normalized = rawStep / magnitude;
+  const niceNorm =
+    normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 2.5 ? 2.5 : normalized <= 5 ? 5 : 10;
+  const step = niceNorm * magnitude;
+  const ceiling = step * 4;
+  return {
+    ceiling,
+    ticks: [ceiling, step * 3, step * 2, step, 0],
+  };
 }
 
 const MAX_BUDGET_TOKENS = 1_000_000_000;

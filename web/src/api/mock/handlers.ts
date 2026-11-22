@@ -238,7 +238,18 @@ export const handlers = [
     if (raw !== "1d" && raw !== "7d" && raw !== "30d") {
       return apiError("INVALID_REQUEST", "无效的时间范围", 400);
     }
-    return HttpResponse.json(mockUsageSummary(raw));
+    const model = url.searchParams.get("model") || undefined;
+    const sourceRaw = url.searchParams.get("source") || undefined;
+    const validSources = new Set(["main", "subagent", "dreaming", "routine", "compaction"]);
+    if (sourceRaw && !validSources.has(sourceRaw)) {
+      return apiError("INVALID_REQUEST", "无效的来源筛选", 400);
+    }
+    return HttpResponse.json(
+      mockUsageSummary(raw, {
+        model,
+        source: sourceRaw as "main" | "subagent" | "dreaming" | "routine" | "compaction" | undefined,
+      }),
+    );
   }),
 
   http.post(`${API}/usage/budget`, async ({ request }) => {
