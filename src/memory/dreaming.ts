@@ -1,27 +1,29 @@
 // Dreaming: background consolidation of core memory, modeled on Letta's dreaming pass.
 //
-// A run never writes the live memory repository during the model work. It gets its own git
-// worktree (ADR-0001), the child edits files there with the ordinary read/write/edit/bash tools,
-// the host checks the wiki layout, and only then commits both sides and fast-forwards the live
-// branch. A conflict, timeout, rejection or dry run discards the
-// worktree; the live directory keeps every byte it had.
+// A run never writes live memory during the model work. It gets a private staging copy
+// (ADR-0004), the child edits files there with the ordinary read/write/edit/bash tools, the host
+// checks the wiki layout, and only then applies the staged changes with a per-file
+// compare-and-swap against the tree the run started from. A conflict, timeout, no-change or
+// dry run discards the staging copy; live memory keeps every byte it had. Evidence paths that
+// name live memory are rewritten to the staging path, so the model is never told where live is.
 //
 // The runner is a process-wide singleton by construction (the integration creates exactly one):
 // at most one run is active, a trigger during a run coalesces into one pending run, and a
 // trigger check only enqueues work — it never waits for a model. The nightly schedule
 // (`DREAMING_AT`, interpreted in the memory timezone) runs at most once per local date, and a
 // process that starts after the time catches up that same day. State lives in the memory
-// repository's gitignored `.aster/dreaming.json`.
+// directory's `.aster/dreaming.json`; snapshots live in `.aster/versions/`.
 //
 // Observation carries run ids, actions, statuses, counts and durations only — never memory text,
 // message bodies, diffs or credentials.
 
-import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { EntryId } from "@earendil-works/pi-durable";
+import { MemoryFsError } from "./fs/contracts.js";
 import { checkMemoryLayout } from "./fs/layout.js";
 import type { MemoryFs } from "./fs/store.js";
+import { diffTrees, scanTree, type TreeManifest } from "./fs/tree.js";
 
 export const DREAMING_DEFAULTS = {
   enabled: true,
@@ -72,7 +74,8 @@ export type DreamingRunRecord = {
   readonly startedAt: string;
   readonly endedAt: string;
   readonly status: DreamingRunStatus;
-  readonly commit: string | null;
+  /** Snapshot taken immediately before the apply; the undo point. Null unless applied. */
+  readonly snapshot: string | null;
   /** A stable code such as `timeout`, `conflict`, `layout-invalid`; never model text. */
   readonly reason: string | null;
 };
@@ -82,7 +85,8 @@ export type DreamingState = {
   /** Local date (`YYYY-MM-DD`) whose nightly trigger already fired; null before the first one. */
   readonly lastNightlyDate: string | null;
   readonly lastRun: DreamingRunRecord | null;
-  readonly lastAppliedCommit: string | null;
+  /** Snapshot id of the newest applied run's undo point. */
+  readonly lastAppliedSnapshot: string | null;
   readonly failure: { readonly at: string; readonly reason: string } | null;
   /** Newest durable entry id a run has consumed; advanced only by an applied run. */
   readonly evidenceThrough: EntryId | null;
@@ -105,7 +109,7 @@ export type DreamingLogEvent = {
 export type DreamingRunnerOptions = {
   readonly config: DreamingConfig;
   readonly memory: MemoryFs;
-  /** Root of the host data directory; worktrees live at `<dataDir>/dreaming/worktrees/<runId>`. */
+  /** Root of the host data directory; staging copies live at `<dataDir>/dreaming/staging/<runId>`. */
   readonly dataDir: string;
   readonly timezone: string;
   readonly run: DreamingTurn;
@@ -144,9 +148,6 @@ export interface DreamingRunner {
 const STATE_VERSION = 1;
 const STATE_FILE = "dreaming.json";
 const STATE_DIR = ".aster";
-const BRANCH_PREFIX = "dreaming/";
-const COMMIT_AUTHOR = { name: "Aster Memory", email: "memory@aster.local" } as const;
-const GIT_TIMEOUT_MS = 30_000;
 const RETRY_DELAY_MS = 1_000;
 const FAILURE_BACKOFF_BASE_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 60 * 60_000;
@@ -166,8 +167,10 @@ const SYSTEM_CLOCK: DreamingClock = {
 };
 
 /** The fixed brief for the dream conversation. Evidence arrives in the prompt, never here. */
-export const DREAMING_INSTRUCTIONS = `You are Aster's dreaming pass. You are working inside an isolated git worktree of
-the owner's core-memory repository, and that worktree is your whole world.
+export const DREAMING_INSTRUCTIONS = `You are Aster's dreaming pass. You are working inside a private staging copy of the owner's
+core-memory directory, and that directory is your whole world. Paths in the evidence below that
+named live memory have been rewritten to this copy. Never read, write or remove anything outside
+it, and never copy files into or out of it.
 Memory has three layers, and you maintain all of them.
 Layer one is the evidence in the prompt below: the owner's recent turns, then the activity digest
 of what was actually said and done across owner conversations, including tool calls, results and
@@ -190,11 +193,11 @@ explicitly overrides anything stored, so record the correction rather than the o
 Only record what the supplied evidence supports: every fact must trace to an owner statement, a
 tool call and its result, or an error. Never invent events, never store credentials, tokens,
 passwords or keys.
-Leave every edit uncommitted: never run git commit, checkout, reset or any command that moves HEAD;
-the host stages, checks the layout and commits the worktree.
+Leave every edit in the staging copy. The host compares it with live memory, checks the wiki
+layout and applies only what you changed; it owns snapshots and rollback. Do not run git.
 When you are done, reply with one plain line naming what changed; do not use Markdown markup.`;
 
-type Worktree = { readonly path: string; readonly branch: string; readonly runId: string };
+type Staging = { readonly path: string; readonly runId: string };
 
 class DreamDiscard extends Error {
   readonly reason: string;
@@ -380,13 +383,13 @@ class Runner implements DreamingRunner {
     const startedMs = this.#now().getTime();
     const config = this.#options.config;
     const adapter = new AbortController();
-    // One hard deadline for the whole run: the model turn, every git command and the apply
+    // One hard deadline for the whole run: the model turn, every file operation and the apply
     // share it, so DREAMING_TIMEOUT_MS is the run's limit rather than each call's.
     const deadline = new AbortController();
     const signal = AbortSignal.any([adapter.signal, deadline.signal]);
     const timer = setTimeout(() => deadline.abort(), config.timeoutMs);
     this.#abort = adapter;
-    let worktree: Worktree | undefined;
+    let staging: Staging | undefined;
     let applied = false;
     try {
       await this.#load();
@@ -395,45 +398,31 @@ class Runner implements DreamingRunner {
       signal.throwIfAborted();
       const input = await this.#options.input({ evidenceThrough: this.#state.evidenceThrough });
       const runId = await this.#newRunId();
-      const memoryDir = this.#options.memory.directory;
-      const base = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
-      worktree = {
-        runId,
-        branch: `${BRANCH_PREFIX}${runId}`,
-        path: join(this.#options.dataDir, "dreaming", "worktrees", runId),
-      };
-      await mkdir(dirname(worktree.path), { recursive: true });
-      signal.throwIfAborted();
-      await rm(worktree.path, { recursive: true, force: true });
-      // A crashed earlier process leaves a registered worktree and branch behind; neither may
-      // block this run.
-      await gitTry(memoryDir, ["worktree", "remove", "--force", worktree.path]);
-      await gitTry(memoryDir, ["worktree", "prune"]);
-      await gitTry(memoryDir, ["branch", "-D", worktree.branch]);
-      await git(memoryDir, ["worktree", "add", "-b", worktree.branch, worktree.path, base], signal);
+      staging = { runId, path: join(this.#options.dataDir, "dreaming", "staging", runId) };
+      // Snapshot live once, then build the staging copy from that snapshot: the manifest the run
+      // is judged against is exactly what the model can see.
+      const snapshot = await this.#options.memory.snapshot("dreaming", "pre-run");
+      const preRun = snapshot.id;
+      const base = await this.#options.memory.materialize(preRun, staging.path);
+      const revision = this.#options.memory.revision();
       this.#log({ event: "dreaming.run.start", runId, action: reason });
 
-      const dreamPrompt = buildDreamPrompt(input, this.#options.timezone);
+      const dreamPrompt = buildDreamPrompt(input, this.#options.timezone, {
+        from: this.#options.memory.directory,
+        to: staging.path,
+      });
       await this.#runWithRetry(signal, {
-        runId, cwd: worktree.path, instructions: DREAMING_INSTRUCTIONS, prompt: dreamPrompt,
+        runId, cwd: staging.path, instructions: DREAMING_INSTRUCTIONS, prompt: dreamPrompt,
       }, async () => {
-        await git(worktree!.path, ["reset", "--hard", base], signal);
-        await git(worktree!.path, ["clean", "-fd"], signal);
+        await this.#options.memory.materialize(preRun, staging!.path);
       });
 
-      // The brief forbids committing, but a model may commit anyway. Rewind to the base without
-      // touching the working tree so its edits are staged like any other change, not mistaken for
-      // an empty run.
-      const dreamHead = (await git(worktree.path, ["rev-parse", "HEAD"], signal)).trim();
-      if (dreamHead !== base) await git(worktree.path, ["reset", "--soft", base], signal);
-      await git(worktree.path, ["add", "-A"], signal);
-      if ((await gitTry(worktree.path, ["diff", "--cached", "--quiet"], signal)).code === 0) {
-        throw new DreamDiscard("no-change");
-      }
+      const staged = await scanTree(staging.path);
+      if (diffTrees(base, staged).length === 0) throw new DreamDiscard("no-change");
       // The wiki contract: MEMORY.md indexes every note, every index link resolves. A pass that
       // breaks it is not memory worth keeping.
       signal.throwIfAborted();
-      const layout = await checkMemoryLayout(worktree.path);
+      const layout = await checkMemoryLayout(staging.path);
       if (layout.length > 0) {
         this.#log({
           event: "dreaming.run.layout",
@@ -447,29 +436,33 @@ class Runner implements DreamingRunner {
         this.#log({ event: "dreaming.run.discarded", runId, action: "dry-run" });
         // A dry run is a completed night: the nightly date was already claimed when it triggered,
         // so it never re-fires the same day.
-        await this.#record({ startedAt, status: "dry-run", commit: null, reason: null });
+        await this.#record({ startedAt, status: "dry-run", snapshot: null, reason: null });
         return;
       }
 
-      // Apply, per ADR-0001: commit the worktree, commit a dirty live tree, rebase the dream
-      // commit if live advanced, then fast-forward. Never a forced merge.
+      // The dream may only touch staging. Live changing while the model worked is fine when the
+      // host itself took a turn-boundary snapshot (the revision moved); with no such snapshot it
+      // is the run leaking into live, so put live back and keep the leaked bytes as a snapshot.
       signal.throwIfAborted();
-      await git(worktree.path, ["commit", "--no-verify", "-m", commitMessage(runId, this.#now())], signal);
-      await this.#options.memory.commitDirty("owner", "pre-dreaming-apply");
-      signal.throwIfAborted();
-      const liveHead = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
-      if (liveHead !== base) {
-        // The live branch advanced while the run worked. Rebase the dream commit onto it so the
-        // apply is still a fast-forward; a real conflict is the discard path, never a forced merge.
-        const rebase = await gitTry(worktree.path, ["rebase", liveHead], signal);
-        if (rebase.code !== 0) {
-          await gitTry(worktree.path, ["rebase", "--abort"]);
-          throw new DreamDiscard("conflict");
-        }
+      const liveNow = await scanTree(this.#options.memory.directory);
+      const drift = diffTrees(base, liveNow);
+      if (drift.length > 0 && this.#options.memory.revision() === revision) {
+        await this.#options.memory.restore(preRun);
+        this.#log({ event: "dreaming.run.live", runId, issues: drift.length });
+        throw new DreamDiscard("live-modified");
       }
-      const merge = await gitTry(memoryDir, ["merge", "--ff-only", worktree.branch], signal);
-      if (merge.code !== 0) throw new DreamDiscard("merge-failed");
-      const commit = (await git(memoryDir, ["rev-parse", "HEAD"], signal)).trim();
+
+      // Apply with a per-file compare-and-swap: every staged change must still match the live
+      // file the run started from. The pre-apply snapshot is the undo point.
+      signal.throwIfAborted();
+      const apply = await this.#options.memory.applyStaging(staging.path, base, {
+        actor: "dreaming",
+        reason: `pre-dreaming-apply ${runId}`,
+      }).catch((error: unknown) => {
+        if (error instanceof MemoryFsError && error.code === "conflict") throw new DreamDiscard("conflict");
+        throw error;
+      });
+      if (apply === null) throw new DreamDiscard("no-change");
       applied = true;
       // The cursor only moves forward: a stale or simultaneous scan can never rewind it.
       const through = input.evidenceThrough !== null
@@ -477,9 +470,9 @@ class Runner implements DreamingRunner {
         ? input.evidenceThrough
         : undefined;
       await this.#record(
-        { startedAt, status: "applied", commit, reason: null },
+        { startedAt, status: "applied", snapshot: apply.snapshot, reason: null },
         {
-          lastAppliedCommit: commit,
+          lastAppliedSnapshot: apply.snapshot,
           failure: null,
           ...(through === undefined ? {} : { evidenceThrough: through }),
         },
@@ -489,23 +482,23 @@ class Runner implements DreamingRunner {
       this.#log({ event: "dreaming.run.applied", runId, durationMs: this.#now().getTime() - startedMs });
     } catch (error) {
       if (error instanceof DreamDiscard) {
-        this.#log({ event: "dreaming.run.discarded", runId: worktree?.runId, action: error.reason, code: error.reason });
-        await this.#record({ startedAt, status: "discarded", commit: null, reason: error.reason });
+        this.#log({ event: "dreaming.run.discarded", runId: staging?.runId, action: error.reason, code: error.reason });
+        await this.#record({ startedAt, status: "discarded", snapshot: null, reason: error.reason });
       } else if (this.#closed) {
         // A host shutdown aborted the run; that is a discard, not a model failure to back off from.
-        this.#log({ event: "dreaming.run.discarded", runId: worktree?.runId, action: "closed", code: "closed" });
-        await this.#record({ startedAt, status: "discarded", commit: null, reason: "closed" });
+        this.#log({ event: "dreaming.run.discarded", runId: staging?.runId, action: "closed", code: "closed" });
+        await this.#record({ startedAt, status: "discarded", snapshot: null, reason: "closed" });
       } else if (deadline.signal.aborted) {
-        this.#log({ event: "dreaming.run.discarded", runId: worktree?.runId, action: "timeout", code: "timeout" });
-        await this.#record({ startedAt, status: "discarded", commit: null, reason: "timeout" });
+        this.#log({ event: "dreaming.run.discarded", runId: staging?.runId, action: "timeout", code: "timeout" });
+        await this.#record({ startedAt, status: "discarded", snapshot: null, reason: "timeout" });
       } else {
         const code = errorCode(error);
-        this.#log({ event: "dreaming.run.failed", runId: worktree?.runId, code, durationMs: this.#now().getTime() - startedMs });
+        this.#log({ event: "dreaming.run.failed", runId: staging?.runId, code, durationMs: this.#now().getTime() - startedMs });
         this.#failureCount += 1;
         this.#backoffUntil = this.#now().getTime()
           + Math.min(FAILURE_BACKOFF_BASE_MS * 2 ** (this.#failureCount - 1), FAILURE_BACKOFF_MAX_MS);
         await this.#record(
-          { startedAt, status: "failed", commit: null, reason: code },
+          { startedAt, status: "failed", snapshot: null, reason: code },
           { failure: { at: this.#now().toISOString(), reason: code } },
         );
       }
@@ -513,20 +506,20 @@ class Runner implements DreamingRunner {
       clearTimeout(timer);
       this.#abort = undefined;
       // Cleanup must run even after the deadline fired, so it never uses the timed signal.
-      if (worktree !== undefined) await this.#discardWorktree(worktree, applied);
+      if (staging !== undefined) await this.#discardStaging(staging);
     }
   }
 
   async #record(
-    entry: { startedAt: string; status: DreamingRunStatus; commit: string | null; reason: string | null },
-    next?: Partial<Pick<DreamingState, "lastAppliedCommit" | "failure" | "evidenceThrough" | "lastNightlyDate">>,
+    entry: { startedAt: string; status: DreamingRunStatus; snapshot: string | null; reason: string | null },
+    next?: Partial<Pick<DreamingState, "lastAppliedSnapshot" | "failure" | "evidenceThrough" | "lastNightlyDate">>,
   ): Promise<void> {
     const endedAt = this.#now().toISOString();
     const lastRun: DreamingRunRecord = {
       startedAt: entry.startedAt,
       endedAt,
       status: entry.status,
-      commit: entry.commit,
+      snapshot: entry.snapshot,
       reason: entry.reason,
     };
     this.#state = { ...this.#state, ...next, lastRun };
@@ -547,19 +540,16 @@ class Runner implements DreamingRunner {
     }
   }
 
-  async #discardWorktree(worktree: Worktree, applied: boolean): Promise<void> {
-    await gitTry(this.#options.memory.directory, ["worktree", "remove", "--force", worktree.path]);
-    await rm(worktree.path, { recursive: true, force: true });
-    // An applied branch is already merged; a discarded one is deleted outright.
-    await gitTry(this.#options.memory.directory, ["branch", applied ? "-d" : "-D", worktree.branch]);
+  async #discardStaging(staging: Staging): Promise<void> {
+    await rm(staging.path, { recursive: true, force: true });
   }
 
   async #newRunId(): Promise<string> {
     const stamp = this.#now().toISOString().replace(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
     let candidate = stamp;
     for (let suffix = 2; suffix < 100; suffix += 1) {
-      const path = join(this.#options.dataDir, "dreaming", "worktrees", candidate);
-      const exists = await readFile(join(path, ".git")).then(() => true, () => false);
+      const path = join(this.#options.dataDir, "dreaming", "staging", candidate);
+      const exists = await readdir(path).then(() => true, () => false);
       if (!exists) return candidate;
       candidate = `${stamp}-${suffix}`;
     }
@@ -592,30 +582,20 @@ class Runner implements DreamingRunner {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    await this.#cleanupStaleBranches().catch(() => undefined);
+    await this.#cleanupStaleStaging().catch(() => undefined);
   }
 
   /**
-   * Remove branches a crashed process left behind. A `dreaming/*` branch with no registered live
-   * worktree can never be applied, so it is deleted; a branch whose worktree still exists (an
-   * in-flight or deliberately kept run, or the current branch) is never touched. Cleanup is not
+   * Remove staging copies a crashed process left behind. A fresh process owns no run, so every
+   * directory here is garbage; a live process empties its own copy in `finally`. Cleanup is not
    * on any critical path, so every failure stays silent.
    */
-  async #cleanupStaleBranches(): Promise<void> {
-    const directory = this.#options.memory.directory;
-    await gitTry(directory, ["worktree", "prune"]);
-    const listed = await gitTry(directory, ["worktree", "list", "--porcelain"]);
-    if (listed.code !== 0) return;
-    const live = new Set<string>();
-    for (const line of listed.stdout.split("\n")) {
-      const match = /^branch refs\/heads\/(.+)$/u.exec(line.trim());
-      if (match?.[1] !== undefined) live.add(match[1]);
-    }
-    const branches = await gitTry(directory, ["for-each-ref", "--format=%(refname:short)", "refs/heads/dreaming"]);
-    if (branches.code !== 0) return;
-    for (const name of branches.stdout.split("\n").map((line) => line.trim())) {
-      if (name === "" || !name.startsWith(BRANCH_PREFIX) || live.has(name)) continue;
-      await gitTry(directory, ["branch", "-D", name]);
+  async #cleanupStaleStaging(): Promise<void> {
+    const directory = join(this.#options.dataDir, "dreaming", "staging");
+    const names = await readdir(directory).catch(() => [] as string[]);
+    for (const name of names) {
+      if (name.startsWith(".")) continue;
+      await rm(join(directory, name), { recursive: true, force: true });
     }
   }
 
@@ -643,7 +623,7 @@ function emptyState(): DreamingState {
     version: STATE_VERSION,
     lastNightlyDate: null,
     lastRun: null,
-    lastAppliedCommit: null,
+    lastAppliedSnapshot: null,
     failure: null,
     evidenceThrough: null,
     reminderTurns: 0,
@@ -664,7 +644,9 @@ export function parseDreamingState(value: unknown): DreamingState {
     ? null
     : localDateString(record.lastNightlyDate);
   const lastRun = record.lastRun === null ? null : parseRun(record.lastRun);
-  const lastAppliedCommit = nullableString(record.lastAppliedCommit);
+  // A state file from the git era named the applied commit; it migrates to the snapshot id it now
+  // records, so an upgrade does not lose the undo pointer.
+  const lastAppliedSnapshot = nullableString(record.lastAppliedSnapshot ?? record.lastAppliedCommit);
   const failure = record.failure === null
     ? null
     : (() => {
@@ -678,7 +660,7 @@ export function parseDreamingState(value: unknown): DreamingState {
   const evidenceThrough = nullableEntryId(record.evidenceThrough);
   // A state file written before reminder behavior existed simply has no counter yet.
   const reminderTurns = record.reminderTurns === undefined ? 0 : integer(record.reminderTurns);
-  return { version: STATE_VERSION, lastNightlyDate, lastRun, lastAppliedCommit, failure, evidenceThrough, reminderTurns };
+  return { version: STATE_VERSION, lastNightlyDate, lastRun, lastAppliedSnapshot, failure, evidenceThrough, reminderTurns };
 }
 
 function parseRun(value: unknown): DreamingRunRecord {
@@ -692,7 +674,7 @@ function parseRun(value: unknown): DreamingRunRecord {
     startedAt: requiredString(record.startedAt),
     endedAt: requiredString(record.endedAt),
     status,
-    commit: nullableString(record.commit),
+    snapshot: nullableString(record.snapshot ?? record.commit),
     reason: nullableString(record.reason),
   };
 }
@@ -719,7 +701,9 @@ function nullableEntryId(value: unknown): EntryId | null {
 }
 
 function nullableString(value: unknown): string | null {
-  if (value === null) return null;
+  // `undefined` is a missing key: a state file written before the field existed, or a `??`
+  // fallback whose left side was null. It parses as null; anything else non-string is damage.
+  if (value === null || value === undefined) return null;
   if (typeof value !== "string") throw new Error("bad string");
   return value;
 }
@@ -792,63 +776,24 @@ function nextOccurrence(nowMs: number, timezone: string, at: string): number {
 
 // --- prompts ------------------------------------------------------------------------------------
 
-function buildDreamPrompt(input: DreamingInput, timezone: string): string {
+function buildDreamPrompt(
+  input: DreamingInput,
+  timezone: string,
+  roots?: { readonly from: string; readonly to: string },
+): string {
+  const rewrite = (value: string): string =>
+    roots === undefined || roots.from === "" ? value : value.split(roots.from).join(roots.to);
   return `Recent owner turns (oldest first, already bounded):
 ---
-${input.transcript === "" ? "(none)" : input.transcript}
+${input.transcript === "" ? "(none)" : rewrite(input.transcript)}
 ---
 
 Activity since the last applied run (grouped by day; credential-shaped values are redacted):
 ---
-${input.activity === "" ? "(none)" : input.activity}
+${input.activity === "" ? "(none)" : rewrite(input.activity)}
 ---
 
 Consolidate this into core memory now. Times are in ${timezone}. Finish every edit, then reply with one line.`;
-}
-
-// --- git --------------------------------------------------------------------------------------
-
-function git(directory: string, args: readonly string[], signal?: AbortSignal): Promise<string> {
-  return gitRun(directory, args, signal).then((result) => {
-    if (result.code !== 0) {
-      const detail = result.stderr.trim().split("\n").at(-1) ?? "";
-      throw Object.assign(new Error(`dreaming git failed${detail === "" ? "" : `: ${detail}`}`), { code: "DREAMING_GIT_FAILED" });
-    }
-    return result.stdout;
-  });
-}
-
-function gitTry(directory: string, args: readonly string[], signal?: AbortSignal): Promise<{ code: number; stdout: string; stderr: string }> {
-  return gitRun(directory, args, signal);
-}
-
-function gitRun(directory: string, args: readonly string[], signal?: AbortSignal): Promise<{ code: number; stdout: string; stderr: string }> {
-  if (!isAbsolute(directory)) {
-    return Promise.resolve({ code: 1, stdout: "", stderr: "memory directory must be absolute" });
-  }
-  return new Promise((resolvePromise) => {
-    execFile("git", ["-C", directory, ...args], {
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 16 * 1024 * 1024,
-      ...(signal === undefined ? {} : { signal }),
-      env: {
-        ...process.env,
-        GIT_AUTHOR_NAME: COMMIT_AUTHOR.name,
-        GIT_AUTHOR_EMAIL: COMMIT_AUTHOR.email,
-        GIT_COMMITTER_NAME: COMMIT_AUTHOR.name,
-        GIT_COMMITTER_EMAIL: COMMIT_AUTHOR.email,
-        GIT_TERMINAL_PROMPT: "0",
-      },
-    }, (error, stdout, stderr) => {
-      if (error === null) return resolvePromise({ code: 0, stdout, stderr });
-      const code = typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : 1;
-      resolvePromise({ code, stdout, stderr });
-    });
-  });
-}
-
-function commitMessage(runId: string, now: Date): string {
-  return `memory: dream run ${runId} by dreaming at ${now.toISOString()}`;
 }
 
 // --- small helpers ----------------------------------------------------------------------------

@@ -1,56 +1,81 @@
-// MemFS M1: the git-backed core-memory store.
+// MemFS M1: the core-memory store.
 //
-// The repository is an ordinary directory. The agent edits it with the ordinary read/write/edit/
-// bash tools (as in Letta); this module does not intercept writes and imposes no per-path sandbox.
-// Its job is to initialize the repository, render `MEMORY.md` into the prompt, and commit
-// whatever the tree accumulated at a turn boundary, so `git log` stays the undo path.
+// Memory is an ordinary directory. The agent edits it with the ordinary read/write/edit/bash
+// tools (as in Letta); this module does not intercept writes and imposes no per-path sandbox.
+// Its job is to initialize the directory, render `MEMORY.md` into the prompt, capture a snapshot
+// of the tree at a turn boundary, and apply a dream's staged changes with a compare-and-swap
+// against the tree the dream started from. Snapshots replace git commits: they are the undo unit,
+// and `restore(id)` is the rollback. `.git/` from an earlier deployment may still exist on disk;
+// nothing here reads or writes it.
 //
-// Commits are serialized inside the process: a turn-boundary commit and a render never overlap on
-// the same index, and two commits racing for `index.lock` are retried rather than surfaced.
+// Snapshots are serialized inside the process, so a turn-boundary snapshot and an apply never
+// interleave their reads and writes.
 
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
   MEMORY_LIMITS,
   MemoryFsError,
   type Actor,
-  type MemoryCommit,
-  type MemoryHistoryEntry,
+  type MemoryApply,
   type MemoryPath,
   type MemoryReadResult,
   type MemoryRender,
+  type MemoryRestore,
   type MemorySearchHit,
+  type MemorySnapshot,
 } from "./contracts.js";
+import {
+  copyTree,
+  diffTrees,
+  readTreeFile,
+  removeTreeFile,
+  scanTree,
+  treeDigest,
+  writeTreeFile,
+  type TreeManifest,
+} from "./tree.js";
 
-const COMMIT_AUTHOR = { name: "Aster Memory", email: "memory@aster.local" } as const;
 const INITIAL_INDEX = "MEMORY.md";
-const GITIGNORE = ".gitignore";
-const GITIGNORE_BODY = ".aster/\n";
+const VERSIONS_DIR = join(".aster", "versions");
+const SNAPSHOT_VERSION = 1;
 const TRUNCATION_MARKER = "\n\n[truncated: MEMORY_FS_CORE_TOKENS budget reached]";
-const LOCK_RETRIES = 5;
 
 export type MemoryFsOptions = {
-  /** Absolute repository directory. It is created on first use when absent. */
+  /** Absolute memory directory. It is created on first use when absent. */
   readonly dir: string;
 };
 
 export interface MemoryFs {
-  /** Absolute repository directory, named in the owner's prompt. */
+  /** Absolute memory directory, named in the owner's prompt. */
   readonly directory: string;
-  /** Create/init the repository now. Every other method calls it lazily; `main` calls it to fail early. */
+  /** Create the directory now. Every other method calls it lazily; `main` calls it to fail early. */
   ensure(): Promise<void>;
   /** Render the root `MEMORY.md` within `budgetTokens`; every other file is read on demand. */
   renderCore(budgetTokens?: number): Promise<MemoryRender>;
-  /** Commit the working tree if it changed; `null` when it was already clean. */
-  commitDirty(actor: Actor, reason: string): Promise<MemoryCommit | null>;
-  /** Host-side read of one file relative to the repository root. */
+  /** Snapshot the tree when it differs from the newest snapshot; `null` when unchanged. */
+  snapshotDirty(actor: Actor, reason: string): Promise<MemorySnapshot | null>;
+  /** Snapshot the tree unconditionally. */
+  snapshot(actor: Actor, reason: string): Promise<MemorySnapshot>;
+  /** Recent snapshots, newest first. */
+  history(limit?: number): Promise<readonly MemorySnapshot[]>;
+  /** Copy one snapshot's files into an empty directory and return the copied manifest. */
+  materialize(id: string, destination: string): Promise<TreeManifest>;
+  /**
+   * Apply a dream's staged tree to live memory. Every staged change must match the live file it
+   * was based on, or the whole apply is refused with `conflict`. A snapshot of live memory is
+   * taken first; its id is the undo point.
+   */
+  applyStaging(staging: string, base: TreeManifest, options: { readonly actor: Actor; readonly reason: string }): Promise<MemoryApply | null>;
+  /** Restore every file from one snapshot, keeping the pre-restore tree as a new snapshot. */
+  restore(id: string): Promise<MemoryRestore>;
+  /** In-process counter bumped whenever a snapshot or apply completes. */
+  revision(): number;
+  /** Host-side read of one file relative to the memory root. */
   read(path: MemoryPath): Promise<MemoryReadResult>;
-  /** Recent commits, newest first. */
-  history(limit?: number): Promise<readonly MemoryHistoryEntry[]>;
   /** Case-insensitive substring search, host use and tests. */
   search(query: string, limit?: number): Promise<readonly MemorySearchHit[]>;
 }
@@ -62,14 +87,16 @@ export function createMemoryFs(options: MemoryFsOptions): MemoryFs {
   if (!isAbsolute(options.dir)) {
     throw new MemoryFsError("invalid-path", "memory directory must be absolute");
   }
-  return new GitMemoryFs(resolve(options.dir));
+  return new DirectoryMemoryFs(resolve(options.dir));
 }
 
-class GitMemoryFs implements MemoryFs {
+class DirectoryMemoryFs implements MemoryFs {
   readonly #dir: string;
   #root: string | undefined;
   #ready: Promise<void> | undefined;
   #queue: Promise<unknown> = Promise.resolve();
+  #revision = 0;
+  #sequence: number | undefined;
 
   constructor(dir: string) {
     this.#dir = dir;
@@ -88,17 +115,11 @@ class GitMemoryFs implements MemoryFs {
     try {
       await mkdir(this.#dir, { recursive: true, mode: 0o700 });
     } catch {
-      throw new MemoryFsError("invalid-path", "memory directory could not be created");
+      throw new MemoryFsError("io-failed", "memory directory could not be created");
     }
     this.#root = await realpath(this.#dir);
-    if (!(await this.#exists(join(this.#root, ".git")))) {
-      await this.#git(["init", "-b", "main"]);
-    }
-    await this.#writeIfMissing(GITIGNORE, GITIGNORE_BODY);
     // Deliberately empty: M1 never fabricates persona/human content.
     await this.#writeIfMissing(INITIAL_INDEX, "");
-    // The first turn-boundary commit also covers files an existing repository already had dirty.
-    await this.#commitDirtyInner("owner", "initialize");
   }
 
   async renderCore(budgetTokens: number = MEMORY_LIMITS.coreTokens): Promise<MemoryRender> {
@@ -150,35 +171,235 @@ class GitMemoryFs implements MemoryFs {
     };
   }
 
-  async commitDirty(actor: Actor, reason: string): Promise<MemoryCommit | null> {
-    await this.ensure();
-    return this.#serialize(() => this.#commitDirtyInner(actor, reason));
+  // --- snapshots ------------------------------------------------------------------------------
+
+  revision(): number {
+    return this.#revision;
   }
+
+  async snapshotDirty(actor: Actor, reason: string): Promise<MemorySnapshot | null> {
+    await this.ensure();
+    return this.#serialize(async () => {
+      const manifest = await scanTree(this.#root!);
+      const latest = await this.#latest();
+      if (latest !== null && latest.digest === treeDigest(manifest)) return null;
+      return this.#capture(actor, reason, manifest);
+    });
+  }
+
+  async snapshot(actor: Actor, reason: string): Promise<MemorySnapshot> {
+    await this.ensure();
+    return this.#serialize(async () => this.#capture(actor, reason, await scanTree(this.#root!)));
+  }
+
+  async history(limit: number = MEMORY_LIMITS.queryLimit): Promise<readonly MemorySnapshot[]> {
+    await this.ensure();
+    const wanted = clamp(Number.isFinite(limit) ? Math.trunc(limit) : MEMORY_LIMITS.queryLimit, 1, 500);
+    return (await this.#snapshots()).slice(0, wanted);
+  }
+
+  async materialize(id: string, destination: string): Promise<TreeManifest> {
+    await this.ensure();
+    const snapshot = await this.#readSnapshot(id);
+    await rm(destination, { recursive: true, force: true });
+    await copyTree(join(this.#versionsDir(), snapshot.id, "tree"), destination);
+    return scanTree(destination);
+  }
+
+  async applyStaging(
+    staging: string,
+    base: TreeManifest,
+    options: { readonly actor: Actor; readonly reason: string },
+  ): Promise<MemoryApply | null> {
+    await this.ensure();
+    return this.#serialize(async () => {
+      const live = await scanTree(this.#root!);
+      const staged = await scanTree(staging);
+      const changes = diffTrees(base, staged);
+      if (changes.length === 0) return null;
+      const conflicts = changes.filter((change) => live.get(change.path) !== base.get(change.path));
+      if (conflicts.length > 0) {
+        const names = conflicts.slice(0, 3).map((change) => change.path).join(", ");
+        throw new MemoryFsError(
+          "conflict",
+          `${conflicts.length} file(s) changed while dreaming: ${names}${conflicts.length > 3 ? ", …" : ""}`,
+        );
+      }
+      // The pre-apply snapshot is the undo point for this run. It is captured before the first
+      // byte changes, and must reproduce the manifest just verified.
+      const snapshot = await this.#capture(options.actor, options.reason, live);
+      // Write the notes first and MEMORY.md last, then remove deleted notes: at every intermediate
+      // step the index is either old-with-old-notes or new-with-new-notes, never new-without-notes.
+      for (const change of changes) {
+        if (change.kind === "delete" || change.path === INITIAL_INDEX) continue;
+        await writeTreeFile(this.#root!, change.path, await readTreeFile(staging, change.path));
+      }
+      const index = changes.find((change) => change.path === INITIAL_INDEX && change.kind !== "delete");
+      if (index !== undefined) {
+        await writeTreeFile(this.#root!, INITIAL_INDEX, await readTreeFile(staging, INITIAL_INDEX));
+      }
+      for (const change of changes) {
+        if (change.kind === "delete") await removeTreeFile(this.#root!, change.path);
+      }
+      this.#revision += 1;
+      return { snapshot: snapshot.id, files: changes.length };
+    });
+  }
+
+  async restore(id: string): Promise<MemoryRestore> {
+    await this.ensure();
+    return this.#serialize(async () => {
+      const snapshot = await this.#readSnapshot(id);
+      const targetRoot = join(this.#versionsDir(), snapshot.id, "tree");
+      const target = await scanTree(targetRoot);
+      const live = await scanTree(this.#root!);
+      // Keep the tree being replaced: a restore is itself undoable.
+      const previous = await this.#capture("owner", "pre-restore", live);
+      for (const path of target.keys()) {
+        if (path === INITIAL_INDEX) continue;
+        await writeTreeFile(this.#root!, path, await readTreeFile(targetRoot, path));
+      }
+      if (target.has(INITIAL_INDEX)) {
+        await writeTreeFile(this.#root!, INITIAL_INDEX, await readTreeFile(targetRoot, INITIAL_INDEX));
+      } else {
+        await removeTreeFile(this.#root!, INITIAL_INDEX).catch(() => undefined);
+      }
+      for (const path of live.keys()) {
+        if (!target.has(path)) await removeTreeFile(this.#root!, path);
+      }
+      this.#revision += 1;
+      return { previous: previous.id, files: target.size };
+    });
+  }
+
+  async #capture(actor: Actor, reason: string, expected?: TreeManifest): Promise<MemorySnapshot> {
+    const at = new Date().toISOString();
+    const id = await this.#newSnapshotId(at, actor, reason);
+    const directory = join(this.#versionsDir(), id);
+    const tree = join(directory, "tree");
+    await mkdir(tree, { recursive: true, mode: 0o700 });
+    await copyTree(this.#root!, tree);
+    // Fingerprint what was actually copied, never the pre-copy scan: a concurrent write must not
+    // make the snapshot metadata disagree with its files.
+    const captured = await scanTree(tree);
+    const digest = treeDigest(captured);
+    if (expected !== undefined && digest !== treeDigest(expected)) {
+      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+      throw new MemoryFsError("conflict", "memory changed while the snapshot was being taken");
+    }
+    const seq = await this.#nextSequence();
+    const meta: MemorySnapshot = { id, actor, reason, at, seq, files: captured.size, digest };
+    const body = `${JSON.stringify({ version: SNAPSHOT_VERSION, ...meta }, null, 2)}\n`;
+    await writeFile(`${directory}/meta.json`, body, { mode: 0o600 }).catch(() => {
+      throw new MemoryFsError("io-failed", "snapshot metadata could not be written");
+    });
+    await this.#prune();
+    this.#revision += 1;
+    return meta;
+  }
+
+  async #newSnapshotId(at: string, actor: Actor, reason: string): Promise<string> {
+    const stamp = at.replace(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
+    const slug = `${actor}-${reason}`.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "").slice(0, 40)
+      || "snapshot";
+    let candidate = `${stamp}-${slug}`;
+    for (let suffix = 2; suffix < 100; suffix += 1) {
+      if (!(await this.#exists(join(this.#versionsDir(), candidate)))) return candidate;
+      candidate = `${stamp}-${slug}-${suffix}`;
+    }
+    return `${stamp}-${slug}-${process.pid}`;
+  }
+
+  async #latest(): Promise<MemorySnapshot | null> {
+    return (await this.#snapshots())[0] ?? null;
+  }
+
+  async #snapshots(): Promise<readonly MemorySnapshot[]> {
+    const names = await readdir(this.#versionsDir()).catch(() => [] as string[]);
+    const snapshots: MemorySnapshot[] = [];
+    for (const name of names) {
+      if (name.startsWith(".")) continue;
+      const snapshot = await this.#readSnapshot(name).catch(() => undefined);
+      if (snapshot !== undefined) snapshots.push(snapshot);
+    }
+    // Ids start with a UTC timestamp, so lexical order is capture order only across seconds:
+    // within one, actor and reason decide. Capture order is `at`, then the capture counter.
+    return snapshots.sort((left, right) => {
+      if (left.at !== right.at) return left.at < right.at ? 1 : -1;
+      if (left.seq !== right.seq) return left.seq < right.seq ? 1 : -1;
+      return left.id < right.id ? 1 : left.id > right.id ? -1 : 0;
+    });
+  }
+
+  /**
+   * The next capture counter. A fresh process continues from the highest one on disk, so a
+   * restart never reuses a number an earlier process already captured with.
+   */
+  async #nextSequence(): Promise<number> {
+    if (this.#sequence === undefined) {
+      this.#sequence = Math.max(0, ...(await this.#snapshots()).map((snapshot) => snapshot.seq));
+    }
+    this.#sequence += 1;
+    return this.#sequence;
+  }
+
+  async #readSnapshot(id: string): Promise<MemorySnapshot> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id)) throw new MemoryFsError("invalid-path", "snapshot id is not valid");
+    const directory = join(this.#versionsDir(), id);
+    const raw = await readFile(join(directory, "meta.json"), "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") throw new MemoryFsError("not-found", `snapshot ${id} does not exist`);
+      throw new MemoryFsError("io-failed", `snapshot ${id} could not be read`);
+    });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new MemoryFsError("io-failed", `snapshot ${id} has invalid metadata`);
+    }
+    if (typeof parsed !== "object" || parsed === null) throw new MemoryFsError("io-failed", `snapshot ${id} has invalid metadata`);
+    const record = parsed as Record<string, unknown>;
+    if (record.version !== SNAPSHOT_VERSION || record.id !== id
+      || (record.actor !== "owner" && record.actor !== "agent" && record.actor !== "dreaming")
+      || typeof record.reason !== "string" || typeof record.at !== "string"
+      || typeof record.digest !== "string" || typeof record.files !== "number") {
+      throw new MemoryFsError("io-failed", `snapshot ${id} has invalid metadata`);
+    }
+    // A capture counter of an earlier build is absent; it then counts as the oldest.
+    const seq = typeof record.seq === "number" ? record.seq : 0;
+    if (!Number.isInteger(seq) || seq < 0) {
+      throw new MemoryFsError("io-failed", `snapshot ${id} has invalid metadata`);
+    }
+    return {
+      id,
+      actor: record.actor,
+      reason: record.reason,
+      at: record.at,
+      seq,
+      files: record.files,
+      digest: record.digest,
+    };
+  }
+
+  async #prune(): Promise<void> {
+    const snapshots = await this.#snapshots();
+    for (const stale of snapshots.slice(MEMORY_LIMITS.snapshotLimit)) {
+      await rm(join(this.#versionsDir(), stale.id), { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  #versionsDir(): string {
+    return join(this.#root!, VERSIONS_DIR);
+  }
+
+  // --- reads ----------------------------------------------------------------------------------
 
   async read(path: MemoryPath): Promise<MemoryReadResult> {
     await this.ensure();
     if (typeof path !== "string" || path.trim() === "") {
       throw new MemoryFsError("invalid-path", "path must be a non-empty relative path");
     }
-    const absolute = resolve(this.#root!, path);
-    const bytes = await readFile(absolute).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") throw new MemoryFsError("not-found", `${path} does not exist`);
-      throw new MemoryFsError("git-failed", `${path} could not be read`);
-    });
+    const bytes = await readTreeFile(this.#root!, path);
     return { path, content: decodeUtf8(bytes, path), digest: sha256(bytes), bytes: bytes.byteLength };
-  }
-
-  async history(limit: number = MEMORY_LIMITS.queryLimit): Promise<readonly MemoryHistoryEntry[]> {
-    await this.ensure();
-    const wanted = clamp(Number.isFinite(limit) ? Math.trunc(limit) : MEMORY_LIMITS.queryLimit, 1, 500);
-    const output = await this.#git(["log", "-n", String(wanted), "--format=%H%x1f%an%x1f%aI%x1f%s"]);
-    return output
-      .split("\n")
-      .filter((line) => line !== "")
-      .map((line) => {
-        const [commit = "", author = "", date = "", message = ""] = line.split("\u001f");
-        return { commit, author, date, message };
-      });
   }
 
   async search(query: string, limit: number = MEMORY_LIMITS.queryLimit): Promise<readonly MemorySearchHit[]> {
@@ -199,7 +420,7 @@ class GitMemoryFs implements MemoryFs {
       .slice(0, wanted);
   }
 
-  // --- commits --------------------------------------------------------------------------------
+  // --- files ----------------------------------------------------------------------------------
 
   #serialize<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.#queue.then(operation, operation);
@@ -208,46 +429,16 @@ class GitMemoryFs implements MemoryFs {
     return run;
   }
 
-  async #commitDirtyInner(actor: Actor, reason: string): Promise<MemoryCommit | null> {
-    if ((await this.#git(["status", "--porcelain"])).trim() === "") return null;
-    const message = `memory: ${reason} by ${actor} at ${new Date().toISOString()}`;
-    await this.#withLockRetry(async () => {
-      await this.#git(["add", "-A"]);
-      await this.#git([
-        "-c", `user.name=${COMMIT_AUTHOR.name}`,
-        "-c", `user.email=${COMMIT_AUTHOR.email}`,
-        "-c", "commit.gpgsign=false",
-        "commit", "--no-verify", "-m", message,
-      ]);
-    });
-    return { commit: (await this.#git(["rev-parse", "HEAD"])).trim(), message };
-  }
-
-  /** `index.lock` is transient (another git process in the same directory); retry it briefly. */
-  async #withLockRetry(operation: () => Promise<void>): Promise<void> {
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await operation();
-        return;
-      } catch (error) {
-        if (attempt + 1 >= LOCK_RETRIES || !isLockConflict(error)) throw error;
-        await delay(25 * (attempt + 1));
-      }
-    }
-  }
-
-  // --- files ----------------------------------------------------------------------------------
-
   async #writeIfMissing(name: string, body: string): Promise<void> {
     await writeFile(join(this.#root!, name), body, { flag: "wx", mode: 0o600 }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "EEXIST") throw new MemoryFsError("git-failed", `${name} could not be created`);
+      if (error.code !== "EEXIST") throw new MemoryFsError("io-failed", `${name} could not be created`);
     });
   }
 
   async #readText(absolute: string, path: string): Promise<string> {
     const bytes = await readFile(absolute).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") throw new MemoryFsError("not-found", `${path} does not exist`);
-      throw new MemoryFsError("git-failed", `${path} could not be read`);
+      throw new MemoryFsError("io-failed", `${path} could not be read`);
     });
     return decodeUtf8(bytes, path);
   }
@@ -268,50 +459,9 @@ class GitMemoryFs implements MemoryFs {
     return found.sort(compareStrings);
   }
 
-  // --- git ------------------------------------------------------------------------------------
-
-  async #git(args: readonly string[]): Promise<string> {
-    const result = await this.#gitResult(args);
-    if (result.code !== 0) {
-      const detail = result.stderr.trim().split("\n").at(-1) ?? "";
-      const command = args.find((arg) => !arg.startsWith("-") && !arg.includes("=")) ?? "command";
-      throw new MemoryFsError("git-failed", `git ${command} failed${detail === "" ? "" : `: ${detail}`}`);
-    }
-    return result.stdout;
-  }
-
-  #gitResult(args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-    return new Promise((resolvePromise) => {
-      execFile("git", ["-C", this.#dir, ...args], {
-        timeout: 10_000,
-        maxBuffer: 4 * 1024 * 1024,
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: COMMIT_AUTHOR.name,
-          GIT_AUTHOR_EMAIL: COMMIT_AUTHOR.email,
-          GIT_COMMITTER_NAME: COMMIT_AUTHOR.name,
-          GIT_COMMITTER_EMAIL: COMMIT_AUTHOR.email,
-          GIT_TERMINAL_PROMPT: "0",
-        },
-      }, (error, stdout, stderr) => {
-        if (error === null) return resolvePromise({ code: 0, stdout, stderr });
-        const code = typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : 1;
-        resolvePromise({ code, stdout, stderr });
-      });
-    });
-  }
-
   async #exists(path: string): Promise<boolean> {
     return access(path, constants.F_OK).then(() => true, () => false);
   }
-}
-
-function isLockConflict(error: unknown): boolean {
-  return error instanceof MemoryFsError && /index\.lock|HEAD\.lock|unable to create .*lock/i.test(error.message);
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
 function isMarkdown(name: string): boolean {

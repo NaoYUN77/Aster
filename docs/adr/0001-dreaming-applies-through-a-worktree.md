@@ -1,5 +1,8 @@
 # Dreaming applies through an isolated worktree
 
+Status: superseded by [0004](0004-dreaming-applies-without-git.md) — a discarded run's stray
+live writes were neither detected nor undone, and git's turn-boundary commits laundered them.
+
 Dreaming edits core memory while the owner may be editing the same files. We decided a dream run
 writes in its own git worktree. At apply time the host commits the worktree (actor `dreaming`),
 commits the live tree if it is dirty, rebases the dream commit onto the live HEAD when live
