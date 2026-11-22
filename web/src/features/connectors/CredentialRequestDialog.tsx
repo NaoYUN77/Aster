@@ -154,7 +154,7 @@ export function CredentialRequestDialog() {
         </div>
       </div>
 
-      <div className="mt-4 space-y-2 rounded-lg border border-border bg-muted/40 p-3 text-xs">
+      <div className="mt-4 space-y-2 rounded-2xl bg-secondary p-3.5 text-xs">
         <div className="flex items-center justify-between gap-3">
           <span className="text-muted-foreground">连接器</span>
           <span className="font-medium">{pending.connector.name}</span>
@@ -170,7 +170,7 @@ export function CredentialRequestDialog() {
           </div>
         )}
         {pending.reason && (
-          <p className="border-t border-border/60 pt-2 text-[11px] leading-relaxed text-muted-foreground">
+          <p className="border-t border-border pt-2 text-[11px] leading-relaxed text-muted-foreground">
             {pending.reason}
           </p>
         )}
@@ -181,7 +181,7 @@ export function CredentialRequestDialog() {
           <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">需要的权限</div>
           <div className="flex flex-wrap gap-1.5">
             {pending.scopes.map((scope) => (
-              <Badge key={scope} variant="outline" className="font-mono text-[10px]">
+              <Badge key={scope} variant="outline" className="rounded-full font-mono text-[10px]">
                 {scope}
               </Badge>
             ))}
@@ -190,7 +190,7 @@ export function CredentialRequestDialog() {
       )}
 
       <div className="mt-4">
-        <div className="mb-1 flex items-center justify-between text-[11px]">
+        <div className="mb-1.5 flex items-center justify-between text-[11px]">
           <span className="text-muted-foreground">剩余时间</span>
           <span
             className={cn("font-mono tabular-nums", urgent ? "text-destructive" : "text-muted-foreground")}
@@ -199,7 +199,7 @@ export function CredentialRequestDialog() {
             {clock}
           </span>
         </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden>
+        <div className="h-1.5 overflow-hidden rounded-full bg-secondary" aria-hidden>
           <div
             className={cn(
               "h-full rounded-full transition-[width] duration-500 ease-linear",
@@ -210,7 +210,7 @@ export function CredentialRequestDialog() {
         </div>
       </div>
 
-      <form onSubmit={(event) => void handleSubmit(event)} className="mt-4 space-y-2">
+      <form onSubmit={(event) => void handleSubmit(event)} className="mt-4 space-y-2.5">
         <label htmlFor="credential-token" className="text-[11px] font-medium text-muted-foreground">
           访问令牌（仅 Mock）
         </label>
@@ -228,6 +228,7 @@ export function CredentialRequestDialog() {
           onChange={(event) => setToken(event.target.value)}
           placeholder="粘贴或输入令牌"
           aria-invalid={errorMessage !== null}
+          className="h-11 rounded-2xl bg-secondary"
           disabled={submitting}
           autoFocus
         />
@@ -239,14 +240,14 @@ export function CredentialRequestDialog() {
           </p>
         )}
 
-        <p className="flex items-start gap-1.5 rounded-md bg-muted/50 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+        <p className="flex items-start gap-1.5 rounded-2xl bg-secondary px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
           <Lock className="mt-0.5 size-3 shrink-0" />
           <span>
             Mock 模式：输入内容不会提交到服务器，也不会保存在本设备或写入日志。
           </span>
         </p>
 
-        <Button type="submit" className="w-full" disabled={submitting || token.trim() === ""}>
+        <Button type="submit" className="h-11 w-full rounded-full" disabled={submitting || token.trim() === ""}>
           {submitting ? <Spinner /> : <KeyRound />}
           完成 Mock 请求
         </Button>
@@ -255,7 +256,7 @@ export function CredentialRequestDialog() {
           <Button
             type="button"
             variant="outline"
-            className="flex-1"
+            className="h-10 flex-1 rounded-full"
             disabled={submitting}
             onClick={() => void cancel("denied")}
           >
@@ -264,7 +265,7 @@ export function CredentialRequestDialog() {
           <Button
             type="button"
             variant="ghost"
-            className="flex-1"
+            className="h-10 flex-1 rounded-full"
             disabled={submitting}
             onClick={() => void cancel("cancelled")}
           >
@@ -281,13 +282,13 @@ export function CredentialRequestDialog() {
     <Dialog open={open} onOpenChange={handleOpenChange}>
       {isDesktop ? (
         <DialogContent
-          className="z-[70] max-h-[92dvh] max-w-md overflow-y-auto"
+          className="z-[70] max-h-[92dvh] max-w-md overflow-y-auto rounded-3xl"
           overlayClassName="z-[70]"
         >
           {body}
         </DialogContent>
       ) : (
-        <SheetContent className="z-[70] max-h-[92dvh]" overlayClassName="z-[70]">
+        <SheetContent className="z-[70] max-h-[92dvh] rounded-t-3xl" overlayClassName="z-[70]">
           <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-3">{body}</div>
         </SheetContent>
       )}

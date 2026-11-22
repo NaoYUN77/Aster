@@ -40,22 +40,22 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   };
 
   return (
-    <div className="group/code my-3 overflow-hidden rounded-lg border border-border bg-code-bg">
-      <div className="flex items-center justify-between border-b border-border/70 px-3 py-1.5">
+    <div className="group/code my-3 overflow-hidden rounded-2xl border border-border bg-code-bg">
+      <div className="flex items-center justify-between border-b border-border/70 px-3.5 py-2">
         <span className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">
           {language ?? "code"}
         </span>
         <button
           type="button"
           onClick={copy}
-          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/code:opacity-100"
+          className="inline-flex items-center gap-1 rounded-full bg-card px-2.5 py-1 text-[11px] font-medium text-foreground shadow-2xs transition-colors hover:bg-accent hover:text-accent-foreground"
           aria-label="复制代码"
         >
           {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <pre className="overflow-x-auto p-3 text-[13px] leading-relaxed">
+      <pre className="overflow-x-auto p-3.5 text-[13px] leading-relaxed">
         <code className="font-mono">{code}</code>
       </pre>
     </div>

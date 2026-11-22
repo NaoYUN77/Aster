@@ -10,7 +10,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogTitle, SheetContent } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { toApiError, errorText } from "@/api/errors";
@@ -143,8 +142,8 @@ function PickerBody({
   const canSelect = data.canSelect && data.selectable.length > 0;
 
   return (
-    <div className="flex min-h-0 flex-col">
-      <div className="flex items-center justify-between px-4 pt-3">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center justify-between px-4 pt-3">
         <div>
           <h2 className="text-sm font-semibold">模型</h2>
           <p className="text-[11px] text-muted-foreground">实时目录 · 与 $model 共用同一策略</p>
@@ -161,7 +160,7 @@ function PickerBody({
         </Button>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         <div className="px-4 pb-4 pt-3">
           <div className="rounded-lg border border-border bg-muted/35 p-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -301,9 +300,9 @@ function PickerBody({
             </p>
           )}
         </div>
-      </ScrollArea>
+      </div>
 
-      <div className="border-t border-border/70 p-3">
+      <div className="shrink-0 border-t border-border/70 p-3">
         <Button
           variant="outline"
           size="sm"
@@ -322,7 +321,11 @@ function PickerBody({
   );
 }
 
-export function ModelPicker() {
+export function ModelPicker({
+  placement = "header",
+}: {
+  placement?: "header" | "composer";
+} = {}) {
   const [open, setOpen] = useState(false);
   const isDesktop = useMediaQuery("(min-width: 768px)");
   const models = useModelsQuery();
@@ -378,25 +381,37 @@ export function ModelPicker() {
     />
   );
 
+  const inComposer = placement === "composer";
+
   const triggerButton = (onClick?: () => void) => (
     <Button
       type="button"
-      variant="outline"
+      variant={inComposer ? "ghost" : "outline"}
       size="sm"
-      className="h-9 max-w-[13.5rem] gap-1.5 rounded-full px-3"
+      className={cn(
+        "gap-1.5 rounded-full px-3 transition-colors",
+        inComposer
+          ? "h-9 max-w-[12rem] bg-card text-foreground/85 shadow-2xs hover:bg-accent hover:text-accent-foreground sm:h-8 sm:max-w-[15rem]"
+          : "h-9 max-w-[13.5rem]",
+      )}
       aria-label="模型选择"
       onClick={onClick}
     >
-      <Cpu className="size-3.5 shrink-0 text-muted-foreground" />
-      <span className="max-w-[7.5rem] truncate text-xs font-medium sm:max-w-[10rem]">
+      {!inComposer && <Cpu className="size-3.5 shrink-0 text-muted-foreground" />}
+      <span className="max-w-[7.5rem] truncate text-xs font-medium sm:max-w-[10.5rem]">
         {label}
       </span>
-      {current ? (
+      {current && current.kind !== "primary" ? (
         <ModelBadge kind={current.kind} />
-      ) : (
+      ) : !current ? (
         <span className="size-1.5 rounded-full bg-muted-foreground/40" />
-      )}
-      <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+      ) : null}
+      <ChevronDown
+        className={cn(
+          "size-3 shrink-0 text-muted-foreground transition-transform",
+          open && "rotate-180",
+        )}
+      />
     </Button>
   );
 
@@ -417,8 +432,13 @@ export function ModelPicker() {
   return (
     <Popover open={open} onOpenChange={changeOpen}>
       <PopoverTrigger asChild>{triggerButton()}</PopoverTrigger>
-      <PopoverContent className="w-[23rem] overflow-hidden" align="end">
-        <div className="h-[min(32rem,75vh)]">{body}</div>
+      <PopoverContent
+        className="w-[23rem] overflow-hidden rounded-2xl"
+        side={inComposer ? "top" : "bottom"}
+        align={inComposer ? "start" : "end"}
+        sideOffset={10}
+      >
+        <div className="flex h-[min(32rem,70vh)] min-h-0 flex-col">{body}</div>
       </PopoverContent>
     </Popover>
   );

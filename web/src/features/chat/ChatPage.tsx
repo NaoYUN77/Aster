@@ -1,7 +1,11 @@
+import { Menu } from "lucide-react";
 import { userFacingMessage } from "@/api/errors";
+import { useMobileNav } from "@/app/AppShell";
+import { ModelPicker } from "@/features/models/ModelPicker";
 import { useModelsQuery } from "@/features/models/use-models";
+import { useMediaQuery } from "@/lib/use-media-query";
 import { useChatStore } from "@/store/chat";
-import { ChatHeader } from "./ChatHeader";
+import { CompanionSprite, deriveCompanionMode } from "./CompanionSprite";
 import { Composer } from "./Composer";
 import { MessageList } from "./MessageList";
 import { QueuePanel } from "./QueuePanel";
@@ -15,6 +19,9 @@ import { useDisplayMessages } from "./use-display-messages";
 import { flattenHistory, useHistoryQuery } from "./use-history";
 
 export function ChatPage() {
+  const { openMobileNav } = useMobileNav();
+  const isDesktop = useMediaQuery("(min-width: 768px)");
+
   const history = useHistoryQuery();
   const models = useModelsQuery();
   const historyMessages = flattenHistory(history.data);
@@ -32,11 +39,32 @@ export function ChatPage() {
 
   const current = models.data?.current;
   const activeModelLabel = current ? current.name || current.label : undefined;
+  const companionMode = deriveCompanionMode(activeStatus, queue.length);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <ChatHeader />
-      <main className="min-h-0 flex-1">
+    <div className="relative flex h-full min-h-0 flex-col bg-background">
+      {/* Floating top-center standalone 3D companion (no redundant desktop chat header) */}
+      {isDesktop ? (
+        <div className="muse-top-fade pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center pb-6 pt-3.5 safe-top">
+          <CompanionSprite mode={companionMode} size={96} />
+        </div>
+      ) : (
+        <div className="muse-top-fade pointer-events-none absolute inset-x-0 top-0 z-20 px-2.5 pb-5 pt-2 safe-top">
+          <div className="relative flex items-start justify-center">
+            <button
+              type="button"
+              onClick={openMobileNav}
+              className="pointer-events-auto absolute left-0 top-1 flex size-11 items-center justify-center rounded-full bg-secondary text-foreground transition-colors active:scale-95"
+              aria-label="打开导航"
+            >
+              <Menu className="size-5" />
+            </button>
+            <CompanionSprite mode={companionMode} size={76} />
+          </div>
+        </div>
+      )}
+
+      <main className="relative min-h-0 flex-1">
         <MessageList
           messages={messages}
           isLoading={history.isPending}
@@ -52,6 +80,7 @@ export function ChatPage() {
           onRetryMessage={(message) => void retry(message)}
         />
       </main>
+
       <QueuePanel
         items={queue}
         activeStatus={activeStatus}
@@ -59,10 +88,12 @@ export function ChatPage() {
         onPromote={promote}
         onCancel={cancel}
       />
+
       <Composer
         onSend={send}
         onStop={() => void stop()}
         activeStatus={activeStatus}
+        leftSlot={<ModelPicker placement="composer" />}
       />
     </div>
   );
