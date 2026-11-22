@@ -665,23 +665,29 @@ export async function openAgent(
       const timeoutController = new AbortController();
       let remainingMs = Math.max(1, timeoutMs);
       let timerStartedAt = Date.now();
-      let timer: NodeJS.Timeout | undefined;
+      let segmentCleanup: (() => void) | undefined;
       let timerPaused = (approvals?.pendingCount ?? 0) > 0;
       const armTimer = () => {
         if (timerPaused || timeoutController.signal.aborted) return;
         timerStartedAt = Date.now();
-        timer = setTimeout(() => {
-          timer = undefined;
-          timeoutController.abort(new Error("Agent request timed out"));
-        }, remainingMs);
-        timer.unref();
+        const segment = AbortSignal.timeout(remainingMs);
+        const onSegmentTimeout = () => {
+          segmentCleanup = undefined;
+          timeoutController.abort(segment.reason ?? new DOMException("Agent request timed out", "TimeoutError"));
+        };
+        if (segment.aborted) {
+          onSegmentTimeout();
+          return;
+        }
+        segment.addEventListener("abort", onSegmentTimeout, { once: true });
+        segmentCleanup = () => segment.removeEventListener("abort", onSegmentTimeout);
       };
       const unsubscribeApprovalWait = approvals?.subscribeWaitActive((waiting) => {
         if (waiting && !timerPaused) {
           timerPaused = true;
-          if (timer !== undefined) {
-            clearTimeout(timer);
-            timer = undefined;
+          if (segmentCleanup !== undefined) {
+            segmentCleanup();
+            segmentCleanup = undefined;
             remainingMs = Math.max(1, remainingMs - (Date.now() - timerStartedAt));
           }
         } else if (!waiting && timerPaused) {
@@ -689,11 +695,12 @@ export async function openAgent(
           armTimer();
         }
       });
-      armTimer();
+      const waitSignal = approvals === undefined
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+        : (armTimer(), AbortSignal.any([signal, timeoutController.signal]));
       try {
         // Recovery starts only while a caller is waiting, so the timeout below bounds every resumed task
         // while pausing automatically while an approval request is waiting on the owner.
-        const waitSignal = AbortSignal.any([signal, timeoutController.signal]);
         harness.resume();
         // Memory prepare is durable and idempotent per requestId: a replayed or recovered request
         // gets no new projection, and a new request is planned before its input lands.
@@ -771,7 +778,7 @@ export async function openAgent(
         // A failed Session rejects every later call too; only a process restart can reopen it.
         throw sessionFailure(error);
       } finally {
-        if (timer !== undefined) clearTimeout(timer);
+        segmentCleanup?.();
         unsubscribeApprovalWait?.();
         approvals?.clearRunScope(String(target.id));
       }
