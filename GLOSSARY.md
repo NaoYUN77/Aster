@@ -72,6 +72,17 @@ consumed. Entry ids are global and increasing, so one watermark covers every own
 after it; it is never a date string.
 _Avoid_: archive cursor, checkpoint, date cursor, recall
 
+**Live memory**:
+The one memory directory the owner and the agent edit directly and the prompt reads. Every other
+copy of it — a snapshot or a staging copy — is derived and never authoritative.
+_Avoid_: the repository, master copy, live tree
+
+**Snapshot**:
+A full-directory capture of live memory the host takes at a turn boundary, before an apply, or
+before a restore. It is the undo unit: the memory CLI lists snapshots and restores one, and a
+restore keeps the tree it replaces as a snapshot of its own.
+_Avoid_: commit, checkpoint, backup, version
+
 **Working state**:
 The host-derived, session-scoped summary of standing goals and open work that is injected for
 the current context cycle. Maintained by the host, never by dreaming.
@@ -91,6 +102,19 @@ _Avoid_: extraction, distillation, index
 **Dream run**:
 One execution of dreaming, from trigger to applied changes or discard.
 _Avoid_: cycle, pass, job
+
+**Staging copy**:
+The private copy of live memory a dream run edits alone, materialized from a pre-run snapshot.
+Evidence that named live memory is rewritten to point at it, and a run's changes reach live memory
+only through the host's compare-and-swap apply.
+_Avoid_: worktree, branch, sandbox
+
+**Discard**:
+The host's decision to throw a run's staging copy away instead of applying it, recorded as a
+discarded run with a reason code. A discard declines the candidate edit; by itself it never
+deletes or rewrites live memory — a run that leaked edits into live memory is undone by a
+restore, which keeps the leaked tree as a snapshot.
+_Avoid_: rollback, revert, delete
 
 **Nightly trigger**:
 The once-per-local-date moment named by `DREAMING_AT` in the memory timezone. A process that

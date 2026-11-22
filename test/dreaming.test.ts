@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { promisify } from "node:util";
 import type { TranscriptContext } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -24,13 +22,7 @@ import {
   type DreamingTurnInput,
 } from "../src/memory/integration.js";
 
-const run = promisify(execFile);
 const running = new AbortController().signal;
-
-async function git(dir: string, args: readonly string[]): Promise<string> {
-  const { stdout } = await run("git", ["-C", dir, ...args]);
-  return stdout;
-}
 
 async function until(check: () => boolean, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -78,9 +70,9 @@ async function writeState(memoryDir: string, state: Record<string, unknown>): Pr
   await writeFile(join(memoryDir, ".aster", "dreaming.json"), JSON.stringify({ version: 1, ...state }), "utf8");
 }
 
-/** Leftovers in the worktree root; an applied or discarded run leaves none. */
-async function worktreeRuns(root: string): Promise<string[]> {
-  return readdir(join(root, "dreaming", "worktrees")).catch(() => [] as string[]);
+/** Leftovers in the staging root; an applied or discarded run leaves none. */
+async function stagingRuns(root: string): Promise<string[]> {
+  return readdir(join(root, "dreaming", "staging")).catch(() => [] as string[]);
 }
 
 function config(overrides: Partial<DreamingConfig> = {}): DreamingConfig {
@@ -129,9 +121,10 @@ async function fixture(options: {
       calls.push(input);
       return options.run(input);
     },
+    // The evidence deliberately names a live memory path; the run must rewrite it to staging.
     input: async () => ({
-      transcript: "user: my color is blue",
-      activity: "## 2026-11-20\n[09:00] user: my color is blue",
+      transcript: `user: my color is blue; read ${join(memoryDir, "notes", "color.md")} first`,
+      activity: `## 2026-11-20\n[09:00] tool read: {"path":"${join(memoryDir, "notes", "color.md")}"}`,
       evidenceThrough: options.evidenceThrough ?? (7 as EntryId),
     }),
     log: (event) => events.push(event.event),
@@ -166,7 +159,7 @@ function writingRun(body = "color: blue\n"): DreamingTurn {
 }
 
 // ---------------------------------------------------------------------------
-// 1: nightly schedule -> worktree -> edit -> layout check -> fast-forward apply
+// 1: nightly schedule -> staging copy -> edit -> layout check -> compare-and-swap apply
 // ---------------------------------------------------------------------------
 
 test("dreaming: the nightly timer fires at DREAMING_AT and never twice on one local date", { timeout: 60_000 }, async () => {
@@ -184,13 +177,20 @@ test("dreaming: the nightly timer fires at DREAMING_AT and never twice on one lo
     const state = await f.state();
     assert.equal(state.lastNightlyDate, "2026-11-21");
     assert.equal(state.lastRun?.status, "applied");
-    assert.equal(state.lastAppliedCommit, (await git(f.memoryDir, ["rev-parse", "HEAD"])).trim());
+    assert.match(state.lastAppliedSnapshot ?? "", /-dreaming-pre-dreaming-apply/u, "the undo point is a pre-apply snapshot");
     assert.equal(state.evidenceThrough, 7);
     assert.equal("archiveThrough" in state, false, "the date cursor is gone from the state file");
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: blue\n");
-    assert.match(await git(f.memoryDir, ["log", "-1", "--format=%s"]), /^memory: dream run .* by dreaming at /);
-    assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
+    assert.deepEqual(await stagingRuns(f.root), []);
     assert.equal(f.events.filter((event) => event === "dreaming.run.applied").length, 1);
+
+    // The evidence named live memory; the model was pointed at the staging copy instead.
+    const turn = f.calls[0]!;
+    assert.equal(turn.prompt.includes(f.memoryDir), false, "live memory paths are rewritten out of the evidence");
+    assert.ok(turn.prompt.includes(join(f.root, "dreaming", "staging")), "the evidence points at the staging copy");
+    assert.ok(turn.cwd.startsWith(join(f.root, "dreaming", "staging")));
+    assert.match(turn.instructions, /staging copy/u);
+    assert.match(turn.instructions, /do not run git/iu, "the brief forbids git instead of relying on it");
 
     // The rest of the day, including a timer that keeps firing, never runs again.
     await clock.advanceTo("2026-11-21T18:00:00Z");
@@ -211,7 +211,7 @@ test("dreaming: a restart past DREAMING_AT catches up the same local date exactl
   const clock = fakeClock("2026-11-21T09:15:00Z");
   const { runner, fixture: f } = await fixture({ run: writingRun(), clock });
   try {
-    await writeState(f.memoryDir, { lastNightlyDate: "2026-11-20", lastRun: null, lastAppliedCommit: null, failure: null, archiveThrough: null });
+    await writeState(f.memoryDir, { lastNightlyDate: "2026-11-20", lastRun: null, lastAppliedSnapshot: null, failure: null, archiveThrough: null });
     await runner.start();
     await until(() => f.calls.length === 1);
     await runner.whenIdle();
@@ -258,13 +258,20 @@ test("dreaming: DREAMING_AT is interpreted in the memory timezone", { timeout: 6
   }
 });
 
-test("dreaming: a dream agent that commits inside the worktree still applies its change", { timeout: 60_000 }, async () => {
+// ---------------------------------------------------------------------------
+// 1b: a dream that writes outside its staging copy is undone, not applied
+// ---------------------------------------------------------------------------
+
+test("dreaming: a dream that writes into live memory is discarded, live is restored, and the leak is kept", { timeout: 60_000 }, async () => {
   const { runner, fixture: f } = await fixture({
+    initialMemory: "color: unknown\n",
     run: async (input) => {
       await writeFile(join(input.cwd, "MEMORY.md"), "color: blue\n", "utf8");
-      await git(input.cwd, ["add", "-A"]);
-      await git(input.cwd, ["-c", "user.name=dream", "-c", "user.email=dream@local", "commit", "-m", "dream"]);
-      return "committed and done";
+      // The model escapes its staging copy and edits live memory directly.
+      await mkdir(join(f.memoryDir, "notes"), { recursive: true });
+      await writeFile(join(f.memoryDir, "MEMORY.md"), "hijacked\n", "utf8");
+      await writeFile(join(f.memoryDir, "notes", "leak.md"), "leaked\n", "utf8");
+      return "updated";
     },
   });
   try {
@@ -272,9 +279,26 @@ test("dreaming: a dream agent that commits inside the worktree still applies its
     await runner.whenIdle();
 
     const state = await f.state();
-    assert.equal(state.lastRun?.status, "applied");
-    assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: blue\n");
-    assert.equal((await git(f.memoryDir, ["log", "--format=%s"])).includes("dream run"), true);
+    assert.equal(state.lastRun?.status, "discarded");
+    assert.equal(state.lastRun?.reason, "live-modified");
+    assert.equal(state.lastAppliedSnapshot, null);
+    assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: unknown\n", "live is put back");
+    assert.equal(
+      await readFile(join(f.memoryDir, "notes", "leak.md"), "utf8").catch(() => "gone"),
+      "gone",
+      "the leaked file is removed from live",
+    );
+    assert.deepEqual(await stagingRuns(f.root), []);
+    assert.equal(f.events.includes("dreaming.run.live"), true, "the leak is visible in observation");
+
+    // Nothing is silently destroyed: the leaked bytes survive as a pre-restore snapshot.
+    const snapshots = await f.memory.history(10);
+    const preserved = snapshots.find((snapshot) => snapshot.reason === "pre-restore");
+    assert.ok(preserved, "the restore kept what it replaced");
+    assert.equal(
+      await readFile(join(f.memoryDir, ".aster", "versions", preserved.id, "tree", "notes", "leak.md"), "utf8"),
+      "leaked\n",
+    );
   } finally {
     await f.cleanup();
   }
@@ -301,7 +325,7 @@ test("dreaming: an unindexed note discards the run", { timeout: 60_000 }, async 
     assert.equal(state.lastRun?.status, "discarded");
     assert.equal(state.lastRun?.reason, "layout-invalid");
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "");
-    assert.deepEqual(await worktreeRuns(f.root), []);
+    assert.deepEqual(await stagingRuns(f.root), []);
   } finally {
     await f.cleanup();
   }
@@ -316,8 +340,9 @@ test("dreaming: a conflicting live change discards the run and leaves the live b
     initialMemory: "color: unknown\n",
     run: async (input) => {
       await writeFile(join(input.cwd, "MEMORY.md"), "color: red\n", "utf8");
-      // The owner edits the live tree while the run works.
+      // The owner edits the live tree while the run works; the turn boundary snapshots it.
       await writeFile(join(f.memoryDir, "MEMORY.md"), "color: green\n", "utf8");
+      await f.memory.snapshotDirty("owner", "pre-render");
       return "updated";
     },
   });
@@ -329,8 +354,7 @@ test("dreaming: a conflicting live change discards the run and leaves the live b
     assert.equal(state.lastRun?.status, "discarded");
     assert.equal(state.lastRun?.reason, "conflict");
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "color: green\n");
-    assert.equal((await git(f.memoryDir, ["log", "--format=%s"])).includes("dream run"), false);
-    assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
+    assert.deepEqual(await stagingRuns(f.root), []);
   } finally {
     await f.cleanup();
   }
@@ -363,7 +387,7 @@ test("dreaming: a timeout discards the run and the runner stays usable", { timeo
     let state = await f.state();
     assert.equal(state.lastRun?.status, "discarded");
     assert.equal(state.lastRun?.reason, "timeout");
-    assert.deepEqual(await worktreeRuns(f.root), []);
+    assert.deepEqual(await stagingRuns(f.root), []);
 
     // The next trigger is admitted: no backoff from a timeout, no stuck runner.
     await runner.compactionCompleted();
@@ -403,22 +427,21 @@ test("dreaming: a transient failure retries once and then applies", { timeout: 6
 });
 
 // ---------------------------------------------------------------------------
-// 6: dry run evaluates the layout but never merges
+// 6: dry run evaluates the layout but never applies
 // ---------------------------------------------------------------------------
 
-test("dreaming: a dry run applies nothing and claims no live commit", { timeout: 60_000 }, async () => {
+test("dreaming: a dry run applies nothing and claims no undo snapshot", { timeout: 60_000 }, async () => {
   const { runner, fixture: f } = await fixture({ overrides: { dryRun: true }, run: writingRun() });
   try {
     await runner.compactionCompleted();
     await runner.whenIdle();
     const state = await f.state();
     assert.equal(state.lastRun?.status, "dry-run");
-    assert.equal(state.lastRun?.commit, null);
-    assert.equal(state.lastAppliedCommit, null);
+    assert.equal(state.lastRun?.snapshot, null);
+    assert.equal(state.lastAppliedSnapshot, null);
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "");
-    assert.equal((await git(f.memoryDir, ["log", "--format=%s"])).includes("dream run"), false);
     assert.equal(f.calls.length, 1, "one dream turn per dry run");
-    assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
+    assert.deepEqual(await stagingRuns(f.root), []);
 
     // A later compaction is a new trigger; a dry run never blocks the next night.
     await runner.compactionCompleted();
@@ -600,7 +623,7 @@ test("dreaming: reminder behavior nudges at the nightly time, once per local dat
   }
 });
 
-test("dreaming: an old turn-counter state file still loads and drops the removed fields", { timeout: 30_000 }, async () => {
+test("dreaming: an old turn-counter state file still loads, drops removed fields, and migrates the git-era pointer", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "aster-dreaming-old-state-"));
   const memoryDir = join(root, "memory-fs");
   const memory = createMemoryFs({ dir: memoryDir });
@@ -617,7 +640,8 @@ test("dreaming: an old turn-counter state file still loads and drops the removed
     await writeState(memoryDir, {
       turnsSinceApply: 4,
       lastRun: null,
-      lastAppliedCommit: null,
+      // A git-era file named the applied commit; it is read as the snapshot pointer it now is.
+      lastAppliedCommit: "cda51a5fd466543cc8a8a20f121e867896c00a1b",
       failure: null,
       archiveThrough: "2026-11-20",
     });
@@ -625,8 +649,9 @@ test("dreaming: an old turn-counter state file still loads and drops the removed
     assert.equal(state.lastNightlyDate, null, "an old file has not claimed a night yet");
     assert.equal(state.evidenceThrough, null, "a date cursor from the archive era becomes no cursor");
     assert.equal(state.reminderTurns, 0);
+    assert.equal(state.lastAppliedSnapshot, "cda51a5fd466543cc8a8a20f121e867896c00a1b", "the old pointer is not lost");
     assert.deepEqual(Object.keys(state).sort(), [
-      "evidenceThrough", "failure", "lastAppliedCommit", "lastNightlyDate", "lastRun", "reminderTurns", "version",
+      "evidenceThrough", "failure", "lastAppliedSnapshot", "lastNightlyDate", "lastRun", "reminderTurns", "version",
     ]);
   } finally {
     runner.close();
@@ -656,8 +681,7 @@ test("dreaming: one deadline covers the whole run", { timeout: 60_000 }, async (
     assert.equal(state.lastRun?.status, "discarded");
     assert.equal(state.lastRun?.reason, "timeout");
     assert.equal(await readFile(join(f.memoryDir, "MEMORY.md"), "utf8"), "");
-    assert.deepEqual(await worktreeRuns(f.root), [], "the worktree is gone, not half-applied");
-    assert.equal((await git(f.memoryDir, ["branch", "--list", "dreaming/*"])).trim(), "");
+    assert.deepEqual(await stagingRuns(f.root), [], "the staging copy is gone, not half-applied");
   } finally {
     await f.cleanup();
   }
@@ -695,39 +719,30 @@ test("dreaming: repeated model failure records the run and backs off", { timeout
 });
 
 // ---------------------------------------------------------------------------
-// Crash leftovers: stale dreaming branches are pruned at startup
+// Crash leftovers: stale staging copies are pruned at startup
 // ---------------------------------------------------------------------------
 
-test("dreaming: initialization prunes branches whose worktree is gone and keeps live ones", { timeout: 60_000 }, async () => {
+test("dreaming: initialization removes a staging copy a crashed process left behind", { timeout: 60_000 }, async () => {
   const { runner, fixture: f } = await fixture({ run: writingRun() });
-  const livePath = join(f.root, "kept-worktree");
   try {
-    await git(f.memoryDir, ["branch", "dreaming/stale"]);
-    await git(f.memoryDir, ["worktree", "add", "-b", "dreaming/kept", livePath]);
+    const stale = join(f.root, "dreaming", "staging", "20261121T000000Z");
+    await mkdir(stale, { recursive: true });
+    await writeFile(join(stale, "MEMORY.md"), "half a run\n", "utf8");
+
     await runner.status();
 
-    const branches = (await git(f.memoryDir, ["branch", "--list", "dreaming/*", "--format=%(refname:short)"]))
-      .split("\n").filter((line) => line !== "").sort();
-    assert.deepEqual(branches, ["dreaming/kept"], "only the branch with a live worktree survives");
-    assert.match(await git(f.memoryDir, ["worktree", "list", "--porcelain"]), /kept-worktree/u);
+    assert.deepEqual(await stagingRuns(f.root), [], "a fresh process owns no staging copy");
   } finally {
-    await git(f.memoryDir, ["worktree", "remove", "--force", livePath]).catch(() => undefined);
     await f.cleanup();
   }
 });
-
-// ---------------------------------------------------------------------------
-// Status CLI: project only the durable fields
-// ---------------------------------------------------------------------------
 
 test("dreaming status: an absent state file is an empty report", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "aster-dreaming-status-"));
   try {
     const report = await dreamingStatus({ DATA_DIR: root });
     assert.equal(report.state, null);
-    const text = formatDreamingStatus(report);
-    assert.match(text, /"state": null/);
-    assert.equal(text.includes("No dream run has been recorded yet."), true);
+    assert.match(formatDreamingStatus(report), /"state": null/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -748,6 +763,7 @@ test("dreaming status: only state fields are printed, never stray content", { ti
         startedAt: "2026-11-21T00:00:00.000Z",
         endedAt: "2026-11-21T00:00:01.000Z",
         status: "applied",
+        // A git-era run record named the commit; it is read as the snapshot id it now is.
         commit: "0123456789abcdef0123456789abcdef01234567",
         reason: null,
       },
@@ -763,6 +779,8 @@ test("dreaming status: only state fields are printed, never stray content", { ti
     const text = formatDreamingStatus(report);
     assert.equal(report.state?.lastNightlyDate, "2026-11-21");
     assert.equal(report.state?.lastRun?.status, "applied");
+    assert.equal(report.state?.lastRun?.snapshot, "0123456789abcdef0123456789abcdef01234567");
+    assert.equal(report.state?.lastAppliedSnapshot, "0123456789abcdef0123456789abcdef01234567");
     assert.equal(text.includes("turnsSinceApply"), false, "removed fields are not projected");
     assert.equal(text.includes("SECRET MESSAGE BODY"), false);
     assert.equal(text.includes("sk-live-not-a-real-key"), false);
@@ -772,7 +790,7 @@ test("dreaming status: only state fields are printed, never stray content", { ti
 });
 
 // ---------------------------------------------------------------------------
-// End to end: the open agent catches up a nightly run through a real worktree
+// End to end: the open agent catches up a nightly run through a real staging copy
 // ---------------------------------------------------------------------------
 
 /** The dream conversation is identified by its fixed brief, so call order never matters. */
@@ -781,7 +799,7 @@ function dreamContext(context: TranscriptContext): boolean {
   return system.includes("Aster's dreaming pass");
 }
 
-test("dreaming: the open agent catches up the nightly run through a real worktree", { timeout: 120_000 }, async () => {
+test("dreaming: the open agent catches up the nightly run through a real staging copy", { timeout: 120_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "aster-dreaming-agent-"));
   const memoryDir = join(directory, "memory-fs");
   const memory = createMemoryFs({ dir: memoryDir });
@@ -789,7 +807,7 @@ test("dreaming: the open agent catches up the nightly run through a real worktre
   try {
     await memory.ensure();
     await writeFile(join(memoryDir, "MEMORY.md"), "persona: direct\n", "utf8");
-    await memory.commitDirty("owner", "seed");
+    await memory.snapshotDirty("owner", "seed");
     const faux = fauxProvider({ provider: "openai" });
     const models = createModels();
     models.setProvider(faux.provider);
@@ -827,9 +845,9 @@ test("dreaming: the open agent catches up the nightly run through a real worktre
     await app.dreamingIdle();
 
     assert.equal(await readFile(join(memoryDir, "MEMORY.md"), "utf8"), "persona: direct\ncolor: blue\n");
-    assert.match(await git(memoryDir, ["log", "-1", "--format=%s"]), /^memory: dream run .* by dreaming at /);
     const state = JSON.parse(await readFile(join(memoryDir, ".aster", "dreaming.json"), "utf8")) as DreamingState;
     assert.equal(state.lastRun?.status, "applied");
+    assert.match(state.lastAppliedSnapshot ?? "", /-dreaming-pre-dreaming-apply/u);
     assert.match(state.lastNightlyDate ?? "", /^\d{4}-\d{2}-\d{2}$/u);
   } finally {
     try {

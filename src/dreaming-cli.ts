@@ -13,7 +13,8 @@ export type DreamingStatusReport = {
   readonly note?: string;
 };
 
-function memoryDirectory(env: NodeJS.ProcessEnv): string {
+/** The memory directory the process is configured with; shared with the memory CLI. */
+export function memoryDirectory(env: NodeJS.ProcessEnv): string {
   const dataDir = resolve(env.DATA_DIR || "data");
   const configured = env.MEMORY_FS_DIR?.trim();
   if (configured !== undefined && configured !== "" && !isAbsolute(configured)) {

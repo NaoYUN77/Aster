@@ -1,16 +1,18 @@
 # Letta-style memory for Aster (core memory + dreaming)
 
-Status: implementation branch `feat/letta-memory`, forked from `main` at `36ee572`.
-Borrows Letta's architecture, not its code: Aster keeps its own working state, and gains a
-git-backed core memory plus a background consolidation pass fed by an activity digest of the
-durable conversation.
+Status: implementation branch `feat/letta-memory`, forked from `main` at `36ee572`. The
+git-based mechanics this document originally described were replaced by the staging-copy +
+snapshot design of [ADR-0004](../adr/0004-dreaming-applies-without-git.md); the sections below
+describe the current mechanism. Borrows Letta's architecture, not its code: Aster keeps its own
+working state, and gains a directory-based core memory plus a background consolidation pass fed
+by an activity digest of the durable conversation.
 
 ## 1. Goal
 
 Aster is a single-owner, single-conversation personal agent. Three ideas are ported from
 [Letta](https://docs.letta.com):
 
-1. **Core memory** — a git-backed repository whose root `MEMORY.md` is injected into the system
+1. **Core memory** — a plain directory whose root `MEMORY.md` is injected into the system
    prompt on every turn, and that the agent edits with its ordinary tools.
 2. **On-demand memory** — other files and subdirectories stay out of context and are read when
    needed.
@@ -31,31 +33,35 @@ model. Aster's existing working state is unchanged.
 Revisiting whether working state should become a host-maintained section of `MEMORY.md` is a
 separate project, deliberately out of scope.
 
-## 3. Repository layout
+## 3. Directory layout
 
 ```
-$DATA_DIR/memory-fs/            # git repository, branch main
+$DATA_DIR/memory-fs/            # core memory directory
 ├── MEMORY.md                   # the only file injected into the prompt
 ├── reference/                  # read on demand
 │   ├── MEMORY.md               # its index line is a signpost, not content
 │   └── project-notes.md
 ├── skills/                     # reserved; existing skills system unchanged
-└── .aster/                     # gitignored: dreaming state
+└── .aster/                     # dreaming state and host snapshots
+    └── versions/<id>/          # snapshot: full tree copy plus meta.json
 ```
 
 - **`MEMORY.md` only.** Persona, standing goals, constraints and hard preferences live as
   sections inside it. Every other file is read on demand with `read` / `bash`.
 - A subdirectory is discoverable only through its own `MEMORY.md` index entry.
-- `.git/`, `.aster/`, non-`*.md` files and symlinks are never rendered. The agent can still reach
-  them with `bash`, the same exposure Letta has.
-- The host commits dirty work at turn boundaries; `git log` is the undo path.
+- Dot-directories (`.aster/`, a legacy `.git/` from an earlier deployment), non-`*.md` files and
+  symlinks are never rendered. The agent can still reach them with `bash`, the same exposure
+  Letta has.
+- The host snapshots dirty work at turn boundaries into `.aster/versions/` (newest 50 kept);
+  `npm run memory -- history` lists them and `npm run memory -- restore <id>` is the undo path.
+  A restore keeps the tree it replaces as a snapshot of its own, so it is itself undoable.
 
 ## 4. Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MEMORY_FS_ENABLED` | `1` | Master switch. `0` restores the pre-branch prompt exactly. |
-| `MEMORY_FS_DIR` | `$DATA_DIR/memory-fs` | Absolute repository path. |
+| `MEMORY_FS_DIR` | `$DATA_DIR/memory-fs` | Absolute memory-directory path. |
 | `MEMORY_FS_CORE_TOKENS` | `4096` | Budget for the injected `MEMORY.md`. |
 | `DREAMING_ENABLED` | `1` | Master switch for background consolidation. |
 | `DREAMING_AT` | `04:00` | Nightly trigger, `HH:MM` on the 24-hour clock in `MEMORY_TIMEZONE`. |
@@ -103,18 +109,22 @@ render.
   grouped by day. Credential-shaped values are redacted before truncation; the digest is capped at
   8000 tokens and trimmed newest-first at whole-line boundaries. Dreaming's own conversations
   (`dreaming:` request ids) are excluded. No member Hubs exist to read.
-- **Run**: one background subagent in an isolated `git worktree`, with the ordinary tools, using
-  the main model. It consolidates recent experience into notes and maintains `MEMORY.md` as a
+- **Run**: one background subagent in a private staging copy of the memory directory, with the
+  ordinary tools, using the main model. The copy is materialized from a pre-run snapshot, and any
+  live path in the evidence is rewritten to it before the model sees it. It consolidates recent
+  experience into notes and maintains `MEMORY.md` as a
   wiki index: `## Core` for facts that must be injected every turn, `## Index` linking every note.
   The number, names and structure of notes are the model's decision.
 - **Layout check**: before anything is applied, the host verifies that `MEMORY.md` exists, that
   every note is linked from `## Index`, and that every index link resolves to a note inside the
-  repository. A broken layout discards the run (`layout-invalid`); there is no second model pass.
+  staging copy. A broken layout discards the run (`layout-invalid`); there is no second model pass.
   A Core fact that evidence contradicts is demoted to a note or deleted by the dream pass itself.
-- **Apply**: the host commits the worktree (actor `dreaming`), commits the live tree if dirty,
-  rebases the dream commit onto the live HEAD if live advanced meanwhile, then
-  `git merge --ff-only`. A rebase conflict, timeout or invalid layout discards the worktree and
-  branch; the live directory is never touched and a forced merge is never used.
+- **Apply**: a per-file compare-and-swap. The host scans live and staged memory and diffs both
+  against the pre-run base: a file the dream changed applies only if live still matches the base;
+  any live drift on a changed file discards the whole run (`conflict`) with live untouched, and no
+  merge is ever attempted. Live drift outside the changed files with no host snapshot in between
+  means the run leaked into live memory: live is restored from the pre-run snapshot, the leaked
+  tree is kept as a `pre-restore` snapshot, and the run is discarded (`live-modified`).
 - **Reminder** (opt-in): a one-line "memory review due" note on the next request after the
   nightly time (or a compaction). The local date is persisted in `.aster/dreaming.json`, so the
   same day never nudges twice.
@@ -129,14 +139,15 @@ Dreaming is asynchronous, not a separate daemon:
 - The nightly check is a process timer for `DREAMING_AT` in `MEMORY_TIMEZONE`; it fires at most
   once per local date and catches up the same date when the process starts after the time. A
   compaction can trigger a run as well. Triggers only enqueue work; nothing sits in the reply path.
-- A run has one hard timeout (`DREAMING_TIMEOUT_MS`) that covers the model turn, every git
-  command and apply; expiry discards the run like any other abort. One retry on a
+- A run has one hard timeout (`DREAMING_TIMEOUT_MS`) that covers the model turn, the staging
+  materialization and apply; expiry discards the run like any other abort. One retry on a
   transient model failure, then backoff. No unbounded loops.
-- State lives in `.aster/dreaming.json`: `lastNightlyDate`, last run, last applied commit, failure
-  reason. Old `turnsSinceApply`/`reminderTurns` fields are read and ignored. `dreaming status`
+- State lives in `.aster/dreaming.json`: `lastNightlyDate`, last run, last applied snapshot, failure
+  reason. Old `turnsSinceApply`/`archiveThrough` fields are read and ignored; git-era
+  `commit`/`lastAppliedCommit` values are read as snapshot ids. `dreaming status`
   prints it; logs use `dreaming.*` events.
-- At startup the runner prunes crashed leftovers: `git worktree prune`, then delete a
-  `dreaming/*` branch only when no live worktree is registered for it.
+- At startup the runner removes every staging copy a crashed process left behind under
+  `$DATA_DIR/dreaming/staging/`.
 
 ## 6. Single-owner cleanup (same change set)
 
@@ -151,11 +162,14 @@ The Hub / multi-tenant isolation predates the single-owner goal and is removed h
 
 ## 7. Safety invariants
 
-1. Dreaming may write any file in the memory repository, including the persona/human sections of
-   `MEMORY.md` and `MEMORY.md` itself. Nothing outside the repository is writable by it.
-2. Every change is committed with actor (`owner`, `agent`, `dreaming`) and reason; `git log` is
-   the undo path.
-3. A failed or conflicting dream run is discarded without touching the live directory.
+1. Dreaming may write any file in its staging copy, including the persona/human sections of
+   `MEMORY.md` and `MEMORY.md` itself. The evidence it reads never names live paths; a run that
+   writes live memory anyway is detected and undone from the pre-run snapshot.
+2. Every change is captured with actor (`owner`, `agent`, `dreaming`) and reason as a snapshot;
+   the memory CLI (`history`, `restore <id>`) is the undo path, and a restore keeps the tree it
+   replaces.
+3. A failed or conflicting dream run is discarded without touching the live directory; a run
+   that leaked into live is restored, and the leaked tree survives as a snapshot.
 4. Auto-launch is the default, exactly as in Letta; the host-side layout check and
    `DREAMING_DRY_RUN` are the safety rails.
 5. Working memory, compaction and the existing tool set are unchanged.
@@ -168,6 +182,9 @@ The Hub / multi-tenant isolation predates the single-owner goal and is removed h
 - **M2 (same PR)**: Hub/thread removal, the dreaming runner, triggers, worktree apply, the
   wiki layout check, dry run, status, and scripted fake-model tests covering trigger → worktree →
   apply, layout rejection, conflict, timeout, and the single-owner routing.
+- **Post-M2 (ADR-0004)**: the git mechanics above were replaced — staging copies instead of
+  worktrees, per-file compare-and-swap instead of rebase + fast-forward merge, host snapshots
+  instead of commits. The milestones above are kept as history of what shipped when.
 - Every step runs `npm run check` and `npm test` with no new skips.
 
 ## 9. Deliberate differences from Letta
