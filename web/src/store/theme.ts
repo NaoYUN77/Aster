@@ -30,7 +30,7 @@ function applyDomTheme(resolved: ResolvedTheme): void {
   document.documentElement.classList.toggle("dark", resolved === "dark");
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) {
-    meta.setAttribute("content", resolved === "dark" ? "#111317" : "#ffffff");
+    meta.setAttribute("content", resolved === "dark" ? "#000000" : "#ffffff");
   }
 }
 
