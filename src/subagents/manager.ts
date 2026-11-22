@@ -14,6 +14,7 @@ import {
   type ApprovalService,
 } from "../approvals/index.js";
 import type { EventHub } from "../http/events.js";
+import type { UsageLedger } from "../usage/index.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "../tools.js";
 
 const context = BACKGROUND_CONTEXT;
@@ -64,6 +65,8 @@ export type SubagentManagerOptions = {
   readonly approvals?: ApprovalService;
   /** Optional SSE hub for broadcasting `subagent.updated` live status events. */
   readonly hub?: EventHub;
+  /** Optional standalone token usage ledger (ADR-0007). */
+  readonly usageLedger?: UsageLedger;
   readonly authority?: ToolAuthority;
   /** Optional custom storage factory for unit tests (defaults to disposable SQLite file). */
   readonly storageFactory?: (id: string, dbPath: string) => Promise<Storage>;
@@ -158,6 +161,7 @@ export class SubagentManager {
   private readonly extensions: readonly Extension[];
   private readonly approvals: ApprovalService | undefined;
   private readonly hub: EventHub | undefined;
+  private readonly usageLedger: UsageLedger | undefined;
   private readonly authority: ToolAuthority;
   private readonly storageFactory: ((id: string, dbPath: string) => Promise<Storage>) | undefined;
   private readonly log: (line: string) => void;
@@ -174,6 +178,7 @@ export class SubagentManager {
     this.extensions = options.extensions ?? [CodingTools, personalTools];
     this.approvals = options.approvals;
     this.hub = options.hub;
+    this.usageLedger = options.usageLedger;
     this.authority = options.authority ?? "owner";
     this.storageFactory = options.storageFactory;
     this.log = options.log ?? ((line) => console.error(line));
@@ -466,9 +471,33 @@ export class SubagentManager {
       await mkdir(runCwd, { recursive: true });
 
       const approvals = this.approvals;
+      const usageLedger = this.usageLedger;
       const registry = createToolRegistry(this.extensions, {
         authority: this.authority,
         log: this.log,
+        ...(usageLedger === undefined ? {} : {
+          onGeneration: (message, api) => {
+            const u = message.usage;
+            if (u === undefined) return;
+            usageLedger.record({
+              timestamp: message.timestamp,
+              source: "subagent",
+              conversationId: api.conversationId,
+              subagentId: id,
+              provider: message.provider,
+              modelId: message.model || message.responseModel || this.defaultModel.modelId,
+              inputTokens: u.input,
+              outputTokens: u.output,
+              cacheReadTokens: u.cacheRead,
+              cacheWriteTokens: u.cacheWrite,
+              ...(u.reasoning === undefined ? {} : { reasoningTokens: u.reasoning }),
+              totalTokens: u.totalTokens,
+              costUsd: u.cost?.total ?? null,
+              stopReason: message.stopReason,
+              ...(message.durationMs === undefined ? {} : { durationMs: message.durationMs }),
+            });
+          },
+        }),
         onToolLifecycle: ({ phase, tool }) => {
           this.updateActiveState(id, { currentTool: phase === "start" ? tool : null });
         },

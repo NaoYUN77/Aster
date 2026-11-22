@@ -17,6 +17,8 @@ import {
   mockSendMessage,
   mockSnapshot,
   mockStartConnectorOAuth,
+  mockUpdateDailyTokenBudget,
+  mockUsageSummary,
   subscribeMockEvents,
 } from "./store";
 
@@ -226,6 +228,45 @@ export const handlers = [
     const outcome = mockResolveApproval(id, body.decision, body.reason);
     if (!outcome.ok) return apiError("APPROVAL_NOT_FOUND", "没有找到该审批请求", 404);
     return HttpResponse.json({ approval: outcome.approval });
+  }),
+
+  http.get(`${API}/usage`, async ({ request }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    const url = new URL(request.url);
+    const raw = url.searchParams.get("range") ?? "7d";
+    if (raw !== "1d" && raw !== "7d" && raw !== "30d") {
+      return apiError("INVALID_REQUEST", "无效的时间范围", 400);
+    }
+    const model = url.searchParams.get("model") || undefined;
+    const sourceRaw = url.searchParams.get("source") || undefined;
+    const validSources = new Set(["main", "subagent", "dreaming", "routine", "compaction"]);
+    if (sourceRaw && !validSources.has(sourceRaw)) {
+      return apiError("INVALID_REQUEST", "无效的来源筛选", 400);
+    }
+    return HttpResponse.json(
+      mockUsageSummary(raw, {
+        model,
+        source: sourceRaw as "main" | "subagent" | "dreaming" | "routine" | "compaction" | undefined,
+      }),
+    );
+  }),
+
+  http.post(`${API}/usage/budget`, async ({ request }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    const body = (await request.json().catch(() => null)) as {
+      dailyTokenBudget?: unknown;
+    } | null;
+    const raw = body?.dailyTokenBudget;
+    if (
+      raw !== null &&
+      raw !== 0 &&
+      (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0 || raw > 1_000_000_000)
+    ) {
+      return apiError("INVALID_REQUEST", "每日预警阈值不合法", 400);
+    }
+    return HttpResponse.json(mockUpdateDailyTokenBudget(raw === 0 ? null : raw));
   }),
 
   http.get(`${API}/events`, async ({ request }) => {

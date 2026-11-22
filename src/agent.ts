@@ -47,6 +47,7 @@ import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.j
 import { evaluateSensitiveOperation, type ApprovalService } from "./approvals/index.js";
 import type { EventHub } from "./http/events.js";
 import { createSubagentExtension, SubagentManager } from "./subagents/index.js";
+import type { UsageLedger } from "./usage/index.js";
 import { beginRequest, type TraceOutcome } from "./trace.js";
 import { createWebExtension } from "./web-tools.js";
 import { inspectGithubToolRecovery, readResidentTools, withToolLedger } from "./tool-ledger.js";
@@ -183,6 +184,8 @@ export type OpenAgentOptions = {
   readonly hub?: EventHub;
   /** Register bounded, disposable-SQLite sub-agent tools (`spawn_subagent`, `wait_subagent`, `cancel_subagent`). */
   readonly enableSubagents?: boolean;
+  /** Optional standalone durable token usage ledger (ADR-0007). */
+  readonly usageLedger?: UsageLedger;
 };
 
 /**
@@ -372,9 +375,39 @@ export async function openAgent(
   });
 
   const approvals = options.approvals;
+  const usageLedger = options.usageLedger;
+  const dreamingConversationIds = new Set<string>();
+  const routineConversationIds = new Set<string>();
   const registry = createToolRegistry([CodingTools, personalTools], {
     authority: options.toolAuthority,
     log: options.toolReviewLog,
+    ...(usageLedger === undefined ? {} : {
+      onGeneration: (message, api) => {
+        const u = message.usage;
+        if (u === undefined) return;
+        const source = dreamingConversationIds.has(api.conversationId)
+          ? "dreaming"
+          : routineConversationIds.has(api.conversationId)
+            ? "routine"
+            : "main";
+        usageLedger.record({
+          timestamp: message.timestamp,
+          source,
+          conversationId: api.conversationId,
+          provider: message.provider,
+          modelId: message.model || message.responseModel || config.model,
+          inputTokens: u.input,
+          outputTokens: u.output,
+          cacheReadTokens: u.cacheRead,
+          cacheWriteTokens: u.cacheWrite,
+          ...(u.reasoning === undefined ? {} : { reasoningTokens: u.reasoning }),
+          totalTokens: u.totalTokens,
+          costUsd: u.cost?.total ?? null,
+          stopReason: message.stopReason,
+          ...(message.durationMs === undefined ? {} : { durationMs: message.durationMs }),
+        });
+      },
+    }),
     ...(approvals === undefined ? {} : {
       approvals: async ({ tool, args, record, conversationId, signal }) => {
         const evaluation = evaluateSensitiveOperation(tool, args, record, {
@@ -403,6 +436,7 @@ export async function openAgent(
       defaultModel: { provider: config.provider, modelId: config.model },
       ...(approvals === undefined ? {} : { approvals }),
       ...(options.hub === undefined ? {} : { hub: options.hub }),
+      ...(usageLedger === undefined ? {} : { usageLedger }),
       ...(options.toolAuthority === undefined ? {} : { authority: options.toolAuthority }),
       ...(options.toolReviewLog === undefined ? {} : { log: options.toolReviewLog }),
     });
@@ -454,6 +488,7 @@ export async function openAgent(
         ...(remove.length === 0 ? {} : { tools: { remove } }),
       },
     }, context);
+    dreamingConversationIds.add(String(conversation.id));
     harness.resume();
     const submission = await conversation.submit({
       type: "input",
@@ -491,6 +526,25 @@ export async function openAgent(
         reserveTokens: memoryConfig.reserveTokens,
         timezone: memoryConfig.timezone,
         storage: () => durableStorage,
+        ...(usageLedger === undefined ? {} : {
+          onCompactionUsage: (obs) => {
+            usageLedger.record({
+              source: "compaction",
+              conversationId: String(obs.conversationId),
+              provider: obs.provider,
+              modelId: obs.modelId,
+              inputTokens: obs.usage.input,
+              outputTokens: obs.usage.output,
+              cacheReadTokens: obs.usage.cacheRead,
+              cacheWriteTokens: obs.usage.cacheWrite,
+              ...(obs.usage.reasoning === undefined ? {} : { reasoningTokens: obs.usage.reasoning }),
+              totalTokens: obs.usage.totalTokens,
+              costUsd: obs.usage.cost?.total ?? null,
+              stopReason: obs.stopReason,
+              durationMs: obs.durationMs,
+            });
+          },
+        }),
         ...(options.memoryFs === undefined || !config.dreaming.enabled
           ? {}
           : {
@@ -624,6 +678,7 @@ export async function openAgent(
           }),
         },
       }, context);
+      routineConversationIds.add(String(conversation.id));
       console.info(`Routine #${input.routineId} opened conversation ${conversation.id}`);
       return conversation;
     }
@@ -1053,6 +1108,7 @@ export async function openAgent(
           ? undefined
           : await harness.conversation(input.conversationId as ConversationId, context);
         const target = existing ?? await openRoutineConversation(input);
+        routineConversationIds.add(String(target.id));
         // A scheduled run is its own bounded run; earlier repeats or errors must not halt it.
         loopGuard.reset();
         const requestTrace = beginRequest({
@@ -1071,6 +1127,22 @@ export async function openAgent(
       },
       /** Shared by `$model` and the HTTP model routes. */
       modelService,
+      /** Live model & context window lookup for the `/api/v1/usage` summary endpoint (ADR-0007). */
+      usageContextInfo: () => {
+        const current = modelService.catalog().current;
+        const resolveContextWindow = (provider: string, modelId: string): number | null => {
+          const found = models.getModel(provider, modelId);
+          return found !== undefined && found.contextWindow > 0 ? found.contextWindow : null;
+        };
+        return {
+          resolveContextWindow,
+          activeModel: {
+            provider: current.provider,
+            modelId: current.id,
+            contextWindow: resolveContextWindow(current.provider, current.id),
+          },
+        };
+      },
       /** Live sub-agent manager when `enableSubagents` is active (for HTTP status & cancel). */
       ...(subagents === undefined ? {} : { subagents }),
       /** Read-only durable transcript access for the web adapter. */
@@ -1083,7 +1155,11 @@ export async function openAgent(
       dreamingIdle: () => memory?.whenDreamingIdle() ?? Promise.resolve(),
       // Ends the current context cycle; the next reply establishes the new snapshot behind the
       // reset before its input, so its first model call already carries block B.
-      reset: () => memory ? memory.resetConversation(context) : root.reset(undefined, context),
+      reset: async () => {
+        if (memory) await memory.resetConversation(context);
+        else await root.reset(undefined, context);
+        usageLedger?.resetMainContext();
+      },
       async close() {
         // Stop new memory work first; durable memory tasks keep their records and resume after a
         // reopen. Closing the harness first cancels tool contexts, so MCP shutdown is not

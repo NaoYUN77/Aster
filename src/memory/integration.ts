@@ -80,6 +80,7 @@ import {
   publishedSnapshot,
   readCompactionTurnCount,
   recordCompletedUserRequest,
+  type CompactionUsageObservation,
 } from "./compaction.js";
 import { buildActivityDigest, type ActivitySource } from "./activity.js";
 
@@ -102,6 +103,8 @@ export type MemoryIntegrationOptions = {
   readonly storage?: () => Storage;
   /** Identifiers-and-codes-only observation; defaults to a one-line stderr log. */
   readonly log?: (event: MemoryLogEvent) => void;
+  /** Optional observer invoked after every compaction summary LLM attempt (ADR-0007). */
+  readonly onCompactionUsage?: (observation: CompactionUsageObservation) => void;
   /**
    * Background consolidation (dreaming). Present only when core memory exists and the host enabled
    * it; without a memory repository there is nothing for a dream run to write.
@@ -202,6 +205,7 @@ export class MemoryIntegration {
         model: this.#options.model,
         budget: this.#options.budget,
         facts: () => this.currentFacts(),
+        ...(this.#options.onCompactionUsage === undefined ? {} : { onUsage: this.#options.onCompactionUsage }),
         onResult: (observation) => {
           this.#log({
             event: "compaction.result",

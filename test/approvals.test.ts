@@ -70,6 +70,7 @@ test("evaluateSensitiveOperation detects all 4 sensitive categories and allows s
 
   // Read-only bash commands on a non-writing sub-agent should not spam approval modals.
   assert.equal(isSafeReadOnlyShellCommand("ls -la | wc -l"), true);
+  assert.equal(isSafeReadOnlyShellCommand("cd /data/workspace && ls -la"), true);
   assert.equal(isSafeReadOnlyShellCommand("find . -maxdepth 2 2>/dev/null"), true);
   assert.equal(isSafeReadOnlyShellCommand("git status && git log -n 5"), true);
   assert.equal(isSafeReadOnlyShellCommand("echo hi > out.txt"), false);
