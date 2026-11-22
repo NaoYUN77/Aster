@@ -2,10 +2,12 @@ import { useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
-  ArrowLeft,
+  Check,
   CheckCircle2,
+  Copy,
   Link2,
   LogOut,
+  Menu,
   PlugZap,
   Server,
   Smartphone,
@@ -13,20 +15,24 @@ import {
   Volume2,
   XCircle,
 } from "lucide-react";
-import { SoundToggle } from "@/components/SoundToggle";
+import { useMobileNav } from "@/app/AppShell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
-import { platformLabel, isNative } from "@/lib/platform";
+import { useConnectors } from "@/features/connectors/use-connectors";
+import { isNative, platformLabel } from "@/lib/platform";
+import { playCue } from "@/lib/sound";
 import { formatExpiry } from "@/lib/time";
+import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
 import {
   useConnectionStore,
   type ConnectionTestResult,
 } from "@/store/connection";
+import { useSoundStore } from "@/store/sound";
+import { useThemeStore, type ThemeMode } from "@/store/theme";
 import { ServerAddressForm } from "./ServerAddressForm";
 
 const SSE_LABEL = {
@@ -46,8 +52,8 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-xl border border-border bg-card p-4 shadow-sm">
-      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+    <section className="rounded-3xl bg-secondary p-5">
+      <h2 className="mb-3.5 flex items-center gap-2 text-sm font-semibold">
         <span className="text-muted-foreground">{icon}</span>
         {title}
       </h2>
@@ -57,6 +63,7 @@ function Section({
 }
 
 export function SettingsPage() {
+  const { openMobileNav } = useMobileNav();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const baseUrl = useConnectionStore((state) => state.baseUrl);
@@ -66,11 +73,31 @@ export function SettingsPage() {
   const logout = useAuthStore((state) => state.logout);
   const resetChat = useChatStore((state) => state.reset);
   const sseState = useChatStore((state) => state.sseState);
+  const muted = useSoundStore((state) => state.muted);
+  const toggleSound = useSoundStore((state) => state.toggle);
+  const themeMode = useThemeStore((state) => state.mode);
+  const setThemeMode = useThemeStore((state) => state.setMode);
+  const connectorsQuery = useConnectors();
 
   const [editingServer, setEditingServer] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+
+  const connectedConnectors =
+    connectorsQuery.data?.connectors.filter((c) => c.status === "connected") ?? [];
+
+  const copyServerUrl = async () => {
+    if (!baseUrl) return;
+    try {
+      await navigator.clipboard.writeText(baseUrl);
+      setCopiedUrl(true);
+      window.setTimeout(() => setCopiedUrl(false), 1600);
+    } catch {
+      /* 忽略剪贴板权限错误 */
+    }
+  };
 
   const runTest = async () => {
     setTesting(true);
@@ -96,156 +123,229 @@ export function SettingsPage() {
   };
 
   return (
-    <div className="min-h-full bg-background">
-      <header className="sticky top-0 z-20 border-b border-border/70 bg-background/85 backdrop-blur safe-top">
-        <div className="mx-auto flex h-14 w-full max-w-2xl items-center gap-2 px-3 sm:px-5">
-          <Button variant="ghost" size="icon-sm" onClick={() => navigate("/")} aria-label="返回聊天">
-            <ArrowLeft className="size-4" />
-          </Button>
-          <h1 className="text-base font-semibold">设置</h1>
-          <Badge variant="outline" className="ml-auto">
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <header className="shrink-0 border-b border-border bg-background/90 backdrop-blur safe-top">
+        <div className="mx-auto flex h-14 w-full max-w-4xl items-center gap-2.5 px-3 sm:px-6">
+          <button
+            type="button"
+            onClick={openMobileNav}
+            className="flex size-10 items-center justify-center rounded-full bg-secondary text-foreground md:hidden"
+            aria-label="打开导航"
+          >
+            <Menu className="size-5" />
+          </button>
+          <h1 className="text-base font-semibold tracking-tight">设置</h1>
+          <Badge variant="outline" className="ml-auto rounded-full">
             {platformLabel()}
           </Badge>
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-2xl space-y-3 px-3 py-4 sm:px-5">
-        <Section icon={<Server className="size-4" />} title="服务器">
-          <div className="flex flex-wrap items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-md bg-muted/60 px-2.5 py-2 font-mono text-xs">
-              {baseUrl || "未配置"}
-            </code>
-            {isNative() ? (
-              <Button variant="outline" size="sm" onClick={() => setEditingServer(true)}>
-                修改地址
-              </Button>
-            ) : (
-              <Badge variant="outline">Web 同源</Badge>
-            )}
-          </div>
-          {!isNative() && (
-            <p className="mt-2 text-[11px] text-muted-foreground">
-              Web 端由 Caddy 同源提供，不允许在设置页改地址。
-            </p>
-          )}
+      <main className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-4xl px-3 py-4 sm:px-6 sm:py-6">
+          <div className="grid gap-4 md:grid-cols-2">
+            <Section icon={<Server className="size-4" />} title="服务器与实时通道">
+              <div className="flex items-center gap-2 rounded-2xl bg-card p-2 shadow-2xs">
+                <code
+                  className="min-w-0 flex-1 truncate px-1.5 font-mono text-xs"
+                  title={baseUrl || "未配置"}
+                >
+                  {baseUrl || "未配置"}
+                </code>
+                {baseUrl && (
+                  <button
+                    type="button"
+                    onClick={() => void copyServerUrl()}
+                    className="flex size-8 shrink-0 items-center justify-center rounded-full bg-secondary text-muted-foreground transition-colors hover:text-foreground"
+                    aria-label="复制服务器地址"
+                    title="复制地址"
+                  >
+                    {copiedUrl ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
+                  </button>
+                )}
+              </div>
 
-          <Separator className="my-3" />
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span
+                    className={cn(
+                      "size-2 rounded-full",
+                      sseState === "open" ? "bg-success" : "bg-warning",
+                    )}
+                  />
+                  实时通道：{SSE_LABEL[sseState]}
+                </span>
+                <div className="flex items-center gap-1.5">
+                  {isNative() && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-9 rounded-full bg-card px-3.5 text-xs shadow-2xs sm:h-8"
+                      onClick={() => setEditingServer(true)}
+                    >
+                      修改地址
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-9 rounded-full bg-card px-3.5 text-xs shadow-2xs sm:h-8"
+                    onClick={() => void runTest()}
+                    disabled={testing || baseUrl === ""}
+                  >
+                    {testing ? <Spinner /> : <PlugZap className="size-3.5" />}
+                    测试连接
+                  </Button>
+                </div>
+              </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground">
-              实时通道：
-              <span className={sseState === "open" ? "text-success" : "text-warning"}>
-                {SSE_LABEL[sseState]}
-              </span>
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-auto"
-              onClick={() => void runTest()}
-              disabled={testing || baseUrl === ""}
-            >
-              {testing ? <Spinner /> : <PlugZap className="size-3.5" />}
-              测试连接
-            </Button>
-          </div>
-
-          {testResult && (
-            <div
-              className={
-                testResult.ok
-                  ? "mt-2 flex items-start gap-2 rounded-md bg-success/10 px-2.5 py-2 text-xs text-success"
-                  : "mt-2 flex items-start gap-2 rounded-md bg-destructive/10 px-2.5 py-2 text-xs text-destructive"
-              }
-            >
-              {testResult.ok ? (
-                <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" />
-              ) : (
-                <XCircle className="mt-0.5 size-3.5 shrink-0" />
+              {testResult && (
+                <div
+                  className={
+                    testResult.ok
+                      ? "mt-3 flex items-start gap-2 rounded-2xl bg-success/10 px-3 py-2 text-xs text-success"
+                      : "mt-3 flex items-start gap-2 rounded-2xl bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                  }
+                >
+                  {testResult.ok ? (
+                    <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" />
+                  ) : (
+                    <XCircle className="mt-0.5 size-3.5 shrink-0" />
+                  )}
+                  <span>
+                    {testResult.ok
+                      ? `连接成功 · 服务版本 ${testResult.version} · ${testResult.latencyMs} ms`
+                      : `连接失败：${testResult.message}`}
+                  </span>
+                </div>
               )}
-              <span>
-                {testResult.ok
-                  ? `连接成功 · 服务版本 ${testResult.version} · ${testResult.latencyMs} ms`
-                  : `连接失败：${testResult.message}`}
-              </span>
-            </div>
-          )}
-        </Section>
+            </Section>
 
-        <Section icon={<Link2 className="size-4" />} title="连接器">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-medium">GitHub · Gmail</p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                一次授权，三端复用；连接由服务器保存，本机不保存令牌。
+            <Section icon={<Volume2 className="size-4" />} title="外观与提示音">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[13.5px] font-medium">界面主题</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      支持浅色、深色或跟随系统切换
+                    </p>
+                  </div>
+                  <div className="inline-flex shrink-0 items-center rounded-full bg-card p-1 shadow-2xs">
+                    {(
+                      [
+                        { id: "light", label: "浅色" },
+                        { id: "dark", label: "深色" },
+                        { id: "system", label: "系统" },
+                      ] as Array<{ id: ThemeMode; label: string }>
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setThemeMode(opt.id)}
+                        className={cn(
+                          "h-7 rounded-full px-2.5 text-xs font-medium transition-colors",
+                          themeMode === opt.id
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-3 border-t border-border pt-3.5">
+                  <div className="min-w-0">
+                    <p className="text-[13.5px] font-medium">回复与授权提示音</p>
+                    <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                      需要令牌、授权完成或出错时本地合成提醒
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={!muted}
+                    onClick={() => {
+                      const willUnmute = muted;
+                      toggleSound();
+                      if (willUnmute) playCue("success");
+                    }}
+                    className="inline-flex min-h-10 shrink-0 items-center gap-2 rounded-full bg-card py-1 pl-3 pr-1.5 shadow-2xs transition-colors sm:min-h-9"
+                  >
+                    <span
+                      className={cn(
+                        "text-xs font-medium",
+                        !muted ? "text-primary" : "text-muted-foreground",
+                      )}
+                    >
+                      {!muted ? "开启" : "关闭"}
+                    </span>
+                    <span
+                      className={cn(
+                        "flex h-5 w-9 items-center rounded-full p-0.5 transition-colors",
+                        !muted ? "justify-end bg-primary" : "justify-start bg-border",
+                      )}
+                    >
+                      <span className="size-4 rounded-full bg-white shadow-xs" />
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </Section>
+
+            <Section icon={<Link2 className="size-4" />} title="连接器">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {connectedConnectors.length > 0
+                  ? `已连接 ${connectedConnectors.length} 项：${connectedConnectors.map((c) => c.name).join(" · ")}`
+                  : "尚未连接外部账号，可在连接器页按需授权。"}
               </p>
-            </div>
-            <Button variant="outline" size="sm" onClick={() => navigate("/connectors")}>
-              管理连接
-            </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-4 h-10 w-full rounded-full bg-card text-xs shadow-2xs sm:h-9"
+                onClick={() => navigate("/connectors")}
+              >
+                <Link2 className="size-3.5" />
+                管理连接器
+              </Button>
+            </Section>
+
+            <Section icon={<UserRound className="size-4" />} title="账号与客户端">
+              <dl className="space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Owner</dt>
+                  <dd className="truncate font-mono">{ownerId || "owner"}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">登录有效期至</dt>
+                  <dd className="font-mono">{expiresAt ? formatExpiry(expiresAt) : "—"}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">运行平台</dt>
+                  <dd className="inline-flex items-center gap-1">
+                    <Smartphone className="size-3 text-muted-foreground" />
+                    {platformLabel()}
+                  </dd>
+                </div>
+              </dl>
+              <Button
+                variant="destructive"
+                size="sm"
+                className="mt-4 h-10 w-full rounded-full text-xs sm:h-9"
+                onClick={() => void handleLogout()}
+                disabled={loggingOut}
+              >
+                {loggingOut ? <Spinner /> : <LogOut className="size-3.5" />}
+                退出登录
+              </Button>
+            </Section>
           </div>
-        </Section>
-
-        <Section icon={<Volume2 className="size-4" />} title="提示音">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-medium">需要令牌 / 授权完成 / 出错</p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                本地合成，不含外部音频；首次点击后才会出声。
-              </p>
-            </div>
-            <SoundToggle />
-          </div>
-        </Section>
-
-        <Section icon={<UserRound className="size-4" />} title="账号">
-          <dl className="space-y-2 text-xs">
-            <div className="flex items-center justify-between gap-3">
-              <dt className="text-muted-foreground">Owner</dt>
-              <dd className="truncate font-mono">{ownerId || "owner"}</dd>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <dt className="text-muted-foreground">登录有效期至</dt>
-              <dd className="font-mono">{expiresAt ? formatExpiry(expiresAt) : "—"}</dd>
-            </div>
-          </dl>
-          <Button
-            variant="destructive"
-            size="sm"
-            className="mt-3 w-full"
-            onClick={() => void handleLogout()}
-            disabled={loggingOut}
-          >
-            {loggingOut ? <Spinner /> : <LogOut className="size-3.5" />}
-            退出登录
-          </Button>
-        </Section>
-
-        <Section icon={<Smartphone className="size-4" />} title="关于">
-          <dl className="space-y-2 text-xs">
-            <div className="flex items-center justify-between gap-3">
-              <dt className="text-muted-foreground">客户端</dt>
-              <dd>Aster Web · v1</dd>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <dt className="text-muted-foreground">运行平台</dt>
-              <dd>{platformLabel()}</dd>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <dt className="text-muted-foreground">模型目录</dt>
-              <dd className="font-mono">/api/v1/models</dd>
-            </div>
-          </dl>
-          <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
-            单 owner 自托管。v1 不提供多用户、Hub、Live2D、头像或贴纸入口。模型选择与
-            <code className="mx-1 rounded bg-muted px-1 font-mono">$model</code>
-            共用同一套实时目录与降级策略。
-          </p>
-        </Section>
+        </div>
       </main>
 
       <Dialog open={editingServer} onOpenChange={setEditingServer}>
-        <DialogContent>
+        <DialogContent className="rounded-3xl">
           <DialogTitle className="mb-3 text-base font-semibold">修改服务器地址</DialogTitle>
           <ServerAddressForm
             initialUrl={baseUrl}

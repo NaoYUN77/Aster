@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ArrowUp, Square } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,8 @@ type ComposerProps = {
   onSend: (text: string, mode: SendMode) => Promise<boolean>;
   onStop: () => void;
   activeStatus: "queued" | "running" | null;
+  /** 输入框左下角插槽（例如内嵌模型选择器），保持 Composer 单测可独立渲染。 */
+  leftSlot?: ReactNode;
 };
 
 /** Enter = 排队，Ctrl/⌘+Enter = 立即插入，Shift+Enter = 换行。 */
@@ -48,13 +50,13 @@ export function ComposerActions({
   const showSingleSend = activeStatus !== "running";
 
   return (
-    <>
+    <div className="flex shrink-0 items-center gap-1.5">
       {activeStatus !== null && (
         <Button
           type="button"
           size="icon"
           variant="secondary"
-          className="size-9 shrink-0 rounded-full"
+          className="size-9 shrink-0 rounded-full bg-card text-foreground shadow-2xs hover:bg-accent sm:size-8"
           onClick={onStop}
           aria-label="停止回复"
           title="停止"
@@ -68,7 +70,7 @@ export function ComposerActions({
             type="button"
             size="sm"
             variant="outline"
-            className="h-9 shrink-0 rounded-full px-2.5 text-xs"
+            className="h-9 shrink-0 rounded-full bg-card px-3 text-xs shadow-2xs sm:h-8"
             disabled={disabled}
             onClick={() => onSend("queue")}
             aria-label="排队"
@@ -79,7 +81,7 @@ export function ComposerActions({
           <Button
             type="button"
             size="sm"
-            className="h-9 shrink-0 rounded-full px-2.5 text-xs"
+            className="h-9 shrink-0 rounded-full px-3 text-xs sm:h-8"
             disabled={disabled}
             onClick={() => onSend("steer")}
             aria-label="立即插入"
@@ -93,7 +95,7 @@ export function ComposerActions({
         <Button
           type="button"
           size="icon"
-          className="size-9 shrink-0 rounded-full"
+          className="size-9 shrink-0 rounded-full disabled:bg-border disabled:text-muted-foreground disabled:opacity-100 sm:size-8"
           disabled={disabled || !hasText}
           onClick={() => onSend("queue")}
           aria-label="发送"
@@ -102,20 +104,23 @@ export function ComposerActions({
           <ArrowUp className="size-4" />
         </Button>
       )}
-    </>
+    </div>
   );
 }
 
-export function Composer({ onSend, onStop, activeStatus }: ComposerProps) {
+export function Composer({ onSend, onStop, activeStatus, leftSlot }: ComposerProps) {
   const [text, setText] = useState("");
   const [pending, setPending] = useState(false);
+  const [scrollable, setScrollable] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const element = textareaRef.current;
     if (!element) return;
     element.style.height = "auto";
-    element.style.height = `${Math.min(element.scrollHeight, 160)}px`;
+    const next = Math.min(element.scrollHeight, 144);
+    element.style.height = `${next}px`;
+    setScrollable(element.scrollHeight > 144);
   }, [text]);
 
   const submit = async (requestedMode: SendMode) => {
@@ -158,49 +163,59 @@ export function Composer({ onSend, onStop, activeStatus }: ComposerProps) {
   const overLimit = text.length > MAX_CHARS;
 
   return (
-    <div className="border-t border-border/70 bg-background/90 backdrop-blur safe-bottom">
-      <div className="mx-auto w-full max-w-3xl px-3 pb-3 pt-2.5">
-        <div className="flex items-end gap-2 rounded-2xl border border-input bg-card p-2 shadow-sm transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={1}
-            placeholder={
-              activeStatus === "running"
-                ? "输入消息…（Enter 排队，Ctrl/⌘+Enter 立即插入）"
-                : "发消息…（Enter 发送，Shift+Enter 换行）"
-            }
-            className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/80"
-            aria-label="消息输入框"
-          />
+    <div className="shrink-0 bg-background safe-bottom">
+      <div className="mx-auto w-full max-w-3xl px-3 pb-3 pt-1.5 sm:px-6 sm:pb-4">
+        <div className="rounded-[24px] border border-border bg-secondary transition-all focus-within:border-primary focus-within:bg-card focus-within:ring-2 focus-within:ring-ring">
+          <div className="px-4 pb-1 pt-3 sm:pt-3.5">
+            <textarea
+              ref={textareaRef}
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              onKeyDown={handleKeyDown}
+              rows={1}
+              placeholder={
+                activeStatus === "running"
+                  ? "补充或继续发消息…"
+                  : "给 Aster 发消息…"
+              }
+              className={cn(
+                "max-h-36 min-h-[30px] w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/80",
+                scrollable ? "overflow-y-auto" : "overflow-y-hidden",
+              )}
+              aria-label="消息输入框"
+            />
+          </div>
 
-          <ComposerActions
-            activeStatus={activeStatus}
-            hasText={text.trim() !== ""}
-            disabled={pending || overLimit}
-            onStop={onStop}
-            onSend={(mode) => void submit(mode)}
-          />
+          <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
+            <div className="min-w-0 flex-1">{leftSlot}</div>
+            <ComposerActions
+              activeStatus={activeStatus}
+              hasText={text.trim() !== ""}
+              disabled={pending || overLimit}
+              onStop={onStop}
+              onSend={(mode) => void submit(mode)}
+            />
+          </div>
         </div>
 
-        <div className="mt-1 flex items-center justify-between px-1.5 text-[11px] text-muted-foreground/80">
-          <span>
-            {activeStatus === "running"
-              ? "正在回复，Enter 排队，Ctrl/⌘+Enter 立即插入"
-              : activeStatus === "queued"
-                ? "排队中，等待当前回复结束"
-                : "文本对话 · 单 owner 自托管"}
-          </span>
-          {text.length > 28_000 && (
-            <span className={cn(overLimit && "text-destructive")}>
-              {text.length.toLocaleString()} / {MAX_CHARS.toLocaleString()}
+        {(activeStatus !== null || text.length > 28_000) && (
+          <div className="mt-1.5 flex items-center justify-between px-2 text-[11px] text-muted-foreground/85">
+            <span>
+              {activeStatus === "running"
+                ? "正在回复，Enter 排队，Ctrl/⌘+Enter 立即插入"
+                : activeStatus === "queued"
+                  ? "排队中，等待当前回复结束"
+                  : ""}
             </span>
-          )}
-        </div>
+            {text.length > 28_000 && (
+              <span className={cn("font-mono", overLimit && "text-destructive")}>
+                {text.length.toLocaleString()} / {MAX_CHARS.toLocaleString()}
+              </span>
+            )}
+          </div>
+        )}
         {overLimit && (
-          <p className="mt-1 px-1.5 text-[11px] text-destructive" role="alert">
+          <p className="mt-1 px-2 text-[11px] text-destructive" role="alert">
             消息太长：最多 {MAX_CHARS.toLocaleString()} 字符，请缩短后重试
           </p>
         )}

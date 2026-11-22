@@ -6,15 +6,7 @@ import { App } from "./app/App";
 import { AppProviders } from "./app/providers";
 import { isNative } from "./lib/platform";
 import { USE_MOCK } from "./lib/env";
-
-function applyColorScheme(): void {
-  const media = window.matchMedia("(prefers-color-scheme: dark)");
-  const apply = () => {
-    document.documentElement.classList.toggle("dark", media.matches);
-  };
-  apply();
-  media.addEventListener("change", apply);
-}
+import { initTheme } from "./store/theme";
 
 async function prepareMocks(): Promise<void> {
   if (!USE_MOCK) return;
@@ -25,7 +17,7 @@ async function prepareMocks(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
-  applyColorScheme();
+  initTheme();
   try {
     await prepareMocks();
   } catch (error) {

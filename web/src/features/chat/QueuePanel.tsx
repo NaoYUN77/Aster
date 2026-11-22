@@ -43,73 +43,75 @@ export function QueuePanel({
 
   return (
     <section
-      className="border-t border-border/70 bg-muted/20"
+      className="shrink-0 bg-background"
       aria-label="等待发送的消息"
     >
-      <div className="mx-auto w-full max-w-3xl px-3 pb-2 pt-2">
-        <div className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11px] font-medium text-muted-foreground">
-          <ListOrdered className="size-3.5" />
-          队列 · {items.length} 条
-        </div>
-        <ul className="max-h-40 space-y-1 overflow-y-auto">
-          {items.map((item) => {
-            const promotingThis = promoting.includes(item.requestId);
-            const cancelling = cancellingId === item.requestId;
-            const busy = promotingThis || cancelling;
-            return (
-              <li
-                key={item.requestId}
-                className="rounded-lg border border-border/70 bg-card px-2.5 py-1.5 shadow-sm"
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className="min-w-0 flex-1 truncate text-xs text-card-foreground"
-                    title={item.text}
-                  >
-                    {item.text}
-                  </span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground/80">
-                    {formatTime(item.createdAt)}
-                  </span>
-                </div>
-                <div className="mt-1 flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                    <Clock3 className="size-3" /> 排队中
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-7 px-2 text-[11px]"
-                      disabled={!canPromote || busy}
-                      title={
-                        canPromote
-                          ? "立即插入当前对话"
-                          : "当前没有运行中的回复"
-                      }
-                      onClick={() => void onPromote(item)}
+      <div className="mx-auto w-full max-w-3xl px-3 pb-1.5 pt-1 sm:px-6">
+        <div className="rounded-2xl bg-secondary px-3 py-2">
+          <div className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11px] font-medium text-muted-foreground">
+            <ListOrdered className="size-3.5 text-primary" />
+            队列 · {items.length} 条
+          </div>
+          <ul className="max-h-40 space-y-1.5 overflow-y-auto">
+            {items.map((item) => {
+              const promotingThis = promoting.includes(item.requestId);
+              const cancelling = cancellingId === item.requestId;
+              const busy = promotingThis || cancelling;
+              return (
+                <li
+                  key={item.requestId}
+                  className="rounded-xl bg-card px-3 py-2 shadow-2xs"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="min-w-0 flex-1 truncate text-xs text-card-foreground"
+                      title={item.text}
                     >
-                      {promotingThis && <Spinner className="size-3" />}
-                      立即插入
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-[11px] text-muted-foreground"
-                      disabled={busy}
-                      onClick={() => void runCancel(item)}
-                    >
-                      {cancelling && <Spinner className="size-3" />}
-                      取消
-                    </Button>
+                      {item.text}
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground/80">
+                      {formatTime(item.createdAt)}
+                    </span>
                   </div>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                      <Clock3 className="size-3" /> 排队中
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 rounded-full px-2.5 text-[11px]"
+                        disabled={!canPromote || busy}
+                        title={
+                          canPromote
+                            ? "立即插入当前对话"
+                            : "当前没有运行中的回复"
+                        }
+                        onClick={() => void onPromote(item)}
+                      >
+                        {promotingThis && <Spinner className="size-3" />}
+                        立即插入
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 rounded-full px-2.5 text-[11px] text-muted-foreground"
+                        disabled={busy}
+                        onClick={() => void runCancel(item)}
+                      >
+                        {cancelling && <Spinner className="size-3" />}
+                        取消
+                      </Button>
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       </div>
     </section>
   );

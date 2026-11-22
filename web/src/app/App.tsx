@@ -16,6 +16,7 @@ import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
 import { useConnectionStore } from "@/store/connection";
 import { useSoundStore } from "@/store/sound";
+import { AppShell } from "./AppShell";
 import { Splash } from "./Splash";
 
 let lastUnauthorizedAt = 0;
@@ -92,10 +93,10 @@ function AuthenticatedShell() {
   }, []);
 
   return (
-    <>
+    <AppShell>
       <Outlet />
       <CredentialRequestDialog />
-    </>
+    </AppShell>
   );
 }
 
