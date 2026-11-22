@@ -1,6 +1,7 @@
 {
   "name": "aster-connector-broker",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "description": "Cloudflare Worker that brokers connector secrets and OAuth tokens for Aster.",
   "scripts": {
