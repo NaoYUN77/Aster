@@ -35,6 +35,7 @@ type AgentRuntimeOptions = Pick<
   | "approvals"
   | "hub"
   | "enableSubagents"
+  | "usageLedger"
 >;
 
 /**

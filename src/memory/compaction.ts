@@ -138,6 +138,15 @@ export type CompactionObservation = {
   readonly errorCode: MemoryErrorCode | null;
 };
 
+export type CompactionUsageObservation = {
+  readonly conversationId: ConversationId;
+  readonly provider: string;
+  readonly modelId: string;
+  readonly usage: Usage;
+  readonly stopReason: AssistantMessage["stopReason"];
+  readonly durationMs: number;
+};
+
 export type CompactionExtensionOptions = {
   readonly commit: CompactionCommitter;
   readonly model: SummaryModelRef;
@@ -145,6 +154,8 @@ export type CompactionExtensionOptions = {
   readonly facts?: SnapshotFacts | (() => SnapshotFacts | Promise<SnapshotFacts>);
   readonly maxAttempts?: number;
   readonly onResult?: (observation: CompactionObservation) => void;
+  /** Optional observer invoked after every compaction summary LLM attempt (for ADR-0007 usage ledger). */
+  readonly onUsage?: (observation: CompactionUsageObservation) => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -656,12 +667,21 @@ export function createCompactionExtension(options: CompactionExtensionOptions): 
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 5) {
     throw new MemoryError("invalid-input", "maxAttempts must be an integer in 1..5", { detail: { maxAttempts } });
   }
-  const config: Required<Omit<CompactionExtensionOptions, "onResult" | "budget" | "facts" | "maxAttempts">> & {
+  const config: Required<Omit<CompactionExtensionOptions, "onResult" | "onUsage" | "budget" | "facts" | "maxAttempts">> & {
     readonly budget: MemoryBudget;
     readonly facts: CompactionExtensionOptions["facts"];
     readonly maxAttempts: number;
     readonly onResult: CompactionExtensionOptions["onResult"];
-  } = { commit: options.commit, model: options.model, budget, facts: options.facts, maxAttempts, onResult: options.onResult };
+    readonly onUsage: CompactionExtensionOptions["onUsage"];
+  } = {
+    commit: options.commit,
+    model: options.model,
+    budget,
+    facts: options.facts,
+    maxAttempts,
+    onResult: options.onResult,
+    onUsage: options.onUsage,
+  };
 
   return defineExtension({
     name: "memory-compaction",
@@ -712,6 +732,7 @@ async function runCompaction(
     readonly budget: MemoryBudget;
     readonly facts: CompactionExtensionOptions["facts"];
     readonly maxAttempts: number;
+    readonly onUsage: CompactionExtensionOptions["onUsage"];
   },
   compaction: BeforeCompactInput,
   api: HookApi,
@@ -830,6 +851,20 @@ async function runCompaction(
     // Every attempt is real model I/O: account it before judging the result (§12.5).
     if (message.usage !== undefined) {
       await recordSummaryUsage(config.commit, conversationId, message.usage, ctx);
+      if (config.onUsage !== undefined) {
+        try {
+          config.onUsage({
+            conversationId,
+            provider: config.model.provider,
+            modelId: config.model.modelId,
+            usage: message.usage,
+            stopReason: message.stopReason,
+            durationMs: Math.max(0, Date.now() - now),
+          });
+        } catch {
+          // Usage ledger recording is best-effort observability and never blocks compaction.
+        }
+      }
     }
     if (message.stopReason === "aborted") {
       // Propagate the task's own cancellation; an abort from elsewhere is a failed attempt.

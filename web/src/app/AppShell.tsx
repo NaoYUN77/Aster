@@ -7,6 +7,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
+  BarChart3,
   Link2,
   LogOut,
   MessageCircle,
@@ -94,6 +95,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       icon: Link2,
       badge: connectedCount > 0 ? connectedCount : null,
     },
+    { path: "/usage", label: "用量", icon: BarChart3, badge: null as number | null },
     { path: "/settings", label: "设置", icon: Settings, badge: null as number | null },
   ];
 

@@ -1,21 +1,24 @@
 import { useEffect, useState } from "react";
-import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { setUnauthorizedHandler } from "@/api/client";
 import { ChatPage } from "@/features/chat/ChatPage";
 import { useChatEvents } from "@/features/chat/use-chat-events";
 import { LoginPage } from "@/features/auth/LoginPage";
 import { ConnectorsPage } from "@/features/connectors/ConnectorsPage";
-import { ApprovalRequestDialog } from "@/features/approvals/ApprovalRequestDialog";
+import { FloatingApprovalCapsule } from "@/features/approvals/FloatingApprovalCapsule";
 import { CredentialRequestDialog } from "@/features/connectors/CredentialRequestDialog";
 import { useConnectorResumeRefresh } from "@/features/connectors/use-connector-resume";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { SetupPage } from "@/features/settings/SetupPage";
+import { UsagePage } from "@/features/usage/UsagePage";
+import { initNotificationListeners } from "@/lib/notifications";
 import { platform } from "@/lib/platform";
 import { initAudioUnlock } from "@/lib/sound";
 import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
 import { useConnectionStore } from "@/store/connection";
+import { useNotificationStore } from "@/store/notifications";
 import { useSoundStore } from "@/store/sound";
 import { AppShell } from "./AppShell";
 import { Splash } from "./Splash";
@@ -84,19 +87,25 @@ function RequireAuth() {
 
 /** 登录后常驻：SSE 与安全注入弹窗在聊天/设置/连接器页之间保持。 */
 function AuthenticatedShell() {
+  const navigate = useNavigate();
   useChatEvents();
   useConnectorResumeRefresh();
 
   useEffect(() => {
     void useSoundStore.getState().hydrate();
-    // 浏览器要求首次用户手势后才能出声；这里只挂监听，不主动播放。
-    return initAudioUnlock();
-  }, []);
+    void useNotificationStore.getState().hydrate();
+    const stopAudio = initAudioUnlock();
+    const stopNotify = initNotificationListeners(() => navigate("/"));
+    return () => {
+      stopAudio();
+      stopNotify();
+    };
+  }, [navigate]);
 
   return (
     <AppShell>
       <Outlet />
-      <ApprovalRequestDialog />
+      <FloatingApprovalCapsule />
       <CredentialRequestDialog />
     </AppShell>
   );
@@ -126,6 +135,7 @@ export function App() {
       <Route element={<RequireAuth />}>
         <Route path="/" element={<ChatPage />} />
         <Route path="/connectors" element={<ConnectorsPage />} />
+        <Route path="/usage" element={<UsagePage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
       {/* RequireAuth 内部渲染 AuthenticatedShell + Outlet，两页共用同一个 SSE 连接。 */}

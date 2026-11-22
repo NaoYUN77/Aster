@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { openAgent } from "../agent.js";
 import { buildAgentOptions } from "../agent-options.js";
 import { ApprovalService } from "../approvals/index.js";
+import { UsageLedger } from "../usage/index.js";
 import { openConnectors, type OpenConnectorsResult } from "../connectors/index.js";
 import { createConnectorExtension } from "../connectors/tools.js";
 import { ConfigurationError, type readConfig, type WebConfig } from "../config.js";
@@ -62,12 +63,23 @@ export async function runWebMode(
     hub,
     shutdownSignal: signal,
   });
+  let host: WebHostDelivery | undefined;
+  const usageLedger = new UsageLedger({
+    dbPath: join(config.dataDir, "usage.sqlite"),
+    timezone: config.memory.timezone,
+    onDailyBudgetCrossed: (event) => {
+      if (host === undefined) return;
+      const text = `今日 Token 用量已达 ${event.todayTokens.toLocaleString("en-US")}，超过你设置的每日预警阈值（${event.budgetTokens.toLocaleString("en-US")}）。`;
+      void host.send("reminder", text, signal, `usage:budget:${event.date}`).catch((error: unknown) => {
+        console.error(`Daily token budget alert failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    },
+  });
   // One serialization point for the durable writer: user turns, routine runs and host messages.
   const gate = new AgentGate();
   let agent: Awaited<ReturnType<typeof openAgent>> | undefined;
   let worker: RequestWorker | undefined;
   let app: Awaited<ReturnType<typeof createWebServer>> | undefined;
-  let host: WebHostDelivery | undefined;
   let reminders: ReminderStore | undefined;
   let scheduler: ReminderScheduler | undefined;
   let watchersStore: SqliteWatchStore | undefined;
@@ -169,6 +181,7 @@ export async function runWebMode(
       signal,
       approvals,
       hub,
+      usageLedger,
       enableSubagents: true,
       onModelUsed: (event) => {
         usage.last = event;
@@ -211,6 +224,8 @@ export async function runWebMode(
       ...(connectors === undefined ? {} : { connectors: connectors.service }),
       approvals,
       ...(agent.subagents === undefined ? {} : { subagents: agent.subagents }),
+      usageLedger,
+      usageContextInfo: () => agent!.usageContextInfo(),
     });
     await app.listen({ port: web.port, host: web.host });
     worker.start();
@@ -276,6 +291,7 @@ export async function runWebMode(
       console.error(`Agent close failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     approvals.close();
+    usageLedger.close();
     store.close();
     connectors?.close();
     watchersStore?.close();

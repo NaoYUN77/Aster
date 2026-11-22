@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { obj } from "@earendil-works/pi-schema";
 import { createRegistry, defineExtension, defineTool, GenerationTask, hook, type Extension, type Registry, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -67,6 +68,8 @@ export type ToolRegistryOptions = {
   readonly approvals?: ToolApprovalHook;
   /** Optional lifecycle observer for tracking active tool execution (e.g. sub-agent status UI). */
   readonly onToolLifecycle?: (event: { readonly phase: "start" | "end"; readonly tool: string }) => void;
+  /** Optional deduped observer fired once per terminal LLM response (e.g. ADR-0007 usage ledger). */
+  readonly onGeneration?: (message: AssistantMessage, api: { readonly conversationId: string; readonly taskId: string }) => void;
 };
 
 export interface ToolRegistry extends Registry {
@@ -229,6 +232,13 @@ export function createToolRegistry(
       observed.add(message);
       // One LLM generation per terminal provider message, attached to the active agent request.
       recordGeneration(message, api);
+      if (options.onGeneration !== undefined) {
+        try {
+          options.onGeneration(message, { conversationId: String(api.conversationId), taskId: String(api.taskId) });
+        } catch (error) {
+          log(`Generation usage observer failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       if (message.stopReason !== "toolUse") return;
       for (const call of message.content) {
         if (call.type !== "toolCall") continue;

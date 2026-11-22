@@ -49,7 +49,7 @@ const FILE_WRITE_TOOLS = new Set(["write", "edit"]);
 const BENIGN_REDIRECT_TARGETS = new Set(["/dev/null", "/dev/stdout", "/dev/stderr", "NUL", "nul"]);
 
 const READONLY_SHELL_COMMANDS = new Set([
-  "ls", "ll", "dir", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "ag",
+  "cd", "ls", "ll", "dir", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "ag",
   "stat", "file", "du", "df", "which", "where", "whoami", "id", "date", "uname", "env", "printenv",
   "echo", "printf", "sort", "uniq", "cut", "tr", "awk", "jq", "tree", "realpath", "dirname",
   "basename", "readlink", "test", "[", "true", "false", "ps", "uptime",

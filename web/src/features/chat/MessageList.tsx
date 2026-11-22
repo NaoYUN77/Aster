@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import type { SseState } from "@/api/sse";
+import { MainApprovalInline } from "@/features/approvals/ApprovalActionCard";
 import { formatDayLabel } from "@/lib/time";
 import { MessageItem, TypingIndicator } from "./MessageItem";
 import type { DisplayMessage } from "./use-display-messages";
@@ -212,6 +213,7 @@ export function MessageList({
           {activeStatus === "running" && (
             <TypingIndicator modelLabel={activeModelLabel} />
           )}
+          <MainApprovalInline />
           <div className="h-1" />
         </div>
       </div>
