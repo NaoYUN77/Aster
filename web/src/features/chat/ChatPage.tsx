@@ -3,6 +3,7 @@ import { userFacingMessage } from "@/api/errors";
 import { useMobileNav } from "@/app/AppShell";
 import { ModelPicker } from "@/features/models/ModelPicker";
 import { useModelsQuery } from "@/features/models/use-models";
+import { NotificationPromptBanner } from "@/features/notifications/NotificationPromptBanner";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { useChatStore } from "@/store/chat";
 import { isSubagentActive, useSubagentStore } from "@/store/subagents";
@@ -84,6 +85,8 @@ export function ChatPage() {
           onRetryMessage={(message) => void retry(message)}
         />
       </main>
+
+      <NotificationPromptBanner />
 
       <SubagentPanel />
 

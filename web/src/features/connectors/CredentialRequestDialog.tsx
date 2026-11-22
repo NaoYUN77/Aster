@@ -161,12 +161,12 @@ export function CredentialRequestDialog() {
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="text-muted-foreground">工具</span>
-          <code className="truncate font-mono text-[11px]">{pending.tool}</code>
+          <code className="truncate font-sans text-[11px] font-medium">{pending.tool}</code>
         </div>
         {pending.accountHint && (
           <div className="flex items-center justify-between gap-3">
             <span className="text-muted-foreground">账号</span>
-            <span className="truncate font-mono text-[11px]">{pending.accountHint}</span>
+            <span className="truncate font-sans text-[11px]">{pending.accountHint}</span>
           </div>
         )}
         {pending.reason && (
@@ -181,7 +181,7 @@ export function CredentialRequestDialog() {
           <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">需要的权限</div>
           <div className="flex flex-wrap gap-1.5">
             {pending.scopes.map((scope) => (
-              <Badge key={scope} variant="outline" className="rounded-full font-mono text-[10px]">
+              <Badge key={scope} variant="outline" className="rounded-full font-sans text-[10px]">
                 {scope}
               </Badge>
             ))}
@@ -193,7 +193,7 @@ export function CredentialRequestDialog() {
         <div className="mb-1.5 flex items-center justify-between text-[11px]">
           <span className="text-muted-foreground">剩余时间</span>
           <span
-            className={cn("font-mono tabular-nums", urgent ? "text-destructive" : "text-muted-foreground")}
+            className={cn("tabular-nums", urgent ? "text-destructive" : "text-muted-foreground")}
             aria-live="polite"
           >
             {clock}
