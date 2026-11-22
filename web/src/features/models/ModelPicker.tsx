@@ -389,9 +389,9 @@ export function ModelPicker({
       variant={inComposer ? "ghost" : "outline"}
       size="sm"
       className={cn(
-        "gap-1.5 rounded-full px-3 transition-colors",
+        "gap-1 rounded-full px-2.5 transition-colors",
         inComposer
-          ? "h-9 max-w-[12rem] bg-card text-foreground/85 shadow-2xs hover:bg-accent hover:text-accent-foreground sm:h-8 sm:max-w-[15rem]"
+          ? "h-7 max-w-[12rem] bg-card text-foreground/85 shadow-2xs hover:bg-accent hover:text-accent-foreground sm:max-w-[15rem]"
           : "h-9 max-w-[13.5rem]",
       )}
       aria-label="模型选择"

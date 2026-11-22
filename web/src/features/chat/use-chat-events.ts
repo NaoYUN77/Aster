@@ -10,13 +10,13 @@ import { subscribeEvents, type ServerEvent } from "@/api/sse";
 import type { ModelsResponse } from "@/api/types";
 import { consumeLocalSelection } from "@/features/models/selection-origin";
 import { modelsQueryKey } from "@/features/models/use-models";
-import { playCue } from "@/lib/sound";
 import { useAuthStore } from "@/store/auth";
 import { useApprovalStore } from "@/store/approvals";
 import { useChatStore } from "@/store/chat";
 import { useSubagentStore } from "@/store/subagents";
 import { useConnectionStore } from "@/store/connection";
 import { useCredentialStore } from "@/store/credential";
+import { useNotificationStore } from "@/store/notifications";
 import { reduceQueue } from "./queue-state";
 
 /**
@@ -150,6 +150,13 @@ export function useChatEvents(): void {
           if (state.activeRequestId === event.requestId) {
             state.setActive(null, null, null);
           }
+          void useNotificationStore.getState().notify({
+            priority: "completion",
+            cue: "success",
+            title: "Aster 已回复",
+            body: event.message.text || "收到一条新回复",
+            tag: `reply:${event.requestId}`,
+          });
           invalidateHistory(200);
           break;
         }
@@ -157,6 +164,7 @@ export function useChatEvents(): void {
         case "request.failed": {
           const state = useChatStore.getState();
           state.updateByRequestId(event.requestId, { status: "failed" });
+          const message = errorText(event.code, event.message);
           state.setFailure(event.requestId, {
             code: event.code,
             message: event.message,
@@ -164,7 +172,14 @@ export function useChatEvents(): void {
           if (state.activeRequestId === event.requestId) {
             state.setActive(null, null, null);
           }
-          toast.error(errorText(event.code, event.message));
+          toast.error(message);
+          void useNotificationStore.getState().notify({
+            priority: "completion",
+            cue: "error",
+            title: "Aster 回复失败",
+            body: message,
+            tag: `fail:${event.requestId}`,
+          });
           invalidateHistory(200);
           break;
         }
@@ -236,11 +251,32 @@ export function useChatEvents(): void {
           break;
         }
 
+        case "host.message": {
+          useChatStore.getState().addLiveMessage(event.message);
+          void useNotificationStore.getState().notify({
+            priority: "high",
+            cue: "attention",
+            title: "Aster 提醒",
+            body: event.message.text || "收到一条新提醒",
+            tag: `host:${event.message.id}`,
+          });
+          invalidateHistory(200);
+          break;
+        }
+
         case "credential.request": {
           const credentials = useCredentialStore.getState();
           const isNew = credentials.pending?.requestId !== event.request.requestId;
           credentials.setPending(event.request);
-          if (isNew) playCue("attention");
+          if (isNew) {
+            void useNotificationStore.getState().notify({
+              priority: "high",
+              cue: "attention",
+              title: "需要凭据授权",
+              body: `${event.request.connector.name} · ${event.request.tool}`,
+              tag: `cred:${event.request.requestId}`,
+            });
+          }
           break;
         }
 
@@ -248,7 +284,19 @@ export function useChatEvents(): void {
           const approvals = useApprovalStore.getState();
           const isNew = !approvals.pending.some((item) => item.id === event.approval.id);
           approvals.upsert(event.approval);
-          if (isNew) playCue("attention");
+          if (isNew) {
+            const caller =
+              event.approval.caller.kind === "main"
+                ? "Main Agent"
+                : `Sub-agent (${event.approval.caller.subagentId})`;
+            void useNotificationStore.getState().notify({
+              priority: "high",
+              cue: "attention",
+              title: "需要你审批",
+              body: `${caller} · ${event.approval.toolName}（请进入应用查看详情）`,
+              tag: `approval:${event.approval.id}`,
+            });
+          }
           break;
         }
 
@@ -258,7 +306,27 @@ export function useChatEvents(): void {
         }
 
         case "subagent.updated": {
+          const prev = useSubagentStore
+            .getState()
+            .items.find((item) => item.id === event.subagent.id);
           useSubagentStore.getState().upsert(event.subagent);
+          const wasActive =
+            prev === undefined ||
+            prev.status === "running" ||
+            prev.status === "waiting_approval";
+          if (
+            wasActive &&
+            (event.subagent.status === "completed" || event.subagent.status === "failed")
+          ) {
+            void useNotificationStore.getState().notify({
+              priority: "completion",
+              cue: event.subagent.status === "failed" ? "error" : "success",
+              title:
+                event.subagent.status === "failed" ? "子任务执行失败" : "子任务已完成",
+              body: event.subagent.task,
+              tag: `subagent:${event.subagent.id}`,
+            });
+          }
           break;
         }
 

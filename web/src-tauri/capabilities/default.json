@@ -7,7 +7,11 @@
   ],
   "permissions": [
     "core:default",
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus",
     "store:default",
-    "opener:default"
+    "opener:default",
+    "notification:default"
   ]
 }

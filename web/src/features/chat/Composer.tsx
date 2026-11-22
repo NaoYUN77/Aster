@@ -56,12 +56,12 @@ export function ComposerActions({
           type="button"
           size="icon"
           variant="secondary"
-          className="size-9 shrink-0 rounded-full bg-card text-foreground shadow-2xs hover:bg-accent sm:size-8"
+          className="size-8 shrink-0 rounded-full bg-card text-foreground shadow-2xs hover:bg-accent sm:size-7"
           onClick={onStop}
           aria-label="停止回复"
           title="停止"
         >
-          <Square className="size-3.5 fill-current" />
+          <Square className="size-3 fill-current" />
         </Button>
       )}
       {showRunningSend && (
@@ -70,7 +70,7 @@ export function ComposerActions({
             type="button"
             size="sm"
             variant="outline"
-            className="h-9 shrink-0 rounded-full bg-card px-3 text-xs shadow-2xs sm:h-8"
+            className="h-8 shrink-0 rounded-full bg-card px-2.5 text-xs shadow-2xs sm:h-7"
             disabled={disabled}
             onClick={() => onSend("queue")}
             aria-label="排队"
@@ -81,7 +81,7 @@ export function ComposerActions({
           <Button
             type="button"
             size="sm"
-            className="h-9 shrink-0 rounded-full px-3 text-xs sm:h-8"
+            className="h-8 shrink-0 rounded-full px-2.5 text-xs sm:h-7"
             disabled={disabled}
             onClick={() => onSend("steer")}
             aria-label="立即插入"
@@ -95,13 +95,13 @@ export function ComposerActions({
         <Button
           type="button"
           size="icon"
-          className="size-9 shrink-0 rounded-full disabled:bg-border disabled:text-muted-foreground disabled:opacity-100 sm:size-8"
+          className="size-8 shrink-0 rounded-full disabled:bg-border disabled:text-muted-foreground disabled:opacity-100 sm:size-7"
           disabled={disabled || !hasText}
           onClick={() => onSend("queue")}
           aria-label="发送"
           title="发送"
         >
-          <ArrowUp className="size-4" />
+          <ArrowUp className="size-3.5" />
         </Button>
       )}
     </div>
@@ -164,9 +164,9 @@ export function Composer({ onSend, onStop, activeStatus, leftSlot }: ComposerPro
 
   return (
     <div className="shrink-0 bg-background safe-bottom">
-      <div className="mx-auto w-full max-w-3xl px-3 pb-3 pt-1.5 sm:px-6 sm:pb-4">
-        <div className="rounded-[24px] border border-border bg-secondary transition-all focus-within:border-primary focus-within:bg-card focus-within:ring-2 focus-within:ring-ring">
-          <div className="px-4 pb-1 pt-3 sm:pt-3.5">
+      <div className="mx-auto w-full max-w-3xl px-3 pb-2.5 pt-1 sm:px-6 sm:pb-3">
+        <div className="rounded-[20px] border border-border bg-secondary transition-all focus-within:border-primary focus-within:bg-card focus-within:ring-2 focus-within:ring-ring">
+          <div className="px-3.5 pb-0.5 pt-2">
             <textarea
               ref={textareaRef}
               value={text}
@@ -179,14 +179,14 @@ export function Composer({ onSend, onStop, activeStatus, leftSlot }: ComposerPro
                   : "给 Aster 发消息…"
               }
               className={cn(
-                "max-h-36 min-h-[30px] w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/80",
+                "max-h-32 min-h-[22px] w-full resize-none bg-transparent text-[14px] leading-snug outline-none placeholder:text-muted-foreground/80",
                 scrollable ? "overflow-y-auto" : "overflow-y-hidden",
               )}
               aria-label="消息输入框"
             />
           </div>
 
-          <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
+          <div className="flex items-center justify-between gap-2 px-2 pb-1.5 pt-0.5">
             <div className="min-w-0 flex-1">{leftSlot}</div>
             <ComposerActions
               activeStatus={activeStatus}

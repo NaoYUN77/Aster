@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
+  Bell,
   Check,
   CheckCircle2,
   Copy,
@@ -15,6 +16,7 @@ import {
   Volume2,
   XCircle,
 } from "lucide-react";
+import { toast } from "sonner";
 import { useMobileNav } from "@/app/AppShell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,6 +33,7 @@ import {
   useConnectionStore,
   type ConnectionTestResult,
 } from "@/store/connection";
+import { useNotificationStore } from "@/store/notifications";
 import { useSoundStore } from "@/store/sound";
 import { useThemeStore, type ThemeMode } from "@/store/theme";
 import { ServerAddressForm } from "./ServerAddressForm";
@@ -75,6 +78,11 @@ export function SettingsPage() {
   const sseState = useChatStore((state) => state.sseState);
   const muted = useSoundStore((state) => state.muted);
   const toggleSound = useSoundStore((state) => state.toggle);
+  const notifyEnabled = useNotificationStore((state) => state.enabled);
+  const notifyPermission = useNotificationStore((state) => state.permission);
+  const requestNotifyPermission = useNotificationStore((state) => state.requestPermission);
+  const setNotifyEnabled = useNotificationStore((state) => state.setEnabled);
+  const sendNotification = useNotificationStore((state) => state.notify);
   const themeMode = useThemeStore((state) => state.mode);
   const setThemeMode = useThemeStore((state) => state.setMode);
   const connectorsQuery = useConnectors();
@@ -290,6 +298,97 @@ export function SettingsPage() {
                       <span className="size-4 rounded-full bg-white shadow-xs" />
                     </span>
                   </button>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3.5">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-[13.5px] font-medium">系统提醒弹窗</p>
+                      <span className="rounded-full bg-card px-2 py-0.5 text-[11px] text-muted-foreground shadow-2xs">
+                        {notifyPermission === "granted"
+                          ? notifyEnabled
+                            ? "已开启"
+                            : "已暂停"
+                          : notifyPermission === "denied"
+                            ? "系统已拒绝"
+                            : notifyPermission === "unsupported"
+                              ? "当前不支持"
+                              : "未授权"}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                      后台或切走窗口时，在浏览器 / Windows 右下角 / 手机通知栏弹出提醒
+                    </p>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-2">
+                    {notifyPermission === "granted" ? (
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-9 rounded-full bg-card px-3 text-xs shadow-2xs sm:h-8"
+                          onClick={async () => {
+                            const ok = await sendNotification({
+                              priority: "high",
+                              cue: "attention",
+                              title: "Aster 测试提醒",
+                              body: "系统提醒弹窗与提示音已就绪，点击可回到对话页。",
+                              forceSystem: true,
+                            });
+                            if (ok) toast.success("已发送测试系统通知");
+                            else toast.info("系统通知当前处于暂停或不可用状态");
+                          }}
+                        >
+                          <Bell className="size-3.5" />
+                          测试通知
+                        </Button>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={notifyEnabled}
+                          onClick={() => setNotifyEnabled(!notifyEnabled)}
+                          className="inline-flex min-h-10 shrink-0 items-center gap-2 rounded-full bg-card py-1 pl-3 pr-1.5 shadow-2xs transition-colors sm:min-h-9"
+                        >
+                          <span
+                            className={cn(
+                              "text-xs font-medium",
+                              notifyEnabled ? "text-primary" : "text-muted-foreground",
+                            )}
+                          >
+                            {notifyEnabled ? "开启" : "关闭"}
+                          </span>
+                          <span
+                            className={cn(
+                              "flex h-5 w-9 items-center rounded-full p-0.5 transition-colors",
+                              notifyEnabled ? "justify-end bg-primary" : "justify-start bg-border",
+                            )}
+                          >
+                            <span className="size-4 rounded-full bg-white shadow-xs" />
+                          </span>
+                        </button>
+                      </>
+                    ) : notifyPermission === "default" ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-9 rounded-full px-3.5 text-xs sm:h-8"
+                        onClick={async () => {
+                          const perm = await requestNotifyPermission();
+                          if (perm === "granted") {
+                            playCue("success");
+                            toast.success("已开启系统提醒通知");
+                          } else if (perm === "denied") {
+                            toast.info("权限被拒绝，可在浏览器或系统设置中重新允许");
+                          }
+                        }}
+                      >
+                        <Bell className="size-3.5" />
+                        申请通知权限
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             </Section>

@@ -5,6 +5,8 @@ pub fn run() {
     .plugin(tauri_plugin_store::Builder::new().build())
     // 授权页交给系统默认浏览器；授权结束后不做任何关闭/跳转操作。
     .plugin(tauri_plugin_opener::init())
+    // Windows 右下角原生 Toast 通知。
+    .plugin(tauri_plugin_notification::init())
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

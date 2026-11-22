@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { setUnauthorizedHandler } from "@/api/client";
 import { ChatPage } from "@/features/chat/ChatPage";
@@ -11,11 +11,13 @@ import { CredentialRequestDialog } from "@/features/connectors/CredentialRequest
 import { useConnectorResumeRefresh } from "@/features/connectors/use-connector-resume";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { SetupPage } from "@/features/settings/SetupPage";
+import { initNotificationListeners } from "@/lib/notifications";
 import { platform } from "@/lib/platform";
 import { initAudioUnlock } from "@/lib/sound";
 import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
 import { useConnectionStore } from "@/store/connection";
+import { useNotificationStore } from "@/store/notifications";
 import { useSoundStore } from "@/store/sound";
 import { AppShell } from "./AppShell";
 import { Splash } from "./Splash";
@@ -84,14 +86,20 @@ function RequireAuth() {
 
 /** 登录后常驻：SSE 与安全注入弹窗在聊天/设置/连接器页之间保持。 */
 function AuthenticatedShell() {
+  const navigate = useNavigate();
   useChatEvents();
   useConnectorResumeRefresh();
 
   useEffect(() => {
     void useSoundStore.getState().hydrate();
-    // 浏览器要求首次用户手势后才能出声；这里只挂监听，不主动播放。
-    return initAudioUnlock();
-  }, []);
+    void useNotificationStore.getState().hydrate();
+    const stopAudio = initAudioUnlock();
+    const stopNotify = initNotificationListeners(() => navigate("/"));
+    return () => {
+      stopAudio();
+      stopNotify();
+    };
+  }, [navigate]);
 
   return (
     <AppShell>

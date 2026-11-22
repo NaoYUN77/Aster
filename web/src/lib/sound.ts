@@ -114,35 +114,42 @@ export function playCue(cue: SoundCue): void {
 
   switch (cue) {
     case "attention": {
-      // 水滴：从高到低的快速滑音，尾部留一点余韵。
+      // 清脆双音提醒：用于敏感审批、定时提醒与凭据授权（高辨识度但不刺耳）。
       tone(ctx, {
-        frequency: 1250,
-        endFrequency: 720,
+        frequency: 987.77, // B5
         startAt: now,
-        duration: 0.18,
-        gain: 0.16,
+        duration: 0.13,
+        gain: 0.14,
       });
       tone(ctx, {
-        frequency: 1800,
-        endFrequency: 1400,
-        startAt: now + 0.03,
-        duration: 0.08,
-        gain: 0.05,
-        type: "triangle",
+        frequency: 1318.51, // E6
+        startAt: now + 0.11,
+        duration: 0.22,
+        gain: 0.14,
       });
       break;
     }
     case "success": {
-      tone(ctx, { frequency: 880, startAt: now, duration: 0.1, gain: 0.12 });
+      // 柔和短促水滴音：用于回复完成、子任务结束与操作成功。
       tone(ctx, {
-        frequency: 1318.5,
-        startAt: now + 0.1,
+        frequency: 1180,
+        endFrequency: 780,
+        startAt: now,
         duration: 0.14,
         gain: 0.11,
+      });
+      tone(ctx, {
+        frequency: 1560,
+        endFrequency: 1320,
+        startAt: now + 0.025,
+        duration: 0.07,
+        gain: 0.04,
+        type: "triangle",
       });
       break;
     }
     case "error": {
+      // 温和低音提示：用于失败与告警。
       tone(ctx, {
         frequency: 220,
         endFrequency: 165,
