@@ -1,6 +1,6 @@
 # Aster
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![SQLite](https://img.shields.io/badge/SQLite-node:sqlite-003B57?logo=sqlite&logoColor=white)](https://nodejs.org/api/sqlite.html) [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/) ![MCP](https://img.shields.io/badge/MCP-pi--mcp_1.5.0-111111) [![pi-durable](https://img.shields.io/badge/pi--durable-1.5.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![SQLite](https://img.shields.io/badge/SQLite-node:sqlite-003B57?logo=sqlite&logoColor=white)](https://nodejs.org/api/sqlite.html) [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/) ![MCP](https://img.shields.io/badge/MCP-pi--mcp_1.5.0-111111) [![pi-durable](https://img.shields.io/badge/pi--durable-1.5.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-AGPL--3.0--only-blue)](LICENSE)
 
 个人 AI agent：所有者通过 **web 端**使用（Fastify REST/SSE，密码登录，单所有者）。消息在可恢复的 durable 执行环境里运行 agent 与工具，回复先落盘再经 SSE 送回。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。web/http 是唯一入口；Telegram 与 Slack 适配层已删除（决策见 [ADR 0002](docs/adr/0002-web-is-the-only-entry.md)）。
 
@@ -233,3 +233,11 @@ npm test        # 全量离线测试
 - [部署与运维手册](scripts/deploy/README.md)：镜像交付、Compose、卷备份与还原、维护命令、上线判定
 - [CI 门禁](scripts/ci/README.md)
 - [技术栈与版本基线](CLAUDE.md)
+
+## 许可
+
+从替换本仓库 `LICENSE` 的这次变更起，Aster 的第一方源代码与文档按 **GNU Affero General Public License v3.0 only** 提供（SPDX：`AGPL-3.0-only`）。完整、未经修改的许可文本见 [LICENSE](LICENSE)。不授予“或任何后续版本”的权利。
+
+在这次变更之前已经发布的历史（包括当时以 Apache License 2.0 提供的提交，以及预览版本 `v0.1.0-frontend-preview`、`android-preview-20261117-454d073`、`android-preview-20261118-f7924ce`）仍按 Apache-2.0 可用。这次变更不撤销那些已经给出的许可。
+
+第三方组件保留各自的许可。Gradle Wrapper（`web/android/gradlew`、`web/android/gradlew.bat` 与 `gradle-wrapper.jar`）仍是 Apache-2.0；依赖锁文件里记录的是依赖自己的许可，不改写成 AGPL。
