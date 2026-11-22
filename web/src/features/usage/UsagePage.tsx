@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Check,
   ChevronDown,
   ChevronRight,
   Menu,
@@ -607,6 +608,99 @@ function ContextInspectorCard({
   );
 }
 
+function FilterDropdown<T extends string>({
+  ariaLabel,
+  value,
+  options,
+  onChange,
+  maxWidthClass,
+}: {
+  ariaLabel: string;
+  value: T;
+  options: readonly { value: T; label: string }[];
+  onChange: (next: T) => void;
+  maxWidthClass?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const currentLabel = options.find((opt) => opt.value === value)?.label ?? value;
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "inline-flex h-8 items-center justify-between gap-1.5 rounded-lg border border-border/80 bg-card px-2.5 text-xs font-medium leading-none text-foreground transition-colors hover:bg-secondary/70 focus:border-primary focus:outline-none",
+          maxWidthClass,
+        )}
+      >
+        <span className="truncate">{currentLabel}</span>
+        <ChevronDown
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground transition-transform duration-150",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+
+      {open && (
+        <div
+          role="listbox"
+          aria-label={ariaLabel}
+          className="absolute right-0 z-30 mt-1.5 min-w-[144px] max-w-[240px] rounded-xl border border-border/80 bg-popover p-1 shadow-lg"
+        >
+          {options.map((opt) => {
+            const active = opt.value === value;
+            return (
+              <button
+                key={opt.value || "__all__"}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => {
+                  onChange(opt.value);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors",
+                  active
+                    ? "bg-secondary font-medium text-foreground"
+                    : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
+                )}
+              >
+                <span className="truncate">{opt.label}</span>
+                {active && <Check className="size-3.5 shrink-0 text-primary" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function UsagePage() {
   const { openMobileNav } = useMobileNav();
   const queryClient = useQueryClient();
@@ -736,60 +830,48 @@ export function UsagePage() {
 
           {/* Right Filter Controls (Range / Model / Source / Refresh) */}
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              aria-label="统计周期"
+            <FilterDropdown
+              ariaLabel="统计周期"
               value={range}
-              onChange={(event) => {
-                setRange(event.target.value as UsageRange);
+              options={RANGE_OPTIONS}
+              onChange={(next) => {
+                setRange(next);
                 setSelectedCallId(null);
               }}
-              className="h-8 rounded-lg border border-border/80 bg-card px-2.5 text-xs font-medium text-foreground focus:border-primary focus:outline-none"
-            >
-              {RANGE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+            />
 
-            <select
-              aria-label="按模型筛选"
+            <FilterDropdown
+              ariaLabel="按模型筛选"
               value={modelFilter}
-              onChange={(event) => {
-                setModelFilter(event.target.value);
+              maxWidthClass="max-w-[168px]"
+              options={[
+                { value: "", label: "全部模型" },
+                ...(data?.availableModels ?? []).map((m) => ({
+                  value: m.modelId,
+                  label: m.modelId,
+                })),
+              ]}
+              onChange={(next) => {
+                setModelFilter(next);
                 setSelectedCallId(null);
               }}
-              className="h-8 max-w-[160px] truncate rounded-lg border border-border/80 bg-card px-2.5 text-xs font-medium text-foreground focus:border-primary focus:outline-none"
-            >
-              <option value="">全部模型</option>
-              {(data?.availableModels ?? []).map((m) => (
-                <option key={`${m.provider}/${m.modelId}`} value={m.modelId}>
-                  {m.modelId}
-                </option>
-              ))}
-            </select>
+            />
 
-            <select
-              aria-label="按来源筛选"
+            <FilterDropdown
+              ariaLabel="按来源筛选"
               value={sourceFilter}
-              onChange={(event) => {
-                setSourceFilter(event.target.value as "" | UsageSource);
+              options={SOURCE_FILTER_OPTIONS}
+              onChange={(next) => {
+                setSourceFilter(next);
                 setSelectedCallId(null);
               }}
-              className="h-8 rounded-lg border border-border/80 bg-card px-2.5 text-xs font-medium text-foreground focus:border-primary focus:outline-none"
-            >
-              {SOURCE_FILTER_OPTIONS.map((opt) => (
-                <option key={opt.value || "all"} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+            />
 
             <button
               type="button"
               onClick={() => void usageQuery.refetch()}
               disabled={usageQuery.isFetching}
-              className="flex size-8 items-center justify-center rounded-lg border border-border/80 bg-card text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+              className="flex size-8 items-center justify-center rounded-lg border border-border/80 bg-card text-muted-foreground transition-colors hover:bg-secondary/70 hover:text-foreground disabled:opacity-50"
               aria-label="刷新用量"
               title="刷新用量"
             >
@@ -827,8 +909,8 @@ export function UsagePage() {
             </div>
           ) : (
             <>
-              {/* Row 1: 3 Open Borderless Typographic KPIs */}
-              <section className="grid grid-cols-1 gap-6 sm:grid-cols-3">
+              {/* Row 1: 4 Open Borderless Typographic KPIs */}
+              <section className="grid grid-cols-2 gap-6 lg:grid-cols-4">
                 <div>
                   <div className="text-xs text-muted-foreground">估算费用</div>
                   <div
@@ -843,7 +925,7 @@ export function UsagePage() {
                   </div>
                   <p className="mt-1.5 text-xs text-muted-foreground">
                     {data.totals.costUsd !== null
-                      ? "费用仅 API 计价估算，不代表订阅剩余额度"
+                      ? "仅 API 计价估算，不代表订阅额度"
                       : "上游未返回计费元数据"}
                   </p>
                 </div>
@@ -855,10 +937,27 @@ export function UsagePage() {
                     <span className="font-normal text-muted-foreground">/</span>{" "}
                     {formatCompactTokens(data.totals.outputTokens)}
                   </div>
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    输入已含缓存读取，图中不再重复堆叠
+                  </p>
+                </div>
+
+                <div>
+                  <div className="text-xs text-muted-foreground">缓存命中</div>
+                  <div
+                    className={cn(
+                      "mt-1.5 text-2xl font-semibold tracking-tight tabular-nums sm:text-[28px]",
+                      data.totals.cacheHitRate !== null
+                        ? "text-success"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    {formatPercent(data.totals.cacheHitRate)}
+                  </div>
                   <p className="mt-1.5 text-xs text-muted-foreground tabular-nums">
-                    {data.totals.cacheHitRate !== null
-                      ? `输入已含缓存读取（命中 ${formatPercent(data.totals.cacheHitRate)}），图中不再单独堆叠`
-                      : "输入已含缓存读取，图中不再单独堆叠"}
+                    {data.totals.cacheReadTokens > 0
+                      ? `命中 ${formatCompactTokens(data.totals.cacheReadTokens)}，降低重复输入开销`
+                      : "该时段暂无缓存命中"}
                   </p>
                 </div>
 
@@ -868,7 +967,7 @@ export function UsagePage() {
                     {data.totals.calls}
                   </div>
                   <p className="mt-1.5 text-xs text-muted-foreground">
-                    {formatRangeLabel(range)}内的请求次数，含子任务与后台整理
+                    {formatRangeLabel(range)}内的请求次数，含子任务
                   </p>
                 </div>
               </section>
