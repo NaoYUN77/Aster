@@ -218,7 +218,7 @@ export function ApprovalCapsuleItem({
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-2xl border border-warning/30 bg-card shadow-sm transition-all",
+        "overflow-hidden rounded-2xl border border-border/80 bg-card shadow-sm transition-all",
         className,
       )}
     >

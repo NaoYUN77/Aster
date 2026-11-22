@@ -198,12 +198,7 @@ export function SubagentPanel() {
   return (
     <section className="shrink-0 bg-background" aria-label="运行中的子任务">
       <div className="mx-auto w-full max-w-3xl px-3 pb-1.5 pt-1 sm:px-6">
-        <div
-          className={cn(
-            "overflow-hidden rounded-2xl border bg-secondary/85 transition-all",
-            totalSubagentApprovals > 0 ? "border-warning/35" : "border-border/80",
-          )}
-        >
+        <div className="overflow-hidden rounded-2xl border border-border/80 bg-secondary/85 transition-all">
           <button
             type="button"
             onClick={() => setExpanded((prev) => !prev)}
@@ -259,10 +254,7 @@ export function SubagentPanel() {
                 return (
                   <li
                     key={item.id}
-                    className={cn(
-                      "rounded-xl bg-card px-3 py-2 text-xs shadow-2xs transition-colors",
-                      hasRowApproval && "ring-1 ring-warning/25",
-                    )}
+                    className="rounded-xl bg-card px-3 py-2 text-xs shadow-2xs transition-colors"
                   >
                     <div className="flex items-center justify-between gap-2.5">
                       <div className="flex min-w-0 flex-1 items-center gap-2">
