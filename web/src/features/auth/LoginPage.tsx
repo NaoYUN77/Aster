@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
-import { Asterisk, Eye, EyeOff, LockKeyhole } from "lucide-react";
+import { Eye, EyeOff, LockKeyhole } from "lucide-react";
+import asterIdleUrl from "@/assets/companion/aster-idle.png";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
@@ -57,22 +58,25 @@ export function LoginPage() {
 
       <div className="relative w-full max-w-sm">
         <div className="mb-6 flex flex-col items-center text-center">
-          <div className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-lg shadow-primary/20">
-            <Asterisk className="size-6" strokeWidth={2.5} />
-          </div>
-          <h1 className="text-xl font-semibold tracking-tight">Aster</h1>
-          <p className="mt-1 text-sm text-muted-foreground">单 owner 自托管聊天</p>
+          <img
+            src={asterIdleUrl}
+            alt="Aster"
+            className="mb-3 size-20 select-none object-contain"
+            draggable={false}
+          />
+          <h1 className="text-2xl font-semibold tracking-tight">Aster</h1>
+          <p className="mt-1 text-xs text-muted-foreground">随时在线的个人助手</p>
         </div>
 
         <form
           onSubmit={submit}
-          className="rounded-2xl border border-border bg-card p-5 shadow-xl shadow-black/5 dark:shadow-black/30"
+          className="rounded-3xl bg-secondary p-5"
         >
           <label htmlFor="password" className="mb-1.5 block text-xs font-medium text-muted-foreground">
             密码
           </label>
           <div className="relative">
-            <LockKeyhole className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/70" />
+            <LockKeyhole className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/70" />
             <Input
               id="password"
               type={showPassword ? "text" : "password"}
@@ -81,13 +85,13 @@ export function LoginPage() {
               placeholder="输入访问密码"
               autoComplete="current-password"
               autoFocus
-              className="pl-9 pr-10"
+              className="h-11 rounded-2xl bg-card pl-10 pr-11"
               disabled={pending}
             />
             <button
               type="button"
               onClick={() => setShowPassword((value) => !value)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              className="absolute right-1 top-1/2 flex size-9 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
               aria-label={showPassword ? "隐藏密码" : "显示密码"}
             >
               {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
@@ -95,18 +99,18 @@ export function LoginPage() {
           </div>
 
           {error && (
-            <p className="mt-2.5 rounded-md bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
+            <p className="mt-2.5 rounded-xl bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error}
             </p>
           )}
 
-          <Button type="submit" className="mt-4 w-full" disabled={pending || password === ""}>
+          <Button type="submit" className="mt-4 h-11 w-full rounded-full" disabled={pending || password === ""}>
             {pending ? <Spinner /> : null}
             {pending ? "登录中…" : "登录"}
           </Button>
 
           {USE_MOCK && (
-            <p className="mt-3 rounded-md bg-warning/10 px-2.5 py-1.5 text-center text-[11px] leading-relaxed text-warning">
+            <p className="mt-3 rounded-xl bg-warning/10 px-3 py-2 text-center text-[11px] leading-relaxed text-warning">
               Mock 模式：密码为 <code className="font-mono">{MOCK_PASSWORD}</code>
               ，未连接真实后端。
             </p>
