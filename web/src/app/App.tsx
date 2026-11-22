@@ -6,7 +6,7 @@ import { ChatPage } from "@/features/chat/ChatPage";
 import { useChatEvents } from "@/features/chat/use-chat-events";
 import { LoginPage } from "@/features/auth/LoginPage";
 import { ConnectorsPage } from "@/features/connectors/ConnectorsPage";
-import { ApprovalRequestDialog } from "@/features/approvals/ApprovalRequestDialog";
+import { FloatingApprovalCapsule } from "@/features/approvals/FloatingApprovalCapsule";
 import { CredentialRequestDialog } from "@/features/connectors/CredentialRequestDialog";
 import { useConnectorResumeRefresh } from "@/features/connectors/use-connector-resume";
 import { SettingsPage } from "@/features/settings/SettingsPage";
@@ -104,7 +104,7 @@ function AuthenticatedShell() {
   return (
     <AppShell>
       <Outlet />
-      <ApprovalRequestDialog />
+      <FloatingApprovalCapsule />
       <CredentialRequestDialog />
     </AppShell>
   );

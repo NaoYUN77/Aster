@@ -765,19 +765,37 @@ export function mockTriggerSubagentDemo(): void {
     startedAt: now - 14_000,
     finishedAt: null,
   };
+  const subAprId = `apr_sub_demo_${now.toString(36)}`;
+  const subApproval = {
+    id: subAprId,
+    status: "pending",
+    caller: { kind: "subagent", subagentId: sub2.id, task: sub2.task },
+    toolName: "write",
+    args: { path: "sub-test.txt", content: "hello from sub-agent" },
+    rule: "subagent_write_escalation",
+    reason: "Sub-agent (sub_demo_write) 未获得工作区写权限或写锁，尝试执行 write",
+    categoryKey: "subagent:write:write_escalation",
+    summary: "write (subagent sub_demo_write)",
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 30 * 60_000).toISOString(),
+    resolvedAt: null,
+    decisionReason: null,
+  };
   mockSubagents.set(sub1.id, sub1);
   mockSubagents.set(sub2.id, sub2);
+  mockApprovals.set(subAprId, subApproval);
   emit("subagent.updated", sub1);
   emit("subagent.updated", sub2);
+  emit("approval.requested", subApproval);
 }
 
 export function mockTriggerApprovalDemo(): void {
   const now = Date.now();
-  const id = `apr_demo_${now.toString(36)}`;
+  const id = `apr_main_demo_${now.toString(36)}`;
   const approval = {
     id,
     status: "pending",
-    caller: { kind: "subagent", subagentId: "sub_demo_write", task: "修复测试断言并生成 sub-test.txt" },
+    caller: { kind: "main", conversationId: "1" },
     toolName: "bash",
     args: { command: "echo hello > /tmp/aster-e2e-escape.txt" },
     rule: "workspace_escape",
@@ -831,6 +849,15 @@ export function mockResolveApproval(
   };
   mockApprovals.delete(id);
   emit("approval.resolved", updated);
+  const caller = item.caller as { kind?: string; subagentId?: string } | undefined;
+  if (caller?.kind === "subagent" && caller.subagentId) {
+    const sub = mockSubagents.get(caller.subagentId);
+    if (sub && sub.status === "waiting_approval") {
+      const nextSub = { ...sub, status: "running" as const };
+      mockSubagents.set(sub.id, nextSub);
+      emit("subagent.updated", nextSub);
+    }
+  }
   return { ok: true, approval: updated };
 }
 

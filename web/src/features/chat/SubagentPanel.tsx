@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
+import type { ApprovalRequestView } from "@/api/approvals";
 import { errorText, toApiError } from "@/api/errors";
 import { cancelSubagent, type SubagentSnapshot } from "@/api/subagents";
 import { Spinner } from "@/components/ui/spinner";
+import { ApprovalActionBody, useCountdownClock } from "@/features/approvals/ApprovalActionCard";
 import { cn } from "@/lib/utils";
+import { useApprovalStore } from "@/store/approvals";
 import { isSubagentActive, useSubagentStore } from "@/store/subagents";
 
 function formatElapsed(startedAt: number, finishedAt: number | null, now: number): string {
@@ -30,28 +33,132 @@ function statusMeta(item: SubagentSnapshot): { label: string; dotClass: string }
   }
 }
 
+function SubagentInlineApprovalDrawer({
+  approvals,
+  onResolved,
+}: {
+  approvals: ApprovalRequestView[];
+  onResolved: () => void;
+}) {
+  const [idx, setIdx] = useState(0);
+  const safeIdx = approvals.length === 0 ? 0 : Math.min(idx, approvals.length - 1);
+  const current = approvals[safeIdx] ?? null;
+  const { clock, urgent } = useCountdownClock(current?.expiresAt ?? null);
+
+  if (!current) return null;
+
+  return (
+    <div className="mt-2 border-t border-border/70 pt-2.5">
+      <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span className="font-medium text-warning">待你确认敏感操作</span>
+        <div className="flex items-center gap-1.5">
+          {approvals.length > 1 && (
+            <span className="inline-flex items-center gap-0.5 rounded-full bg-secondary px-1.5 py-0.5 tabular-nums">
+              <button
+                type="button"
+                aria-label="上一条审批"
+                onClick={() => setIdx((prev) => (prev - 1 + approvals.length) % approvals.length)}
+                className="rounded-full p-0.5 hover:bg-card hover:text-foreground"
+              >
+                <ChevronLeft className="size-3" />
+              </button>
+              <span>
+                {safeIdx + 1} / {approvals.length}
+              </span>
+              <button
+                type="button"
+                aria-label="下一条审批"
+                onClick={() => setIdx((prev) => (prev + 1) % approvals.length)}
+                className="rounded-full p-0.5 hover:bg-card hover:text-foreground"
+              >
+                <ChevronRight className="size-3" />
+              </button>
+            </span>
+          )}
+          <span
+            className={cn(
+              "font-mono tabular-nums",
+              urgent ? "font-medium text-destructive" : "text-muted-foreground",
+            )}
+          >
+            剩余 {clock}
+          </span>
+        </div>
+      </div>
+      <ApprovalActionBody approval={current} onResolved={onResolved} />
+    </div>
+  );
+}
+
 /**
- * Meta Muse 风格 Sub-agent 折叠胶囊条：
+ * Meta Muse 风格 Sub-agent 折叠胶囊条（集成 Sub-agent 行内非阻塞审批）：
  * - 位于输入框上方（QueuePanel 之上），平时默认收起为单行轻汇总胶囊；
  * - 点击展开每条 Sub-agent 的任务、状态、当前工具、实时耗时与一键中止；
+ * - 若某条 Sub-agent 存在待审批敏感操作，点击其「待审批」标签即可在该行下方就地展开审批卡片，不额外占第三条胶囊、也不阻塞对话；
  * - 全部子任务结束后保留 3 秒完成态回执后由 store 自动收起隐藏。
  */
 export function SubagentPanel() {
-  const items = useSubagentStore((state) => state.items);
+  const storeItems = useSubagentStore((state) => state.items);
+  const pendingApprovals = useApprovalStore((state) => state.pending);
+
   const [expanded, setExpanded] = useState(false);
+  const [openApprovalSubId, setOpenApprovalSubId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
-  const activeItems = items.filter(isSubagentActive);
+  // 按 subagentId 分组待审批请求；如果某条 Sub-agent 审批早于 subagent.updated 到达，则合成兜底展示行避免丢失。
+  const approvalsBySubId = new Map<string, ApprovalRequestView[]>();
+  for (const apr of pendingApprovals) {
+    if (apr.caller.kind !== "subagent") continue;
+    const list = approvalsBySubId.get(apr.caller.subagentId) ?? [];
+    list.push(apr);
+    approvalsBySubId.set(apr.caller.subagentId, list);
+  }
+
+  const mergedItems: SubagentSnapshot[] = storeItems.map((item) => {
+    const hasPendingApr = (approvalsBySubId.get(item.id)?.length ?? 0) > 0;
+    if (hasPendingApr && item.status === "running") {
+      return { ...item, status: "waiting_approval" };
+    }
+    return item;
+  });
+
+  const knownIds = new Set(mergedItems.map((item) => item.id));
+  for (const [subagentId, aprs] of approvalsBySubId.entries()) {
+    if (knownIds.has(subagentId)) continue;
+    const first = aprs[0]!;
+    if (first.caller.kind !== "subagent") continue;
+    mergedItems.push({
+      id: subagentId,
+      task: first.caller.task,
+      status: "waiting_approval",
+      currentTool: first.toolName,
+      startedAt: Date.parse(first.createdAt) || Date.now(),
+      finishedAt: null,
+    });
+  }
+
+  const activeItems = mergedItems.filter(isSubagentActive);
   const hasActive = activeItems.length > 0;
-  const waitingApprovalCount = activeItems.filter((item) => item.status === "waiting_approval").length;
+  const totalSubagentApprovals = [...approvalsBySubId.values()].reduce(
+    (sum, list) => sum + list.length,
+    0,
+  );
 
   useEffect(() => {
-    if (items.length === 0) {
+    if (mergedItems.length === 0) {
       setExpanded(false);
+      setOpenApprovalSubId(null);
       setCancellingId(null);
     }
-  }, [items.length]);
+  }, [mergedItems.length]);
+
+  useEffect(() => {
+    if (openApprovalSubId && (approvalsBySubId.get(openApprovalSubId)?.length ?? 0) === 0) {
+      setOpenApprovalSubId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingApprovals, openApprovalSubId]);
 
   useEffect(() => {
     if (!hasActive) return;
@@ -59,18 +166,18 @@ export function SubagentPanel() {
     return () => window.clearInterval(timer);
   }, [hasActive]);
 
-  if (items.length === 0) return null;
+  if (mergedItems.length === 0) return null;
 
-  const earliestStart = Math.min(...items.map((item) => item.startedAt));
+  const earliestStart = Math.min(...mergedItems.map((item) => item.startedAt));
   const latestFinish = hasActive
     ? null
-    : Math.max(...items.map((item) => item.finishedAt ?? now));
+    : Math.max(...mergedItems.map((item) => item.finishedAt ?? now));
 
   const summaryText = hasActive
     ? `${activeItems.length} 个子任务运行中`
-    : items.every((item) => item.status === "completed")
-      ? `${items.length} 个子任务已完成`
-      : `${items.length} 个子任务已结束`;
+    : mergedItems.every((item) => item.status === "completed")
+      ? `${mergedItems.length} 个子任务已完成`
+      : `${mergedItems.length} 个子任务已结束`;
 
   const handleCancel = async (item: SubagentSnapshot) => {
     if (cancellingId !== null) return;
@@ -91,7 +198,12 @@ export function SubagentPanel() {
   return (
     <section className="shrink-0 bg-background" aria-label="运行中的子任务">
       <div className="mx-auto w-full max-w-3xl px-3 pb-1.5 pt-1 sm:px-6">
-        <div className="overflow-hidden rounded-2xl border border-border/80 bg-secondary/85 transition-all">
+        <div
+          className={cn(
+            "overflow-hidden rounded-2xl border bg-secondary/85 transition-all",
+            totalSubagentApprovals > 0 ? "border-warning/35" : "border-border/80",
+          )}
+        >
           <button
             type="button"
             onClick={() => setExpanded((prev) => !prev)}
@@ -100,17 +212,23 @@ export function SubagentPanel() {
           >
             <div className="flex min-w-0 items-center gap-2">
               {hasActive ? (
-                <span className="size-2 shrink-0 rounded-full bg-primary animate-pulse" aria-hidden />
+                <span
+                  className={cn(
+                    "size-2 shrink-0 rounded-full animate-pulse",
+                    totalSubagentApprovals > 0 ? "bg-warning" : "bg-primary",
+                  )}
+                  aria-hidden
+                />
               ) : (
                 <Check className="size-3.5 shrink-0 text-success" aria-hidden />
               )}
               <span className="truncate font-medium text-foreground">{summaryText}</span>
-              {waitingApprovalCount > 0 && (
+              {totalSubagentApprovals > 0 && (
                 <>
                   <span className="text-muted-foreground/50">·</span>
                   <span className="inline-flex shrink-0 items-center gap-1 font-medium text-warning whitespace-nowrap">
                     <span className="size-1.5 rounded-full bg-warning" aria-hidden />
-                    {waitingApprovalCount} 待审批
+                    {totalSubagentApprovals} 待审批
                   </span>
                 </>
               )}
@@ -129,59 +247,103 @@ export function SubagentPanel() {
           </button>
 
           {expanded && (
-            <ul className="max-h-48 space-y-1.5 overflow-y-auto px-2 pb-2">
-              {items.map((item) => {
+            <ul className="max-h-[340px] space-y-1.5 overflow-y-auto px-2 pb-2">
+              {mergedItems.map((item) => {
                 const meta = statusMeta(item);
                 const active = isSubagentActive(item);
                 const cancelling = cancellingId === item.id;
+                const rowApprovals = approvalsBySubId.get(item.id) ?? [];
+                const hasRowApproval = rowApprovals.length > 0;
+                const approvalOpen = openApprovalSubId === item.id && hasRowApproval;
+
                 return (
                   <li
                     key={item.id}
-                    className="flex items-center justify-between gap-2.5 rounded-xl bg-card px-3 py-2 text-xs shadow-2xs"
+                    className={cn(
+                      "rounded-xl bg-card px-3 py-2 text-xs shadow-2xs transition-colors",
+                      hasRowApproval && "ring-1 ring-warning/25",
+                    )}
                   >
-                    <div className="flex min-w-0 flex-1 items-center gap-2">
-                      {item.status === "completed" ? (
-                        <Check className="size-3.5 shrink-0 text-success" aria-hidden />
-                      ) : (
+                    <div className="flex items-center justify-between gap-2.5">
+                      <div className="flex min-w-0 flex-1 items-center gap-2">
+                        {item.status === "completed" ? (
+                          <Check className="size-3.5 shrink-0 text-success" aria-hidden />
+                        ) : (
+                          <span
+                            className={cn("size-1.5 shrink-0 rounded-full", meta.dotClass)}
+                            aria-hidden
+                          />
+                        )}
                         <span
-                          className={cn("size-1.5 shrink-0 rounded-full", meta.dotClass)}
-                          aria-hidden
-                        />
-                      )}
-                      <span className="min-w-0 truncate text-card-foreground" title={item.task}>
-                        {item.task}
-                      </span>
-                      {item.status === "waiting_approval" ? (
-                        <span className="shrink-0 rounded-md bg-warning/15 px-1.5 py-0.5 text-[11px] font-medium text-warning whitespace-nowrap">
-                          待审批
+                          className="min-w-0 truncate text-card-foreground"
+                          title={item.task}
+                        >
+                          {item.task}
                         </span>
-                      ) : item.currentTool ? (
-                        <span className="shrink-0 rounded-md bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground whitespace-nowrap">
-                          {item.currentTool}
+                        {hasRowApproval ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenApprovalSubId((prev) =>
+                                prev === item.id ? null : item.id,
+                              )
+                            }
+                            aria-expanded={approvalOpen}
+                            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-[11px] font-medium text-warning transition-colors hover:bg-warning/25 whitespace-nowrap"
+                          >
+                            <span>
+                              {approvalOpen
+                                ? "收起审批"
+                                : rowApprovals.length > 1
+                                  ? `待审批 (${rowApprovals.length})`
+                                  : "待审批"}
+                            </span>
+                            <ChevronDown
+                              className={cn(
+                                "size-3 transition-transform duration-200",
+                                approvalOpen && "rotate-180",
+                              )}
+                            />
+                          </button>
+                        ) : item.status === "waiting_approval" ? (
+                          <span className="shrink-0 rounded-md bg-warning/15 px-1.5 py-0.5 text-[11px] font-medium text-warning whitespace-nowrap">
+                            待审批
+                          </span>
+                        ) : item.currentTool ? (
+                          <span className="shrink-0 rounded-md bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground whitespace-nowrap">
+                            {item.currentTool}
+                          </span>
+                        ) : !active ? (
+                          <span className="shrink-0 text-[11px] text-muted-foreground whitespace-nowrap">
+                            {meta.label}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                          {formatElapsed(item.startedAt, item.finishedAt, now)}
                         </span>
-                      ) : !active ? (
-                        <span className="shrink-0 text-[11px] text-muted-foreground whitespace-nowrap">
-                          {meta.label}
-                        </span>
-                      ) : null}
+                        {active && (
+                          <button
+                            type="button"
+                            disabled={cancellingId !== null}
+                            onClick={() => void handleCancel(item)}
+                            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+                          >
+                            {cancelling && <Spinner className="size-3" />}
+                            中止
+                          </button>
+                        )}
+                      </div>
                     </div>
 
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
-                        {formatElapsed(item.startedAt, item.finishedAt, now)}
-                      </span>
-                      {active && (
-                        <button
-                          type="button"
-                          disabled={cancellingId !== null}
-                          onClick={() => void handleCancel(item)}
-                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
-                        >
-                          {cancelling && <Spinner className="size-3" />}
-                          中止
-                        </button>
-                      )}
-                    </div>
+                    {approvalOpen && (
+                      <SubagentInlineApprovalDrawer
+                        approvals={rowApprovals}
+                        onResolved={() => setOpenApprovalSubId(null)}
+                      />
+                    )}
                   </li>
                 );
               })}
