@@ -14,6 +14,7 @@ import { playCue } from "@/lib/sound";
 import { useAuthStore } from "@/store/auth";
 import { useApprovalStore } from "@/store/approvals";
 import { useChatStore } from "@/store/chat";
+import { useSubagentStore } from "@/store/subagents";
 import { useConnectionStore } from "@/store/connection";
 import { useCredentialStore } from "@/store/credential";
 import { reduceQueue } from "./queue-state";
@@ -98,6 +99,9 @@ export function useChatEvents(): void {
           }
           if (event.pendingApprovals !== undefined) {
             useApprovalStore.getState().setAll(event.pendingApprovals);
+          }
+          if (event.activeSubagents !== undefined) {
+            useSubagentStore.getState().setAll(event.activeSubagents);
           }
           break;
         }
@@ -250,6 +254,11 @@ export function useChatEvents(): void {
 
         case "approval.resolved": {
           useApprovalStore.getState().remove(event.approval.id);
+          break;
+        }
+
+        case "subagent.updated": {
+          useSubagentStore.getState().upsert(event.subagent);
           break;
         }
 

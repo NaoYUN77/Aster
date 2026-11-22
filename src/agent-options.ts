@@ -33,6 +33,7 @@ type AgentRuntimeOptions = Pick<
   | "onModelUsed"
   | "onModelSelectionChanged"
   | "approvals"
+  | "hub"
   | "enableSubagents"
 >;
 

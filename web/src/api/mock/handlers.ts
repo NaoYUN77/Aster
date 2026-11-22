@@ -3,6 +3,7 @@ import {
   mockAbort,
   mockActiveRequest,
   mockAuthorized,
+  mockCancelSubagent,
   mockConnectors,
   mockCreateConnector,
   mockDeleteConnector,
@@ -11,6 +12,7 @@ import {
   mockMessages,
   mockModels,
   mockRequestCredential,
+  mockResolveApproval,
   mockSelectModel,
   mockSendMessage,
   mockSnapshot,
@@ -201,6 +203,29 @@ export const handlers = [
     const result = mockRequestCredential(connectorId);
     if ("error" in result) return apiError(result.error, "连接器不存在", 404);
     return HttpResponse.json(result, { status: 202 });
+  }),
+
+  http.post(`${API}/subagents/:subagentId/cancel`, async ({ request, params }) => {
+    await delay(120);
+    if (!authorized(request)) return unauthorized();
+    const id = String(params.subagentId ?? "");
+    const outcome = mockCancelSubagent(id);
+    if (!outcome.ok) return apiError("SUBAGENT_NOT_FOUND", "没有找到该子任务", 404);
+    return HttpResponse.json({ id, status: outcome.status });
+  }),
+
+  http.post(`${API}/approvals/:approvalId/resolve`, async ({ request, params }) => {
+    await delay(120);
+    if (!authorized(request)) return unauthorized();
+    const id = String(params.approvalId ?? "");
+    const body = (await request.json().catch(() => null)) as {
+      decision?: "approve_once" | "approve_similar" | "deny";
+      reason?: string;
+    } | null;
+    if (!body?.decision) return apiError("INVALID_REQUEST", "无效的审批决定", 400);
+    const outcome = mockResolveApproval(id, body.decision, body.reason);
+    if (!outcome.ok) return apiError("APPROVAL_NOT_FOUND", "没有找到该审批请求", 404);
+    return HttpResponse.json({ approval: outcome.approval });
   }),
 
   http.get(`${API}/events`, async ({ request }) => {

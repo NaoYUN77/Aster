@@ -65,6 +65,8 @@ export type ToolRegistryOptions = {
   readonly log?: (line: string) => void;
   /** Optional runtime human-in-the-loop approval hook for sensitive operations (ADR-0006). */
   readonly approvals?: ToolApprovalHook;
+  /** Optional lifecycle observer for tracking active tool execution (e.g. sub-agent status UI). */
+  readonly onToolLifecycle?: (event: { readonly phase: "start" | "end"; readonly tool: string }) => void;
 };
 
 export interface ToolRegistry extends Registry {
@@ -302,7 +304,15 @@ export function createToolRegistry(
           taskId: api.taskId,
           ...(api.callId === undefined ? {} : { callId: api.callId }),
         });
-        if (execution === undefined) return tool.execute(args, delegated, context);
+        if (execution === undefined) {
+          options.onToolLifecycle?.({ phase: "start", tool: tool.name });
+          try {
+            return await tool.execute(args, delegated, context);
+          } finally {
+            options.onToolLifecycle?.({ phase: "end", tool: tool.name });
+          }
+        }
+        options.onToolLifecycle?.({ phase: "start", tool: tool.name });
         try {
           const result = await tool.execute(args, delegated, context);
           execution.end(result.isError === true ? "error" : "ok", executionResultFields(result));
@@ -312,6 +322,8 @@ export function createToolRegistry(
           // tool ran and failed, and the caller's own error handling decides what the model sees.
           execution.end(context.abortSignal?.aborted === true ? "aborted" : "error", { errorCode: "TOOL_EXECUTION_FAILED" });
           throw error;
+        } finally {
+          options.onToolLifecycle?.({ phase: "end", tool: tool.name });
         }
       },
     };

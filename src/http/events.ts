@@ -21,6 +21,7 @@ export type SseEventName =
   | "credential.request"
   | "approval.requested"
   | "approval.resolved"
+  | "subagent.updated"
   | "heartbeat";
 
 type Client = { readonly id: number; readonly res: ServerResponse };

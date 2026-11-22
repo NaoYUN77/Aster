@@ -9,9 +9,10 @@ export type CompanionMode = "idle" | "working" | "busy";
 export function deriveCompanionMode(
   activeStatus: "queued" | "running" | null,
   queueLength: number,
+  activeSubagents = 0,
 ): CompanionMode {
-  if (activeStatus === "running" && queueLength > 0) return "busy";
-  if (activeStatus === "running" || activeStatus === "queued") return "working";
+  if ((activeStatus === "running" || activeSubagents > 0) && queueLength > 0) return "busy";
+  if (activeStatus === "running" || activeStatus === "queued" || activeSubagents > 0) return "working";
   return "idle";
 }
 

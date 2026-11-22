@@ -45,6 +45,7 @@ import { createReminderExtension, type ReminderStore } from "./reminders.js";
 import { NO_REPORT, type RoutineDelivery, type RoutineRunRequest } from "./routines/protocol.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
 import { evaluateSensitiveOperation, type ApprovalService } from "./approvals/index.js";
+import type { EventHub } from "./http/events.js";
 import { createSubagentExtension, SubagentManager } from "./subagents/index.js";
 import { beginRequest, type TraceOutcome } from "./trace.js";
 import { createWebExtension } from "./web-tools.js";
@@ -178,6 +179,8 @@ export type OpenAgentOptions = {
   readonly memoryFs?: MemoryFs;
   /** Runtime human-in-the-loop approval engine for sensitive operations (ADR-0006). */
   readonly approvals?: ApprovalService;
+  /** Optional SSE hub for broadcasting live sub-agent status updates. */
+  readonly hub?: EventHub;
   /** Register bounded, disposable-SQLite sub-agent tools (`spawn_subagent`, `wait_subagent`, `cancel_subagent`). */
   readonly enableSubagents?: boolean;
 };
@@ -399,6 +402,7 @@ export async function openAgent(
       models,
       defaultModel: { provider: config.provider, modelId: config.model },
       ...(approvals === undefined ? {} : { approvals }),
+      ...(options.hub === undefined ? {} : { hub: options.hub }),
       ...(options.toolAuthority === undefined ? {} : { authority: options.toolAuthority }),
       ...(options.toolReviewLog === undefined ? {} : { log: options.toolReviewLog }),
     });
@@ -1067,6 +1071,8 @@ export async function openAgent(
       },
       /** Shared by `$model` and the HTTP model routes. */
       modelService,
+      /** Live sub-agent manager when `enableSubagents` is active (for HTTP status & cancel). */
+      ...(subagents === undefined ? {} : { subagents }),
       /** Read-only durable transcript access for the web adapter. */
       history,
       /** Append a host-originated notification; durable, idempotent by key, never model-visible. */

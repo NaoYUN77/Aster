@@ -25,7 +25,9 @@ import { USE_MOCK } from "@/lib/env";
 import { platformLabel } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/auth";
+import { useApprovalStore } from "@/store/approvals";
 import { useChatStore } from "@/store/chat";
+import { useSubagentStore } from "@/store/subagents";
 import { useThemeStore } from "@/store/theme";
 
 const CONNECTION_META = {
@@ -78,6 +80,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     setMobileOpen(false);
     await logout();
     resetChat();
+    useApprovalStore.getState().clear();
+    useSubagentStore.getState().clear();
     queryClient.clear();
     navigate("/login", { replace: true });
   };

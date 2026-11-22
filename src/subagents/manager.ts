@@ -13,6 +13,7 @@ import {
   isOutsideWorkspace,
   type ApprovalService,
 } from "../approvals/index.js";
+import type { EventHub } from "../http/events.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "../tools.js";
 
 const context = BACKGROUND_CONTEXT;
@@ -22,11 +23,21 @@ const MAX_SUBAGENT_TURNS = 30;
 const MAX_FINISHED_RESULTS = 64;
 const BLOCKED_SUBAGENT_TOOLS = new Set(["spawn_subagent", "wait_subagent", "cancel_subagent"]);
 
-export type SubagentStatus = "running" | "completed" | "failed" | "cancelled";
+export type SubagentStatus = "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
+
+export type SubagentSnapshot = {
+  readonly id: string;
+  readonly task: string;
+  readonly status: SubagentStatus;
+  readonly currentTool: string | null;
+  readonly startedAt: number;
+  readonly finishedAt: number | null;
+  readonly error?: string;
+};
 
 export type SubagentResult = {
   readonly id: string;
-  readonly status: Exclude<SubagentStatus, "running">;
+  readonly status: "completed" | "failed" | "cancelled";
   readonly task: string;
   readonly summary: string;
   readonly durationMs: number;
@@ -51,6 +62,8 @@ export type SubagentManagerOptions = {
   /** Base extensions available to sub-agents (filtered by `tools` allowlist). Defaults to [CodingTools, personalTools]. */
   readonly extensions?: readonly Extension[];
   readonly approvals?: ApprovalService;
+  /** Optional SSE hub for broadcasting `subagent.updated` live status events. */
+  readonly hub?: EventHub;
   readonly authority?: ToolAuthority;
   /** Optional custom storage factory for unit tests (defaults to disposable SQLite file). */
   readonly storageFactory?: (id: string, dbPath: string) => Promise<Storage>;
@@ -61,6 +74,8 @@ type ActiveSubagent = {
   readonly id: string;
   readonly task: string;
   readonly startedAt: number;
+  status: "running" | "waiting_approval";
+  currentTool: string | null;
   readonly controller: AbortController;
   readonly promise: Promise<SubagentResult>;
 };
@@ -142,6 +157,7 @@ export class SubagentManager {
   private readonly defaultModel: { readonly provider: string; readonly modelId: string };
   private readonly extensions: readonly Extension[];
   private readonly approvals: ApprovalService | undefined;
+  private readonly hub: EventHub | undefined;
   private readonly authority: ToolAuthority;
   private readonly storageFactory: ((id: string, dbPath: string) => Promise<Storage>) | undefined;
   private readonly log: (line: string) => void;
@@ -157,9 +173,44 @@ export class SubagentManager {
     this.defaultModel = options.defaultModel;
     this.extensions = options.extensions ?? [CodingTools, personalTools];
     this.approvals = options.approvals;
+    this.hub = options.hub;
     this.authority = options.authority ?? "owner";
     this.storageFactory = options.storageFactory;
     this.log = options.log ?? ((line) => console.error(line));
+  }
+
+  private emitSnapshot(snapshot: SubagentSnapshot): void {
+    this.hub?.broadcast("subagent.updated", snapshot);
+  }
+
+  private updateActiveState(
+    id: string,
+    patch: { readonly status?: "running" | "waiting_approval"; readonly currentTool?: string | null },
+  ): void {
+    const item = this.active.get(id);
+    if (item === undefined) return;
+    if (patch.status !== undefined) item.status = patch.status;
+    if (patch.currentTool !== undefined) item.currentTool = patch.currentTool;
+    this.emitSnapshot({
+      id: item.id,
+      task: item.task,
+      status: item.status,
+      currentTool: item.currentTool,
+      startedAt: item.startedAt,
+      finishedAt: null,
+    });
+  }
+
+  /** Live snapshots of all currently active sub-agent runs (for SSE snapshot & HTTP GET). */
+  listSnapshots(): SubagentSnapshot[] {
+    return [...this.active.values()].map((item) => ({
+      id: item.id,
+      task: item.task,
+      status: item.status,
+      currentTool: item.currentTool,
+      startedAt: item.startedAt,
+      finishedAt: null,
+    }));
   }
 
   /** Remove any orphaned disposable SQLite files left behind by a prior crashed process. */
@@ -236,8 +287,24 @@ export class SubagentManager {
       controller,
     });
 
-    const record: ActiveSubagent = { id, task, startedAt, controller, promise };
+    const record: ActiveSubagent = {
+      id,
+      task,
+      startedAt,
+      status: "running",
+      currentTool: null,
+      controller,
+      promise,
+    };
     this.active.set(id, record);
+    this.emitSnapshot({
+      id,
+      task,
+      status: "running",
+      currentTool: null,
+      startedAt,
+      finishedAt: null,
+    });
     void promise.finally(() => {
       this.active.delete(id);
     });
@@ -353,12 +420,22 @@ export class SubagentManager {
     }
   }
 
-  private recordFinished(result: SubagentResult): SubagentResult {
+  private recordFinished(result: SubagentResult, startedAt?: number): SubagentResult {
     this.finished.set(result.id, result);
     if (this.finished.size > MAX_FINISHED_RESULTS) {
       const oldest = this.finished.keys().next().value;
       if (oldest !== undefined) this.finished.delete(oldest);
     }
+    const now = Date.now();
+    this.emitSnapshot({
+      id: result.id,
+      task: result.task,
+      status: result.status,
+      currentTool: null,
+      startedAt: startedAt ?? Math.max(0, now - result.durationMs),
+      finishedAt: now,
+      ...(result.error === undefined ? {} : { error: result.error }),
+    });
     return result;
   }
 
@@ -392,6 +469,9 @@ export class SubagentManager {
       const registry = createToolRegistry(this.extensions, {
         authority: this.authority,
         log: this.log,
+        onToolLifecycle: ({ phase, tool }) => {
+          this.updateActiveState(id, { currentTool: phase === "start" ? tool : null });
+        },
         ...(approvals === undefined ? {} : {
           approvals: async ({ tool, args, record, signal }) => {
             const evaluation = evaluateSensitiveOperation(tool, args, record, {
@@ -401,13 +481,18 @@ export class SubagentManager {
               workspaceWriteAllowed: holdsWriteLock,
             });
             if (!evaluation.sensitive) return { allowed: true };
-            return approvals.requestApproval({
-              runScopeId: id,
-              caller: { kind: "subagent", subagentId: id, task },
-              toolName: tool,
-              args,
-              evaluation,
-            }, signal);
+            this.updateActiveState(id, { status: "waiting_approval", currentTool: tool });
+            try {
+              return await approvals.requestApproval({
+                runScopeId: id,
+                caller: { kind: "subagent", subagentId: id, task },
+                toolName: tool,
+                args,
+                evaluation,
+              }, signal);
+            } finally {
+              this.updateActiveState(id, { status: "running" });
+            }
           },
         }),
       });

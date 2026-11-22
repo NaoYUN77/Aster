@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ApprovalRequestView } from "./approvals";
 import type { CredentialRequest } from "./connectors";
+import type { SubagentSnapshot } from "./subagents";
 import type {
   ModelKind,
   ModelRef,
@@ -95,6 +96,16 @@ const approvalRequestSchema = z.object({
   decisionReason: z.string().nullable(),
 });
 
+const subagentSnapshotSchema = z.object({
+  id: z.string(),
+  task: z.string(),
+  status: z.enum(["running", "waiting_approval", "completed", "failed", "cancelled"]),
+  currentTool: z.string().nullable(),
+  startedAt: z.number(),
+  finishedAt: z.number().nullable(),
+  error: z.string().optional(),
+});
+
 const snapshotSchema = z.object({
   activeRequest: z
     .object({
@@ -106,6 +117,7 @@ const snapshotSchema = z.object({
   queue: z.array(queuedRequestSchema).optional(),
   modelVersion: z.number().optional(),
   pendingApprovals: z.array(approvalRequestSchema).optional(),
+  activeSubagents: z.array(subagentSnapshotSchema).optional(),
 });
 
 const queueChangedSchema = z.object({
@@ -188,6 +200,7 @@ export type ParsedServerEvent =
       modelVersion?: number;
       queue?: QueuedRequest[];
       pendingApprovals?: ApprovalRequestView[];
+      activeSubagents?: SubagentSnapshot[];
     }
   | { type: "queue.changed"; items: QueuedRequest[] }
   | { type: "request.queued"; requestId: string; clientMessageId: string }
@@ -209,6 +222,7 @@ export type ParsedServerEvent =
   | { type: "credential.request"; request: CredentialRequest }
   | { type: "approval.requested"; approval: ApprovalRequestView }
   | { type: "approval.resolved"; approval: ApprovalRequestView }
+  | { type: "subagent.updated"; subagent: SubagentSnapshot }
   | { type: "ignored"; event: string };
 
 function fallbackUsage(message: UiMessage): ModelUsage {
@@ -239,6 +253,9 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
         ...(parsed.data.queue !== undefined ? { queue: parsed.data.queue } : {}),
         ...(parsed.data.pendingApprovals !== undefined
           ? { pendingApprovals: parsed.data.pendingApprovals as ApprovalRequestView[] }
+          : {}),
+        ...(parsed.data.activeSubagents !== undefined
+          ? { activeSubagents: parsed.data.activeSubagents as SubagentSnapshot[] }
           : {}),
       };
     }
@@ -347,6 +364,11 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
       const parsed = approvalRequestSchema.safeParse(data);
       if (!parsed.success) return { type: "ignored", event };
       return { type: "approval.resolved", approval: parsed.data as ApprovalRequestView };
+    }
+    case "subagent.updated": {
+      const parsed = subagentSnapshotSchema.safeParse(data);
+      if (!parsed.success) return { type: "ignored", event };
+      return { type: "subagent.updated", subagent: parsed.data as SubagentSnapshot };
     }
     default:
       return { type: "ignored", event };

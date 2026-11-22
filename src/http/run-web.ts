@@ -168,6 +168,7 @@ export async function runWebMode(
     }, {
       signal,
       approvals,
+      hub,
       enableSubagents: true,
       onModelUsed: (event) => {
         usage.last = event;
@@ -209,6 +210,7 @@ export async function runWebMode(
       modelVersion: () => modelVersion,
       ...(connectors === undefined ? {} : { connectors: connectors.service }),
       approvals,
+      ...(agent.subagents === undefined ? {} : { subagents: agent.subagents }),
     });
     await app.listen({ port: web.port, host: web.host });
     worker.start();

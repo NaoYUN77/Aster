@@ -7,6 +7,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type { WebConfig } from "../config.js";
 import type { ApprovalDecision, ApprovalService } from "../approvals/index.js";
+import type { SubagentManager } from "../subagents/index.js";
 import { ModelSelectionError, type ModelSelectionService } from "../model-control.js";
 import { ConnectorError, connectorCode, safeConnectorMessage } from "../connectors/errors.js";
 import type { ConnectorService } from "../connectors/service.js";
@@ -37,6 +38,7 @@ export type WebServerOptions = {
   readonly modelVersion: () => number;
   readonly connectors?: ConnectorService;
   readonly approvals?: ApprovalService;
+  readonly subagents?: Pick<SubagentManager, "listSnapshots" | "cancel">;
   readonly log?: (line: string) => void;
 };
 
@@ -493,6 +495,25 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     return { approval: outcome.approval };
   });
 
+  // ------------------------------------------------------------------ subagents
+  app.get("/api/v1/subagents", async () => ({
+    items: options.subagents?.listSnapshots() ?? [],
+  }));
+
+  app.post("/api/v1/subagents/:subagentId/cancel", async (request, reply) => {
+    if (options.subagents === undefined) {
+      return reply.code(503).send(errorBody("SUBAGENTS_DISABLED", "子任务服务未启用"));
+    }
+    const { subagentId } = request.params as { subagentId: string };
+    const outcome = await options.subagents.cancel(subagentId);
+    if (!outcome.ok) {
+      return outcome.status === "not_found"
+        ? reply.code(404).send(errorBody("SUBAGENT_NOT_FOUND", "没有找到该子任务"))
+        : reply.code(409).send(errorBody("SUBAGENT_NOT_ACTIVE", "该子任务已结束"));
+    }
+    return { id: subagentId, status: outcome.status };
+  });
+
   // ------------------------------------------------------------------ SSE
   app.get("/api/v1/events", async (request, reply) => {
     reply.hijack();
@@ -518,6 +539,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
         modelVersion: options.modelVersion(),
         queue: store.listQueued(),
         pendingApprovals: options.approvals?.listPending() ?? [],
+        activeSubagents: options.subagents?.listSnapshots() ?? [],
       },
     }]);
   });

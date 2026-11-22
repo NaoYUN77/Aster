@@ -10,7 +10,8 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import { ApprovalService } from "../src/approvals/index.js";
-import { SubagentManager } from "../src/subagents/index.js";
+import { EventHub } from "../src/http/events.js";
+import { SubagentManager, type SubagentSnapshot } from "../src/subagents/index.js";
 
 test("SubagentManager runs in disposable SQLite and unlinks it cleanly on completion", async () => {
   const dir = await mkdtemp(join(tmpdir(), "aster-subagents-test-"));
@@ -19,12 +20,20 @@ test("SubagentManager runs in disposable SQLite and unlinks it cleanly on comple
   const models = createModels();
   models.setProvider(faux.provider);
   const approvals = new ApprovalService({ dbPath: ":memory:", log: () => {} });
+  const hub = new EventHub(() => {});
+  const emitted: SubagentSnapshot[] = [];
+  const origBroadcast = hub.broadcast.bind(hub);
+  hub.broadcast = (event, data) => {
+    if (event === "subagent.updated") emitted.push(data as SubagentSnapshot);
+    origBroadcast(event, data);
+  };
   const manager = new SubagentManager({
     dataDir: dir,
     workspace,
     models,
     defaultModel: { provider: "faux", modelId: "m1" },
     approvals,
+    hub,
     log: () => {},
   });
 
@@ -43,8 +52,14 @@ test("SubagentManager runs in disposable SQLite and unlinks it cleanly on comple
     // Disposable SQLite must be unlinked after completion.
     const leftovers = await readdir(join(dir, "subagents"));
     assert.deepEqual(leftovers, []);
+
+    // Live SSE lifecycle snapshots emitted running -> completed.
+    assert.ok(emitted.length >= 2);
+    assert.equal(emitted[0]!.status, "running");
+    assert.equal(emitted[emitted.length - 1]!.status, "completed");
   } finally {
     await manager.close();
+    hub.close();
     approvals.close();
     await rm(dir, { recursive: true, force: true });
   }

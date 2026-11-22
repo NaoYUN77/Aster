@@ -5,10 +5,12 @@ import { ModelPicker } from "@/features/models/ModelPicker";
 import { useModelsQuery } from "@/features/models/use-models";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { useChatStore } from "@/store/chat";
+import { isSubagentActive, useSubagentStore } from "@/store/subagents";
 import { CompanionSprite, deriveCompanionMode } from "./CompanionSprite";
 import { Composer } from "./Composer";
 import { MessageList } from "./MessageList";
 import { QueuePanel } from "./QueuePanel";
+import { SubagentPanel } from "./SubagentPanel";
 import {
   useQueueActions,
   useRetryMessage,
@@ -31,6 +33,8 @@ export function ChatPage() {
   const sseState = useChatStore((state) => state.sseState);
   const queue = useChatStore((state) => state.queue);
   const promoting = useChatStore((state) => state.promoting);
+  const subagents = useSubagentStore((state) => state.items);
+  const activeSubagentCount = subagents.filter(isSubagentActive).length;
 
   const send = useSendMessage();
   const stop = useStopRequest();
@@ -39,7 +43,7 @@ export function ChatPage() {
 
   const current = models.data?.current;
   const activeModelLabel = current ? current.name || current.label : undefined;
-  const companionMode = deriveCompanionMode(activeStatus, queue.length);
+  const companionMode = deriveCompanionMode(activeStatus, queue.length, activeSubagentCount);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-background">
@@ -80,6 +84,8 @@ export function ChatPage() {
           onRetryMessage={(message) => void retry(message)}
         />
       </main>
+
+      <SubagentPanel />
 
       <QueuePanel
         items={queue}
