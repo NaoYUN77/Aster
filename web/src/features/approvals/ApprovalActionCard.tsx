@@ -126,10 +126,10 @@ export function ApprovalActionBody({
 
       <div className="rounded-xl bg-muted/85 px-3.5 py-2.5">
         <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
-          <span className="font-mono font-medium text-foreground/75">{approval.toolName}</span>
+          <span className="font-medium text-foreground/75">{approval.toolName}</span>
           <span className="text-warning">{copy.tag}</span>
         </div>
-        <pre className="m-0 max-h-36 overflow-auto font-mono text-[12px] leading-relaxed text-foreground whitespace-pre-wrap break-all">
+        <pre className="m-0 max-h-36 overflow-auto font-sans text-[12.5px] leading-relaxed text-foreground whitespace-pre-wrap break-all">
           {formatApprovalArgs(approval.toolName, approval.args)}
         </pre>
       </div>
@@ -231,7 +231,7 @@ export function ApprovalCapsuleItem({
         >
           <span className="size-2 shrink-0 rounded-full bg-warning animate-pulse" aria-hidden />
           <span className="truncate font-medium text-foreground">
-            需要审批 · <span className="font-mono">{current.toolName}</span>
+            需要审批 · {current.toolName}
           </span>
           <span className="hidden shrink-0 text-warning sm:inline">（{copy.tag}）</span>
         </button>
@@ -263,7 +263,7 @@ export function ApprovalCapsuleItem({
 
           <span
             className={cn(
-              "font-mono text-[11px] tabular-nums",
+              "text-[11px] tabular-nums",
               urgent ? "font-medium text-destructive" : "text-muted-foreground",
             )}
           >

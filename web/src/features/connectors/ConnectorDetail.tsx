@@ -168,7 +168,7 @@ export function ConnectorDetail({
         {connected && connector.account && (
           <div className="mt-3 rounded-lg border border-border bg-muted/40 p-3">
             <div className="text-[11px] text-muted-foreground">已连接账号</div>
-            <div className="mt-0.5 truncate font-mono text-sm">{connector.account.label}</div>
+            <div className="mt-0.5 truncate text-sm font-medium">{connector.account.label}</div>
             {connector.account.detail && (
               <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
                 {connector.account.detail}
@@ -207,7 +207,7 @@ export function ConnectorDetail({
             {permissions.map((permission) => (
               <li key={permission} className="flex items-start gap-1.5">
                 <CheckCircle2 className="mt-0.5 size-3 shrink-0 text-success/80" />
-                <span className="break-all font-mono">{permission}</span>
+                <span className="break-all font-sans">{permission}</span>
               </li>
             ))}
           </ul>

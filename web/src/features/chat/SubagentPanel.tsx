@@ -77,7 +77,7 @@ function SubagentInlineApprovalDrawer({
           )}
           <span
             className={cn(
-              "font-mono tabular-nums",
+              "tabular-nums",
               urgent ? "font-medium text-destructive" : "text-muted-foreground",
             )}
           >
@@ -229,7 +229,7 @@ export function SubagentPanel() {
               )}
             </div>
             <div className="flex shrink-0 items-center gap-2 text-muted-foreground">
-              <span className="font-mono text-[11px] tabular-nums">
+              <span className="text-[11px] tabular-nums">
                 {formatElapsed(earliestStart, latestFinish, now)}
               </span>
               <ChevronDown
@@ -302,7 +302,7 @@ export function SubagentPanel() {
                             待审批
                           </span>
                         ) : item.currentTool ? (
-                          <span className="shrink-0 rounded-md bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground whitespace-nowrap">
+                          <span className="shrink-0 rounded-md bg-secondary px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground whitespace-nowrap">
                             {item.currentTool}
                           </span>
                         ) : !active ? (
@@ -313,7 +313,7 @@ export function SubagentPanel() {
                       </div>
 
                       <div className="flex shrink-0 items-center gap-2">
-                        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
                           {formatElapsed(item.startedAt, item.finishedAt, now)}
                         </span>
                         {active && (

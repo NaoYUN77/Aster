@@ -91,7 +91,7 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 6px);
 
-  --font-sans: "Inter", "SF Pro Text", ui-sans-serif, system-ui, -apple-system,
+  --font-sans: "Inter Variable", "Inter", "SF Pro Text", ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, "Menlo",
