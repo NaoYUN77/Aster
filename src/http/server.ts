@@ -6,6 +6,7 @@ import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type { WebConfig } from "../config.js";
+import type { ApprovalDecision, ApprovalService } from "../approvals/index.js";
 import { ModelSelectionError, type ModelSelectionService } from "../model-control.js";
 import { ConnectorError, connectorCode, safeConnectorMessage } from "../connectors/errors.js";
 import type { ConnectorService } from "../connectors/service.js";
@@ -35,6 +36,7 @@ export type WebServerOptions = {
   readonly modelService: ModelSelectionService;
   readonly modelVersion: () => number;
   readonly connectors?: ConnectorService;
+  readonly approvals?: ApprovalService;
   readonly log?: (line: string) => void;
 };
 
@@ -461,6 +463,36 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     }
   });
 
+  // ------------------------------------------------------------------ approvals
+  app.get("/api/v1/approvals", async () => ({
+    items: options.approvals?.listPending() ?? [],
+  }));
+
+  app.post("/api/v1/approvals/:approvalId/resolve", async (request, reply) => {
+    if (options.approvals === undefined) {
+      return reply.code(503).send(errorBody("APPROVALS_DISABLED", "审批服务未启用"));
+    }
+    const { approvalId } = request.params as { approvalId: string };
+    const body = request.body as { decision?: unknown; reason?: unknown } | undefined;
+    const decision = body?.decision;
+    if (decision !== "approve_once" && decision !== "approve_similar" && decision !== "deny") {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的审批决定"));
+    }
+    if (body?.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 1_000)) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "审批说明不合法"));
+    }
+    const outcome = options.approvals.resolve(approvalId, {
+      decision: decision as ApprovalDecision,
+      ...(typeof body?.reason === "string" ? { reason: body.reason } : {}),
+    });
+    if (!outcome.ok) {
+      return outcome.reason === "not_found"
+        ? reply.code(404).send(errorBody("APPROVAL_NOT_FOUND", "没有找到该审批请求"))
+        : reply.code(409).send(errorBody("APPROVAL_ALREADY_RESOLVED", "该审批请求已处理"));
+    }
+    return { approval: outcome.approval };
+  });
+
   // ------------------------------------------------------------------ SSE
   app.get("/api/v1/events", async (request, reply) => {
     reply.hijack();
@@ -485,6 +517,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
         },
         modelVersion: options.modelVersion(),
         queue: store.listQueued(),
+        pendingApprovals: options.approvals?.listPending() ?? [],
       },
     }]);
   });

@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { openAgent } from "../agent.js";
 import { buildAgentOptions } from "../agent-options.js";
+import { ApprovalService } from "../approvals/index.js";
 import { openConnectors, type OpenConnectorsResult } from "../connectors/index.js";
 import { createConnectorExtension } from "../connectors/tools.js";
 import { ConfigurationError, type readConfig, type WebConfig } from "../config.js";
@@ -56,6 +57,10 @@ export async function runWebMode(
 
   const store = new WebRequestStore(join(config.dataDir, "web.sqlite"));
   const hub = new EventHub();
+  const approvals = new ApprovalService({
+    dbPath: join(config.dataDir, "approvals.sqlite"),
+    hub,
+  });
   // One serialization point for the durable writer: user turns, routine runs and host messages.
   const gate = new AgentGate();
   let agent: Awaited<ReturnType<typeof openAgent>> | undefined;
@@ -161,6 +166,8 @@ export async function runWebMode(
       ...(skills === undefined ? {} : { skills }),
     }, {
       signal,
+      approvals,
+      enableSubagents: true,
       onModelUsed: (event) => {
         usage.last = event;
       },
@@ -200,6 +207,7 @@ export async function runWebMode(
       modelService,
       modelVersion: () => modelVersion,
       ...(connectors === undefined ? {} : { connectors: connectors.service }),
+      approvals,
     });
     await app.listen({ port: web.port, host: web.host });
     worker.start();
@@ -264,6 +272,7 @@ export async function runWebMode(
     await agent?.close().catch((error: unknown) => {
       console.error(`Agent close failed: ${error instanceof Error ? error.message : String(error)}`);
     });
+    approvals.close();
     store.close();
     connectors?.close();
     watchersStore?.close();

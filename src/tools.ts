@@ -48,9 +48,23 @@ export type ToolRecord = ToolGovernance & {
 
 /** Fixed by the host for one agent instance, including its recovered and nested calls. */
 export type ToolAuthority = "owner" | "restricted";
+export type ToolApprovalHook = (input: {
+  readonly tool: string;
+  readonly args: unknown;
+  readonly record: ToolRecord;
+  readonly conversationId: string;
+  readonly taskId: string;
+  readonly callId?: string;
+  readonly signal?: AbortSignal;
+}) => Promise<
+  | { readonly allowed: true; readonly approvalId?: string }
+  | { readonly allowed: false; readonly reason: string; readonly approvalId?: string }
+>;
 export type ToolRegistryOptions = {
   readonly authority?: ToolAuthority;
   readonly log?: (line: string) => void;
+  /** Optional runtime human-in-the-loop approval hook for sensitive operations (ADR-0006). */
+  readonly approvals?: ToolApprovalHook;
 };
 
 export interface ToolRegistry extends Registry {
@@ -250,6 +264,30 @@ export function createToolRegistry(
         };
         // review() proved the record exists and is available; only a rejected call skips execution.
         const record = records.get(tool.name)!;
+        if (options.approvals !== undefined) {
+          const decision = await options.approvals({
+            tool: tool.name,
+            args,
+            record,
+            conversationId: String(api.conversationId),
+            taskId: String(api.taskId),
+            ...(api.callId === undefined ? {} : { callId: api.callId }),
+            ...(context.abortSignal === undefined ? {} : { signal: context.abortSignal }),
+          });
+          if (!decision.allowed) {
+            audit(tool.name, identity, "TOOL_APPROVAL_DENIED", record);
+            return {
+              isError: true,
+              output: [{ type: "text", text: decision.reason }],
+              details: {
+                code: "TOOL_APPROVAL_DENIED",
+                tool: tool.name,
+                ...(decision.approvalId === undefined ? {} : { approvalId: decision.approvalId }),
+              },
+              diagnostics: [{ severity: "error", code: "TOOL_APPROVAL_DENIED", message: decision.reason }],
+            };
+          }
+        }
         const summary = argumentSummary(args);
         const execution = beginToolExecution({
           tool: tool.name,

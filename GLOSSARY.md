@@ -134,3 +134,33 @@ _Avoid_: rollback, downgrade, correction (correction is the content; demotion is
 **Dry run**:
 A dream run that computes changes and passes the layout check without applying them.
 _Avoid_: shadow mode, rehearsal
+
+### Sub-agents and approvals
+
+**Sub-agent**:
+A bounded, dynamically spawned execution unit created by the main agent to carry out a delegated
+task with explicit instructions and tools. Sub-agents have no fixed archetypes; their count and
+scope are decided at runtime.
+_Avoid_: worker, child agent, agent class
+
+**Sub-agent run**:
+One execution of a sub-agent from spawn to completion, cancellation, or failure, together with its
+disposable private transcript and state.
+_Avoid_: sub-session, child thread, sub-conversation
+
+**Sub-agent result**:
+The structured outcome a completed sub-agent run returns to the conversation, while its
+intermediate steps and private artifacts remain isolated and disposable.
+_Avoid_: sub-agent log, raw transcript
+
+**Sensitive operation**:
+An action crossing a host-enforced safety boundary—such as a destructive shell command, a write
+outside the workspace, an external write tool, or an unauthorized workspace write by a
+sub-agent—that must pause for owner approval rather than relying on model judgment.
+_Avoid_: dangerous tool, privileged call
+
+**Approval request**:
+A pending decision surfaced to the owner in the conversation when a sensitive operation is
+intercepted before execution, allowing the owner to approve once, allow similar operations for the
+current run, or deny with an optional reason.
+_Avoid_: gate, confirm dialog, prompt

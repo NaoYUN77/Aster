@@ -19,6 +19,8 @@ export type SseEventName =
   | "host.message"
   | "connector.changed"
   | "credential.request"
+  | "approval.requested"
+  | "approval.resolved"
   | "heartbeat";
 
 type Client = { readonly id: number; readonly res: ServerResponse };

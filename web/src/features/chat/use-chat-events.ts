@@ -12,6 +12,7 @@ import { consumeLocalSelection } from "@/features/models/selection-origin";
 import { modelsQueryKey } from "@/features/models/use-models";
 import { playCue } from "@/lib/sound";
 import { useAuthStore } from "@/store/auth";
+import { useApprovalStore } from "@/store/approvals";
 import { useChatStore } from "@/store/chat";
 import { useConnectionStore } from "@/store/connection";
 import { useCredentialStore } from "@/store/credential";
@@ -94,6 +95,9 @@ export function useChatEvents(): void {
           if (event.queue !== undefined) {
             snapshotQueueSeen = true;
             chat.setQueueFromServer(event.queue);
+          }
+          if (event.pendingApprovals !== undefined) {
+            useApprovalStore.getState().setAll(event.pendingApprovals);
           }
           break;
         }
@@ -233,6 +237,19 @@ export function useChatEvents(): void {
           const isNew = credentials.pending?.requestId !== event.request.requestId;
           credentials.setPending(event.request);
           if (isNew) playCue("attention");
+          break;
+        }
+
+        case "approval.requested": {
+          const approvals = useApprovalStore.getState();
+          const isNew = !approvals.pending.some((item) => item.id === event.approval.id);
+          approvals.upsert(event.approval);
+          if (isNew) playCue("attention");
+          break;
+        }
+
+        case "approval.resolved": {
+          useApprovalStore.getState().remove(event.approval.id);
           break;
         }
 

@@ -44,6 +44,8 @@ import {
 import { createReminderExtension, type ReminderStore } from "./reminders.js";
 import { NO_REPORT, type RoutineDelivery, type RoutineRunRequest } from "./routines/protocol.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "./tools.js";
+import { evaluateSensitiveOperation, type ApprovalService } from "./approvals/index.js";
+import { createSubagentExtension, SubagentManager } from "./subagents/index.js";
 import { beginRequest, type TraceOutcome } from "./trace.js";
 import { createWebExtension } from "./web-tools.js";
 import { inspectGithubToolRecovery, readResidentTools, withToolLedger } from "./tool-ledger.js";
@@ -174,6 +176,10 @@ export type OpenAgentOptions = {
    * at each successful turn boundary. Routines never see it.
    */
   readonly memoryFs?: MemoryFs;
+  /** Runtime human-in-the-loop approval engine for sensitive operations (ADR-0006). */
+  readonly approvals?: ApprovalService;
+  /** Register bounded, disposable-SQLite sub-agent tools (`spawn_subagent`, `wait_subagent`, `cancel_subagent`). */
+  readonly enableSubagents?: boolean;
 };
 
 /**
@@ -362,7 +368,43 @@ export async function openAgent(
       : { memoryFiles: { directory: memoryFs.directory, text: startupCore.text } }),
   });
 
-  const registry = createToolRegistry([CodingTools, personalTools], { authority: options.toolAuthority, log: options.toolReviewLog });
+  const approvals = options.approvals;
+  const registry = createToolRegistry([CodingTools, personalTools], {
+    authority: options.toolAuthority,
+    log: options.toolReviewLog,
+    ...(approvals === undefined ? {} : {
+      approvals: async ({ tool, args, record, conversationId, signal }) => {
+        const evaluation = evaluateSensitiveOperation(tool, args, record, {
+          workspace: workingDirectory,
+          cwd: workingDirectory,
+          caller: { kind: "main", conversationId },
+          workspaceWriteAllowed: true,
+        });
+        if (!evaluation.sensitive) return { allowed: true };
+        return approvals.requestApproval({
+          runScopeId: conversationId,
+          caller: { kind: "main", conversationId },
+          toolName: tool,
+          args,
+          evaluation,
+        }, signal);
+      },
+    }),
+  });
+  let subagents: SubagentManager | undefined;
+  if (options.enableSubagents === true) {
+    subagents = new SubagentManager({
+      dataDir: config.dataDir,
+      workspace: workingDirectory,
+      models,
+      defaultModel: { provider: config.provider, modelId: config.model },
+      ...(approvals === undefined ? {} : { approvals }),
+      ...(options.toolAuthority === undefined ? {} : { authority: options.toolAuthority }),
+      ...(options.toolReviewLog === undefined ? {} : { log: options.toolReviewLog }),
+    });
+    await subagents.cleanupOrphans();
+    registry.install(createSubagentExtension(subagents));
+  }
   // Reminders are host-owned tools; the model never supplies the receiving chat.
   if (options.reminderStore !== undefined) {
     registry.install(createReminderExtension(options.reminderStore, { chatId: config.channel.ownerId }));
@@ -620,9 +662,38 @@ export async function openAgent(
       requestTrace: ReturnType<typeof beginRequest>,
     ): Promise<string> {
       let submission: Submission | undefined;
+      const timeoutController = new AbortController();
+      let remainingMs = Math.max(1, timeoutMs);
+      let timerStartedAt = Date.now();
+      let timer: NodeJS.Timeout | undefined;
+      let timerPaused = (approvals?.pendingCount ?? 0) > 0;
+      const armTimer = () => {
+        if (timerPaused || timeoutController.signal.aborted) return;
+        timerStartedAt = Date.now();
+        timer = setTimeout(() => {
+          timer = undefined;
+          timeoutController.abort(new Error("Agent request timed out"));
+        }, remainingMs);
+        timer.unref();
+      };
+      const unsubscribeApprovalWait = approvals?.subscribeWaitActive((waiting) => {
+        if (waiting && !timerPaused) {
+          timerPaused = true;
+          if (timer !== undefined) {
+            clearTimeout(timer);
+            timer = undefined;
+            remainingMs = Math.max(1, remainingMs - (Date.now() - timerStartedAt));
+          }
+        } else if (!waiting && timerPaused) {
+          timerPaused = false;
+          armTimer();
+        }
+      });
+      armTimer();
       try {
-        // Recovery starts only while a caller is waiting, so the timeout below bounds every resumed task.
-        const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+        // Recovery starts only while a caller is waiting, so the timeout below bounds every resumed task
+        // while pausing automatically while an approval request is waiting on the owner.
+        const waitSignal = AbortSignal.any([signal, timeoutController.signal]);
         harness.resume();
         // Memory prepare is durable and idempotent per requestId: a replayed or recovered request
         // gets no new projection, and a new request is planned before its input lands.
@@ -699,6 +770,10 @@ export async function openAgent(
         if (typeof code === "string" && code.startsWith("MEMORY_")) throw error;
         // A failed Session rejects every later call too; only a process restart can reopen it.
         throw sessionFailure(error);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        unsubscribeApprovalWait?.();
+        approvals?.clearRunScope(String(target.id));
       }
     }
 
@@ -1003,6 +1078,7 @@ export async function openAgent(
         memory?.close();
         // A dream run is aborted by close(); let its worktree cleanup finish before the harness goes.
         await memory?.whenDreamingIdle().catch(() => undefined);
+        await subagents?.close().catch(() => undefined);
         try {
           await harness.close(context);
         } finally {
