@@ -6,7 +6,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 const MAX_DATABASE_BYTES = 1024 * 1024 * 1024;
-const MAX_DIAGNOSTIC_ROWS = 100_000;
 const codes = [
   "ARGUMENTS_INVALID", "VOLUME_METADATA_OK", "VOLUME_UNREADABLE", "VOLUME_NOT_DIRECTORY",
   "VOLUME_OWNER_MISMATCH", "VOLUME_MODE_UNSAFE", "STATE_UNREADABLE", "STATE_NOT_REGULAR_FILE",
@@ -29,14 +28,6 @@ function fail(code: Code): never {
 
 export interface DeploymentVolumePreflightOptions {
   appVolume: string;
-  inboxDiagnostics?: boolean;
-}
-export interface InboxCounts {
-  requests: number;
-  deliveryParts: number;
-  sending: number;
-  uncertain: number;
-  failed: number;
 }
 
 async function metadata(path: string, optional = false): Promise<Stats | undefined> {
@@ -155,33 +146,10 @@ async function inspectDatabase<T>(path: string, uid: number, confidential: boole
   }
 }
 
-function isTable(db: DatabaseSync, name: string): boolean {
-  return db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ? AND rootpage > 0").get(name) !== undefined;
-}
-
-function inspectInbox(db: DatabaseSync, diagnostics: boolean): InboxCounts | undefined {
-  if (!["checkpoint", "identity", "inbox", "deliveries", "failures"].every((name) => isTable(db, name))) fail("APP_SCHEMA_UNKNOWN");
-  if (!diagnostics) return undefined;
-  const counts: InboxCounts = { requests: 0, deliveryParts: 0, sending: 0, uncertain: 0, failed: 0 };
-  for (const [table, target] of [["inbox", "requests"], ["deliveries", "deliveryParts"]] as const) {
-    // Bound both work and returned data; never select user text, identifiers or failure messages.
-    const row = db.prepare(`SELECT count(*) AS total,
-      coalesce(sum(status = 'sending'), 0) AS sending,
-      coalesce(sum(status = 'uncertain'), 0) AS uncertain,
-      coalesce(sum(status = 'failed'), 0) AS failed,
-      coalesce(sum(status IS NULL OR status NOT IN ('pending','ready','sending','sent','failed','uncertain')), 0) AS invalid
-      FROM (SELECT status FROM ${table} LIMIT ${MAX_DIAGNOSTIC_ROWS + 1})`).get()!;
-    if (Number(row.total) > MAX_DIAGNOSTIC_ROWS) fail("APP_DIAGNOSTICS_LIMIT");
-    if (row.invalid !== 0) fail("APP_SCHEMA_UNKNOWN");
-    counts[target] = Number(row.total);
-    // sending/uncertain/failed count delivery parts, including pre-recovery 'sending'.
-    if (table === "deliveries") {
-      counts.sending = Number(row.sending);
-      counts.uncertain = Number(row.uncertain);
-      counts.failed = Number(row.failed);
-    }
+function requireInitialized(db: DatabaseSync): void {
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND rootpage > 0 LIMIT 1").get()) {
+    fail("SQLITE_NOT_INITIALIZED");
   }
-  return counts;
 }
 
 /** Offline metadata only. The caller must stop all writers and mount the volume read-only.
@@ -191,32 +159,32 @@ export async function preflightDeploymentVolumes(options: DeploymentVolumePrefli
   status: "offline-volume-metadata-ok";
   code: "VOLUME_METADATA_OK";
   productionAdmission: "not-evaluated";
-  inbox?: InboxCounts;
 }> {
-  if (!(typeof options.appVolume === "string" && isAbsolute(options.appVolume) && !options.appVolume.includes("\0"))
-    || (options.inboxDiagnostics !== undefined && typeof options.inboxDiagnostics !== "boolean")) fail("ARGUMENTS_INVALID");
+  if (!(typeof options.appVolume === "string" && isAbsolute(options.appVolume) && !options.appVolume.includes("\0"))) {
+    fail("ARGUMENTS_INVALID");
+  }
   const app = resolve(options.appVolume);
   // Check each component below the explicit volume root; never walk arbitrary volume contents.
   await directory(app, 1000);
-  await inspectDatabase(join(app, "agent.sqlite"), 1000, false, (db) => {
-    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND rootpage > 0 LIMIT 1").get()) fail("SQLITE_NOT_INITIALIZED");
-  });
-  const inbox = await inspectDatabase(join(app, "inbox.sqlite"), 1000, false, (db) => inspectInbox(db, options.inboxDiagnostics === true));
-  return { status: "offline-volume-metadata-ok", code: "VOLUME_METADATA_OK", productionAdmission: "not-evaluated", ...(inbox ? { inbox } : {}) };
+  await inspectDatabase(join(app, "agent.sqlite"), 1000, false, requireInitialized);
+  const webDbPath = join(app, "web.sqlite");
+  if (await metadata(webDbPath, true) !== undefined) {
+    await inspectDatabase(webDbPath, 1000, false, requireInitialized);
+  }
+  return { status: "offline-volume-metadata-ok", code: "VOLUME_METADATA_OK", productionAdmission: "not-evaluated" };
 }
 
 const help = `Usage: node dist/src/deployment-volume-preflight.js \\
-  --app-volume /app-data [--inbox-diagnostics]
+  --app-volume /app-data
 Run in the application image with the initialized volume mounted read-only and all writers stopped.
 Checks selected file ownership/mode and the app databases' shape; never verifies a password or decrypts data.
-Optional inbox counts report sending/uncertain/failed delivery parts without blocking backup or changing them.
 Nonempty WAL requires a verified Linux read-only mount; recovery-dependent databases fail closed.
 Exit 0 is offline metadata success only; productionAdmission is always not-evaluated.`;
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const { values, tokens } = parseArgs({
-      options: { "app-volume": { type: "string" }, "inbox-diagnostics": { type: "boolean" }, help: { type: "boolean" } },
+      options: { "app-volume": { type: "string" }, help: { type: "boolean" } },
       strict: true, allowPositionals: false, tokens: true,
     });
     if (new Set(tokens.map((token) => token.kind === "option" ? token.name : "")).size !== tokens.length) fail("ARGUMENTS_INVALID");
@@ -224,7 +192,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     else {
       if (values.help || !values["app-volume"]) fail("ARGUMENTS_INVALID");
       console.log(JSON.stringify(await preflightDeploymentVolumes({
-        appVolume: values["app-volume"], inboxDiagnostics: values["inbox-diagnostics"],
+        appVolume: values["app-volume"],
       })));
     }
   } catch (error) {

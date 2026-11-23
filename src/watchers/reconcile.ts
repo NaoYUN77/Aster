@@ -64,8 +64,3 @@ export async function runReconcileTick(options: ReconcileTickOptions): Promise<n
   }
   return processed;
 }
-
-/** Delay between reconcile passes, derived only from configuration. */
-export function reconcileIntervalSeconds(config: Pick<WatchersConfig, "githubReconcileMin">): number {
-  return Math.max(60, Math.min(Math.round(config.githubReconcileMin * 60), 86_400));
-}

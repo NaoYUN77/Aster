@@ -72,7 +72,7 @@ run_helper() {
 }
 code=VOLUME_PREFLIGHT_FAILED
 run_helper --entrypoint node "$image" dist/src/deployment-volume-preflight.js \
-  --app-volume /app-data --inbox-diagnostics >/dev/null || fail VOLUME_PREFLIGHT_FAILED
+  --app-volume /app-data >/dev/null || fail VOLUME_PREFLIGHT_FAILED
 assert_stopped
 code=BACKUP_SPACE_CHECK_FAILED
 used=$(run_helper --entrypoint bash "$image" -ceu '
@@ -89,7 +89,7 @@ snapshot=$(mktemp -d "$backup_root/snapshot-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX"
 code=BACKUP_WRITE_FAILED
 run_helper --entrypoint tar "$image" --numeric-owner -czf - -C /app-data . > "$snapshot/app-data.tgz" || fail BACKUP_WRITE_FAILED
 code=BACKUP_ARCHIVE_INVALID
-tar -tzf "$snapshot/app-data.tgz" ./inbox.sqlite ./agent.sqlite ./workspace/ >/dev/null 2>&1 || fail BACKUP_ARCHIVE_INVALID
+tar -tzf "$snapshot/app-data.tgz" ./agent.sqlite ./workspace/ >/dev/null 2>&1 || fail BACKUP_ARCHIVE_INVALID
 code=BACKUP_CHECKSUM_FAILED
 (cd "$snapshot" && sha256sum app-data.tgz > SHA256SUMS && sha256sum --check --status SHA256SUMS) || fail BACKUP_CHECKSUM_FAILED
 chmod 600 "$snapshot/app-data.tgz" "$snapshot/SHA256SUMS"

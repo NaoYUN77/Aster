@@ -175,11 +175,4 @@ export function projectEntries(entries: readonly EntryRecord[]): UiMessage[] {
   return messages;
 }
 
-/** Text of the newest assistant message in an entry, if any (used to enrich `request.done`). */
-export function assistantText(entry: EntryRecord): string | undefined {
-  const messages = assistantMessages(entry);
-  if (messages.length === 0) return undefined;
-  return contentText(messages.flatMap((message) => message.content)).trim();
-}
-
 export type { Message };

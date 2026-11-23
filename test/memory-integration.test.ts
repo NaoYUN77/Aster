@@ -617,7 +617,7 @@ test("07-G: agent.ts composes only through the integration entry; inbox/delivery
     assert.ok(!agent.includes(forbidden), `agent.ts must not contain ${forbidden}`);
   }
 
-  for (const path of ["src/inbox.ts", "src/deliveries.ts", "src/main.ts", "src/http/run-web.ts"]) {
+  for (const path of ["src/main.ts", "src/http/run-web.ts"]) {
     const source = await read(path);
     assert.ok(!/from\s+"[^"]*memory\//.test(source), `${path} must not import memory internals`);
   }

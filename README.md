@@ -57,7 +57,7 @@ flowchart TB
 | 工具 | 工具注册表（常驻 + deferred）、MCP 接入与 OAuth 凭据保管、connector 运行时 | `src/tools.ts`、`src/mcp*.ts`、`src/connectors/` |
 | 模型 | 提供商注册表、声明文件解析、模型目录拉取与解析、启动前目录校验 | `src/providers.ts`、`src/provider-config.ts`、`src/provider-catalog.ts` |
 | 配置 | `.env` 解析与严格校验（缺项/错项启动前失败） | `src/config.ts` |
-| 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`web.sqlite`、`inbox.sqlite`、`memory-fs/` |
+| 存储 | 会话/checkpoint/记忆与投递状态，位于数据目录 | `agent.sqlite`、`web.sqlite`、`memory-fs/` |
 
 数据目录：
 
@@ -65,7 +65,6 @@ flowchart TB
 | --- | --- |
 | `agent.sqlite`（及 WAL） | 底座会话与执行恢复状态；记忆系统的 working 状态、周期快照投影与轮数计数 |
 | `web.sqlite`（及 WAL） | web 请求队列、登录会话与历史（web 入口的唯一请求存储） |
-| `inbox.sqlite`（及 WAL） | 旧渠道收件箱与投递状态；`deliveries` CLI 与恢复测试仍使用 |
 | `memory-fs/` | core memory 目录：根目录 `MEMORY.md` 注入提示词，其它文件按需读取；`.aster/versions/` 保存宿主快照（回滚单元，保留最新 50 份） |
 | `workspace/` | agent 的任务文件 |
 | `mcp.json`（可选） | MCP server 配置 |

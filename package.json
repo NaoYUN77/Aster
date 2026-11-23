@@ -18,7 +18,6 @@
     "release:preflight": "tsx src/release-preflight.ts",
     "deployment:environment": "node dist/src/deployment-environment-check.js",
     "deployment:volume-preflight": "node dist/src/deployment-volume-preflight.js",
-    "deliveries": "node --env-file-if-exists=.env dist/src/deliveries.js",
     "reminders": "node --env-file-if-exists=.env dist/src/reminders-cli.js",
     "dreaming": "node --env-file-if-exists=.env dist/src/dreaming-cli.js",
     "memory": "node --env-file-if-exists=.env dist/src/memory-cli.js",

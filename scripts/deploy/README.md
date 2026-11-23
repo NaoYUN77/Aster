@@ -97,14 +97,9 @@ docker compose logs --tail 50 personal-agent
 
 ```sh
 docker compose stop personal-agent
-docker compose run --rm --no-deps personal-agent node dist/src/deliveries.js list
-docker compose start personal-agent
-docker compose stop personal-agent
 docker compose run --rm --no-deps personal-agent node dist/src/mcp-check.js
 docker compose start personal-agent
 ```
-
-`deliveries.js list` 输出 `blocked` 与 `failures` 两个数组；该命令会先执行恢复，强杀时处于 `sending` 的分段会以 `uncertain` 出现。先核对当前渠道实际收到的内容，再决定 `retry` 或 `sent`；这些命令只改本地投递状态，不重新执行 agent。
 
 ### MCP OAuth
 
@@ -139,12 +134,12 @@ docker inspect --format '{{.State.OOMKilled}}' $(docker compose ps -q personal-a
 docker compose stop personal-agent
 docker run --rm -v personal-agent-data:/data -v "$PWD":/backup alpine \
   tar czf /backup/aster-data.tgz -C /data .
-tar tzf aster-data.tgz | grep -E '(^|/)(agent|inbox)\.sqlite(-wal|-shm)?$|(^|/)workspace/|(^|/)mcp-oauth/'
+tar tzf aster-data.tgz | grep -E '(^|/)(agent|web)\.sqlite(-wal|-shm)?$|(^|/)workspace/|(^|/)mcp-oauth/'
 ls -l aster-data.tgz
 docker compose start personal-agent
 ```
 
-通过标准：归档非空，列表包含 `agent.sqlite`、`inbox.sqlite`、`workspace/`（SQLite 的 `-wal`、`-shm` 可能同时存在），配置了 MCP 时包含 `mcp.json`、使用过 OAuth 时包含 `mcp-oauth/<server>.json`；**只有空列表或找不到文件，说明卷名错误或目录为空，不能当作备份成功**。还原会覆盖现有数据：
+通过标准：归档非空，列表包含 `agent.sqlite`、`workspace/`（以及 web 运行后的 `web.sqlite` 与 SQLite 的 `-wal`、`-shm`），配置了 MCP 时包含 `mcp.json`、使用过 OAuth 时包含 `mcp-oauth/<server>.json`；**只有空列表或找不到文件，说明卷名错误或目录为空，不能当作备份成功**。还原会覆盖现有数据：
 
 ```sh
 docker compose down
@@ -166,10 +161,10 @@ docker run --rm --pull never --network none --read-only --user 0:0 \
   --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true \
   --mount type=volume,source=personal-agent-data,target=/app-data,readonly,volume-nocopy \
   --entrypoint node "$APP_IMAGE" dist/src/deployment-volume-preflight.js \
-  --app-volume /app-data --inbox-diagnostics
+  --app-volume /app-data
 ```
 
-工具契约与固定错误码以 `src/deployment-volume-preflight.ts` 为准：应用根目录与选定 SQLite 文件属主为 1000，拒绝其他用户可写、symlink、特殊文件和超大文件（不递归审计全部文件或 ACL）；必须已有 `agent.sqlite` 与 `inbox.sqlite`，**首次安装空卷不能据此通过**。`--inbox-diagnostics` 仅检查有界数量的记录并返回投递分段计数，`sending`／`uncertain`／`failed` 会保留、不阻止保存备份；它不执行 `Inbox.recover()`、不改变投递结果、不打印消息或请求标识，**计数不能替代上线前的人工核查**。有非空 WAL 时仅在验证为只读挂载后用只读连接读取已提交 WAL，需要恢复写入的状态拒绝。预检若报告权限错误，须在确认卷身份、停止写入并保留备份后单独处理，检查命令不会代为修复。
+工具契约与固定错误码以 `src/deployment-volume-preflight.ts` 为准：应用根目录与选定 SQLite 文件属主为 1000，拒绝其他用户可写、symlink、特殊文件和超大文件（不递归审计全部文件或 ACL）；必须已有 `agent.sqlite`（存在 `web.sqlite` 时同步校验），**首次安装空卷不能据此通过**。有非空 WAL 时仅在验证为只读挂载后用只读连接读取已提交 WAL，需要恢复写入的状态拒绝。预检若报告权限错误，须在确认卷身份、停止写入并保留备份后单独处理，检查命令不会代为修复。
 
 `backup-volumes.sh` 要求 Linux 上可访问 Docker、`flock`、GNU `timeout`、`tar`、`sha256sum`，备份根目录已存在、由调用者拥有、权限 0700；应用镜像必须已在本机，支持完整 digest 或本地完整 `sha256:<image-id>`，不会拉取或构建镜像。先停止写入者，再备份：
 

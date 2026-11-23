@@ -5,12 +5,6 @@ export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
 }
 
-export function truncateMiddle(value: string, max = 48): string {
-  if (value.length <= max) return value;
-  const half = Math.floor((max - 1) / 2);
-  return `${value.slice(0, half)}…${value.slice(-half)}`;
-}
-
 export function formatContextWindow(tokens: number | undefined): string | undefined {
   if (!tokens || tokens <= 0) return undefined;
   if (tokens >= 1_000_000) {

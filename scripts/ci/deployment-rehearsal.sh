@@ -40,7 +40,7 @@ docker run --rm --pull never --network none --read-only --user 0:0 \
   --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true \
   --mount "type=volume,source=$restored_app,target=/app-data,readonly,volume-nocopy" \
   --entrypoint node "$image" dist/src/deployment-volume-preflight.js \
-  --app-volume /app-data --inbox-diagnostics >/dev/null
+  --app-volume /app-data >/dev/null
 # Refuse backing up a live writer, even one that never opened SQLite.
 writer="${app}-backup-writer"
 trap 'docker rm -f "$writer" >/dev/null 2>&1 || true' EXIT
