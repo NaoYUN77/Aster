@@ -2,13 +2,32 @@
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-7.0.2-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Node.js](https://img.shields.io/badge/Node.js-24.19.0-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![SQLite](https://img.shields.io/badge/SQLite-node:sqlite-003B57?logo=sqlite&logoColor=white)](https://nodejs.org/api/sqlite.html) [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/) ![MCP](https://img.shields.io/badge/MCP-pi--mcp_1.5.0-111111) [![pi-durable](https://img.shields.io/badge/pi--durable-1.5.0-5c4ee5)](https://www.npmjs.com/package/@earendil-works/pi-durable) [![License](https://img.shields.io/badge/License-AGPL--3.0--only-blue)](LICENSE)
 
-个人 AI agent：所有者通过 **web 端**使用（Fastify REST/SSE，密码登录，单所有者）。消息在可恢复的 durable 执行环境里运行 agent 与工具，回复先落盘再经 SSE 送回。它有长期记忆、能接入 MCP 工具，面向一台小规格云服务器长期运行。web/http 是唯一入口；Telegram 与 Slack 适配层已删除（决策见 [ADR 0002](docs/adr/0002-web-is-the-only-entry.md)）。
+> **Self-hosted, single-owner personal AI agent that dreams.** Every night, Aster consolidates your conversation history into layered long-term memory — inside an isolated staging copy, applied file-by-file with compare-and-swap, and reversible with a single command.
 
-下面描述当前可用能力。
+个人 AI agent，单所有者，**web 端**使用（Fastify REST/SSE，密码登录）。消息在可恢复的 durable 执行环境里运行 agent 与工具，回复先落盘再经 SSE 送回。基于 [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable)（1.5.0）构建，面向一台小规格云服务器长期运行。web/http 是唯一入口；Telegram 与 Slack 适配层已删除（决策见 [ADR 0002](docs/adr/0002-web-is-the-only-entry.md)）。
 
-基于 `@earendil-works/pi-durable`（1.5.0）构建。线上仍在运行旧的 Slack DM 入口；**本 web-only 分支不能直接部署**，需要先有 web 入口的上线方案（密码、TLS/域名、端口与数据目录迁移）。日期、镜像 digest 等脱敏细节还没写进仓库，可以补在 [部署与运维手册](scripts/deploy/README.md) 的上线判定一节。
+## 亮点
+
+- 🌙 **Dreaming 记忆整理**：夜间后台把对话证据整理进分层记忆。全程在私有 staging 副本里进行，逐文件 compare-and-swap 应用，宿主快照保留 50 份，`npm run memory -- restore <id>` 一键回滚——整理错了也不伤 live。
+- 🔐 **敏感操作审批门**：危险 shell（`rm -rf`、`sudo`…）、工作区越界写、sub-agent 越权统一挂起等所有者批准；评估器内置于宿主，不靠提示词自觉。
+- ♻️ **Durable 运行时**：checkpoint + replay 恢复；回复先落盘再经 SSE 送回，进程重启不丢已完成的轮次。
+- 🧠 **三区上下文**：稳定规则 / 周期快照 / 实时尾巴分层组装，稳定区保持不变以吃到提供商前缀缓存。
+- 🤖 **常驻任务**：聊天里一句话创建定时任务（`agent` 全跑 / `notify` 零模型成本），独立会话、独立工作目录、独立记忆。
+- 🔌 **MCP 与 connectors**：MCP server 接入 + OAuth 凭据保管，内置 `web_search` / `web_fetch` / `exa_search`。
+- 🛟 **模型自动切换链**：`MODEL_FALLBACKS` 按 429/超时/5xx 自动降级，粘性选择跨重启生效。
+- 📦 **小机器友好**：单容器部署，三块 SQLite，实测峰值 RSS 约 136 MiB。
+
+## 目录
+
+[架构](#架构) · [记忆系统](#记忆系统) · [Dreaming](#dreaming) · [快速开始](#快速开始) · [模型自动切换](#模型自动切换model_fallbacks) · [常驻任务](#常驻任务) · [部署与运维](#部署与运维) · [已验证与尚未验证](#已验证与尚未验证) · [许可](#许可)
 
 ## 架构
+
+设计原则，读架构图前先记住这三条：
+
+1. **单所有者意味着串行**：web 入口只有一个所有者会话，请求排队、工具顺序执行。放弃了并发吞吐，换来小机器上的确定性与低资源占用。
+2. **持久先于投递**：任何回复先写进 SQLite 再经 SSE 送出；进程随时可以被杀，已完成轮次的历史不丢，重启后从 checkpoint replay。
+3. **观测走旁路**：Langfuse trace 只记标识、长度、耗时与结果码，不碰正文与凭据——观测能力不以扩大敏感面为代价。
 
 一条消息的路径：web 客户端请求（`/api/v1/messages`）→ 密码会话校验 → `web.sqlite` 落盘 → 唯一所有者会话（常驻任务各有自己的会话）→ 记忆层组装上下文（core memory 来自 `$MEMORY_FS_DIR` 的记忆目录，只注入 `MEMORY.md`）→ 模型层调用提供商 → 工具层执行 → 回复落盘并经 SSE 送回；提醒、事件与定时任务作为 host message 写入同一份历史。
 
@@ -65,7 +84,7 @@ flowchart TB
 - 最终镜像与单服务拓扑 6 项：Compose 边界、缺 provider key 时不回显凭据、同卷 `flock`、离线卷预检与整卷备份还原、容器日志不含合成凭据。脚本写明不覆盖真实渠道／模型链路，见 [CI 门禁](scripts/ci/README.md)。
 - 记忆机制的离线验收，以及一次 DeepSeek 真实模型补测（28 次调用里 27 次前缀缓存命中，约 87%）。腾讯云 4 核、7680 MB 的机器在同一份记录里跑过验收测试和资源测量（峰值 RSS 约 136 MiB）。那是测试补测，不是部署验收。
 - 启动配置在联网前拒绝未知提供商和未知模型 id；进程日志只打印本应用的配置／状态错误或错误码（`src/config.ts`、`src/main.ts`）。这是代码和测试里的行为，不是一份生产日志审计。
-- 生产环境已部署在腾讯云服务器上并持续运行（旧 Slack DM 入口），包括真实往返、记忆落盘和容器重启恢复。web-only 入口尚未部署。仓库里还没有日期或镜像 digest。
+- 生产环境已部署在腾讯云服务器上并持续运行：早期为 Slack DM 入口，2026-11 起切换为 web-only 入口（单容器、密码登录），包括真实往返、记忆落盘和容器重启恢复。生产日期与镜像 digest 的脱敏记录待补进仓库。
 
 **仓库记录尚未覆盖**
 
@@ -171,6 +190,16 @@ core memory 是 `$MEMORY_FS_DIR` 下的普通目录（不是 git 仓库；旧部
 ### Dreaming
 
 dreaming 是后台的记忆整理，不阻塞聊天：每个本地日期到了 `DREAMING_AT`（默认 04:00，按 `MEMORY_TIMEZONE` 解释）触发一次，压缩完成时按 `DREAMING_ON_COMPACTION` 也触发；进程在当天该时刻之后启动会补触发一次，同一本地日期不会跑第二次。触发只把任务入队，绝不等在回复路径上。进程内同一时刻最多一个 run，期间的再次触发合并成一个 pending，不排队。
+
+```mermaid
+flowchart LR
+  ev["证据（已脱敏 · 有水位）<br/>durable 历史 + activity digest"] --> dream["后台子代理整理<br/>私有 staging 副本<br/>只许 read/write/edit/bash"]
+  dream --> check["布局检查<br/>MEMORY.md 只含 Core + Index<br/>索引与文件互证"]
+  check --> apply["逐文件 compare-and-swap<br/>live 与基线有冲突则整轮丢弃"]
+  apply --> snap["宿主快照 .aster/versions<br/>保留 50 份 · restore 一键回滚"]
+  style dream fill:#5c4ee5,color:#fff
+  style apply fill:#2d7d46,color:#fff
+```
 
 一次 run 的流程：
 
