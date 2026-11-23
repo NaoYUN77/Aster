@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deliverNotification, truncateSummary } from "./notifications";
+import { deliverNotification, hostMessageTitle, truncateSummary } from "./notifications";
 import * as sound from "./sound";
 import { useSoundStore } from "@/store/sound";
 
@@ -45,6 +45,13 @@ describe("cross-platform notifications", () => {
     });
     expect(sent).toBe(false);
     expect(cueSpy).toHaveBeenCalledWith("attention");
+  });
+
+  it("maps host.message sources to distinct Chinese notification titles", () => {
+    expect(hostMessageTitle("routine")).toBe("Aster 定时任务");
+    expect(hostMessageTitle("watch")).toBe("Aster 监控动态");
+    expect(hostMessageTitle("reminder")).toBe("Aster 提醒");
+    expect(hostMessageTitle(undefined)).toBe("Aster 提醒");
   });
 
   it("dispatches silent Web Notification + Web Audio cue when backgrounded (prevents double sound)", async () => {

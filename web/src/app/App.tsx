@@ -13,7 +13,8 @@ import { SettingsPage } from "@/features/settings/SettingsPage";
 import { SetupPage } from "@/features/settings/SetupPage";
 import { UsagePage } from "@/features/usage/UsagePage";
 import { initNotificationListeners } from "@/lib/notifications";
-import { platform } from "@/lib/platform";
+import { startAndroidKeepAlive, stopAndroidKeepAlive } from "@/lib/android-keepalive";
+import { isCapacitor, platform } from "@/lib/platform";
 import { initAudioUnlock } from "@/lib/sound";
 import { useAuthStore } from "@/store/auth";
 import { useChatStore } from "@/store/chat";
@@ -91,6 +92,15 @@ function AuthenticatedShell() {
   useChatEvents();
   useConnectorResumeRefresh();
 
+  const authStatus = useAuthStore((s) => s.status);
+  const token = useAuthStore((s) => s.token);
+  const baseUrl = useConnectionStore((s) => s.baseUrl);
+  const notifyHydrated = useNotificationStore((s) => s.hydrated);
+  const notifyEnabled = useNotificationStore((s) => s.enabled);
+  const notifyPermission = useNotificationStore((s) => s.permission);
+  const keepAliveEnabled = useNotificationStore((s) => s.keepAliveEnabled);
+  const muted = useSoundStore((s) => s.muted);
+
   useEffect(() => {
     void useSoundStore.getState().hydrate();
     void useNotificationStore.getState().hydrate();
@@ -101,6 +111,28 @@ function AuthenticatedShell() {
       stopNotify();
     };
   }, [navigate]);
+
+  useEffect(() => {
+    if (!isCapacitor() || !notifyHydrated) return;
+    const shouldRun =
+      authStatus === "authenticated" &&
+      Boolean(token) &&
+      baseUrl !== "" &&
+      keepAliveEnabled &&
+      notifyEnabled &&
+      notifyPermission === "granted";
+
+    if (shouldRun && token) {
+      void startAndroidKeepAlive({
+        baseUrl,
+        token,
+        muted,
+        notifyEnabled,
+      });
+    } else {
+      void stopAndroidKeepAlive();
+    }
+  }, [authStatus, token, baseUrl, notifyHydrated, keepAliveEnabled, notifyEnabled, notifyPermission, muted]);
 
   return (
     <AppShell>

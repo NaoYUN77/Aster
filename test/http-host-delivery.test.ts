@@ -41,7 +41,7 @@ test("host delivery persists once and broadcasts the same host.message", async (
   const sent = await delivery.send("reminder", "提醒：喝水", new AbortController().signal, "reminder:1");
   assert.equal(sent.id, "1");
   assert.deepEqual(calls, [{ text: "提醒：喝水", key: "reminder:1", source: "reminder" }]);
-  assert.deepEqual(events, [{ event: "host.message", data: { message: sent } }]);
+  assert.deepEqual(events, [{ event: "host.message", data: { message: sent, source: "reminder" } }]);
 });
 
 test("the agent gate serializes host writes with each other", async () => {
