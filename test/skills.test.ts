@@ -191,8 +191,20 @@ test("the prompt section carries names and descriptions only", async () => {
   });
 });
 
-test("the extension exposes exactly the two skill tools", () => {
-  const extension = createSkillsExtension({ summaries: () => [], load: async () => { throw new Error("unused"); } } as unknown as SkillIndex);
-  const names = (extension.tools ?? []).map((tool) => (tool as { name?: string }).name);
+test("the extension exposes exactly the two skill tools and renders the index section when populated", async () => {
+  const emptyExt = createSkillsExtension({ summaries: () => [], load: async () => { throw new Error("unused"); } } as unknown as SkillIndex);
+  const names = (emptyExt.tools ?? []).map((tool) => (tool as { name?: string }).name);
   assert.deepEqual(names.sort(), ["skill_list", "skill_load"]);
+  const emptyRender = emptyExt.sections?.[0]?.render as unknown as (input: unknown, context: unknown) => Promise<string | undefined> | string | undefined;
+  assert.equal(await emptyRender({}, {}), undefined);
+
+  await withRoot(async (root) => {
+    await skill(root, "deploy", "---\ndescription: Deploy the service\n---\n", "SECRET BODY");
+    const index = await SkillIndex.scan(root);
+    const ext = createSkillsExtension(index);
+    const render = ext.sections?.[0]?.render as unknown as (input: unknown, context: unknown) => Promise<string | undefined> | string | undefined;
+    const rendered = String(await render({}, {}));
+    assert.ok(rendered.includes("- deploy: Deploy the service"));
+    assert.equal(rendered.includes("SECRET BODY"), false);
+  });
 });

@@ -5,8 +5,9 @@ import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { AgentDoc, AssistantEntry, ConversationIdle, Harness, ResetEntry, SessionFailed, ToolResultEntry, UserEntry, type Conversation, type ConversationId, type Cursor, type EntryId, type Extension, type Storage, type Submission } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { createToolSearchExtension, TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { resolveProviderConfigPath, type MemoryConfig, type readConfig } from "./config.js";
 import { ConfigurationError, errorCode, StateError } from "./errors.js";
 import { connectMcp, type McpHost } from "./mcp.js";
@@ -555,18 +556,29 @@ export async function openAgent(
       })
     : undefined;
   if (memory) for (const extension of memory.extensions()) registry.install(extension);
+  const extraReserved = [
+    ...(options.enableSubagents === true ? ["spawn_subagent", "wait_subagent", "cancel_subagent"] : []),
+    ...(registry.snapshot().tools().some(({ tool }) => tool.deferred === true) ? [TOOL_SEARCH_TOOL_NAME] : []),
+  ];
   const mcp = options.mcp ?? await openMcpHost(
     config,
     registry,
     options.signal,
     options.mcpServers,
-    options.enableSubagents === true ? ["spawn_subagent", "wait_subagent", "cancel_subagent"] : undefined,
+    extraReserved.length === 0 ? undefined : extraReserved,
   );
   const unsubscribeMcp = mcp.subscribeAvailability((server, state) => registry.setMcpAvailability(server, state));
   const mcpExtensions = orderedMcpExtensions(mcp.extensions);
   for (const extension of mcpExtensions) {
     registry.install(extension);
     subagentExtensions.push(extension);
+  }
+  // Ensure `tool_search` is installed whenever any deferred tool exists (e.g. built-in connectors
+  // even when no MCP servers are connected), without duplicating MCP's own `tool-search` extension.
+  const hasDeferredTools = registry.snapshot().tools().some(({ tool }) => tool.deferred === true);
+  const hasToolSearch = registry.snapshot().tools().some(({ tool }) => tool.name === TOOL_SEARCH_TOOL_NAME);
+  if (hasDeferredTools && !hasToolSearch) {
+    registry.install(createToolSearchExtension());
   }
   let subagents: SubagentManager | undefined;
 

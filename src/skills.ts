@@ -377,5 +377,17 @@ export function createSkillsExtension(index: SkillIndex): Extension {
       }
     },
   });
-  return defineExtension({ name: "skills", tools: [list, load] });
+  return defineExtension({
+    name: "skills",
+    tools: [list, load],
+    sections: [{
+      key: "skills",
+      render: () => {
+        const text = typeof index.promptSection === "function"
+          ? index.promptSection()
+          : "";
+        return text === "" ? undefined : text;
+      },
+    }],
+  });
 }
