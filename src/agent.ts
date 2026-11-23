@@ -725,7 +725,7 @@ export async function openAgent(
       let remainingMs = Math.max(1, timeoutMs);
       let timerStartedAt = Date.now();
       let segmentCleanup: (() => void) | undefined;
-      let timerPaused = (approvals?.pendingCount ?? 0) > 0;
+      let timerPaused = (approvals?.pendingCount ?? 0) > 0 || (subagents?.isWaiting ?? false);
       const armTimer = () => {
         if (timerPaused || timeoutController.signal.aborted) return;
         timerStartedAt = Date.now();
@@ -741,20 +741,23 @@ export async function openAgent(
         segment.addEventListener("abort", onSegmentTimeout, { once: true });
         segmentCleanup = () => segment.removeEventListener("abort", onSegmentTimeout);
       };
-      const unsubscribeApprovalWait = approvals?.subscribeWaitActive((waiting) => {
-        if (waiting && !timerPaused) {
+      const syncTimerPause = () => {
+        const shouldPause = (approvals?.pendingCount ?? 0) > 0 || (subagents?.isWaiting ?? false);
+        if (shouldPause && !timerPaused) {
           timerPaused = true;
           if (segmentCleanup !== undefined) {
             segmentCleanup();
             segmentCleanup = undefined;
             remainingMs = Math.max(1, remainingMs - (Date.now() - timerStartedAt));
           }
-        } else if (!waiting && timerPaused) {
+        } else if (!shouldPause && timerPaused) {
           timerPaused = false;
           armTimer();
         }
-      });
-      const waitSignal = approvals === undefined
+      };
+      const unsubscribeApprovalWait = approvals?.subscribeWaitActive(() => syncTimerPause());
+      const unsubscribeSubagentWait = subagents?.subscribeWaitActive(() => syncTimerPause());
+      const waitSignal = approvals === undefined && subagents === undefined
         ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
         : (armTimer(), AbortSignal.any([signal, timeoutController.signal]));
       try {
@@ -839,6 +842,7 @@ export async function openAgent(
       } finally {
         segmentCleanup?.();
         unsubscribeApprovalWait?.();
+        unsubscribeSubagentWait?.();
         approvals?.clearRunScope(String(target.id));
       }
     }

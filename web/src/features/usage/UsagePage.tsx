@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
@@ -20,6 +20,11 @@ import {
 } from "@/api/usage";
 import { useMobileNav } from "@/app/AppShell";
 import { Button } from "@/components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import {
@@ -622,55 +627,38 @@ function FilterDropdown<T extends string>({
   maxWidthClass?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
   const currentLabel = options.find((opt) => opt.value === value)?.label ?? value;
 
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
   return (
-    <div ref={rootRef} className="relative">
-      <button
-        type="button"
-        aria-label={ariaLabel}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className={cn(
-          "inline-flex h-8 items-center justify-between gap-1.5 rounded-lg border border-border/80 bg-card px-2.5 text-xs font-medium leading-none text-foreground transition-colors hover:bg-secondary/70 focus:border-primary focus:outline-none",
-          maxWidthClass,
-        )}
-      >
-        <span className="truncate">{currentLabel}</span>
-        <ChevronDown
-          className={cn(
-            "size-3.5 shrink-0 text-muted-foreground transition-transform duration-150",
-            open && "rotate-180",
-          )}
-        />
-      </button>
-
-      {open && (
-        <div
-          role="listbox"
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
           aria-label={ariaLabel}
-          className="absolute right-0 z-30 mt-1.5 min-w-[144px] max-w-[240px] rounded-xl border border-border/80 bg-popover p-1 shadow-lg"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className={cn(
+            "inline-flex h-8 items-center justify-between gap-1.5 rounded-lg border border-border/80 bg-card px-2.5 text-xs font-medium leading-none text-foreground transition-colors hover:bg-secondary/70 focus:border-primary focus:outline-none",
+            maxWidthClass,
+          )}
         >
+          <span className="truncate">{currentLabel}</span>
+          <ChevronDown
+            className={cn(
+              "size-3.5 shrink-0 text-muted-foreground transition-transform duration-150",
+              open && "rotate-180",
+            )}
+          />
+        </button>
+      </PopoverTrigger>
+
+      <PopoverContent
+        align="start"
+        sideOffset={6}
+        collisionPadding={12}
+        className="w-auto min-w-[144px] max-w-[min(240px,calc(100vw-24px))] rounded-xl border-border/80 p-1 shadow-lg"
+      >
+        <div role="listbox" aria-label={ariaLabel}>
           {options.map((opt) => {
             const active = opt.value === value;
             return (
@@ -684,7 +672,7 @@ function FilterDropdown<T extends string>({
                   setOpen(false);
                 }}
                 className={cn(
-                  "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors",
+                  "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors sm:py-1.5",
                   active
                     ? "bg-secondary font-medium text-foreground"
                     : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
@@ -696,8 +684,8 @@ function FilterDropdown<T extends string>({
             );
           })}
         </div>
-      )}
-    </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
