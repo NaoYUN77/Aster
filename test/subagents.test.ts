@@ -1,19 +1,29 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { obj } from "@earendil-works/pi-schema";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { obj, str } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
+import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { ApprovalService } from "../src/approvals/index.js";
 import { EventHub } from "../src/http/events.js";
-import { SubagentManager, type SubagentSnapshot } from "../src/subagents/index.js";
+import {
+  createSubagentExtension,
+  SubagentInvalidToolsError,
+  SubagentManager,
+  type SubagentSnapshot,
+} from "../src/subagents/index.js";
+import { personalTools } from "../src/tools.js";
+import { createWebExtension } from "../src/web-tools.js";
 
 test("SubagentManager runs in disposable SQLite and unlinks it cleanly on completion", async () => {
   const dir = await mkdtemp(join(tmpdir(), "aster-subagents-test-"));
@@ -346,6 +356,317 @@ test("Sub-agent execution timeout preserves partial assistant output instead of 
     assert.match(outcome.result.error ?? "", /timed out/i);
     assert.match(outcome.result.summary, /partial output preserved/i);
     assert.match(outcome.result.summary, /Collected 3 files so far/);
+  } finally {
+    await manager.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("Sub-agent defaults include web search tools and discover deferred tools via tool_search", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-subagents-discovery-"));
+  const workspace = join(dir, "workspace");
+
+  const webExt = createWebExtension({
+    deepseekApiKey: "test-ds-key",
+    exaApiKey: "test-exa-key",
+    fetch: async () => new Response(JSON.stringify({
+      results: [{ title: "Harness Engineering", url: "https://example.com/harness", text: "Harness guide" }],
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+
+  const feishuExt = defineExtension({
+    name: "mcp-server-feishu",
+    tools: [
+      defineTool({
+        name: "feishu_list_docs",
+        description: "List Feishu cloud documents in a folder.",
+        parameters: obj({ folder: str() }),
+        deferred: true,
+        replay: "safe",
+        execute: async ({ folder }) => ({
+          output: [{ type: "text", text: `docs in ${folder}: spec.md` }],
+        }),
+      }),
+      defineTool({
+        name: "feishu_read_doc",
+        description: "Read a Feishu document.",
+        parameters: obj({ docId: str() }),
+        deferred: true,
+        replay: "safe",
+        execute: async ({ docId }) => ({
+          output: [{ type: "text", text: `content of ${docId}` }],
+        }),
+      }),
+    ],
+  });
+
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "m1" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const manager = new SubagentManager({
+    dataDir: dir,
+    workspace,
+    models,
+    defaultModel: { provider: "faux", modelId: "m1" },
+    extensions: [CodingTools, personalTools, webExt, feishuExt],
+    log: () => {},
+  });
+
+  try {
+    // Verify concise capability summary (token-efficient description for spawn_subagent).
+    const caps = manager.describeToolCapabilities();
+    assert.ok(caps.defaultTools.includes("exa_search"));
+    assert.ok(caps.defaultTools.includes("web_search"));
+    assert.ok(caps.defaultTools.includes("web_fetch"));
+    assert.ok(caps.defaultTools.includes("tool_search"));
+    assert.ok(!caps.defaultTools.includes("feishu_list_docs"));
+    assert.deepEqual(caps.onDemandCategories, [{ extension: "mcp-server-feishu", count: 2 }]);
+
+    const spawnTool = createSubagentExtension(manager).tools!.find((t) => t.name === "spawn_subagent")!;
+    assert.match(spawnTool.description, /exa_search/);
+    assert.match(spawnTool.description, /mcp-server-feishu \(2\)/);
+    assert.doesNotMatch(spawnTool.description, /feishu_list_docs/);
+
+    const turnTools: string[][] = [];
+    faux.setResponses([
+      (transcript) => {
+        turnTools.push(getCurrentTools(transcript.messages).map((t) => t.name));
+        return fauxAssistantMessage([
+          fauxToolCall("exa_search", { query: "harness engineering" }),
+          fauxToolCall("tool_search", { query: "feishu list docs" }),
+        ], { stopReason: "toolUse" });
+      },
+      (transcript) => {
+        turnTools.push(getCurrentTools(transcript.messages).map((t) => t.name));
+        return fauxAssistantMessage([
+          fauxToolCall("feishu_list_docs", { folder: "root" }),
+        ], { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage("Searched web and listed Feishu docs: spec.md."),
+    ]);
+
+    const outcome = await manager.spawn({
+      task: "Search harness engineering and list Feishu docs",
+      mode: "wait",
+    });
+
+    assert.equal(outcome.mode, "wait");
+    assert.equal(outcome.result.status, "completed");
+    assert.match(outcome.result.summary, /spec\.md/);
+
+    // Turn 1: Tier-1 resident tools + tool_search present; deferred Feishu tools NOT bloated into schema.
+    assert.ok(turnTools[0]!.includes("exa_search"));
+    assert.ok(turnTools[0]!.includes("web_search"));
+    assert.ok(turnTools[0]!.includes("web_fetch"));
+    assert.ok(turnTools[0]!.includes("tool_search"));
+    assert.ok(!turnTools[0]!.includes("feishu_list_docs"));
+
+    // Turn 2: After tool_search, feishu_list_docs is promoted and callable.
+    assert.ok(turnTools[1]!.includes("feishu_list_docs"));
+  } finally {
+    await manager.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("extraTools promotes deferred tools alongside defaults while explicit tools enforces lock-cage mode", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-subagents-modes-"));
+  const workspace = join(dir, "workspace");
+
+  const connectorExt = defineExtension({
+    name: "connectors",
+    tools: [
+      defineTool({
+        name: "github_get_issue",
+        description: "Read a GitHub issue.",
+        parameters: obj({ id: str() }),
+        deferred: true,
+        replay: "safe",
+        execute: async ({ id }) => ({
+          output: [{ type: "text", text: `issue #${id}` }],
+        }),
+      }),
+      defineTool({
+        name: "calendar_list_events",
+        description: "List calendar events.",
+        parameters: obj({}),
+        deferred: true,
+        replay: "safe",
+        execute: async () => ({
+          output: [{ type: "text", text: "no events" }],
+        }),
+      }),
+    ],
+  });
+
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "m1" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const manager = new SubagentManager({
+    dataDir: dir,
+    workspace,
+    models,
+    defaultModel: { provider: "faux", modelId: "m1" },
+    extensions: [CodingTools, personalTools, connectorExt],
+    log: () => {},
+  });
+
+  try {
+    // 1. extraTools: promotes github_get_issue directly alongside defaults + tool_search.
+    let extraTurnTools: string[] = [];
+    faux.setResponses([
+      (transcript) => {
+        extraTurnTools = getCurrentTools(transcript.messages).map((t) => t.name);
+        return fauxAssistantMessage([fauxToolCall("github_get_issue", { id: "42" })], { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage("Read issue #42."),
+    ]);
+
+    const extraOutcome = await manager.spawn({
+      task: "Read issue 42",
+      extraTools: ["github_get_issue"],
+      mode: "wait",
+    });
+    assert.equal(extraOutcome.mode, "wait");
+    assert.equal(extraOutcome.result.status, "completed");
+    assert.ok(extraTurnTools.includes("github_get_issue"));
+    assert.ok(extraTurnTools.includes("read"));
+    assert.ok(extraTurnTools.includes("tool_search"));
+    assert.ok(!extraTurnTools.includes("calendar_list_events"));
+
+    // 2. Lock-cage mode: explicit `tools: ["read"]` removes unlisted tools AND removes tool_search.
+    let lockedTurnTools: string[] = [];
+    faux.setResponses([
+      (transcript) => {
+        lockedTurnTools = getCurrentTools(transcript.messages).map((t) => t.name);
+        return fauxAssistantMessage("Locked down.");
+      },
+    ]);
+
+    const lockedOutcome = await manager.spawn({
+      task: "Read only strict",
+      tools: ["read"],
+      mode: "wait",
+    });
+    assert.equal(lockedOutcome.mode, "wait");
+    assert.equal(lockedOutcome.result.status, "completed");
+    assert.deepEqual(lockedTurnTools, ["read"]);
+
+    // 3. Lock-cage mode with a deferred tool strips `deferred` so it is immediately usable without tool_search.
+    let lockedDeferredTools: string[] = [];
+    faux.setResponses([
+      (transcript) => {
+        lockedDeferredTools = getCurrentTools(transcript.messages).map((t) => t.name);
+        return fauxAssistantMessage([fauxToolCall("github_get_issue", { id: "7" })], { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage("Read issue #7 in lock cage."),
+    ]);
+
+    const lockedDeferredOutcome = await manager.spawn({
+      task: "Read issue 7 only",
+      tools: ["github_get_issue"],
+      mode: "wait",
+    });
+    assert.equal(lockedDeferredOutcome.mode, "wait");
+    assert.equal(lockedDeferredOutcome.result.status, "completed");
+    assert.deepEqual(lockedDeferredTools, ["github_get_issue"]);
+  } finally {
+    await manager.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("allowWrite: true automatically promotes write and edit into defaults when tools is omitted", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-subagents-allow-write-"));
+  const workspace = join(dir, "workspace");
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "m1" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const approvals = new ApprovalService({ dbPath: ":memory:", defaultTimeoutMs: 5_000, log: () => {} });
+  const manager = new SubagentManager({
+    dataDir: dir,
+    workspace,
+    models,
+    defaultModel: { provider: "faux", modelId: "m1" },
+    approvals,
+    log: () => {},
+  });
+
+  try {
+    let seenTools: string[] = [];
+    faux.setResponses([
+      (transcript) => {
+        seenTools = getCurrentTools(transcript.messages).map((t) => t.name);
+        return fauxAssistantMessage([
+          fauxToolCall("write", { path: "created.txt", content: "hello write" }),
+        ], { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage("Created created.txt."),
+    ]);
+
+    const outcome = await manager.spawn({
+      task: "Create created.txt",
+      allowWrite: true,
+      mode: "wait",
+    });
+
+    assert.equal(outcome.mode, "wait");
+    assert.equal(outcome.result.status, "completed");
+    assert.ok(seenTools.includes("write"));
+    assert.ok(seenTools.includes("edit"));
+    assert.equal(await readFile(join(workspace, "created.txt"), "utf8"), "hello write");
+  } finally {
+    await manager.close();
+    approvals.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("SubagentManager fails fast on invalid tools and spawn_subagent returns structured error", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-subagents-invalid-tools-"));
+  const workspace = join(dir, "workspace");
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "m1" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const manager = new SubagentManager({
+    dataDir: dir,
+    workspace,
+    models,
+    defaultModel: { provider: "faux", modelId: "m1" },
+    log: () => {},
+  });
+
+  try {
+    await assert.rejects(
+      manager.spawn({ task: "bad", tools: ["nonexistent_tool"] }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubagentInvalidToolsError);
+        assert.equal(error.code, "SUBAGENT_INVALID_TOOLS");
+        assert.deepEqual(error.invalidTools, ["nonexistent_tool"]);
+        assert.ok(error.availableTools.includes("read"));
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      manager.spawn({ task: "bad extra", extraTools: ["spawn_subagent"] }),
+      (error: unknown) => error instanceof SubagentInvalidToolsError && error.invalidTools.includes("spawn_subagent"),
+    );
+
+    // spawn_subagent tool catches SubagentInvalidToolsError and returns structured isError output.
+    const spawnTool = createSubagentExtension(manager).tools!.find((t) => t.name === "spawn_subagent")!;
+    const toolResult = await spawnTool.execute(
+      { task: "try bogus", tools: ["bogus_tool"] },
+      { conversationId: 1, taskId: 2, callId: "call-1" } as ToolExecutionApi,
+      BACKGROUND_CONTEXT,
+    );
+    assert.equal(toolResult.isError, true);
+    const structured = toolResult.structuredOutput as {
+      error?: { code?: string; invalidTools?: string[]; availableTools?: string[] };
+    };
+    assert.equal(structured.error?.code, "SUBAGENT_INVALID_TOOLS");
+    assert.deepEqual(structured.error?.invalidTools, ["bogus_tool"]);
+    assert.ok(structured.error?.availableTools?.includes("read"));
   } finally {
     await manager.close();
     await rm(dir, { recursive: true, force: true });

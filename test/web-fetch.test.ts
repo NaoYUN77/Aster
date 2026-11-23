@@ -193,3 +193,75 @@ test("built-in web extension exposes both read-only tools with shared bounded co
   assert.equal((await first).isError, undefined);
   assert.equal((await second).isError, undefined);
 });
+
+test("web extension FIFO semaphore queues concurrent requests, honors AbortSignal, and times out cleanly", async () => {
+  const gates: Array<() => void> = [];
+  let inFlight = 0;
+  let maxSeen = 0;
+  const registry = createToolRegistry([createWebExtension({
+    deepseekApiKey: "host-secret",
+    maxConcurrentRequests: 2,
+    queueWaitTimeoutMs: 5_000,
+    maxQueuedRequests: 8,
+    fetch: async () => {
+      inFlight += 1;
+      maxSeen = Math.max(maxSeen, inFlight);
+      await new Promise<void>((resolve) => { gates.push(resolve); });
+      inFlight -= 1;
+      return jsonResponse({ title: "OK", content: "Body" });
+    },
+  })], { authority: "restricted", log: () => {} });
+
+  const webFetchTool = registry.snapshot().tools().find(({ tool }) => tool.name === "web_fetch")!.tool;
+  const api = (callId: string) => ({ conversationId: 1, taskId: 2, callId }) as ToolExecutionApi;
+
+  // Launch 3 concurrent requests (limit=2): first 2 run immediately, 3rd queues cleanly.
+  const p1 = webFetchTool.execute({ url: "https://example.com/1" }, api("1"), BACKGROUND_CONTEXT);
+  const p2 = webFetchTool.execute({ url: "https://example.com/2" }, api("2"), BACKGROUND_CONTEXT);
+  const p3 = webFetchTool.execute({ url: "https://example.com/3" }, api("3"), BACKGROUND_CONTEXT);
+
+  // Also queue a 4th request with an AbortController and abort it while still waiting in queue.
+  const abortController = new AbortController();
+  const p4 = webFetchTool.execute(
+    { url: "https://example.com/4" },
+    api("4"),
+    withAbortSignal(abortController.signal, BACKGROUND_CONTEXT),
+  );
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(inFlight, 2);
+  abortController.abort(new Error("cancelled while queued"));
+  await assert.rejects(p4);
+
+  // Release first active slot -> p3 should dequeue and run.
+  gates.shift()!();
+  assert.equal((await p1).isError, undefined);
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(gates.length, 2); // p2 and p3 are active
+
+  // Release remaining active slots.
+  gates.shift()!();
+  gates.shift()!();
+  assert.equal((await p2).isError, undefined);
+  assert.equal((await p3).isError, undefined);
+  assert.equal(maxSeen, 2);
+
+  // Separate gate with short queueWaitTimeoutMs returns BUSY when timeout expires.
+  let releaseTight!: () => void;
+  const tightGate = new Promise<void>((resolve) => { releaseTight = resolve; });
+  const tightRegistry = createToolRegistry([createWebExtension({
+    deepseekApiKey: "host-secret",
+    maxConcurrentRequests: 1,
+    queueWaitTimeoutMs: 40,
+    fetch: async () => {
+      await tightGate;
+      return jsonResponse({ title: "OK", content: "Body" });
+    },
+  })], { authority: "restricted", log: () => {} });
+  const tightFetch = tightRegistry.snapshot().tools().find(({ tool }) => tool.name === "web_fetch")!.tool;
+  const active = tightFetch.execute({ url: "https://example.com/hold" }, api("hold"), BACKGROUND_CONTEXT);
+  const timedOut = await tightFetch.execute({ url: "https://example.com/wait" }, api("wait"), BACKGROUND_CONTEXT);
+  assert.equal(timedOut.isError, true);
+  assert.equal((timedOut.structuredOutput as { error?: { code?: string } }).error?.code, "BUSY");
+  releaseTight();
+  assert.equal((await active).isError, undefined);
+});
