@@ -1626,7 +1626,7 @@ export function mockFlushWatchDigest(): { count: number; text: string } {
   };
   state.messages.push(msg);
   persist();
-  emit("host.message", { message: msg });
+  emit("host.message", { message: msg, source: "watch" });
   return { count, text };
 }
 

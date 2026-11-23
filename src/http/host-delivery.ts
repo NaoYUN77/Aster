@@ -52,7 +52,7 @@ export class WebHostDelivery {
       });
     });
     // A client that disconnected simply re-reads history; the durable entry is authoritative.
-    this.#hub.broadcast("host.message", { message });
+    this.#hub.broadcast("host.message", { message, source });
     return message;
   }
 

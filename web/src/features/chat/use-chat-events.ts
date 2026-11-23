@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { getQueue } from "@/api/client";
 import { AUTOMATIONS_QUERY_ROOT } from "@/api/automations";
@@ -11,6 +12,7 @@ import { subscribeEvents, type ServerEvent } from "@/api/sse";
 import type { ModelsResponse } from "@/api/types";
 import { consumeLocalSelection } from "@/features/models/selection-origin";
 import { modelsQueryKey } from "@/features/models/use-models";
+import { hostMessageTitle, isAppInForeground, truncateSummary } from "@/lib/notifications";
 import { useAuthStore } from "@/store/auth";
 import { useApprovalStore } from "@/store/approvals";
 import { useChatStore } from "@/store/chat";
@@ -30,6 +32,7 @@ export function useChatEvents(): void {
   const baseUrl = useConnectionStore((state) => state.baseUrl);
   const setSseState = useChatStore((state) => state.setSseState);
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   useEffect(() => {
     if (status !== "authenticated" || !token || baseUrl === "") {
@@ -255,11 +258,23 @@ export function useChatEvents(): void {
 
         case "host.message": {
           useChatStore.getState().addLiveMessage(event.message);
+          const title = hostMessageTitle(event.source);
+          const body = event.message.text || "收到一条新提醒";
+          if (isAppInForeground()) {
+            toast(title, {
+              description: truncateSummary(body, 120),
+              duration: 8_000,
+              action: {
+                label: "查看对话",
+                onClick: () => navigate("/"),
+              },
+            });
+          }
           void useNotificationStore.getState().notify({
             priority: "high",
             cue: "attention",
-            title: "Aster 提醒",
-            body: event.message.text || "收到一条新提醒",
+            title,
+            body,
             tag: `host:${event.message.id}`,
           });
           invalidateHistory(200);

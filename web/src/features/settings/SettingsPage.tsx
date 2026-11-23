@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
+  BatteryCharging,
   Bell,
   Check,
   CheckCircle2,
@@ -23,7 +24,13 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { useConnectors } from "@/features/connectors/use-connectors";
-import { isNative, platformLabel } from "@/lib/platform";
+import {
+  getAndroidKeepAliveStatus,
+  requestAndroidBatteryExemption,
+  stopAndroidKeepAlive,
+  type AndroidKeepAliveStatus,
+} from "@/lib/android-keepalive";
+import { isCapacitor, isNative, isTauri, platformLabel } from "@/lib/platform";
 import { playCue } from "@/lib/sound";
 import { formatExpiry } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -79,9 +86,11 @@ export function SettingsPage() {
   const muted = useSoundStore((state) => state.muted);
   const toggleSound = useSoundStore((state) => state.toggle);
   const notifyEnabled = useNotificationStore((state) => state.enabled);
+  const keepAliveEnabled = useNotificationStore((state) => state.keepAliveEnabled);
   const notifyPermission = useNotificationStore((state) => state.permission);
   const requestNotifyPermission = useNotificationStore((state) => state.requestPermission);
   const setNotifyEnabled = useNotificationStore((state) => state.setEnabled);
+  const setKeepAliveEnabled = useNotificationStore((state) => state.setKeepAliveEnabled);
   const sendNotification = useNotificationStore((state) => state.notify);
   const themeMode = useThemeStore((state) => state.mode);
   const setThemeMode = useThemeStore((state) => state.setMode);
@@ -92,6 +101,25 @@ export function SettingsPage() {
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [keepAliveStatus, setKeepAliveStatus] = useState<AndroidKeepAliveStatus | null>(null);
+
+  useEffect(() => {
+    if (!isCapacitor()) return;
+    let active = true;
+    const refresh = () => {
+      void getAndroidKeepAliveStatus().then((status) => {
+        if (active) setKeepAliveStatus(status);
+      });
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [keepAliveEnabled, notifyEnabled, notifyPermission]);
 
   const connectedConnectors =
     connectorsQuery.data?.connectors.filter((c) => c.status === "connected") ?? [];
@@ -121,6 +149,7 @@ export function SettingsPage() {
     if (loggingOut) return;
     setLoggingOut(true);
     try {
+      void stopAndroidKeepAlive();
       await logout();
       resetChat();
       queryClient.clear();
@@ -317,8 +346,13 @@ export function SettingsPage() {
                       </span>
                     </div>
                     <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-                      后台或切走窗口时，在浏览器 / Windows 右下角 / 手机通知栏弹出提醒
+                      前台收到任务/监控/提醒时弹出应用内通知条；后台或切走窗口时弹出系统通知
                     </p>
+                    {isTauri() && (
+                      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                        关闭窗口会自动隐藏到系统托盘保持通知在线，右键托盘图标可彻底退出。
+                      </p>
+                    )}
                   </div>
 
                   <div className="flex shrink-0 items-center gap-2">
@@ -390,6 +424,71 @@ export function SettingsPage() {
                     ) : null}
                   </div>
                 </div>
+
+                {isCapacitor() && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3.5">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-[13.5px] font-medium">后台保活接收通知</p>
+                        <span className="rounded-full bg-card px-2 py-0.5 text-[11px] text-muted-foreground shadow-2xs">
+                          {keepAliveStatus?.running ? "运行中" : keepAliveEnabled ? "待启动" : "已关闭"}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                        通过 Android 前台保活服务维持实时连接，锁屏/切后台时也能及时弹出任务与提醒通知
+                      </p>
+                    </div>
+
+                    <div className="flex shrink-0 flex-wrap items-center gap-2">
+                      {keepAliveStatus?.ignoringBatteryOptimizations ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-success/10 px-2.5 py-1 text-[11px] font-medium text-success">
+                          <Check className="size-3" />
+                          已加入电池白名单
+                        </span>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-9 rounded-full bg-card px-3 text-xs shadow-2xs sm:h-8"
+                          onClick={async () => {
+                            const ok = await requestAndroidBatteryExemption();
+                            if (!ok) {
+                              toast.info("请在手机系统设置中将 Aster 设为「无限制/允许后台运行」");
+                            }
+                          }}
+                        >
+                          <BatteryCharging className="size-3.5" />
+                          防杀后台设置
+                        </Button>
+                      )}
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={keepAliveEnabled}
+                        onClick={() => setKeepAliveEnabled(!keepAliveEnabled)}
+                        className="inline-flex min-h-10 shrink-0 items-center gap-2 rounded-full bg-card py-1 pl-3 pr-1.5 shadow-2xs transition-colors sm:min-h-9"
+                      >
+                        <span
+                          className={cn(
+                            "text-xs font-medium",
+                            keepAliveEnabled ? "text-primary" : "text-muted-foreground",
+                          )}
+                        >
+                          {keepAliveEnabled ? "开启" : "关闭"}
+                        </span>
+                        <span
+                          className={cn(
+                            "flex h-5 w-9 items-center rounded-full p-0.5 transition-colors",
+                            keepAliveEnabled ? "justify-end bg-primary" : "justify-start bg-border",
+                          )}
+                        >
+                          <span className="size-4 rounded-full bg-white shadow-xs" />
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </Section>
 

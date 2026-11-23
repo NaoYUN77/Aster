@@ -23,6 +23,7 @@ import { SoundToggle } from "@/components/SoundToggle";
 import { Badge } from "@/components/ui/badge";
 import { useConnectors } from "@/features/connectors/use-connectors";
 import { USE_MOCK } from "@/lib/env";
+import { stopAndroidKeepAlive } from "@/lib/android-keepalive";
 import { platformLabel } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/auth";
@@ -79,6 +80,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const handleLogout = async () => {
     setMobileOpen(false);
+    void stopAndroidKeepAlive();
     await logout();
     resetChat();
     useApprovalStore.getState().clear();

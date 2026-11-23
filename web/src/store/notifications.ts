@@ -10,9 +10,11 @@ import { storageGet, storageSet } from "@/lib/storage";
 
 const ENABLED_KEY = "notifyEnabled";
 const BANNER_DISMISSED_KEY = "notifyBannerDismissed";
+const KEEP_ALIVE_KEY = "notifyKeepAlive";
 
 type NotificationState = {
   enabled: boolean;
+  keepAliveEnabled: boolean;
   permission: NotificationPermissionState;
   bannerDismissed: boolean;
   hydrated: boolean;
@@ -20,24 +22,28 @@ type NotificationState = {
   refreshPermission: () => Promise<NotificationPermissionState>;
   requestPermission: () => Promise<NotificationPermissionState>;
   setEnabled: (enabled: boolean) => void;
+  setKeepAliveEnabled: (enabled: boolean) => void;
   dismissBanner: () => void;
   notify: (payload: NotifyPayload) => Promise<boolean>;
 };
 
 export const useNotificationStore = create<NotificationState>((set, get) => ({
   enabled: true,
+  keepAliveEnabled: true,
   permission: "default",
   bannerDismissed: false,
   hydrated: false,
 
   hydrate: async () => {
-    const [rawEnabled, rawDismissed, permission] = await Promise.all([
+    const [rawEnabled, rawDismissed, rawKeepAlive, permission] = await Promise.all([
       storageGet(ENABLED_KEY),
       storageGet(BANNER_DISMISSED_KEY),
+      storageGet(KEEP_ALIVE_KEY),
       checkNotificationPermission(),
     ]);
     set({
       enabled: rawEnabled !== "0",
+      keepAliveEnabled: rawKeepAlive !== "0",
       bannerDismissed: rawDismissed === "1",
       permission,
       hydrated: true,
@@ -67,6 +73,11 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
   setEnabled: (enabled) => {
     set({ enabled });
     void storageSet(ENABLED_KEY, enabled ? "1" : "0");
+  },
+
+  setKeepAliveEnabled: (keepAliveEnabled) => {
+    set({ keepAliveEnabled });
+    void storageSet(KEEP_ALIVE_KEY, keepAliveEnabled ? "1" : "0");
   },
 
   dismissBanner: () => {

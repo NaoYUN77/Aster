@@ -180,8 +180,11 @@ const credentialRequestSchema = z.object({
   tool: z.string(),
 });
 
+export type HostMessageSource = "reminder" | "watch" | "routine";
+
 const hostMessageSchema = z.object({
   message: uiMessageSchema,
+  source: z.enum(["reminder", "watch", "routine"]).optional(),
 });
 
 /** Connector 连接状态变化；只用于让前端刷新列表，不信任 payload。 */
@@ -222,7 +225,7 @@ export type ParsedServerEvent =
     }
   | { type: "steer.done"; requestId: string; steerId: string; message: UiMessage }
   | { type: "model.changed"; current: ModelRef; version?: number }
-  | { type: "host.message"; message: UiMessage }
+  | { type: "host.message"; message: UiMessage; source?: HostMessageSource }
   | { type: "connector.changed" }
   | { type: "credential.request"; request: CredentialRequest }
   | { type: "approval.requested"; approval: ApprovalRequestView }
@@ -342,7 +345,11 @@ export function parseServerEvent(event: string, data: unknown): ParsedServerEven
     case "host.message": {
       const parsed = hostMessageSchema.safeParse(data);
       if (!parsed.success) return { type: "ignored", event };
-      return { type: "host.message", message: parsed.data.message as UiMessage };
+      return {
+        type: "host.message",
+        message: parsed.data.message as UiMessage,
+        ...(parsed.data.source ? { source: parsed.data.source } : {}),
+      };
     }
     case "credential.request": {
       const parsed = credentialRequestSchema.safeParse(data);

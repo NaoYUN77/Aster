@@ -1,8 +1,21 @@
+import type { HostMessageSource } from "@/api/events";
 import { isCapacitor, isTauri } from "./platform";
 import { playCue, type SoundCue } from "./sound";
 import { useSoundStore } from "@/store/sound";
 
 export type NotificationPermissionState = "default" | "granted" | "denied" | "unsupported";
+
+export function hostMessageTitle(source?: HostMessageSource): string {
+  switch (source) {
+    case "routine":
+      return "Aster 定时任务";
+    case "watch":
+      return "Aster 监控动态";
+    case "reminder":
+    default:
+      return "Aster 提醒";
+  }
+}
 
 export type NotifyPayload = {
   /** high: 审批/定时提醒/凭据（前台出声、后台弹系统通知）；completion: 回复/子任务结束（仅后台提醒）。 */
