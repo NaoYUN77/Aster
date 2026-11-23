@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { openAgent } from "../src/agent.js";
 import { buildAgentOptions } from "../src/agent-options.js";
 import { openConnectors } from "../src/connectors/index.js";
@@ -55,12 +56,22 @@ test("the web host composition exposes reminders, watches, routines and skills",
     const faux = fauxProvider({ provider: "openai" });
     const models = createModels();
     models.setProvider(faux.provider);
-    let toolNames: string[] = [];
-    faux.setResponses([(transcript) => {
-      toolNames = transcript.messages.flatMap((message) =>
-        message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : []);
-      return fauxAssistantMessage("ok");
-    }]);
+    let turn1Tools: string[] = [];
+    let turn2Tools: string[] = [];
+    let systemText = "";
+    faux.setResponses([
+      (transcript) => {
+        turn1Tools = getCurrentTools(transcript.messages).map((tool) => tool.name);
+        systemText = getCurrentSystemPrompt(transcript.messages);
+        return fauxAssistantMessage([
+          fauxToolCall("tool_search", { query: "github repositories" }),
+        ], { stopReason: "toolUse" });
+      },
+      (transcript) => {
+        turn2Tools = getCurrentTools(transcript.messages).map((tool) => tool.name);
+        return fauxAssistantMessage("ok");
+      },
+    ]);
     app = await openAgent(config, models, undefined, buildAgentOptions(config, {
       reminderStore: reminders,
       extraExtensions: [
@@ -77,11 +88,16 @@ test("the web host composition exposes reminders, watches, routines and skills",
       text: "hello",
     }, new AbortController().signal), "ok");
     for (const name of ["reminder_create", "reminder_list", "watch_create", "watch_list",
-      "routine_create", "routine_list", "skill_list", "connector_list",
-      "connector_github_list_repositories", "connector_gmail_search_messages"]) {
-      assert.ok(toolNames.includes(name), `${name} is registered (${toolNames.join(",")})`);
+      "routine_create", "routine_list", "skill_list", "skill_load", "connector_list", "tool_search"]) {
+      assert.ok(turn1Tools.includes(name), `${name} is registered (${turn1Tools.join(",")})`);
     }
-    assert.ok(toolNames.length > 9, `expected more than 9 tools, saw ${toolNames.length}`);
+    // Connector action tools stay Tier-2 deferred until discovered via tool_search.
+    assert.equal(turn1Tools.includes("connector_github_list_repositories"), false);
+    assert.equal(turn1Tools.includes("connector_gmail_search_messages"), false);
+    assert.ok(turn2Tools.includes("connector_github_list_repositories"), `discovered via tool_search (${turn2Tools.join(",")})`);
+    // Skills index is injected into system context while the skill body stays on disk.
+    assert.match(systemText, /- demo: demo skill/);
+    assert.equal(systemText.includes("\nbody\n"), false);
   } finally {
     await app?.close();
     connectors?.close();

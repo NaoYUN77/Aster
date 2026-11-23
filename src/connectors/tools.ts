@@ -22,7 +22,12 @@ const READ_TOOL_NAMES = new Set([
 ]);
 
 function governed(tool: ToolRegistration): GovernedTool {
-  return Object.assign(tool, {
+  // Keep `connector_list` Tier-1 resident (0-arg status query); defer all provider-specific action
+  // tools to Tier-2 so they load on demand via `tool_search` instead of bloating every turn's schema.
+  const registered: ToolRegistration = tool.name === "connector_list"
+    ? tool
+    : { ...tool, deferred: true };
+  return Object.assign(registered, {
     governance: {
       source: { kind: "builtin" as const, extension: "connectors" },
       trust: "trusted" as const,
@@ -161,15 +166,21 @@ export function connectorStatusText(service: ConnectorService): string {
   }
   if (view.connections.length === 0) return "暂无已授权连接。";
   const toolsByProvider = new Map(view.definitions.map((definition) => [definition.provider, definition.tools]));
+  let hasActiveTools = false;
   const lines = view.connections.map((connection) => {
     const head = `${connection.slug} (${connection.provider}, ${connection.status}`
       + `${connection.accountLabel === null ? "" : `, ${connection.accountLabel}`})`;
     if (connection.status !== "connected") return `- ${head}：工具暂不可用，需要在客户端重新授权`;
     const tools = toolsByProvider.get(connection.provider) ?? [];
     if (tools.length === 0) return `- ${head}：已连接（无内置工具）`;
+    hasActiveTools = true;
     return `- ${head}：可用工具 ${tools.join(", ")}`;
   });
-  return ["已授权连接：", ...lines].join("\n");
+  return [
+    "已授权连接：",
+    ...lines,
+    ...(hasActiveTools ? ["提示：连接器工具按需加载，调用前请先用 tool_search 搜索目标工具名。"] : []),
+  ].join("\n");
 }
 
 /**

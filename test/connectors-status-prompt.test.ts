@@ -84,6 +84,20 @@ test("connector_list remains registered as the authoritative query", () => {
   assert.ok(names.includes("connector_github_list_repositories"));
 });
 
+test("connector_list stays Tier-1 resident while provider action tools are deferred to Tier-2", () => {
+  const service = { list: () => ({ definitions: DEFINITIONS, connections: [] }) } as unknown as ConnectorService;
+  const extension = createConnectorExtension(service, "owner");
+  const tools = extension.tools ?? [];
+  const listTool = tools.find((tool) => tool.name === "connector_list");
+  assert.ok(listTool !== undefined);
+  assert.notEqual(listTool.deferred, true);
+  const actionTools = tools.filter((tool) => tool.name !== "connector_list");
+  assert.ok(actionTools.length >= 30);
+  for (const tool of actionTools) {
+    assert.equal(tool.deferred, true, `${tool.name} should be deferred`);
+  }
+});
+
 test("a failing status read degrades to a neutral line instead of breaking the turn", () => {
   const service = {
     list: () => {
