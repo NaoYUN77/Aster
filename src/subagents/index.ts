@@ -1,4 +1,5 @@
 export {
+  SubagentConcurrencyLimitError,
   SubagentInvalidToolsError,
   SubagentManager,
   type SubagentManagerOptions,
@@ -9,4 +10,4 @@ export {
   type SubagentToolCapabilities,
   type SubagentWaitResult,
 } from "./manager.js";
-export { createSubagentExtension } from "./tools.js";
+export { buildSubagentsPromptSection, createSubagentExtension } from "./tools.js";

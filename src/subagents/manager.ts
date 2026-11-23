@@ -35,6 +35,7 @@ const MAX_SUBAGENT_TIMEOUT_MS = 1_800_000;
 const MAX_PARTIAL_SUMMARY_CHARS = 8_000;
 const MAX_SUBAGENT_TURNS = 30;
 const MAX_FINISHED_RESULTS = 64;
+const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 6;
 const BLOCKED_SUBAGENT_TOOLS = new Set(["spawn_subagent", "wait_subagent", "cancel_subagent"]);
 /** Host-stateful or recursive extensions never exposed to isolated sub-agents. */
 const EXCLUDED_SUBAGENT_EXTENSIONS = new Set([
@@ -101,6 +102,20 @@ export class SubagentInvalidToolsError extends Error {
   }
 }
 
+export class SubagentConcurrencyLimitError extends Error {
+  readonly code = "SUBAGENT_CONCURRENCY_LIMIT";
+  constructor(
+    readonly activeCount: number,
+    readonly maxConcurrent: number,
+  ) {
+    super(
+      `Sub-agent concurrency limit reached (${activeCount}/${maxConcurrent} active). `
+      + "Wait for running sub-agents with wait_subagent or batch smaller subtasks before spawning more.",
+    );
+    this.name = "SubagentConcurrencyLimitError";
+  }
+}
+
 export type SubagentSpawnInput = {
   readonly task: string;
   readonly systemPrompt?: string;
@@ -130,6 +145,8 @@ export type SubagentManagerOptions = {
   /** Optional standalone token usage ledger (ADR-0007). */
   readonly usageLedger?: UsageLedger;
   readonly authority?: ToolAuthority;
+  /** Maximum number of concurrently active sub-agents. Defaults to 6. */
+  readonly maxConcurrent?: number;
   /** Optional custom storage factory for unit tests (defaults to disposable SQLite file). */
   readonly storageFactory?: (id: string, dbPath: string) => Promise<Storage>;
   readonly log?: (line: string) => void;
@@ -149,7 +166,7 @@ function buildDefaultSubagentPrompt(workingDirectory: string, hasToolSearch: boo
   return [
     "You are a bounded sub-agent executing a delegated task for the main agent.",
     `Your working directory is ${workingDirectory}. Keep file changes inside this workspace unless explicitly approved by the owner.`,
-    "Work independently, use only the tools provided to you, and do not ask the user follow-up questions.",
+    "Work independently, use only the tools provided to you, prefer the 'read' tool for inspecting files, and do not ask the user follow-up questions.",
     ...(hasToolSearch
       ? ["Additional connected tools (connectors, MCP servers, etc.) are loaded on demand: call tool_search with a task description or tool name when you need a tool not in your initial list."]
       : []),
@@ -248,6 +265,7 @@ export class SubagentManager {
   private readonly hub: EventHub | undefined;
   private readonly usageLedger: UsageLedger | undefined;
   private readonly authority: ToolAuthority;
+  readonly maxConcurrent: number;
   private readonly storageFactory: ((id: string, dbPath: string) => Promise<Storage>) | undefined;
   private readonly log: (line: string) => void;
   private readonly active = new Map<string, ActiveSubagent>();
@@ -267,6 +285,9 @@ export class SubagentManager {
     this.hub = options.hub;
     this.usageLedger = options.usageLedger;
     this.authority = options.authority ?? "owner";
+    this.maxConcurrent = options.maxConcurrent !== undefined && Number.isFinite(options.maxConcurrent) && options.maxConcurrent >= 1
+      ? Math.trunc(options.maxConcurrent)
+      : DEFAULT_MAX_CONCURRENT_SUBAGENTS;
     this.storageFactory = options.storageFactory;
     this.log = options.log ?? ((line) => console.error(line));
   }
@@ -519,6 +540,10 @@ export class SubagentManager {
         new Error(`Subagent cwd must stay inside workspace (${this.workspace})`),
         { code: "SUBAGENT_CWD_OUTSIDE_WORKSPACE" },
       );
+    }
+
+    if (this.active.size >= this.maxConcurrent) {
+      throw new SubagentConcurrencyLimitError(this.active.size, this.maxConcurrent);
     }
 
     const id = `sub_${randomBytes(6).toString("hex")}`;
