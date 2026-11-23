@@ -13,17 +13,21 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
-import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import { openAgent } from "../src/agent.js";
 import { ApprovalService } from "../src/approvals/index.js";
+import { readConfig } from "../src/config.js";
 import { EventHub } from "../src/http/events.js";
 import {
   createSubagentExtension,
+  SubagentConcurrencyLimitError,
   SubagentInvalidToolsError,
   SubagentManager,
   type SubagentSnapshot,
 } from "../src/subagents/index.js";
 import { personalTools } from "../src/tools.js";
 import { createWebExtension } from "../src/web-tools.js";
+import { withMemoryOff } from "./support/memory-off.js";
 
 test("SubagentManager runs in disposable SQLite and unlinks it cleanly on completion", async () => {
   const dir = await mkdtemp(join(tmpdir(), "aster-subagents-test-"));
@@ -668,6 +672,149 @@ test("SubagentManager fails fast on invalid tools and spawn_subagent returns str
     assert.deepEqual(structured.error?.invalidTools, ["bogus_tool"]);
     assert.ok(structured.error?.availableTools?.includes("read"));
   } finally {
+    await manager.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("Main agent receives static <subagents> delegation guidelines while sub-agents do not", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-subagents-prompt-section-"));
+  const config = withMemoryOff(readConfig({
+    WEB_OWNER_ID: "owner",
+    MODEL_PROVIDER: "openai",
+    MODEL_ID: "faux-1",
+    OPENAI_API_KEY: "offline-test",
+    DATA_DIR: dir,
+  }));
+  const faux = fauxProvider({ provider: "openai" });
+  const models = createModels();
+  models.setProvider(faux.provider);
+
+  let mainSystemPrompt = "";
+  let subagentSystemPrompt = "";
+  let app: Awaited<ReturnType<typeof openAgent>> | undefined;
+
+  try {
+    faux.setResponses([
+      (transcript) => {
+        mainSystemPrompt = getCurrentSystemPrompt(transcript.messages);
+        return fauxAssistantMessage([
+          fauxToolCall("spawn_subagent", { task: "Inspect workspace quickly", mode: "wait" }),
+        ], { stopReason: "toolUse" });
+      },
+      (transcript) => {
+        subagentSystemPrompt = getCurrentSystemPrompt(transcript.messages);
+        return fauxAssistantMessage("Sub-agent inspected.");
+      },
+      fauxAssistantMessage("Main agent summarized."),
+    ]);
+
+    app = await openAgent(config, models, undefined, { enableSubagents: true });
+    const reply = await app.reply({
+      requestId: "web:subagent-section:1",
+      conversationId: "owner",
+      senderId: "owner",
+      text: "Check the workspace",
+    }, new AbortController().signal);
+
+    assert.equal(reply, "Main agent summarized.");
+    assert.match(mainSystemPrompt, /<subagents>/);
+    assert.match(mainSystemPrompt, /Sub-agent delegation:/);
+    assert.match(mainSystemPrompt, /hard concurrency cap: 6/);
+    assert.equal(subagentSystemPrompt.includes("<subagents>"), false);
+    assert.equal(subagentSystemPrompt.includes("Sub-agent delegation:"), false);
+  } finally {
+    await app?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("SubagentManager enforces maxConcurrent cap and returns structured error via spawn_subagent", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-subagents-concurrency-"));
+  const workspace = join(dir, "workspace");
+  const releases: Array<() => void> = [];
+
+  const gateExt = defineExtension({
+    name: "gate-test-tools",
+    tools: [
+      defineTool({
+        name: "hold_slot",
+        description: "Blocks until released.",
+        parameters: obj({}),
+        replay: "safe",
+        execute: async () => {
+          await new Promise<void>((resolve) => { releases.push(resolve); });
+          return { output: [{ type: "text", text: "released" }] };
+        },
+      }),
+    ],
+  });
+
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "m1" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const manager = new SubagentManager({
+    dataDir: dir,
+    workspace,
+    models,
+    defaultModel: { provider: "faux", modelId: "m1" },
+    extensions: [gateExt],
+    maxConcurrent: 2,
+    log: () => {},
+  });
+
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("hold_slot", {})], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("hold_slot", {})], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Done 1"),
+      fauxAssistantMessage("Done 2"),
+      fauxAssistantMessage("Done 3"),
+    ]);
+
+    const first = await manager.spawn({ task: "Task 1", tools: ["hold_slot"], mode: "background" });
+    const second = await manager.spawn({ task: "Task 2", tools: ["hold_slot"], mode: "background" });
+    assert.equal(first.mode, "background");
+    assert.equal(second.mode, "background");
+
+    await assert.rejects(
+      manager.spawn({ task: "Task 3", tools: ["hold_slot"], mode: "background" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubagentConcurrencyLimitError);
+        assert.equal(error.code, "SUBAGENT_CONCURRENCY_LIMIT");
+        assert.equal(error.activeCount, 2);
+        assert.equal(error.maxConcurrent, 2);
+        return true;
+      },
+    );
+
+    const spawnTool = createSubagentExtension(manager).tools!.find((t) => t.name === "spawn_subagent")!;
+    const toolResult = await spawnTool.execute(
+      { task: "Task 3 via tool", tools: ["hold_slot"], mode: "background" },
+      { conversationId: 1, taskId: 2, callId: "call-limit" } as ToolExecutionApi,
+      BACKGROUND_CONTEXT,
+    );
+    assert.equal(toolResult.isError, true);
+    const structured = toolResult.structuredOutput as {
+      error?: { code?: string; activeCount?: number; maxConcurrent?: number };
+    };
+    assert.equal(structured.error?.code, "SUBAGENT_CONCURRENCY_LIMIT");
+    assert.equal(structured.error?.activeCount, 2);
+    assert.equal(structured.error?.maxConcurrent, 2);
+
+    // Wait until both sub-agents reach hold_slot, then release both so slots free up.
+    for (let i = 0; i < 100 && releases.length < 2; i++) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    while (releases.length > 0) releases.shift()!();
+    await manager.wait([first.id, second.id]);
+
+    // After slots free up, spawning succeeds again.
+    const third = await manager.spawn({ task: "Task 3 after free", tools: ["hold_slot"], mode: "wait" });
+    assert.equal(third.mode, "wait");
+    assert.equal(third.result.status, "completed");
+  } finally {
+    while (releases.length > 0) releases.shift()!();
     await manager.close();
     await rm(dir, { recursive: true, force: true });
   }

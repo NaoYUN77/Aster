@@ -1,13 +1,36 @@
 import { arr, bool, lit, num, obj, opt, str, union } from "@earendil-works/pi-schema";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { GovernedTool } from "../tools.js";
-import { SubagentInvalidToolsError, type SubagentManager } from "./manager.js";
+import { SubagentConcurrencyLimitError, SubagentInvalidToolsError, type SubagentManager } from "./manager.js";
 
 const SUBAGENT_GOVERNANCE = {
   source: { kind: "builtin" as const, extension: "subagents" },
   trust: "trusted" as const,
   authz: "read" as const,
 };
+
+/**
+ * Static delegation guidelines injected into the root conversation's prompt context.
+ * Kept byte-stable across turns so prompt prefix caching stays intact.
+ */
+export function buildSubagentsPromptSection(maxConcurrent: number): string {
+  return [
+    "Sub-agent delegation: you can proactively decide whether to handle a task directly or delegate to isolated sub-agents via spawn_subagent.",
+    "Delegate when:",
+    "- A task naturally splits into 2-4 independent parallel tracks (e.g. comparing options, researching multiple topics/sources, or inspecting separate code modules).",
+    "- Heavy multi-step web research, log inspection, or wide file exploration would bloat the main conversation while you only need a concise synthesized result.",
+    "- A well-scoped, self-contained implementation or code review can run independently (set allowWrite=true only when edits are required; keep at most one writer active at a time).",
+    "Do NOT delegate when:",
+    "- The request can be finished directly in 1-3 tool calls (a single search, reading 1-2 files, a small edit, reminders, or quick status checks).",
+    "- Steps have tight sequential dependencies, rely heavily on nuanced main-chat context, or require asking the owner clarifying questions.",
+    `- Do not spawn one sub-agent per item in a long list; batch related items into 2-4 sub-agents (hard concurrency cap: ${maxConcurrent}).`,
+    "Execution & handoff rules:",
+    "- For a single heavy task, use mode='wait'. For 2+ independent tasks, call spawn_subagent with mode='background' for each in one turn so they run concurrently, then collect them with one wait_subagent call.",
+    "- Each sub-agent starts fresh with NO main conversation history and NO MEMORY.md: make 'task' self-contained (background, exact goal, constraints, and expected output format).",
+    "- Omit 'tools' by default so the sub-agent gets core resident tools plus tool_search; use 'extraTools' to promote specific connected tools; pass 'tools' only when strict minimal-privilege isolation is needed.",
+    "- Always follow explicit user instructions if the user asks to use or avoid sub-agents.",
+  ].join("\n");
+}
 
 function buildSpawnDescription(manager: SubagentManager): string {
   const caps = manager.describeToolCapabilities();
@@ -55,6 +78,21 @@ export function createSubagentExtension(manager: SubagentManager) {
                 message: error.message,
                 invalidTools: [...error.invalidTools],
                 availableTools: [...error.availableTools],
+              },
+            };
+            return {
+              isError: true,
+              output: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+              structuredOutput: payload,
+            };
+          }
+          if (error instanceof SubagentConcurrencyLimitError) {
+            const payload = {
+              error: {
+                code: error.code,
+                message: error.message,
+                activeCount: error.activeCount,
+                maxConcurrent: error.maxConcurrent,
               },
             };
             return {
@@ -121,8 +159,14 @@ export function createSubagentExtension(manager: SubagentManager) {
     governance: SUBAGENT_GOVERNANCE,
   };
 
+  const subagentsSection = buildSubagentsPromptSection(manager.maxConcurrent);
+
   return defineExtension({
     name: "subagents",
     tools: [spawnSubagent, waitSubagent, cancelSubagent],
+    sections: [{
+      key: "subagents",
+      render: () => subagentsSection,
+    }],
   });
 }
