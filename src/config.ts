@@ -395,6 +395,42 @@ export function readWatchersConfig(env: NodeJS.ProcessEnv = process.env): Watche
   if ((relayUrl === undefined || relayUrl === "") !== (relayToken === undefined || relayToken === "")) {
     throw new ConfigurationError("WATCHERS_RELAY_URL and WATCHERS_RELAY_TOKEN must be set together");
   }
+  const timezone = env.ROUTINES_TIMEZONE?.trim() || ROUTINE_DEFAULTS.timezone;
+  try {
+    assertTimeZone(timezone);
+  } catch {
+    throw new ConfigurationError("ROUTINES_TIMEZONE must be a valid IANA time zone name, such as Asia/Shanghai");
+  }
+  const quietRaw = env.WATCH_QUIET_HOURS?.trim();
+  let quietHours: string | null = "23:00-08:00";
+  if (quietRaw !== undefined && quietRaw !== "") {
+    if (quietRaw.toLowerCase() === "off" || quietRaw === "0" || quietRaw.toLowerCase() === "none") {
+      quietHours = null;
+    } else {
+      const parts = quietRaw.split("-");
+      if (parts.length !== 2) {
+        throw new ConfigurationError("WATCH_QUIET_HOURS must be HH:MM-HH:MM (e.g. 23:00-08:00) or 'off'");
+      }
+      const start = normalizeTimeOfDay(parts[0]!.trim());
+      const end = normalizeTimeOfDay(parts[1]!.trim());
+      if (!isValidTimeOfDay(start) || !isValidTimeOfDay(end)) {
+        throw new ConfigurationError("WATCH_QUIET_HOURS must be HH:MM-HH:MM (e.g. 23:00-08:00) or 'off'");
+      }
+      quietHours = `${start}-${end}`;
+    }
+  }
+  let digestTime = "08:30";
+  const digestRaw = env.WATCH_DIGEST_TIME?.trim();
+  if (digestRaw !== undefined && digestRaw !== "") {
+    const normalized = normalizeTimeOfDay(digestRaw);
+    if (!isValidTimeOfDay(normalized)) {
+      throw new ConfigurationError("WATCH_DIGEST_TIME must be HH:MM (e.g. 08:30)");
+    }
+    digestTime = normalized;
+  }
+  const triageModel = env.WATCH_TRIAGE_MODEL?.trim();
+  const triageTimeoutMs = boundedInteger(env, "WATCH_TRIAGE_TIMEOUT_MS", 45_000, 5_000, 180_000);
+
   return {
     enabled: enabledRaw !== "0",
     maxActive: boundedInteger(env, "WATCHERS_MAX_ACTIVE", 20, 1, 100),
@@ -403,6 +439,11 @@ export function readWatchersConfig(env: NodeJS.ProcessEnv = process.env): Watche
     xIntervalSec: boundedInteger(env, "WATCHERS_X_INTERVAL_SEC", 900, 300, 86_400),
     githubReconcileMin: boundedInteger(env, "WATCHERS_GITHUB_RECONCILE_MIN", 15, 0, 1_440),
     fetchTimeoutMs: boundedInteger(env, "WATCHERS_FETCH_TIMEOUT_MS", 15_000, 1_000, 60_000),
+    timezone,
+    quietHours,
+    digestTime,
+    triageTimeoutMs,
+    ...(triageModel === undefined || triageModel === "" ? {} : { triageModel }),
     ...(relayUrl === undefined || relayUrl === "" ? {} : { relayUrl }),
     ...(relayToken === undefined || relayToken === "" ? {} : { relayToken }),
     ...(githubToken === undefined || githubToken === "" ? {} : { githubToken }),

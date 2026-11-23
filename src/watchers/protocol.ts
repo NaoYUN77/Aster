@@ -8,6 +8,11 @@
 
 export type WatchKind = "github_run" | "github_pr" | "github_events" | "feed" | "x";
 
+/** `triage` runs new events through a read-only Sub-agent before delivery; `direct` pushes immediately. */
+export type WatchDeliveryMode = "triage" | "direct";
+
+export type WatchTriageAction = "notify" | "digest" | "suppress";
+
 /** `push` sources are never polled; they are reconciled. `poll` sources are driven by nextCheckAt. */
 export type SourceMode = "push" | "poll";
 
@@ -23,6 +28,8 @@ export const WATCH_SCHEMA_SQL: readonly string[] = [
      label TEXT NOT NULL,
      status TEXT NOT NULL DEFAULT 'active',
      max_events_per_hour INTEGER NOT NULL DEFAULT 10,
+     delivery_mode TEXT NOT NULL DEFAULT 'triage',
+     triage_prompt TEXT,
      created_at TEXT NOT NULL,
      stopped_at TEXT
    )`,
@@ -70,7 +77,15 @@ export const WATCH_SCHEMA_SQL: readonly string[] = [
      message_id TEXT,
      created_at TEXT NOT NULL,
      sent_at TEXT,
-     failure_code TEXT
+     failure_code TEXT,
+     triage_action TEXT,
+     triage_reason TEXT,
+     triage_urgent INTEGER NOT NULL DEFAULT 0,
+     digest_sent_at TEXT
+   )`,
+  `CREATE TABLE IF NOT EXISTS watch_meta (
+     key TEXT PRIMARY KEY,
+     value TEXT NOT NULL
    )`,
 ];
 
@@ -83,6 +98,8 @@ export type WatcherRow = {
   readonly label: string;
   readonly status: string;
   readonly maxEventsPerHour: number;
+  readonly deliveryMode: WatchDeliveryMode;
+  readonly triagePrompt: string | null;
   readonly createdAt: string;
   readonly stoppedAt: string | null;
 };
@@ -135,9 +152,12 @@ export type OutboxRow = {
   readonly chatId: string;
   readonly threadTs: string | null;
   readonly text: string;
-  readonly status: "pending" | "sending" | "sent" | "failed" | "uncertain";
+  readonly status: "pending" | "sending" | "sent" | "suppressed" | "queued_digest" | "failed" | "uncertain";
   readonly attempts: number;
   readonly createdAt: string;
+  readonly triageAction?: WatchTriageAction | null;
+  readonly triageReason?: string | null;
+  readonly triageUrgent?: boolean;
 };
 
 export type CreateWatcherInput = {
@@ -149,6 +169,8 @@ export type CreateWatcherInput = {
   readonly location: string;
   readonly mode: SourceMode;
   readonly intervalSec: number;
+  readonly deliveryMode?: WatchDeliveryMode;
+  readonly triagePrompt?: string;
   readonly now: string;
 };
 
@@ -216,4 +238,14 @@ export type WatchersConfig = {
   readonly relayUrl?: string;
   readonly relayToken?: string;
   readonly githubToken?: string;
+  /** IANA timezone for Quiet Hours & daily digest scheduling (defaults to Asia/Shanghai). */
+  readonly timezone?: string;
+  /** Quiet Hours window `HH:MM-HH:MM` (default `23:00-08:00`), or `null` when disabled (`off`). */
+  readonly quietHours?: string | null;
+  /** Local wall-clock time `HH:MM` to flush daily queued digest items (default `08:30`). */
+  readonly digestTime?: string;
+  /** Optional model override for watcher triage Sub-agent (`provider/model` or `modelId`). */
+  readonly triageModel?: string;
+  /** Per-batch timeout for watcher triage Sub-agent (default 45000 ms). */
+  readonly triageTimeoutMs?: number;
 };
