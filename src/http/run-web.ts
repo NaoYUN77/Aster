@@ -238,6 +238,19 @@ export async function runWebMode(
       ...(agent.subagents === undefined ? {} : { subagents: agent.subagents }),
       usageLedger,
       usageContextInfo: () => agent!.usageContextInfo(),
+      ...(routinesStore === undefined
+        ? {}
+        : { routines: { store: routinesStore, paused: config.routines?.paused === true } }),
+      ...(watchersStore === undefined || config.watchers === undefined
+        ? {}
+        : {
+            watchers: {
+              store: watchersStore,
+              ...(watchers === undefined ? {} : { runtime: watchers }),
+              config: config.watchers,
+            },
+          }),
+      ...(reminders === undefined ? {} : { reminders }),
     });
     await app.listen({ port: web.port, host: web.host });
     worker.start();

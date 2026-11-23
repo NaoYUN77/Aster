@@ -9,6 +9,12 @@ import type { WebConfig } from "../config.js";
 import type { ApprovalDecision, ApprovalService } from "../approvals/index.js";
 import type { SubagentManager } from "../subagents/index.js";
 import type { UsageLedger, UsageRange, UsageSource } from "../usage/index.js";
+import { ReminderError, type ReminderStore } from "../reminders.js";
+import type { SqliteRoutineStore } from "../routines/store.js";
+import type { WatchersRuntime } from "../watchers/index.js";
+import type { WatchersConfig } from "../watchers/protocol.js";
+import type { SqliteWatchStore } from "../watchers/store.js";
+import { DEFAULT_WATCH_DIGEST_TIME, DEFAULT_WATCH_QUIET_HOURS, DEFAULT_WATCH_TIMEZONE } from "../watchers/triage.js";
 import { ModelSelectionError, type ModelSelectionService } from "../model-control.js";
 import { ConnectorError, connectorCode, safeConnectorMessage } from "../connectors/errors.js";
 import type { ConnectorService } from "../connectors/service.js";
@@ -45,6 +51,16 @@ export type WebServerOptions = {
     readonly resolveContextWindow: (provider: string, modelId: string) => number | null;
     readonly activeModel: { readonly provider: string; readonly modelId: string; readonly contextWindow: number | null };
   };
+  readonly routines?: {
+    readonly store: SqliteRoutineStore;
+    readonly paused?: boolean;
+  };
+  readonly watchers?: {
+    readonly store: SqliteWatchStore;
+    readonly runtime?: Pick<WatchersRuntime, "flushDigest">;
+    readonly config: WatchersConfig;
+  };
+  readonly reminders?: ReminderStore;
   readonly log?: (line: string) => void;
 };
 
@@ -563,6 +579,172 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       return reply.code(400).send(errorBody("INVALID_REQUEST", "每日预警阈值必须为正整数或 null"));
     }
     return { budget: options.usageLedger.setDailyTokenBudget(normalized) };
+  });
+
+  // ------------------------------------------------------------------ automations
+  const parsePositiveIntId = (raw: string): number | null => {
+    if (!/^[1-9]\d*$/.test(raw)) return null;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) ? value : null;
+  };
+
+  app.get("/api/v1/automations", async () => {
+    const routineItems = options.routines === undefined
+      ? []
+      : options.routines.store.list(options.ownerId).map((item) => ({
+          ...item,
+          recentRuns: options.routines!.store.runs(item.id, 5),
+        }));
+    const watchersConfig = options.watchers?.config;
+    const watcherItems = options.watchers === undefined
+      ? []
+      : options.watchers.store.list(options.ownerId);
+    const digestItems = options.watchers === undefined
+      ? []
+      : options.watchers.store.queuedDigest(options.ownerId, 50);
+    const reminderItems = options.reminders === undefined
+      ? []
+      : options.reminders.list(options.ownerId, { includeFinished: false, limit: 100 });
+    return {
+      routines: {
+        enabled: options.routines !== undefined,
+        paused: options.routines?.paused === true,
+        items: routineItems,
+      },
+      watchers: {
+        enabled: options.watchers !== undefined,
+        quietHours: watchersConfig === undefined
+          ? DEFAULT_WATCH_QUIET_HOURS
+          : (watchersConfig.quietHours === undefined ? DEFAULT_WATCH_QUIET_HOURS : watchersConfig.quietHours),
+        digestTime: watchersConfig?.digestTime ?? DEFAULT_WATCH_DIGEST_TIME,
+        timezone: watchersConfig?.timezone ?? DEFAULT_WATCH_TIMEZONE,
+        items: watcherItems,
+        digest: {
+          items: digestItems,
+        },
+      },
+      reminders: {
+        enabled: options.reminders !== undefined,
+        items: reminderItems,
+      },
+    };
+  });
+
+  app.post("/api/v1/routines/:id/pause", async (request, reply) => {
+    if (options.routines === undefined) {
+      return reply.code(503).send(errorBody("ROUTINES_DISABLED", "定时任务服务未启用"));
+    }
+    const id = parsePositiveIntId((request.params as { id: string }).id);
+    if (id === null) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的定时任务 ID"));
+    }
+    const existing = options.routines.store.get(id);
+    if (existing === undefined || existing.chatId !== options.ownerId || existing.status === "stopped") {
+      return reply.code(404).send(errorBody("ROUTINE_NOT_FOUND", "没有找到该定时任务"));
+    }
+    const updated = options.routines.store.setStatus(id, "paused");
+    return { routine: { ...updated, recentRuns: options.routines.store.runs(id, 5) } };
+  });
+
+  app.post("/api/v1/routines/:id/resume", async (request, reply) => {
+    if (options.routines === undefined) {
+      return reply.code(503).send(errorBody("ROUTINES_DISABLED", "定时任务服务未启用"));
+    }
+    const id = parsePositiveIntId((request.params as { id: string }).id);
+    if (id === null) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的定时任务 ID"));
+    }
+    const existing = options.routines.store.get(id);
+    if (existing === undefined || existing.chatId !== options.ownerId || existing.status === "stopped") {
+      return reply.code(404).send(errorBody("ROUTINE_NOT_FOUND", "没有找到该定时任务"));
+    }
+    const updated = options.routines.store.setStatus(id, "active");
+    return { routine: { ...updated, recentRuns: options.routines.store.runs(id, 5) } };
+  });
+
+  app.post("/api/v1/routines/:id/run-now", async (request, reply) => {
+    if (options.routines === undefined) {
+      return reply.code(503).send(errorBody("ROUTINES_DISABLED", "定时任务服务未启用"));
+    }
+    const id = parsePositiveIntId((request.params as { id: string }).id);
+    if (id === null) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的定时任务 ID"));
+    }
+    const existing = options.routines.store.get(id);
+    if (existing === undefined || existing.chatId !== options.ownerId || existing.status === "stopped") {
+      return reply.code(404).send(errorBody("ROUTINE_NOT_FOUND", "没有找到该定时任务"));
+    }
+    if (options.routines.paused === true) {
+      return reply.code(409).send(errorBody("ROUTINE_PAUSED", "定时任务服务当前处于全局暂停状态"));
+    }
+    if (existing.status !== "active") {
+      return reply.code(409).send(errorBody("ROUTINE_PAUSED", "该定时任务已暂停，请先恢复后再运行"));
+    }
+    const run = options.routines.store.enqueueManual(id, new Date());
+    return { run };
+  });
+
+  app.delete("/api/v1/routines/:id", async (request, reply) => {
+    if (options.routines === undefined) {
+      return reply.code(503).send(errorBody("ROUTINES_DISABLED", "定时任务服务未启用"));
+    }
+    const id = parsePositiveIntId((request.params as { id: string }).id);
+    if (id === null) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的定时任务 ID"));
+    }
+    const existing = options.routines.store.get(id);
+    if (existing === undefined || existing.chatId !== options.ownerId) {
+      return reply.code(404).send(errorBody("ROUTINE_NOT_FOUND", "没有找到该定时任务"));
+    }
+    options.routines.store.delete(id);
+    return { deleted: true, id };
+  });
+
+  app.post("/api/v1/watchers/:id/stop", async (request, reply) => {
+    if (options.watchers === undefined) {
+      return reply.code(503).send(errorBody("WATCHERS_DISABLED", "监控任务服务未启用"));
+    }
+    const id = parsePositiveIntId((request.params as { id: string }).id);
+    if (id === null) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的监控任务 ID"));
+    }
+    const stopped = options.watchers.store.stop(options.ownerId, id, new Date().toISOString());
+    if (!stopped) {
+      return reply.code(404).send(errorBody("WATCHER_NOT_FOUND", "没有找到运行中的监控任务"));
+    }
+    return { stopped: true, id };
+  });
+
+  app.post("/api/v1/watchers/digest/flush", async (_request, reply) => {
+    if (options.watchers?.runtime === undefined) {
+      return reply.code(503).send(errorBody("WATCHERS_DISABLED", "监控任务服务未启用"));
+    }
+    const result = await options.watchers.runtime.flushDigest(options.ownerId);
+    return { count: result.count, text: result.text };
+  });
+
+  app.post("/api/v1/reminders/:id/cancel", async (request, reply) => {
+    if (options.reminders === undefined) {
+      return reply.code(503).send(errorBody("REMINDERS_DISABLED", "提醒服务未启用"));
+    }
+    const id = parsePositiveIntId((request.params as { id: string }).id);
+    if (id === null) {
+      return reply.code(400).send(errorBody("INVALID_REQUEST", "无效的提醒 ID"));
+    }
+    try {
+      const reminder = options.reminders.cancel(options.ownerId, id);
+      return { reminder };
+    } catch (error) {
+      if (error instanceof ReminderError) {
+        if (error.code === "REMINDER_NOT_FOUND") {
+          return reply.code(404).send(errorBody(error.code, "没有找到该提醒"));
+        }
+        if (error.code === "REMINDER_NOT_CANCELLABLE") {
+          return reply.code(409).send(errorBody(error.code, "该提醒已触发或无法取消"));
+        }
+      }
+      throw error;
+    }
   });
 
   // ------------------------------------------------------------------ SSE

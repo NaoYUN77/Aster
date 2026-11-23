@@ -1,6 +1,7 @@
 import { Menu } from "lucide-react";
 import { userFacingMessage } from "@/api/errors";
 import { useMobileNav } from "@/app/AppShell";
+import { ChatAutomationsTrigger } from "@/features/automations/AutomationsDialog";
 import { ModelPicker } from "@/features/models/ModelPicker";
 import { useModelsQuery } from "@/features/models/use-models";
 import { NotificationPromptBanner } from "@/features/notifications/NotificationPromptBanner";
@@ -48,10 +49,13 @@ export function ChatPage() {
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-background">
-      {/* Floating top-center standalone 3D companion (no redundant desktop chat header) */}
+      {/* Floating top-center standalone 3D companion + top-right automations capsule */}
       {isDesktop ? (
         <div className="muse-top-fade pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center pb-6 pt-3.5 safe-top">
           <CompanionSprite mode={companionMode} size={96} />
+          <div className="absolute right-4 top-3.5">
+            <ChatAutomationsTrigger />
+          </div>
         </div>
       ) : (
         <div className="muse-top-fade pointer-events-none absolute inset-x-0 top-0 z-20 px-2.5 pb-5 pt-2 safe-top">
@@ -65,6 +69,9 @@ export function ChatPage() {
               <Menu className="size-5" />
             </button>
             <CompanionSprite mode={companionMode} size={76} />
+            <div className="absolute right-0 top-1">
+              <ChatAutomationsTrigger compact />
+            </div>
           </div>
         </div>
       )}
