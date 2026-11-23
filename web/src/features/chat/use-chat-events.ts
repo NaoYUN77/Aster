@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { getQueue } from "@/api/client";
+import { AUTOMATIONS_QUERY_ROOT } from "@/api/automations";
 import { CONNECTORS_QUERY_ROOT } from "@/api/connectors";
 import { refreshConnectorsFromServer } from "@/features/connectors/connector-refresh";
 import { parseServerEvent } from "@/api/events";
@@ -158,6 +159,7 @@ export function useChatEvents(): void {
             tag: `reply:${event.requestId}`,
           });
           invalidateHistory(200);
+          void queryClient.invalidateQueries({ queryKey: [AUTOMATIONS_QUERY_ROOT] });
           break;
         }
 
@@ -261,6 +263,7 @@ export function useChatEvents(): void {
             tag: `host:${event.message.id}`,
           });
           invalidateHistory(200);
+          void queryClient.invalidateQueries({ queryKey: [AUTOMATIONS_QUERY_ROOT] });
           break;
         }
 

@@ -1,5 +1,13 @@
 import type { ModelRef, ModelUsage, ModelsResponse, SelectableModel, UiMessage } from "../types";
 import type {
+  AutomationsResponse,
+  ReminderItem,
+  RoutineItem,
+  RoutineRunItem,
+  WatchDigestItem,
+  WatcherItem,
+} from "../automations";
+import type {
   UsageBudgetState,
   UsageCallItem,
   UsageRange,
@@ -1209,6 +1217,428 @@ export function mockUpdateDailyTokenBudget(
           : null,
     },
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* 后台任务（Routines / Watchers / Watch digest / Reminders）           */
+/* ------------------------------------------------------------------ */
+
+type MockAutomationsState = {
+  routines: RoutineItem[];
+  watchers: WatcherItem[];
+  digestItems: WatchDigestItem[];
+  reminders: ReminderItem[];
+  nextRunId: number;
+};
+
+function createInitialMockAutomations(): MockAutomationsState {
+  const now = Date.now();
+  const hour = 3_600_000;
+  const day = 24 * hour;
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  return {
+    nextRunId: 200,
+    routines: [
+      {
+        id: 101,
+        chatId: MOCK_OWNER_ID,
+        title: "每日 AI 与开源简报",
+        timezone: "Asia/Shanghai",
+        mode: "agent",
+        brief: "汇总过去 24 小时 AI 模型发布、GitHub 趋势与重要架构博文，过滤营销软文，仅在有实质进展时汇报。",
+        text: null,
+        delivery: "report",
+        status: "active",
+        conversationId: 12,
+        consecutiveFailures: 0,
+        lastError: null,
+        createdAt: iso(now - 14 * day),
+        updatedAt: iso(now - 6 * hour),
+        schedule: {
+          routineId: 101,
+          kind: "daily",
+          spec: { kind: "daily", at: "09:00" },
+          nextDueAt: iso(now + 10 * hour),
+          lastRunAt: iso(now - 14 * hour),
+        },
+        recentRuns: [
+          {
+            id: 195,
+            routineId: 101,
+            runKey: "sched:today",
+            trigger: "schedule",
+            status: "succeeded",
+            scheduledFor: iso(now - 14 * hour),
+            notBefore: null,
+            startedAt: iso(now - 14 * hour),
+            finishedAt: iso(now - 14 * hour + 18_000),
+            reply: "今日重点：1) TypeScript 5.9 RC 发布，显著优化增量构建；2) SQLite 3.50 改善 WAL 并发读性能。",
+            errorCode: null,
+            attempts: 1,
+            leaseUntil: null,
+            createdAt: iso(now - 14 * hour),
+          },
+          {
+            id: 191,
+            routineId: 101,
+            runKey: "sched:yesterday",
+            trigger: "schedule",
+            status: "suppressed",
+            scheduledFor: iso(now - 38 * hour),
+            notBefore: null,
+            startedAt: iso(now - 38 * hour),
+            finishedAt: iso(now - 38 * hour + 11_000),
+            reply: "NO_REPORT",
+            errorCode: null,
+            attempts: 1,
+            leaseUntil: null,
+            createdAt: iso(now - 38 * hour),
+          },
+          {
+            id: 186,
+            routineId: 101,
+            runKey: "sched:2days-ago",
+            trigger: "schedule",
+            status: "failed",
+            scheduledFor: iso(now - 62 * hour),
+            notBefore: null,
+            startedAt: iso(now - 62 * hour),
+            finishedAt: iso(now - 62 * hour + 45_000),
+            reply: null,
+            errorCode: "UPSTREAM_TIMEOUT",
+            attempts: 2,
+            leaseUntil: null,
+            createdAt: iso(now - 62 * hour),
+          },
+        ],
+      },
+      {
+        id: 102,
+        chatId: MOCK_OWNER_ID,
+        title: "周五晚间工作复盘提醒",
+        timezone: "Asia/Shanghai",
+        mode: "notify",
+        brief: null,
+        text: "本周收尾啦，记得整理下周优先级并同步项目进度。",
+        delivery: "always",
+        status: "paused",
+        conversationId: null,
+        consecutiveFailures: 0,
+        lastError: null,
+        createdAt: iso(now - 30 * day),
+        updatedAt: iso(now - 2 * day),
+        schedule: {
+          routineId: 102,
+          kind: "weekly",
+          spec: { kind: "weekly", days: [5], at: "18:00" },
+          nextDueAt: iso(now + 3 * day),
+          lastRunAt: iso(now - 4 * day),
+        },
+        recentRuns: [
+          {
+            id: 180,
+            routineId: 102,
+            runKey: "sched:last-fri",
+            trigger: "schedule",
+            status: "succeeded",
+            scheduledFor: iso(now - 4 * day),
+            notBefore: null,
+            startedAt: iso(now - 4 * day),
+            finishedAt: iso(now - 4 * day + 400),
+            reply: "本周收尾啦，记得整理下周优先级并同步项目进度。",
+            errorCode: null,
+            attempts: 1,
+            leaseUntil: null,
+            createdAt: iso(now - 4 * day),
+          },
+        ],
+      },
+    ],
+    watchers: [
+      {
+        id: 201,
+        chatId: MOCK_OWNER_ID,
+        threadTs: null,
+        kind: "feed",
+        target: "https://openai.com/news/rss.xml",
+        label: "OpenAI & Anthropic 官方博客",
+        status: "active",
+        maxEventsPerHour: 10,
+        deliveryMode: "triage",
+        triagePrompt: "仅关注新模型发布、API 价格变化与重要工程博客，跳过市场活动公告。",
+        createdAt: iso(now - 10 * day),
+        stoppedAt: null,
+        source: {
+          id: 301,
+          watcherId: 201,
+          kind: "feed",
+          location: "https://openai.com/news/rss.xml",
+          mode: "poll",
+          status: "active",
+          intervalSec: 900,
+          nextCheckAt: iso(now + 8 * 60_000),
+          reconcileAt: null,
+          failures: 0,
+          lastError: null,
+          lastCheckAt: iso(now - 7 * 60_000),
+        },
+      },
+      {
+        id: 202,
+        chatId: MOCK_OWNER_ID,
+        threadTs: null,
+        kind: "github_run",
+        target: "NaoYUN77/Aster",
+        label: "Aster 主分支 CI 构建",
+        status: "active",
+        maxEventsPerHour: 20,
+        deliveryMode: "direct",
+        triagePrompt: null,
+        createdAt: iso(now - 5 * day),
+        stoppedAt: null,
+        source: {
+          id: 302,
+          watcherId: 202,
+          kind: "github_run",
+          location: "NaoYUN77/Aster",
+          mode: "push",
+          status: "active",
+          intervalSec: 900,
+          nextCheckAt: null,
+          reconcileAt: iso(now + 12 * 60_000),
+          failures: 0,
+          lastError: null,
+          lastCheckAt: iso(now - 3 * 60_000),
+        },
+      },
+      {
+        id: 203,
+        chatId: MOCK_OWNER_ID,
+        threadTs: null,
+        kind: "x",
+        target: "@karpathy",
+        label: "X · @karpathy",
+        status: "active",
+        maxEventsPerHour: 10,
+        deliveryMode: "triage",
+        triagePrompt: "关注开源项目、训练方法论和长文笔记。",
+        createdAt: iso(now - 8 * day),
+        stoppedAt: null,
+        source: {
+          id: 303,
+          watcherId: 203,
+          kind: "x",
+          location: "https://x.com/karpathy",
+          mode: "poll",
+          status: "backoff",
+          intervalSec: 600,
+          nextCheckAt: iso(now + 24 * 60_000),
+          reconcileAt: null,
+          failures: 2,
+          lastError: "WATCH_RATE_LIMITED",
+          lastCheckAt: iso(now - 18 * 60_000),
+        },
+      },
+    ],
+    digestItems: [
+      {
+        id: 401,
+        watcherId: 201,
+        eventId: 901,
+        chatId: MOCK_OWNER_ID,
+        threadTs: null,
+        text: "OpenAI & Anthropic 官方博客：发布 Agent Tool Use 评测基准更新（新增多步工具编排指标）",
+        status: "queued_digest",
+        attempts: 1,
+        createdAt: iso(now - 2 * hour),
+        triageAction: "digest",
+        triageReason: "属于工程评测更新，非紧急突发事件，已纳入每日简报队列",
+        triageUrgent: false,
+      },
+      {
+        id: 402,
+        watcherId: 203,
+        eventId: 902,
+        chatId: MOCK_OWNER_ID,
+        threadTs: null,
+        text: "X · @karpathy：分享本地 LLM 推理上下文压缩的实测笔记与内存占用对比",
+        status: "queued_digest",
+        attempts: 1,
+        createdAt: iso(now - 50 * 60_000),
+        triageAction: "digest",
+        triageReason: "高质量技术随笔，静默时段暂存等待明日早报汇总",
+        triageUrgent: false,
+      },
+    ],
+    reminders: [
+      {
+        id: 501,
+        chatId: MOCK_OWNER_ID,
+        ownerId: MOCK_OWNER_ID,
+        content: "准备明天上午的开源一键部署架构方案评审",
+        dueAt: iso(now + 11 * hour),
+        timezone: "Asia/Shanghai",
+        createdAt: iso(now - 3 * hour),
+        status: "pending",
+        attempts: 0,
+        messageId: null,
+        sentAt: null,
+        failureCode: null,
+      },
+      {
+        id: 502,
+        chatId: MOCK_OWNER_ID,
+        ownerId: MOCK_OWNER_ID,
+        content: "确认 Exa API Key 的月度用量账单与额度上限",
+        dueAt: iso(now + 2 * day),
+        timezone: "Asia/Shanghai",
+        createdAt: iso(now - day),
+        status: "pending",
+        attempts: 0,
+        messageId: null,
+        sentAt: null,
+        failureCode: null,
+      },
+    ],
+  };
+}
+
+let mockAutomations: MockAutomationsState = createInitialMockAutomations();
+
+export function mockGetAutomations(): AutomationsResponse {
+  return {
+    routines: {
+      enabled: true,
+      paused: false,
+      items: mockAutomations.routines.map((r) => ({
+        ...r,
+        schedule: { ...r.schedule },
+        recentRuns: r.recentRuns.map((run) => ({ ...run })),
+      })),
+    },
+    watchers: {
+      enabled: true,
+      quietHours: "23:00-08:00",
+      digestTime: "08:30",
+      timezone: "Asia/Shanghai",
+      items: mockAutomations.watchers.map((w) => ({
+        ...w,
+        source: { ...w.source },
+      })),
+      digest: {
+        items: mockAutomations.digestItems.map((d) => ({ ...d })),
+      },
+    },
+    reminders: {
+      enabled: true,
+      items: mockAutomations.reminders.map((r) => ({ ...r })),
+    },
+  };
+}
+
+export function mockSetRoutineStatus(
+  id: number,
+  status: "active" | "paused",
+): { ok: true; routine: RoutineItem } | { ok: false; code: string; message: string; status: number } {
+  const item = mockAutomations.routines.find((r) => r.id === id);
+  if (!item) {
+    return { ok: false, code: "ROUTINE_NOT_FOUND", message: "没有找到该定时任务", status: 404 };
+  }
+  item.status = status;
+  item.updatedAt = new Date().toISOString();
+  return { ok: true, routine: { ...item, recentRuns: [...item.recentRuns] } };
+}
+
+export function mockRunRoutineNow(
+  id: number,
+): { ok: true; run: RoutineRunItem } | { ok: false; code: string; message: string; status: number } {
+  const item = mockAutomations.routines.find((r) => r.id === id);
+  if (!item) {
+    return { ok: false, code: "ROUTINE_NOT_FOUND", message: "没有找到该定时任务", status: 404 };
+  }
+  if (item.status !== "active") {
+    return { ok: false, code: "ROUTINE_PAUSED", message: "该定时任务已暂停，请先恢复后再运行", status: 409 };
+  }
+  const nowIso = new Date().toISOString();
+  const run: RoutineRunItem = {
+    id: ++mockAutomations.nextRunId,
+    routineId: item.id,
+    runKey: `manual:${Date.now()}`,
+    trigger: "manual",
+    status: "queued",
+    scheduledFor: null,
+    notBefore: null,
+    startedAt: null,
+    finishedAt: null,
+    reply: null,
+    errorCode: null,
+    attempts: 0,
+    leaseUntil: null,
+    createdAt: nowIso,
+  };
+  item.recentRuns = [run, ...item.recentRuns].slice(0, 5);
+  return { ok: true, run };
+}
+
+export function mockDeleteRoutine(
+  id: number,
+): { ok: true; id: number } | { ok: false; code: string; message: string; status: number } {
+  const idx = mockAutomations.routines.findIndex((r) => r.id === id);
+  if (idx === -1) {
+    return { ok: false, code: "ROUTINE_NOT_FOUND", message: "没有找到该定时任务", status: 404 };
+  }
+  mockAutomations.routines.splice(idx, 1);
+  return { ok: true, id };
+}
+
+export function mockStopWatcher(
+  id: number,
+): { ok: true; id: number } | { ok: false; code: string; message: string; status: number } {
+  const idx = mockAutomations.watchers.findIndex((w) => w.id === id);
+  if (idx === -1) {
+    return { ok: false, code: "WATCHER_NOT_FOUND", message: "没有找到运行中的监控任务", status: 404 };
+  }
+  mockAutomations.watchers.splice(idx, 1);
+  return { ok: true, id };
+}
+
+export function mockFlushWatchDigest(): { count: number; text: string } {
+  const items = mockAutomations.digestItems;
+  if (items.length === 0) {
+    return { count: 0, text: "" };
+  }
+  const count = items.length;
+  const lines = items.map((item, i) => `${i + 1}. ${item.text}`);
+  const text = `【监控简报汇总 · 共 ${count} 条】\n${lines.join("\n")}`;
+  mockAutomations.digestItems = [];
+  const msg: UiMessage = {
+    id: `host_digest_${Date.now()}`,
+    role: "assistant",
+    text,
+    createdAt: Date.now(),
+    status: "complete",
+    requestId: null,
+    clientMessageId: null,
+    model: null,
+    errorCode: null,
+    tool: null,
+  };
+  state.messages.push(msg);
+  persist();
+  emit("host.message", { message: msg });
+  return { count, text };
+}
+
+export function mockCancelReminder(
+  id: number,
+): { ok: true; reminder: ReminderItem } | { ok: false; code: string; message: string; status: number } {
+  const idx = mockAutomations.reminders.findIndex((r) => r.id === id);
+  if (idx === -1) {
+    return { ok: false, code: "REMINDER_NOT_FOUND", message: "没有找到该提醒", status: 404 };
+  }
+  const [removed] = mockAutomations.reminders.splice(idx, 1);
+  return { ok: true, reminder: { ...removed!, status: "cancelled" } };
 }
 
 export { MOCK_FALLBACK, MOCK_PRIMARY };

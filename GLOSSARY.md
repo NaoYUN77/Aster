@@ -188,3 +188,25 @@ _Avoid_: context size, memory usage, prompt length
 An optional owner-configured daily token ceiling that emits a single soft host reminder when
 crossed for the first time on a local calendar day, without halting execution.
 _Avoid_: hard limit, quota, rate limit
+
+### Background automations
+
+**Routine**:
+A recurring host-owned schedule (daily, weekly, or interval) that either delivers a fixed notice or
+runs the agent autonomously and posts the result into the conversation.
+_Avoid_: cron job, scheduled task, task
+
+**Watcher**:
+A continuous monitor bound to an external source (such as RSS, X, or GitHub) that detects new
+events and either pushes them directly or triages them before notifying the owner.
+_Avoid_: monitor, feed, subscription, poller
+
+**Watch digest**:
+The queued batch of non-urgent watcher findings held during quiet hours or routine triage until
+the daily digest time or an explicit flush by the owner.
+_Avoid_: summary queue, notification buffer, outbox
+
+**Reminder**:
+A one-shot host-scheduled notice that delivers once at a specific time into the conversation and
+then finishes.
+_Avoid_: alarm, timer, routine

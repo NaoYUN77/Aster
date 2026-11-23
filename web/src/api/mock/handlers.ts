@@ -3,20 +3,27 @@ import {
   mockAbort,
   mockActiveRequest,
   mockAuthorized,
+  mockCancelReminder,
   mockCancelSubagent,
   mockConnectors,
   mockCreateConnector,
   mockDeleteConnector,
+  mockDeleteRoutine,
+  mockFlushWatchDigest,
+  mockGetAutomations,
   mockLogin,
   mockLogout,
   mockMessages,
   mockModels,
   mockRequestCredential,
   mockResolveApproval,
+  mockRunRoutineNow,
   mockSelectModel,
   mockSendMessage,
+  mockSetRoutineStatus,
   mockSnapshot,
   mockStartConnectorOAuth,
+  mockStopWatcher,
   mockUpdateDailyTokenBudget,
   mockUsageSummary,
   subscribeMockEvents,
@@ -267,6 +274,66 @@ export const handlers = [
       return apiError("INVALID_REQUEST", "每日预警阈值不合法", 400);
     }
     return HttpResponse.json(mockUpdateDailyTokenBudget(raw === 0 ? null : raw));
+  }),
+
+  http.get(`${API}/automations`, async ({ request }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    return HttpResponse.json(mockGetAutomations());
+  }),
+
+  http.post(`${API}/routines/:id/pause`, async ({ request, params }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    const res = mockSetRoutineStatus(Number(params.id), "paused");
+    if (!res.ok) return apiError(res.code, res.message, res.status);
+    return HttpResponse.json({ routine: res.routine });
+  }),
+
+  http.post(`${API}/routines/:id/resume`, async ({ request, params }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    const res = mockSetRoutineStatus(Number(params.id), "active");
+    if (!res.ok) return apiError(res.code, res.message, res.status);
+    return HttpResponse.json({ routine: res.routine });
+  }),
+
+  http.post(`${API}/routines/:id/run-now`, async ({ request, params }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    const res = mockRunRoutineNow(Number(params.id));
+    if (!res.ok) return apiError(res.code, res.message, res.status);
+    return HttpResponse.json({ run: res.run });
+  }),
+
+  http.delete(`${API}/routines/:id`, async ({ request, params }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    const res = mockDeleteRoutine(Number(params.id));
+    if (!res.ok) return apiError(res.code, res.message, res.status);
+    return HttpResponse.json({ deleted: true, id: res.id });
+  }),
+
+  http.post(`${API}/watchers/:id/stop`, async ({ request, params }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    const res = mockStopWatcher(Number(params.id));
+    if (!res.ok) return apiError(res.code, res.message, res.status);
+    return HttpResponse.json({ stopped: true, id: res.id });
+  }),
+
+  http.post(`${API}/watchers/digest/flush`, async ({ request }) => {
+    await delay(180);
+    if (!authorized(request)) return unauthorized();
+    return HttpResponse.json(mockFlushWatchDigest());
+  }),
+
+  http.post(`${API}/reminders/:id/cancel`, async ({ request, params }) => {
+    await delay(140);
+    if (!authorized(request)) return unauthorized();
+    const res = mockCancelReminder(Number(params.id));
+    if (!res.ok) return apiError(res.code, res.message, res.status);
+    return HttpResponse.json({ reminder: res.reminder });
   }),
 
   http.get(`${API}/events`, async ({ request }) => {
