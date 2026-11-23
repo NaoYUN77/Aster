@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { AssistantEntry, Harness, type Extension, type Storage } from "@earendil-works/pi-durable";
+import { AssistantEntry, Harness, type Conversation, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -19,7 +19,10 @@ import { createToolRegistry, personalTools, type ToolAuthority } from "../tools.
 
 const context = BACKGROUND_CONTEXT;
 const DEFAULT_SUBAGENT_TOOLS = ["read", "current_time"] as const;
-const DEFAULT_SUBAGENT_TIMEOUT_MS = 300_000;
+/** Default execution budget for one sub-agent run (15 minutes; paused during approval waits). */
+const DEFAULT_SUBAGENT_TIMEOUT_MS = 900_000;
+const MAX_SUBAGENT_TIMEOUT_MS = 1_800_000;
+const MAX_PARTIAL_SUMMARY_CHARS = 8_000;
 const MAX_SUBAGENT_TURNS = 30;
 const MAX_FINISHED_RESULTS = 64;
 const BLOCKED_SUBAGENT_TOOLS = new Set(["spawn_subagent", "wait_subagent", "cancel_subagent"]);
@@ -44,6 +47,18 @@ export type SubagentResult = {
   readonly durationMs: number;
   readonly error?: string;
 };
+
+export type SubagentWaitResult =
+  | SubagentResult
+  | {
+      readonly id: string;
+      readonly status: "running" | "waiting_approval";
+      readonly task: string;
+      readonly summary: string;
+      readonly currentTool: string | null;
+      readonly durationMs: number;
+      readonly timedOut: true;
+    };
 
 export type SubagentSpawnInput = {
   readonly task: string;
@@ -146,6 +161,26 @@ function createPauseableTimeout(
   };
 }
 
+async function extractPartialSummary(conversation: Conversation): Promise<string> {
+  try {
+    const page = await conversation.entries({ order: "descending" }, 20, undefined, context);
+    const chunks: string[] = [];
+    for (const entry of page.items) {
+      if (!AssistantEntry.is(entry)) continue;
+      const messages = (entry.model ?? []).flatMap((m) => (m.role === "assistant" ? [m] : []));
+      const text = contentText(messages.flatMap((m) => m.content)).trim();
+      if (text !== "") chunks.push(text);
+    }
+    if (chunks.length === 0) return "";
+    chunks.reverse();
+    const combined = chunks.join("\n\n");
+    if (combined.length <= MAX_PARTIAL_SUMMARY_CHARS) return combined;
+    return `…${combined.slice(-MAX_PARTIAL_SUMMARY_CHARS)}`;
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Manages dynamically spawned, bounded sub-agent runs (ADR-0005).
  *
@@ -167,6 +202,8 @@ export class SubagentManager {
   private readonly log: (line: string) => void;
   private readonly active = new Map<string, ActiveSubagent>();
   private readonly finished = new Map<string, SubagentResult>();
+  private readonly waitListeners = new Set<(waiting: boolean) => void>();
+  private activeWaits = 0;
   private workspaceWriterId: string | undefined;
   private closed = false;
 
@@ -182,6 +219,34 @@ export class SubagentManager {
     this.authority = options.authority ?? "owner";
     this.storageFactory = options.storageFactory;
     this.log = options.log ?? ((line) => console.error(line));
+  }
+
+  get isWaiting(): boolean {
+    return this.activeWaits > 0;
+  }
+
+  subscribeWaitActive(listener: (waiting: boolean) => void): () => void {
+    this.waitListeners.add(listener);
+    return () => {
+      this.waitListeners.delete(listener);
+    };
+  }
+
+  private enterWait(): () => void {
+    const wasWaiting = this.activeWaits > 0;
+    this.activeWaits += 1;
+    if (!wasWaiting) {
+      for (const listener of [...this.waitListeners]) listener(true);
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeWaits = Math.max(0, this.activeWaits - 1);
+      if (this.activeWaits === 0) {
+        for (const listener of [...this.waitListeners]) listener(false);
+      }
+    };
   }
 
   private emitSnapshot(snapshot: SubagentSnapshot): void {
@@ -279,7 +344,11 @@ export class SubagentManager {
 
     const controller = new AbortController();
     const startedAt = Date.now();
-    const timeoutMs = input.timeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
+    const requestedTimeout = input.timeoutMs;
+    const timeoutMs =
+      requestedTimeout !== undefined && Number.isFinite(requestedTimeout) && requestedTimeout > 0
+        ? Math.min(Math.trunc(requestedTimeout), MAX_SUBAGENT_TIMEOUT_MS)
+        : DEFAULT_SUBAGENT_TIMEOUT_MS;
 
     const promise = this.runIsolated({
       id,
@@ -318,66 +387,118 @@ export class SubagentManager {
       return { mode: "background", id, status: "running" };
     }
 
-    const result = await this.awaitWithCallerSignal(promise, controller, callerSignal);
-    return { mode: "wait", result };
+    const releaseWait = this.enterWait();
+    try {
+      const result = await this.awaitWithCallerSignal(promise, controller, callerSignal);
+      return { mode: "wait", result };
+    } finally {
+      releaseWait();
+    }
   }
 
   async wait(
     ids: readonly string[],
     options: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
-  ): Promise<SubagentResult[]> {
+  ): Promise<SubagentWaitResult[]> {
     const uniqueIds = [...new Set(ids)];
-    const results: SubagentResult[] = [];
     const pendingPromises: Promise<SubagentResult>[] = [];
 
     for (const id of uniqueIds) {
-      const done = this.finished.get(id);
-      if (done !== undefined) {
-        results.push(done);
-        continue;
-      }
+      if (this.finished.has(id)) continue;
       const running = this.active.get(id);
-      if (running !== undefined) {
-        pendingPromises.push(running.promise);
-        continue;
-      }
-      results.push({
-        id,
-        status: "failed",
-        task: "",
-        summary: "",
-        durationMs: 0,
-        error: `Unknown sub-agent id: ${id}`,
+      if (running !== undefined) pendingPromises.push(running.promise);
+    }
+
+    const collectSnapshot = (timedOut: boolean): SubagentWaitResult[] => {
+      const now = Date.now();
+      return uniqueIds.map((id) => {
+        const done = this.finished.get(id);
+        if (done !== undefined) return done;
+        const running = this.active.get(id);
+        if (running !== undefined) {
+          const elapsedMs = Math.max(0, now - running.startedAt);
+          const stateText = running.status === "waiting_approval"
+            ? "waiting for owner approval"
+            : "still running in background";
+          const toolNote = running.currentTool ? ` (current tool: ${running.currentTool})` : "";
+          return {
+            id: running.id,
+            status: running.status,
+            task: running.task,
+            summary: timedOut
+              ? `Sub-agent is ${stateText}${toolNote} after ${Math.round(elapsedMs / 1000)}s. It was NOT cancelled; call wait_subagent again to keep waiting.`
+              : "",
+            currentTool: running.currentTool,
+            durationMs: elapsedMs,
+            timedOut: true as const,
+          };
+        }
+        return {
+          id,
+          status: "failed" as const,
+          task: "",
+          summary: "",
+          durationMs: 0,
+          error: `Unknown sub-agent id: ${id}`,
+        };
       });
+    };
+
+    if (pendingPromises.length === 0) return collectSnapshot(false);
+
+    const releaseWait = this.enterWait();
+    try {
+      const waitTimedOut = await new Promise<boolean>((resolveWait, rejectWait) => {
+        let settled = false;
+        let pauseableTimeout: { dispose: () => void } | undefined;
+
+        const cleanup = () => {
+          pauseableTimeout?.dispose();
+          pauseableTimeout = undefined;
+          options.signal?.removeEventListener("abort", onCallerAbort);
+        };
+
+        const onCallerAbort = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          rejectWait(options.signal?.reason ?? Object.assign(new Error("Wait aborted"), { name: "AbortError" }));
+        };
+
+        if (options.signal?.aborted) {
+          onCallerAbort();
+          return;
+        }
+        options.signal?.addEventListener("abort", onCallerAbort, { once: true });
+
+        if (options.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+          pauseableTimeout = createPauseableTimeout(options.timeoutMs, this.approvals, () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolveWait(true);
+          });
+        }
+
+        Promise.all(pendingPromises)
+          .then(() => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolveWait(false);
+          })
+          .catch((error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            rejectWait(error);
+          });
+      });
+
+      return collectSnapshot(waitTimedOut);
+    } finally {
+      releaseWait();
     }
-
-    if (pendingPromises.length === 0) return results;
-
-    let waitSignal = options.signal;
-    if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
-      const timeoutSignal = AbortSignal.timeout(options.timeoutMs);
-      waitSignal = waitSignal === undefined ? timeoutSignal : AbortSignal.any([waitSignal, timeoutSignal]);
-    }
-
-    const settled = await new Promise<SubagentResult[]>((resolveWait, rejectWait) => {
-      const onAbort = () => rejectWait(waitSignal?.reason ?? Object.assign(new Error("Wait aborted"), { name: "AbortError" }));
-      if (waitSignal?.aborted) {
-        onAbort();
-        return;
-      }
-      waitSignal?.addEventListener("abort", onAbort, { once: true });
-      Promise.all(pendingPromises)
-        .then((items) => {
-          waitSignal?.removeEventListener("abort", onAbort);
-          resolveWait(items);
-        })
-        .catch((error) => {
-          waitSignal?.removeEventListener("abort", onAbort);
-          rejectWait(error);
-        });
-    });
-
-    return [...results, ...settled];
   }
 
   async cancel(id: string): Promise<{ readonly ok: boolean; readonly status: string }> {
@@ -565,14 +686,17 @@ export class SubagentManager {
       } catch (error) {
         await conversation.abort(context).catch(() => undefined);
         const durationMs = Date.now() - startedAt;
+        const partial = await extractPartialSummary(conversation);
         if (timedOut) {
           return this.recordFinished({
             id,
             status: "failed",
             task,
-            summary: "",
+            summary: partial
+              ? `[Timed out after ${Math.round(durationMs / 1000)}s — partial output preserved]\n${partial}`
+              : "",
             durationMs,
-            error: "Sub-agent timed out",
+            error: `Sub-agent timed out after ${Math.round(durationMs / 1000)}s`,
           });
         }
         if (controller.signal.aborted) {
@@ -580,7 +704,9 @@ export class SubagentManager {
             id,
             status: "cancelled",
             task,
-            summary: "",
+            summary: partial
+              ? `[Cancelled after ${Math.round(durationMs / 1000)}s — partial output preserved]\n${partial}`
+              : "",
             durationMs,
             error: "Sub-agent cancelled",
           });

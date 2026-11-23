@@ -24,7 +24,7 @@ export function createSubagentExtension(manager: SubagentManager) {
         cwd: opt(str({ description: "Optional subdirectory inside the workspace." })),
         mode: opt(union([lit("wait"), lit("background")], { description: "Execution mode: 'wait' (default) or 'background'." })),
         allowWrite: opt(bool({ description: "Whether to request the single-writer workspace lock for code/file edits." })),
-        timeoutMs: opt(num({ description: "Optional execution timeout in milliseconds (paused while waiting for approval)." })),
+        timeoutMs: opt(num({ description: "Optional execution timeout in milliseconds (defaults to 900000 ms / 15 min, max 1800000 ms; paused while waiting for approval)." })),
       }),
       replay: "unsafe",
       execute: async (args, _api, context) => {
@@ -41,10 +41,12 @@ export function createSubagentExtension(manager: SubagentManager) {
   const waitSubagent: GovernedTool = {
     ...defineTool({
       name: "wait_subagent",
-      description: "Wait for one or more background sub-agents to finish and return their structured results.",
+      description:
+        "Wait for one or more background sub-agents to finish and return their structured results. "
+        + "If timeoutMs elapses (paused automatically while waiting for owner approval), completed sub-agents are returned alongside live running snapshots without throwing or cancelling still-running sub-agents; call wait_subagent again to keep waiting.",
       parameters: obj({
         ids: arr(str(), { description: "Sub-agent IDs returned by spawn_subagent(mode='background')." }),
-        timeoutMs: opt(num({ description: "Optional wait timeout in milliseconds." })),
+        timeoutMs: opt(num({ description: "Optional wait timeout in milliseconds (paused during approval waits). Never discards results on expiry." })),
       }),
       replay: "safe",
       execute: async (args, _api, context) => {
@@ -52,9 +54,16 @@ export function createSubagentExtension(manager: SubagentManager) {
           ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
           ...(context.abortSignal === undefined ? {} : { signal: context.abortSignal }),
         });
+        const pendingIds = results
+          .filter((item) => item.status === "running" || item.status === "waiting_approval")
+          .map((item) => item.id);
+        const payload = {
+          results,
+          ...(pendingIds.length > 0 ? { pendingIds, timedOut: true } : {}),
+        };
         return {
-          output: [{ type: "text", text: JSON.stringify({ results }, null, 2) }],
-          structuredOutput: { results },
+          output: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+          structuredOutput: payload,
         };
       },
     }),
