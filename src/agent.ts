@@ -427,40 +427,37 @@ export async function openAgent(
       },
     }),
   });
-  let subagents: SubagentManager | undefined;
-  if (options.enableSubagents === true) {
-    subagents = new SubagentManager({
-      dataDir: config.dataDir,
-      workspace: workingDirectory,
-      models,
-      defaultModel: { provider: config.provider, modelId: config.model },
-      ...(approvals === undefined ? {} : { approvals }),
-      ...(options.hub === undefined ? {} : { hub: options.hub }),
-      ...(usageLedger === undefined ? {} : { usageLedger }),
-      ...(options.toolAuthority === undefined ? {} : { authority: options.toolAuthority }),
-      ...(options.toolReviewLog === undefined ? {} : { log: options.toolReviewLog }),
-    });
-    await subagents.cleanupOrphans();
-    registry.install(createSubagentExtension(subagents));
-  }
+  const subagentExtensions: Extension[] = [CodingTools, personalTools];
   // Reminders are host-owned tools; the model never supplies the receiving chat.
   if (options.reminderStore !== undefined) {
     registry.install(createReminderExtension(options.reminderStore, { chatId: config.channel.ownerId }));
   }
   if (options.extraExtensions !== undefined) {
-    for (const extension of options.extraExtensions) registry.install(extension);
+    for (const extension of options.extraExtensions) {
+      registry.install(extension);
+      subagentExtensions.push(extension);
+    }
   }
-  if (options.skills !== undefined) registry.install(createSkillsExtension(options.skills));
+  if (options.skills !== undefined) {
+    const skillsExtension = createSkillsExtension(options.skills);
+    registry.install(skillsExtension);
+    subagentExtensions.push(skillsExtension);
+  }
   // The loop guard observes every model-issued tool call in this run and faults the generation at
   // its bound; the next user request starts a fresh run with cleared counters.
   const loopGuard = createLoopGuard(options.toolReviewLog ?? console.error);
   registry.install(loopGuard.extension);
   // Each provider's built-in web tools appear only while the host supplies that credential.
   if (config.deepseekWebApiKey !== undefined || config.exaApiKey !== undefined) {
-    registry.install(createWebExtension({
+    const webExtension = createWebExtension({
       ...(config.deepseekWebApiKey === undefined ? {} : { deepseekApiKey: config.deepseekWebApiKey }),
       ...(config.exaApiKey === undefined ? {} : { exaApiKey: config.exaApiKey }),
-    }));
+      maxConcurrentRequests: 4,
+      queueWaitTimeoutMs: 30_000,
+      maxQueuedRequests: 16,
+    });
+    registry.install(webExtension);
+    subagentExtensions.push(webExtension);
   }
   // Memory wiring (MEM-07) goes through the one composition entry. `readConfig` always carries an
   // enabled memory section; a host may inject `enabled: false` to keep exactly its previous
@@ -558,15 +555,41 @@ export async function openAgent(
       })
     : undefined;
   if (memory) for (const extension of memory.extensions()) registry.install(extension);
-  const mcp = options.mcp ?? await openMcpHost(config, registry, options.signal, options.mcpServers);
+  const mcp = options.mcp ?? await openMcpHost(
+    config,
+    registry,
+    options.signal,
+    options.mcpServers,
+    options.enableSubagents === true ? ["spawn_subagent", "wait_subagent", "cancel_subagent"] : undefined,
+  );
   const unsubscribeMcp = mcp.subscribeAvailability((server, state) => registry.setMcpAvailability(server, state));
   const mcpExtensions = orderedMcpExtensions(mcp.extensions);
-  for (const extension of mcpExtensions) registry.install(extension);
+  for (const extension of mcpExtensions) {
+    registry.install(extension);
+    subagentExtensions.push(extension);
+  }
+  let subagents: SubagentManager | undefined;
 
   let durableStorage: Storage;
   let syncCatalog = false;
   let githubRecovery: Awaited<ReturnType<typeof inspectGithubToolRecovery>>;
   try {
+    if (options.enableSubagents === true) {
+      subagents = new SubagentManager({
+        dataDir: config.dataDir,
+        workspace: workingDirectory,
+        models,
+        defaultModel: { provider: config.provider, modelId: config.model },
+        extensions: () => subagentExtensions,
+        ...(approvals === undefined ? {} : { approvals }),
+        ...(options.hub === undefined ? {} : { hub: options.hub }),
+        ...(usageLedger === undefined ? {} : { usageLedger }),
+        ...(options.toolAuthority === undefined ? {} : { authority: options.toolAuthority }),
+        ...(options.toolReviewLog === undefined ? {} : { log: options.toolReviewLog }),
+      });
+      await subagents.cleanupOrphans();
+      registry.install(createSubagentExtension(subagents));
+    }
     const rawStorage = storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite"));
     try {
       // Capture old declarations before ledger migration or startup observation can replace evidence.
@@ -1201,6 +1224,7 @@ async function openMcpHost(
   registry: ReturnType<typeof createToolRegistry>,
   signal: AbortSignal | undefined,
   extraServers: readonly McpServerConfig[] | undefined,
+  extraReserved?: readonly string[],
 ): Promise<McpHost> {
   const read = await readMcpConfig(config.mcpConfigPath, config.mcpConfigExplicit);
   for (const warning of read.warnings) console.error(`MCP config: ${warning}`);
@@ -1219,7 +1243,10 @@ async function openMcpHost(
   const merged = servers.length === 0 ? read.config : { ...read.config, servers };
   return connectMcp(merged, {
     dataDir: config.dataDir,
-    reserved: new Set(registry.snapshot().tools().map(({ tool }) => tool.name)),
+    reserved: new Set([
+      ...registry.snapshot().tools().map(({ tool }) => tool.name),
+      ...(extraReserved ?? []),
+    ]),
     ...(signal === undefined ? {} : { signal }),
     log: (line) => console.error(line),
   });

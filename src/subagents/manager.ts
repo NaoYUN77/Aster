@@ -4,9 +4,10 @@ import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { AssistantEntry, Harness, type Conversation, type Extension, type Storage } from "@earendil-works/pi-durable";
+import { AssistantEntry, Harness, type Conversation, type Extension, type Storage, type ToolRegistration } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { createToolSearchExtension, TOOL_SEARCH_TOOL_NAME } from "@earendil-works/pi-durable/tool-search";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import {
   evaluateSensitiveOperation,
@@ -18,7 +19,16 @@ import type { UsageLedger } from "../usage/index.js";
 import { createToolRegistry, personalTools, type ToolAuthority } from "../tools.js";
 
 const context = BACKGROUND_CONTEXT;
-const DEFAULT_SUBAGENT_TOOLS = ["read", "current_time"] as const;
+/** Core Tier-1 resident tools granted by default whenever installed in the sub-agent pool. */
+const DEFAULT_RESIDENT_TOOLS = new Set([
+  "read",
+  "current_time",
+  "bash",
+  "exa_search",
+  "web_search",
+  "web_fetch",
+  "skill_load",
+]);
 /** Default execution budget for one sub-agent run (15 minutes; paused during approval waits). */
 const DEFAULT_SUBAGENT_TIMEOUT_MS = 900_000;
 const MAX_SUBAGENT_TIMEOUT_MS = 1_800_000;
@@ -26,6 +36,17 @@ const MAX_PARTIAL_SUMMARY_CHARS = 8_000;
 const MAX_SUBAGENT_TURNS = 30;
 const MAX_FINISHED_RESULTS = 64;
 const BLOCKED_SUBAGENT_TOOLS = new Set(["spawn_subagent", "wait_subagent", "cancel_subagent"]);
+/** Host-stateful or recursive extensions never exposed to isolated sub-agents. */
+const EXCLUDED_SUBAGENT_EXTENSIONS = new Set([
+  "subagents",
+  "memory-working",
+  "memory-compaction",
+  "loop-guard",
+  "reminders",
+  "watchers",
+  "routines",
+  "tool-search",
+]);
 
 export type SubagentStatus = "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
 
@@ -60,10 +81,33 @@ export type SubagentWaitResult =
       readonly timedOut: true;
     };
 
+export type SubagentToolCapabilities = {
+  readonly defaultTools: readonly string[];
+  readonly onDemandCategories: readonly { readonly extension: string; readonly count: number }[];
+  readonly availableTools: readonly string[];
+};
+
+export class SubagentInvalidToolsError extends Error {
+  readonly code = "SUBAGENT_INVALID_TOOLS";
+  constructor(
+    readonly invalidTools: readonly string[],
+    readonly availableTools: readonly string[],
+  ) {
+    super(
+      `Unknown or disallowed sub-agent tool(s): ${invalidTools.join(", ")}. `
+      + `Available tools: ${availableTools.join(", ")}`,
+    );
+    this.name = "SubagentInvalidToolsError";
+  }
+}
+
 export type SubagentSpawnInput = {
   readonly task: string;
   readonly systemPrompt?: string;
+  /** Strict allowlist (lock-cage mode): removes all unlisted tools including tool_search unless listed. */
   readonly tools?: readonly string[];
+  /** Additive tools promoted to Tier-1 resident alongside defaults (keeps tool_search when tools is omitted). */
+  readonly extraTools?: readonly string[];
   readonly cwd?: string;
   readonly mode?: "wait" | "background";
   readonly allowWrite?: boolean;
@@ -75,8 +119,11 @@ export type SubagentManagerOptions = {
   readonly workspace: string;
   readonly models: Models;
   readonly defaultModel: { readonly provider: string; readonly modelId: string };
-  /** Base extensions available to sub-agents (filtered by `tools` allowlist). Defaults to [CodingTools, personalTools]. */
-  readonly extensions?: readonly Extension[];
+  /**
+   * Business extensions available to sub-agents (array or late-bound getter).
+   * Defaults to [CodingTools, personalTools].
+   */
+  readonly extensions?: readonly Extension[] | (() => readonly Extension[]);
   readonly approvals?: ApprovalService;
   /** Optional SSE hub for broadcasting `subagent.updated` live status events. */
   readonly hub?: EventHub;
@@ -98,11 +145,14 @@ type ActiveSubagent = {
   readonly promise: Promise<SubagentResult>;
 };
 
-function buildDefaultSubagentPrompt(workingDirectory: string): string {
+function buildDefaultSubagentPrompt(workingDirectory: string, hasToolSearch: boolean): string {
   return [
     "You are a bounded sub-agent executing a delegated task for the main agent.",
     `Your working directory is ${workingDirectory}. Keep file changes inside this workspace unless explicitly approved by the owner.`,
     "Work independently, use only the tools provided to you, and do not ask the user follow-up questions.",
+    ...(hasToolSearch
+      ? ["Additional connected tools (connectors, MCP servers, etc.) are loaded on demand: call tool_search with a task description or tool name when you need a tool not in your initial list."]
+      : []),
     "When finished, return a concise, factual summary of what you observed, changed, and verified.",
   ].join("\n");
 }
@@ -193,7 +243,7 @@ export class SubagentManager {
   private readonly workspace: string;
   private readonly models: Models;
   private readonly defaultModel: { readonly provider: string; readonly modelId: string };
-  private readonly extensions: readonly Extension[];
+  private readonly extensionsProvider: readonly Extension[] | (() => readonly Extension[]);
   private readonly approvals: ApprovalService | undefined;
   private readonly hub: EventHub | undefined;
   private readonly usageLedger: UsageLedger | undefined;
@@ -212,13 +262,157 @@ export class SubagentManager {
     this.workspace = resolve(options.workspace);
     this.models = options.models;
     this.defaultModel = options.defaultModel;
-    this.extensions = options.extensions ?? [CodingTools, personalTools];
+    this.extensionsProvider = options.extensions ?? [CodingTools, personalTools];
     this.approvals = options.approvals;
     this.hub = options.hub;
     this.usageLedger = options.usageLedger;
     this.authority = options.authority ?? "owner";
     this.storageFactory = options.storageFactory;
     this.log = options.log ?? ((line) => console.error(line));
+  }
+
+  private resolvePoolExtensions(): Extension[] {
+    const raw = typeof this.extensionsProvider === "function"
+      ? this.extensionsProvider()
+      : this.extensionsProvider;
+    const seenExtNames = new Set<string>();
+    const result: Extension[] = [];
+    for (const ext of raw) {
+      if (EXCLUDED_SUBAGENT_EXTENSIONS.has(ext.name) || seenExtNames.has(ext.name)) continue;
+      seenExtNames.add(ext.name);
+      const tools = ext.tools?.filter((tool) => !BLOCKED_SUBAGENT_TOOLS.has(tool.name));
+      // Skip pure-section extensions if empty? Keep section-only extensions like `mcp-servers`!
+      if (ext.tools !== undefined && (tools === undefined || tools.length === 0) && (ext.sections === undefined || ext.sections.length === 0)) {
+        continue;
+      }
+      result.push({ ...ext, ...(tools === undefined ? {} : { tools }) });
+    }
+    return result;
+  }
+
+  /** Summarize installed default tools & on-demand extension categories for spawn_subagent's description. */
+  describeToolCapabilities(): SubagentToolCapabilities {
+    const pool = this.resolvePoolExtensions();
+    const available: string[] = [];
+    const defaultTools: string[] = [];
+    const onDemandCategories: { extension: string; count: number }[] = [];
+
+    for (const ext of pool) {
+      let deferredInExt = 0;
+      for (const tool of ext.tools ?? []) {
+        available.push(tool.name);
+        if (DEFAULT_RESIDENT_TOOLS.has(tool.name)) {
+          defaultTools.push(tool.name);
+        } else {
+          deferredInExt += 1;
+        }
+      }
+      if (deferredInExt > 0 && ext.name !== CodingTools.name && ext.name !== personalTools.name) {
+        onDemandCategories.push({ extension: ext.name, count: deferredInExt });
+      }
+    }
+
+    const hasDeferred = available.some((name) => !DEFAULT_RESIDENT_TOOLS.has(name));
+    if (hasDeferred) {
+      defaultTools.push(TOOL_SEARCH_TOOL_NAME);
+      available.push(TOOL_SEARCH_TOOL_NAME);
+    }
+
+    return {
+      defaultTools,
+      onDemandCategories,
+      availableTools: [...new Set(available)].sort(),
+    };
+  }
+
+  private planRunTools(input: SubagentSpawnInput): {
+    readonly extensions: Extension[];
+    readonly residentSet: ReadonlySet<string>;
+    readonly hasToolSearch: boolean;
+  } {
+    const pool = this.resolvePoolExtensions();
+    const poolToolNames = new Set<string>();
+    for (const ext of pool) {
+      for (const tool of ext.tools ?? []) poolToolNames.add(tool.name);
+    }
+    const hasPoolDeferred = [...poolToolNames].some((name) => !DEFAULT_RESIDENT_TOOLS.has(name));
+    const validToolNames = new Set<string>(poolToolNames);
+    if (hasPoolDeferred) validToolNames.add(TOOL_SEARCH_TOOL_NAME);
+
+    // Fail-fast validation (Q4): reject unknown or blocked tool names before spinning up a sub-agent.
+    const requestedExplicit = input.tools ?? [];
+    const requestedExtra = input.extraTools ?? [];
+    const invalid: string[] = [];
+    for (const name of [...requestedExplicit, ...requestedExtra]) {
+      const trimmed = name.trim();
+      if (trimmed === "" || BLOCKED_SUBAGENT_TOOLS.has(trimmed) || !validToolNames.has(trimmed)) {
+        invalid.push(name);
+      }
+    }
+    if (invalid.length > 0) {
+      throw new SubagentInvalidToolsError(
+        [...new Set(invalid)],
+        [...validToolNames].sort(),
+      );
+    }
+
+    const isLockCage = requestedExplicit.length > 0;
+    const residentSet = new Set<string>();
+
+    if (isLockCage) {
+      for (const name of requestedExplicit) residentSet.add(name.trim());
+      for (const name of requestedExtra) residentSet.add(name.trim());
+    } else {
+      for (const name of poolToolNames) {
+        if (DEFAULT_RESIDENT_TOOLS.has(name)) residentSet.add(name);
+      }
+      if (input.allowWrite === true) {
+        if (poolToolNames.has("write")) residentSet.add("write");
+        if (poolToolNames.has("edit")) residentSet.add("edit");
+      }
+      for (const name of requestedExtra) residentSet.add(name.trim());
+    }
+
+    const allowDiscovery = isLockCage
+      ? residentSet.has(TOOL_SEARCH_TOOL_NAME)
+      : true;
+
+    const prepared: Extension[] = [];
+    let deferredCount = 0;
+
+    for (const ext of pool) {
+      const sourceTools = ext.tools;
+      if (sourceTools === undefined) {
+        // Section-only extension (e.g. `mcp-servers` summary): include only when discovery is open.
+        if (allowDiscovery) prepared.push(ext);
+        continue;
+      }
+      const nextTools: ToolRegistration[] = [];
+      for (const tool of sourceTools) {
+        if (residentSet.has(tool.name)) {
+          // Promote explicitly granted or default-resident tools to Tier 1 (strip `deferred`).
+          const { deferred: _deferred, ...resident } = tool;
+          nextTools.push(resident);
+        } else if (allowDiscovery) {
+          // Keep discoverable via `tool_search` as Tier 2 (`deferred: true`).
+          nextTools.push({ ...tool, deferred: true });
+          deferredCount += 1;
+        }
+      }
+      if (nextTools.length === 0) continue;
+      prepared.push({
+        ...ext,
+        tools: nextTools,
+      });
+    }
+
+    const hasToolSearch = allowDiscovery && deferredCount > 0;
+    if (hasToolSearch) {
+      residentSet.add(TOOL_SEARCH_TOOL_NAME);
+      prepared.push(createToolSearchExtension());
+    }
+
+    return { extensions: prepared, residentSet, hasToolSearch };
   }
 
   get isWaiting(): boolean {
@@ -329,10 +523,8 @@ export class SubagentManager {
 
     const id = `sub_${randomBytes(6).toString("hex")}`;
     const mode = input.mode ?? "wait";
-    const requestedTools = (input.tools && input.tools.length > 0 ? input.tools : DEFAULT_SUBAGENT_TOOLS)
-      .filter((name) => !BLOCKED_SUBAGENT_TOOLS.has(name));
-    const allowedToolSet = new Set(requestedTools);
-    const wantsWrite = input.allowWrite ?? (allowedToolSet.has("write") || allowedToolSet.has("edit"));
+    const toolPlan = this.planRunTools(input);
+    const wantsWrite = input.allowWrite ?? (toolPlan.residentSet.has("write") || toolPlan.residentSet.has("edit"));
 
     // Single-writer workspace mutex: if another sub-agent holds the lock, this sub-agent runs
     // without write authority so any mutating tool call escalates to the owner's approval dialog.
@@ -353,8 +545,8 @@ export class SubagentManager {
     const promise = this.runIsolated({
       id,
       task,
-      systemPrompt: input.systemPrompt?.trim() || buildDefaultSubagentPrompt(runCwd),
-      allowedToolSet,
+      systemPrompt: input.systemPrompt?.trim() || buildDefaultSubagentPrompt(runCwd, toolPlan.hasToolSearch),
+      extensions: toolPlan.extensions,
       runCwd,
       holdsWriteLock,
       timeoutMs,
@@ -569,13 +761,13 @@ export class SubagentManager {
     readonly id: string;
     readonly task: string;
     readonly systemPrompt: string;
-    readonly allowedToolSet: ReadonlySet<string>;
+    readonly extensions: readonly Extension[];
     readonly runCwd: string;
     readonly holdsWriteLock: boolean;
     readonly timeoutMs: number;
     readonly controller: AbortController;
   }): Promise<SubagentResult> {
-    const { id, task, systemPrompt, allowedToolSet, runCwd, holdsWriteLock, timeoutMs, controller } = params;
+    const { id, task, systemPrompt, extensions, runCwd, holdsWriteLock, timeoutMs, controller } = params;
     const startedAt = Date.now();
     const dbPath = join(this.subagentsDir, `${id}.sqlite`);
     let storage: Storage | undefined;
@@ -593,7 +785,7 @@ export class SubagentManager {
 
       const approvals = this.approvals;
       const usageLedger = this.usageLedger;
-      const registry = createToolRegistry(this.extensions, {
+      const registry = createToolRegistry(extensions, {
         authority: this.authority,
         log: this.log,
         ...(usageLedger === undefined ? {} : {
@@ -647,10 +839,6 @@ export class SubagentManager {
         }),
       });
 
-      const remove = registry.snapshot().tools()
-        .filter(({ tool }) => !allowedToolSet.has(tool.name))
-        .map(({ tool }) => tool);
-
       storage = this.storageFactory !== undefined
         ? await this.storageFactory(id, dbPath)
         : await openNodeSqliteStorage(dbPath);
@@ -669,7 +857,6 @@ export class SubagentManager {
           cwd: runCwd,
           instructions: systemPrompt,
           maxTurns: MAX_SUBAGENT_TURNS,
-          ...(remove.length === 0 ? {} : { tools: { remove } }),
         },
       }, context);
 
