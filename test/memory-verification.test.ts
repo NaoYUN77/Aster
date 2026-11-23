@@ -733,7 +733,7 @@ test("08-H: dependency review — pure Context and activity, state-only Working,
   const agentMemoryImports = importsOf(agentSource).filter((spec) => spec.includes("memory"));
   assert.deepEqual(agentMemoryImports, ["./memory/integration.js"], "the application reaches memory only through the composition root");
 
-  for (const path of ["src/inbox.ts", "src/deliveries.ts", "src/main.ts", "src/http/run-web.ts"]) {
+  for (const path of ["src/main.ts", "src/http/run-web.ts"]) {
     const source = await read(path);
     assert.ok(!/from\s+"[^"]*memory\//.test(source), `${path} must not import memory internals`);
   }

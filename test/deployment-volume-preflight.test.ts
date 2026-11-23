@@ -36,44 +36,31 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   t.after(() => rm(parent, { recursive: true, force: true }));
   const appVolume = join(parent, "app");
   await mkdir(appVolume, { mode: 0o755 });
-  const inboxDb = join(appVolume, "inbox.sqlite");
+  const webDb = join(appVolume, "web.sqlite");
   const agentDb = join(appVolume, "agent.sqlite");
-  update(inboxDb, `
-    CREATE TABLE checkpoint(id INTEGER PRIMARY KEY CHECK(id=1), offset INTEGER NOT NULL);
-    CREATE TABLE identity(id INTEGER PRIMARY KEY CHECK(id=1), botId TEXT NOT NULL, ownerId TEXT NOT NULL);
-    CREATE TABLE inbox(requestId TEXT PRIMARY KEY, conversationId TEXT NOT NULL, senderId TEXT NOT NULL,
-      text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', reply TEXT, receivedAt TEXT, repliedAt TEXT);
-    CREATE TABLE deliveries(requestId TEXT NOT NULL REFERENCES inbox(requestId) ON DELETE CASCADE,
-      part INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-      messageId TEXT, error TEXT, createdAt TEXT, updatedAt TEXT, PRIMARY KEY(requestId,part));
-    CREATE TABLE failures(requestId TEXT PRIMARY KEY REFERENCES inbox(requestId), code TEXT NOT NULL);
-    INSERT INTO checkpoint VALUES(1,0);
-    INSERT INTO inbox(requestId,conversationId,senderId,text,status) VALUES('synthetic','conversation','sender','${marker}','ready');
-    INSERT INTO deliveries(requestId,part,text,status) VALUES('synthetic',0,'${marker}','pending');
-  `);
+  update(webDb, `CREATE TABLE requests(id TEXT PRIMARY KEY, text TEXT); INSERT INTO requests VALUES('synthetic', '${marker}');`);
   update(agentDb, "CREATE TABLE synthetic_agent_state(id INTEGER PRIMARY KEY)");
   await chown(appVolume, 1000, 1000);
-  for (const path of [agentDb, inboxDb]) {
+  for (const path of [agentDb, webDb]) {
     await chown(path, 1000, 1000);
     await chmod(path, 0o600);
   }
-  return { parent, appVolume, inboxDb, agentDb, options: { appVolume, inboxDiagnostics: true } };
+  return { parent, appVolume, webDb, agentDb, options: { appVolume } };
 }
 
 // Ownership is part of the real contract, so these fixtures require POSIX root to assign
 // the service UID. Run the compiled file in the Linux app image as root to exercise them.
 const integration = { skip: !root };
 
-test("app metadata and bounded inbox counts succeed without changing bytes, modes, mtime or directory entries", integration, async (t) => {
+test("app metadata succeeds without changing bytes, modes, mtime or directory entries", integration, async (t) => {
   const { parent, options, agentDb } = await fixture(t);
   update(agentDb, "PRAGMA journal_mode=WAL");
   const before = await snapshot(parent);
   assert.deepEqual(await preflightDeploymentVolumes(options), {
     status: "offline-volume-metadata-ok", code: "VOLUME_METADATA_OK", productionAdmission: "not-evaluated",
-    inbox: { requests: 1, deliveryParts: 1, sending: 0, uncertain: 0, failed: 0 },
   });
   assert.deepEqual(await snapshot(parent), before);
-  const result = runCli(["--app-volume", options.appVolume, "--inbox-diagnostics"]);
+  const result = runCli(["--app-volume", options.appVolume]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).productionAdmission, "not-evaluated");
   assert.equal((result.stdout + result.stderr).includes(marker), false);
@@ -100,47 +87,17 @@ test("wrong owners and unsafe or owner-inaccessible modes fail even when the ope
   await chmod(agentDb, 0o600);
 });
 
-test("pre-recovery sending and uncertain deliveries and legacy uncertain requests are reported without mutation", integration, async (t) => {
-  const { parent, options, inboxDb } = await fixture(t);
-  for (const state of ["sending", "uncertain", "failed"] as const) {
-    update(inboxDb, `UPDATE deliveries SET status='${state}',error='${marker}'`);
-    const before = await snapshot(parent);
-    const result = await preflightDeploymentVolumes(options);
-    assert.equal(result.status, "offline-volume-metadata-ok");
-    assert.equal(result.productionAdmission, "not-evaluated");
-    assert.deepEqual(result.inbox, {
-      requests: 1, deliveryParts: 1,
-      sending: state === "sending" ? 1 : 0,
-      uncertain: state === "uncertain" ? 1 : 0,
-      failed: state === "failed" ? 1 : 0,
-    });
-    assert.deepEqual(await snapshot(parent), before);
-  }
-  update(inboxDb, "UPDATE deliveries SET status='pending'; UPDATE inbox SET status='uncertain'");
-  const before = await snapshot(parent);
-  assert.deepEqual((await preflightDeploymentVolumes(options)).inbox, {
-    requests: 1, deliveryParts: 1, sending: 0, uncertain: 0, failed: 0,
-  });
-  assert.deepEqual(await snapshot(parent), before);
-});
-
-test("missing initialized app DB and unknown diagnostic status/schema fail closed", integration, async (t) => {
-  const { options, inboxDb, agentDb } = await fixture(t);
-  update(inboxDb, "UPDATE deliveries SET status='future-state'");
-  await assert.rejects(preflightDeploymentVolumes(options), errorCode("APP_SCHEMA_UNKNOWN"));
-  update(inboxDb, "DROP TABLE failures");
-  await assert.rejects(preflightDeploymentVolumes({ ...options, inboxDiagnostics: false }), errorCode("APP_SCHEMA_UNKNOWN"));
+test("missing or uninitialized app DB and corrupt web DB fail closed", integration, async (t) => {
+  const { options, webDb, agentDb } = await fixture(t);
+  await writeFile(webDb, "");
+  await assert.rejects(preflightDeploymentVolumes(options), errorCode("SQLITE_NOT_INITIALIZED"));
+  await rm(webDb);
+  // Missing web.sqlite is allowed when agent.sqlite is initialized.
+  assert.equal((await preflightDeploymentVolumes(options)).code, "VOLUME_METADATA_OK");
   await writeFile(agentDb, "");
   await assert.rejects(preflightDeploymentVolumes(options), errorCode("SQLITE_NOT_INITIALIZED"));
   await rm(agentDb);
   await assert.rejects(preflightDeploymentVolumes(options), errorCode("STATE_UNREADABLE"));
-});
-
-test("bounded diagnostic queries reject oversized inboxes without reading message content", integration, async (t) => {
-  const { options, inboxDb } = await fixture(t);
-  update(inboxDb, `WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100001)
-    INSERT INTO deliveries(requestId,part,text,status) SELECT 'synthetic',i,'${marker}','sent' FROM n`);
-  await assert.rejects(preflightDeploymentVolumes(options), errorCode("APP_DIAGNOSTICS_LIMIT"));
 });
 
 test("symlinks, directories, FIFOs and oversized regular database files never reach SQLite", integration, async (t) => {
@@ -182,7 +139,7 @@ test("WAL on writable mount and nonempty rollback journals are rejected without 
 
 // Opt in after npm run build with ASTER_TEST_DOCKER_VOLUME_PREFLIGHT=1. This fixture
 // uses a unique Docker volume, a pinned local runtime tag, no network and no production mounts.
-test("Docker read-only residual WAL is read, an unknown status committed only in WAL is rejected, and all source files remain unchanged", {
+test("Docker read-only residual WAL is read and all source files remain unchanged", {
   skip: process.env.ASTER_TEST_DOCKER_VOLUME_PREFLIGHT !== "1",
 }, () => {
   const volume = `aster-preflight-wal-test-${randomUUID()}`;
@@ -200,13 +157,13 @@ test("Docker read-only residual WAL is read, an unknown status committed only in
     mkdirSync('/fixture/app'); chownSync('/fixture/app',1000,1000); chmodSync('/fixture/app',0o755);
     function create(p,sql) {const d=new DatabaseSync(p);d.exec(sql);d.close();chownSync(p,1000,1000);chmodSync(p,0o600);}
     create('/fixture/app/agent.sqlite','CREATE TABLE state(id INTEGER PRIMARY KEY)');
-    create('/fixture/app/inbox.sqlite',"CREATE TABLE checkpoint(id INTEGER PRIMARY KEY, offset INTEGER NOT NULL); CREATE TABLE identity(id INTEGER PRIMARY KEY, botId TEXT, ownerId TEXT); CREATE TABLE inbox(requestId TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending'); CREATE TABLE deliveries(requestId TEXT NOT NULL, part INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(requestId,part)); CREATE TABLE failures(requestId TEXT PRIMARY KEY, code TEXT); INSERT INTO checkpoint VALUES(1,0); INSERT INTO inbox VALUES('synthetic','ready'); INSERT INTO deliveries VALUES('synthetic',0,'pending')");
+    create('/fixture/app/web.sqlite','CREATE TABLE requests(id TEXT PRIMARY KEY)');
   `;
-  const crash = (invalidStatus: boolean) => {
+  const crash = () => {
     const writer = `
       import {chmodSync,chownSync} from 'node:fs'; import {DatabaseSync} from 'node:sqlite';
-      const p='/fixture/app/inbox.sqlite'; const d=new DatabaseSync(p);
-      d.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ${invalidStatus ? "UPDATE deliveries SET status='future-state'" : "UPDATE inbox SET status='sent'"}");
+      const p='/fixture/app/web.sqlite'; const d=new DatabaseSync(p);
+      d.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; INSERT INTO requests VALUES('synthetic')");
       for(const s of ['-wal','-shm']) {chownSync(p+s,1000,1000);chmodSync(p+s,0o600);}
       process.kill(process.pid,'SIGKILL');
     `;
@@ -228,22 +185,15 @@ test("Docker read-only residual WAL is read, an unknown status committed only in
   function probe(expected: number) {
     return docker(["run", "--rm", "--pull", "never", "--network", "none", "--user", "0:0", "--read-only", "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE",
       "--mount", `${mount},readonly`, "--mount", `type=bind,source=${dist},target=/probe,readonly`, image,
-      "node", "/probe/src/deployment-volume-preflight.js", "--app-volume", "/fixture/app", "--inbox-diagnostics"], expected);
+      "node", "/probe/src/deployment-volume-preflight.js", "--app-volume", "/fixture/app"], expected);
   }
   docker(["volume", "create", volume]);
   try {
     execute(create);
-    execute(crash(false), false, 137);
+    execute(crash(), false, 137);
     const cleanBefore = execute(snapshotScript, true).stdout;
     assert.equal(JSON.parse(probe(0).stdout).code, "VOLUME_METADATA_OK");
     assert.equal(execute(snapshotScript, true).stdout, cleanBefore);
-    execute(crash(true), false, 137);
-    const invalidBefore = execute(snapshotScript, true).stdout;
-    const result = probe(1);
-    assert.deepEqual(JSON.parse(result.stderr), {
-      status: "offline-volume-metadata-failed", code: "APP_SCHEMA_UNKNOWN", productionAdmission: "not-evaluated",
-    });
-    assert.equal(execute(snapshotScript, true).stdout, invalidBefore);
   } finally {
     docker(["volume", "rm", volume]);
   }

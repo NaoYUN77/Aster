@@ -15,7 +15,6 @@ import { createRegistry, defineExtension, defineTool, Harness, ToolResultEntry }
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { readConfig } from "../src/config.js";
-import { Inbox } from "../src/inbox.js";
 import { createToolRegistry } from "../src/tools.js";
 
 const context = BACKGROUND_CONTEXT;
@@ -51,21 +50,6 @@ async function crashAt(startedFile: string, fixture: string, args: string[]): Pr
     child.kill("SIGKILL");
   }
   await exited;
-}
-
-async function runCli(directory: string, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  const child = spawn(process.execPath, ["--import", "tsx", join(projectRoot, "src", "deliveries.ts"), ...args], {
-    cwd: projectRoot,
-    env: { ...process.env, DATA_DIR: directory },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout!.on("data", (chunk) => { stdout += String(chunk); });
-  child.stderr!.on("data", (chunk) => { stderr += String(chunk); });
-  const [code] = await once(child, "exit");
-  return { code: code as number | null, stdout, stderr };
 }
 
 function modelFixture() {
@@ -130,77 +114,6 @@ for (const mode of ["safe", "unsafe"] as const) {
     }
   });
 }
-
-test("a crash while a segment is sending quarantines it and later sends only stored text", { timeout: 30_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "pa-crash-delivery-"));
-  const database = join(directory, "inbox.sqlite");
-  const startedFile = join(directory, "started.txt");
-  try {
-    await crashAt(startedFile, "crash-inbox.ts", [database, startedFile]);
-    const inbox = new Inbox(database);
-    try {
-      inbox.recover();
-      assert.deepEqual(inbox.blocked().map((row) => [row.part, row.status, row.error]), [[0, "uncertain", "PROCESS_INTERRUPTED"]]);
-      assert.equal(inbox.next(), undefined, "an unconfirmed segment is not resent automatically");
-      assert.equal(inbox.nextPart("web:99:12")?.part, 1);
-
-      inbox.resolvePart("web:99:12", 0, "retry");
-      const sent: string[] = [];
-      let part = inbox.nextPart("web:99:12");
-      while (part) {
-        sent.push(part.text);
-        inbox.beginPart("web:99:12", part.part);
-        inbox.confirmPart("web:99:12", part.part, String(100 + sent.length));
-        part = inbox.nextPart("web:99:12");
-      }
-      assert.deepEqual(sent, ["a".repeat(4000), "tail"]);
-      assert.equal(inbox.blocked().length, 0);
-    } finally {
-      inbox.close();
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("delivery CLI recovers an interrupted send before listing and resolving it", { timeout: 30_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "pa-cli-recover-"));
-  const database = join(directory, "inbox.sqlite");
-  const startedFile = join(directory, "started.txt");
-  try {
-    await crashAt(startedFile, "crash-inbox.ts", [database, startedFile]);
-
-    const list = await runCli(directory, ["list"]);
-    assert.equal(list.code, 0, list.stderr);
-    const output = JSON.parse(list.stdout) as { blocked: { requestId: string; status: string; part: number }[] };
-    assert.deepEqual(output.blocked.map((row) => [row.requestId, row.status, row.part]),
-      [["web:99:12", "uncertain", 0]], "a leftover sending part must be visible to the operator");
-
-    const inbox = new Inbox(database);
-    try {
-      assert.equal(inbox.next(), undefined, "a request with an unresolved interrupted part is not sent automatically");
-      assert.equal(inbox.nextPart("web:99:12")?.part, 1, "the unresolved interrupted part itself is not pending");
-    } finally {
-      inbox.close();
-    }
-
-    const retry = await runCli(directory, ["retry", "web:99:12", "0"]);
-    assert.equal(retry.code, 0, retry.stderr);
-
-    const reopened = new Inbox(database);
-    try {
-      assert.equal(reopened.nextPart("web:99:12")?.part, 0, "retry makes the stored part pending again");
-      reopened.recover();
-      reopened.recover();
-      assert.equal(reopened.blocked().length, 0, "recover is idempotent after resolution");
-      assert.equal(reopened.nextPart("web:99:12")?.part, 0);
-    } finally {
-      reopened.close();
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
 
 test("bash output is bounded and the model is told where the full output went", { timeout: 20_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "pa-bash-limits-"));

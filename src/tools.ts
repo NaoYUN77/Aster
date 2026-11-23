@@ -81,9 +81,7 @@ export interface ToolRegistry extends Registry {
   setDisabled(name: string, disabled: boolean): void;
 }
 
-// `emoji_search` lists what the channel can react with; it reads a list and changes nothing, while
-// the reaction it informs is a write.
-const READ_TOOLS = new Set(["read", "current_time", "working_read", "tool_search", "reminder_list", "emoji_search"]);
+const READ_TOOLS = new Set(["read", "current_time", "working_read", "tool_search", "reminder_list"]);
 
 /** Where a tool's implementation came from, as one trace label. */
 function sourceLabel(source: ToolSource): string {

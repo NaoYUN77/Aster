@@ -160,19 +160,11 @@ volumes:
         const agent = new DatabaseSync('/data/agent.sqlite');
         agent.exec('CREATE TABLE state(id INTEGER PRIMARY KEY)');
         agent.close();
-        const inbox = new DatabaseSync('/data/inbox.sqlite');
-        inbox.exec(\`CREATE TABLE checkpoint(id INTEGER PRIMARY KEY CHECK(id=1), offset INTEGER NOT NULL);
-          CREATE TABLE identity(id INTEGER PRIMARY KEY CHECK(id=1), botId TEXT NOT NULL, ownerId TEXT NOT NULL);
-          CREATE TABLE inbox(requestId TEXT PRIMARY KEY, conversationId TEXT NOT NULL, senderId TEXT NOT NULL,
-            text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', reply TEXT, receivedAt TEXT, repliedAt TEXT);
-          CREATE TABLE deliveries(requestId TEXT NOT NULL REFERENCES inbox(requestId) ON DELETE CASCADE,
-            part INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-            messageId TEXT, error TEXT, createdAt TEXT, updatedAt TEXT, PRIMARY KEY(requestId,part));
-          CREATE TABLE failures(requestId TEXT PRIMARY KEY REFERENCES inbox(requestId), code TEXT NOT NULL);
-          INSERT INTO checkpoint VALUES(1,0);\`);
-        inbox.close();
+        const web = new DatabaseSync('/data/web.sqlite');
+        web.exec('CREATE TABLE requests(id TEXT PRIMARY KEY)');
+        web.close();
         chmodSync('/data/agent.sqlite', 0o600);
-        chmodSync('/data/inbox.sqlite', 0o600);
+        chmodSync('/data/web.sqlite', 0o600);
       `;
       await docker("run", "--rm", "--pull", "never", "--network", "none",
         "--mount", `type=volume,source=${project}-app,target=/data`,

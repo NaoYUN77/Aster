@@ -4,9 +4,8 @@ Aster serves exactly one conversation surface: the HTTP/SSE web adapter. We dele
 long-polling and Slack Socket Mode transports, the `CHANNEL` selector and their configuration —
 bot tokens, owner/member ids, allowed channels, emoji receipts and `STYLE_LEARNING`. The web
 adapter already had its own durable store, password login and owner identity, so it needed no bot
-credential or second identity model. `src/reactions.ts` and `src/style.ts` stay in the tree as
-host-owned libraries, but no transport delivers reaction events to them and they are not wired
-into startup.
+credential or second identity model. The legacy Slack `src/reactions.ts`, `src/style.ts`, and
+channel `src/inbox.ts` / `src/deliveries.ts` modules were subsequently removed.
 
 We rejected keeping Slack as a transition entry: it would keep two authentication models, two
 inbound identity schemes and a second delivery loop alive with no owner to migrate them. We
