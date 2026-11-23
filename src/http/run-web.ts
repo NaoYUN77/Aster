@@ -12,7 +12,7 @@ import { createRoutines, type RoutinesRuntime } from "../routines/runtime.js";
 import { SqliteRoutineStore } from "../routines/store.js";
 import { createRoutinesExtension } from "../routines/tools.js";
 import { SkillIndex } from "../skills.js";
-import { createWatchers, type WatchersRuntime } from "../watchers/index.js";
+import { createSubagentWatchTriageRunner, createWatchers, type WatchersRuntime } from "../watchers/index.js";
 import { SqliteWatchStore } from "../watchers/store.js";
 import { AgentGate } from "./agent-gate.js";
 import { WebHostDelivery } from "./host-delivery.js";
@@ -105,6 +105,7 @@ export async function runWebMode(
       : new ReminderStore(join(config.dataDir, "reminders.sqlite"), { limits: config.reminders });
     reminders?.recover();
 
+    let memoryFs: Awaited<ReturnType<typeof ensureMemoryFs>> | undefined;
     watchersStore = config.watchers === undefined
       ? undefined
       : new SqliteWatchStore(join(config.dataDir, "watchers.sqlite"));
@@ -127,6 +128,17 @@ export async function runWebMode(
             const code = (error as { code?: unknown } | null)?.code;
             return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : "HOST_DELIVERY_FAILED";
           },
+          triage: createSubagentWatchTriageRunner({
+            subagents: () => agent?.subagents,
+            renderMemoryCore: async () => {
+              if (memoryFs === undefined) return undefined;
+              const rendered = await memoryFs.renderCore(config.memoryFs.coreTokens);
+              return rendered.text.trim() === "" ? undefined : rendered.text;
+            },
+            defaultProvider: config.provider,
+            ...(config.watchers.triageModel === undefined ? {} : { triageModel: config.watchers.triageModel }),
+            ...(config.watchers.triageTimeoutMs === undefined ? {} : { timeoutMs: config.watchers.triageTimeoutMs }),
+          }),
         });
 
     routinesStore = config.routines === undefined
@@ -170,7 +182,7 @@ export async function runWebMode(
     ];
     // Core memory is initialized before the agent opens, exactly as the Telegram/Slack entry does:
     // an unusable directory is a startup error, and MEMORY_FS_ENABLED=0 creates nothing.
-    const memoryFs = await ensureMemoryFs(config.memoryFs);
+    memoryFs = await ensureMemoryFs(config.memoryFs);
     agent = await openAgent(config, undefined, undefined, buildAgentOptions(config, {
       ...(memoryFs === undefined ? {} : { memoryFs }),
       ...(reminders === undefined ? {} : { reminderStore: reminders }),

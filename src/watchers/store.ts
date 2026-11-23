@@ -9,10 +9,12 @@ import {
   type SourceRow,
   type SourceState,
   type SourceStatus,
+  type WatchDeliveryMode,
   type WatchEventInput,
   type WatchKind,
   type WatchReasonCode,
   type WatchStore,
+  type WatchTriageAction,
   type WatcherRow,
 } from "./protocol.js";
 
@@ -67,6 +69,8 @@ function addSeconds(now: string, seconds: number): string {
 }
 
 function watcherRow(record: Record<string, unknown>): WatcherRow {
+  const modeRaw = record.deliveryMode;
+  const deliveryMode: WatchDeliveryMode = modeRaw === "direct" ? "direct" : "triage";
   return Object.freeze({
     id: Number(record.id),
     chatId: String(record.chatId),
@@ -76,6 +80,8 @@ function watcherRow(record: Record<string, unknown>): WatcherRow {
     label: String(record.label),
     status: String(record.status),
     maxEventsPerHour: Number(record.maxEventsPerHour),
+    deliveryMode,
+    triagePrompt: record.triagePrompt === null || record.triagePrompt === undefined ? null : String(record.triagePrompt),
     createdAt: String(record.createdAt),
     stoppedAt: record.stoppedAt === null ? null : String(record.stoppedAt),
   });
@@ -112,6 +118,11 @@ function outboxRow(record: Record<string, unknown>): OutboxRow {
     status: String(record.status) as OutboxRow["status"],
     attempts: Number(record.attempts),
     createdAt: String(record.createdAt),
+    triageAction: record.triageAction === null || record.triageAction === undefined
+      ? null
+      : String(record.triageAction) as WatchTriageAction,
+    triageReason: record.triageReason === null || record.triageReason === undefined ? null : String(record.triageReason),
+    triageUrgent: Number(record.triageUrgent ?? 0) === 1,
   });
 }
 
@@ -121,9 +132,11 @@ const SOURCE_COLUMNS = `s.id AS id, s.watcher_id AS watcherId, s.kind AS kind, s
   s.failures AS failures, s.last_error AS lastError, s.last_check_at AS lastCheckAt`;
 const WATCHER_COLUMNS = `w.id AS id, w.chat_id AS chatId, w.thread_ts AS threadTs, w.kind AS kind,
   w.target AS target, w.label AS label, w.status AS status, w.max_events_per_hour AS maxEventsPerHour,
+  w.delivery_mode AS deliveryMode, w.triage_prompt AS triagePrompt,
   w.created_at AS createdAt, w.stopped_at AS stoppedAt`;
 const OUTBOX_COLUMNS = `id, watcher_id AS watcherId, event_id AS eventId, chat_id AS chatId,
-  thread_ts AS threadTs, text, status, attempts, created_at AS createdAt`;
+  thread_ts AS threadTs, text, status, attempts, created_at AS createdAt,
+  triage_action AS triageAction, triage_reason AS triageReason, triage_urgent AS triageUrgent`;
 
 /**
  * The runtime's store surface: the protocol's interface plus the operations the scheduler and the
@@ -132,6 +145,8 @@ const OUTBOX_COLUMNS = `id, watcher_id AS watcherId, event_id AS eventId, chat_i
 export interface WatchRuntimeStore extends WatchStore {
   /** A conditional GET proved reachability without changing the failure state. */
   unchanged(sourceId: number, state: SourceState, now: string, nextCheckAt: string): void;
+  getWatcher(id: number): WatcherRow | undefined;
+  eventFacts(eventId: number): Readonly<Record<string, string | number | boolean>>;
   liveCount(chatId: string): number;
   listAll(limit?: number): readonly (WatcherRow & { readonly source: SourceRow })[];
   sources(mode: SourceMode): readonly SourceRow[];
@@ -140,6 +155,19 @@ export interface WatchRuntimeStore extends WatchStore {
   resetRelayCursor(): void;
   pendingForChat(chatId: string, limit: number): readonly OutboxRow[];
   sentLastHour(chatId: string, since: string): number;
+  sentWithTriage(
+    id: number,
+    messageId: string,
+    now: string,
+    triage: { readonly action: WatchTriageAction; readonly reason: string; readonly urgent: boolean; readonly text?: string },
+  ): void;
+  suppress(id: number, reason: string, now: string): void;
+  queueDigest(id: number, summary: string, reason: string, urgent: boolean, now: string): void;
+  requeuePending(id: number, code: string): void;
+  queuedDigest(chatId?: string, limit?: number): readonly OutboxRow[];
+  markDigestSent(ids: readonly number[], messageId: string, now: string): void;
+  meta(key: string): string | undefined;
+  setMeta(key: string, value: string): void;
 }
 
 /** Lease for a claim: long enough for one fetch, short enough that a crash is retried soon. */
@@ -161,6 +189,22 @@ export class SqliteWatchStore implements WatchRuntimeStore {
       PRAGMA foreign_keys = ON;
     `);
     for (const statement of WATCH_SCHEMA_SQL) this.#db.exec(statement);
+    this.#migrateColumns();
+  }
+
+  #migrateColumns(): void {
+    const ensureColumn = (table: string, column: string, ddl: string) => {
+      const cols = this.#db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!cols.some((c) => c.name === column)) {
+        this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+      }
+    };
+    ensureColumn("watchers", "delivery_mode", "delivery_mode TEXT NOT NULL DEFAULT 'triage'");
+    ensureColumn("watchers", "triage_prompt", "triage_prompt TEXT");
+    ensureColumn("outbox", "triage_action", "triage_action TEXT");
+    ensureColumn("outbox", "triage_reason", "triage_reason TEXT");
+    ensureColumn("outbox", "triage_urgent", "triage_urgent INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("outbox", "digest_sent_at", "digest_sent_at TEXT");
   }
 
   create(input: CreateWatcherInput): { watcherId: number; sourceId: number } {
@@ -168,6 +212,10 @@ export class SqliteWatchStore implements WatchRuntimeStore {
     const target = requireText(input.target, "target");
     const label = requireText(input.label, "label");
     const location = requireText(input.location, "location");
+    const deliveryMode: WatchDeliveryMode = input.deliveryMode === "direct" ? "direct" : "triage";
+    const triagePrompt = input.triagePrompt === undefined || input.triagePrompt.trim() === ""
+      ? null
+      : input.triagePrompt.trim().slice(0, 1_000);
     if (!KINDS.includes(input.kind)) throw new WatchError("WATCH_TARGET_INVALID", "unknown watch kind");
     if (!Number.isInteger(input.intervalSec) || input.intervalSec < 30 || input.intervalSec > 86_400) {
       throw new WatchError("WATCH_TARGET_INVALID", "interval is outside the supported range");
@@ -182,9 +230,9 @@ export class SqliteWatchStore implements WatchRuntimeStore {
       ).get(chatId, input.kind, target);
       if (live !== undefined) throw new WatchError("WATCH_DUPLICATE", "this target is already being watched");
       const inserted = this.#db.prepare(`INSERT INTO watchers
-        (chat_id, thread_ts, kind, target, label, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'active', ?)`).run(
-        chatId, input.threadTs ?? null, input.kind, target, label, now,
+        (chat_id, thread_ts, kind, target, label, status, delivery_mode, triage_prompt, created_at)
+        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`).run(
+        chatId, input.threadTs ?? null, input.kind, target, label, deliveryMode, triagePrompt, now,
       );
       const watcherId = Number(inserted.lastInsertRowid);
       // A poll source is due immediately; a push source's first reconcile is its baseline.
@@ -434,6 +482,103 @@ export class SqliteWatchStore implements WatchRuntimeStore {
   sentLastHour(chatId: string, since: string): number {
     return Number((this.#db.prepare(`SELECT COUNT(*) AS n FROM outbox
       WHERE chat_id = ? AND status = 'sent' AND sent_at >= ?`).get(chatId, iso(since)) as { n: number }).n);
+  }
+
+  getWatcher(id: number): WatcherRow | undefined {
+    return this.#watcherRow(id);
+  }
+
+  eventFacts(eventId: number): Readonly<Record<string, string | number | boolean>> {
+    const row = this.#db.prepare("SELECT facts FROM events WHERE id = ?").get(eventId) as { facts: string } | undefined;
+    if (row === undefined) return {};
+    try {
+      const parsed = JSON.parse(row.facts) as unknown;
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, string | number | boolean>;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
+  sentWithTriage(
+    id: number,
+    messageId: string,
+    now: string,
+    triage: { readonly action: WatchTriageAction; readonly reason: string; readonly urgent: boolean; readonly text?: string },
+  ): void {
+    const nextText = triage.text === undefined || triage.text.trim() === ""
+      ? undefined
+      : triage.text.trim().slice(0, MAX_TEXT_CHARS);
+    const changed = nextText === undefined
+      ? this.#db.prepare(`UPDATE outbox SET status = 'sent', message_id = ?, sent_at = ?,
+          failure_code = NULL, triage_action = ?, triage_reason = ?, triage_urgent = ?
+          WHERE id = ? AND status = 'sending'`).run(
+          messageId.slice(0, 256), iso(now), triage.action, triage.reason.slice(0, 500), triage.urgent ? 1 : 0, id,
+        )
+      : this.#db.prepare(`UPDATE outbox SET status = 'sent', message_id = ?, sent_at = ?, text = ?,
+          failure_code = NULL, triage_action = ?, triage_reason = ?, triage_urgent = ?
+          WHERE id = ? AND status = 'sending'`).run(
+          messageId.slice(0, 256), iso(now), nextText, triage.action, triage.reason.slice(0, 500), triage.urgent ? 1 : 0, id,
+        );
+    if (changed.changes !== 1) throw new WatchError("WATCH_STORE_ERROR", "outbox row is not being sent");
+  }
+
+  suppress(id: number, reason: string, now: string): void {
+    const changed = this.#db.prepare(`UPDATE outbox SET status = 'suppressed', sent_at = ?,
+      failure_code = NULL, triage_action = 'suppress', triage_reason = ?, triage_urgent = 0
+      WHERE id = ? AND status = 'sending'`).run(iso(now), reason.slice(0, 500), id);
+    if (changed.changes !== 1) throw new WatchError("WATCH_STORE_ERROR", "outbox row is not being sent");
+  }
+
+  queueDigest(id: number, summary: string, reason: string, urgent: boolean, now: string): void {
+    const text = summary.trim() === "" ? undefined : summary.trim().slice(0, MAX_TEXT_CHARS);
+    const changed = text === undefined
+      ? this.#db.prepare(`UPDATE outbox SET status = 'queued_digest', sent_at = ?,
+          failure_code = NULL, triage_action = 'digest', triage_reason = ?, triage_urgent = ?
+          WHERE id = ? AND status = 'sending'`).run(iso(now), reason.slice(0, 500), urgent ? 1 : 0, id)
+      : this.#db.prepare(`UPDATE outbox SET status = 'queued_digest', sent_at = ?, text = ?,
+          failure_code = NULL, triage_action = 'digest', triage_reason = ?, triage_urgent = ?
+          WHERE id = ? AND status = 'sending'`).run(iso(now), text, reason.slice(0, 500), urgent ? 1 : 0, id);
+    if (changed.changes !== 1) throw new WatchError("WATCH_STORE_ERROR", "outbox row is not being sent");
+  }
+
+  requeuePending(id: number, code: string): void {
+    const changed = this.#db.prepare(`UPDATE outbox SET status = 'pending', failure_code = ?
+      WHERE id = ? AND status = 'sending'`).run(code.slice(0, 64), id);
+    if (changed.changes !== 1) throw new WatchError("WATCH_STORE_ERROR", "outbox row is not being sent");
+  }
+
+  queuedDigest(chatId?: string, limit = 50): readonly OutboxRow[] {
+    const bound = Math.max(1, Math.min(limit, 200));
+    const rows = chatId === undefined
+      ? this.#db.prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox
+          WHERE status = 'queued_digest' ORDER BY id LIMIT ?`).all(bound) as Record<string, unknown>[]
+      : this.#db.prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox
+          WHERE chat_id = ? AND status = 'queued_digest' ORDER BY id LIMIT ?`).all(chatId, bound) as Record<string, unknown>[];
+    return rows.map(outboxRow);
+  }
+
+  markDigestSent(ids: readonly number[], messageId: string, now: string): void {
+    if (ids.length === 0) return;
+    const at = iso(now);
+    const msgId = messageId.slice(0, 256);
+    this.#transaction(() => {
+      const update = this.#db.prepare(`UPDATE outbox SET status = 'sent', message_id = ?,
+        digest_sent_at = ?, sent_at = ? WHERE id = ? AND status = 'queued_digest'`);
+      for (const id of ids) update.run(msgId, at, at, id);
+    });
+  }
+
+  meta(key: string): string | undefined {
+    const row = this.#db.prepare("SELECT value FROM watch_meta WHERE key = ?").get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  setMeta(key: string, value: string): void {
+    this.#db.prepare(`INSERT INTO watch_meta (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key.slice(0, 128), value.slice(0, 512));
   }
 
   close(): void {

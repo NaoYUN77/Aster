@@ -1,7 +1,7 @@
 import { isIP } from "node:net";
 import { defineExtension, defineTool, type Extension, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
-import type { SourceMode, WatchKind, WatchersConfig } from "./protocol.js";
+import type { SourceMode, WatchDeliveryMode, WatchKind, WatchersConfig } from "./protocol.js";
 import { parseGithubTarget } from "./github.js";
 import { WatchError, watchReasonCode, type WatchRuntimeStore } from "./store.js";
 
@@ -15,8 +15,10 @@ import { WatchError, watchReasonCode, type WatchRuntimeStore } from "./store.js"
  */
 
 const WATCH_KINDS: readonly WatchKind[] = ["github_run", "github_pr", "github_events", "feed", "x"];
+const WATCH_DELIVERY_MODES: readonly WatchDeliveryMode[] = ["triage", "direct"];
 const MAX_TARGET_CHARS = 2_048;
 const MAX_LABEL_CHARS = 200;
+const MAX_TRIAGE_PROMPT_CHARS = 1_000;
 
 export type WatchToolOptions = {
   readonly config: WatchersConfig;
@@ -24,6 +26,8 @@ export type WatchToolOptions = {
   readonly chatId?: string;
   /** Host-resolved thread anchor. Never a tool parameter. */
   readonly threadTs?: string;
+  /** Optional host callback for `watch_digest(action="flush")` to immediately deliver queued digest items. */
+  readonly flushDigest?: (chatId: string, signal?: AbortSignal) => Promise<{ readonly count: number; readonly text: string }>;
 };
 
 type TargetPlan = {
@@ -114,7 +118,9 @@ function formatWatcher(watcher: ReturnType<WatchRuntimeStore["list"]>[number]): 
   const source = watcher.source;
   const next = source.nextCheckAt ?? source.reconcileAt ?? "—";
   const error = source.lastError === null ? "" : ` (${source.lastError})`;
-  return `#${watcher.id} | ${watcher.status}/${source.status}${error} | ${watcher.kind} | ${watcher.label} | ${watcher.target} | next ${next}`;
+  const modeNote = watcher.deliveryMode === "direct" ? "direct" : "triage";
+  const filterNote = watcher.triagePrompt === null ? "" : ` | filter: ${watcher.triagePrompt.slice(0, 80)}`;
+  return `#${watcher.id} | ${watcher.status}/${source.status}${error} | ${watcher.kind} | ${modeNote} | ${watcher.label} | ${watcher.target} | next ${next}${filterNote}`;
 }
 
 export function createWatchersExtension(store: WatchRuntimeStore, options: WatchToolOptions): Extension {
@@ -124,11 +130,19 @@ export function createWatchersExtension(store: WatchRuntimeStore, options: Watch
 
   const create = defineTool({
     name: "watch_create",
-    description: "Start watching something and notify this conversation when it reaches a final state. kind=feed or x watches an RSS/Atom URL; github_run watches completed CI runs in owner/repo; github_pr watches one pull request (owner/repo#123); github_events watches closed issues in owner/repo. Only terminal changes produce messages; the first check is a silent baseline.",
+    description:
+      "Start watching something and notify this conversation when new events arrive. "
+      + "kind=feed or x watches an RSS/Atom URL; github_run watches completed CI runs in owner/repo; "
+      + "github_pr watches one pull request (owner/repo#123); github_events watches closed issues in owner/repo. "
+      + "By default (deliveryMode='triage'), new events are evaluated by a read-only Sub-agent to decide notify / digest / suppress; "
+      + "pass deliveryMode='direct' to push raw updates immediately without LLM triage, or pass triagePrompt to specify custom filter criteria. "
+      + "The first check is always a silent baseline.",
     parameters: obj({
       kind: oneOf(WATCH_KINDS),
       target: str({ minLength: 1, maxLength: MAX_TARGET_CHARS, description: "Feed URL, owner/repo, owner/repo#123, or a GitHub URL" }),
       label: opt(str({ maxLength: MAX_LABEL_CHARS, description: "Short human name shown in watch_list" })),
+      deliveryMode: opt(oneOf(WATCH_DELIVERY_MODES, { description: "Optional delivery mode: 'triage' (default, Sub-agent filters notify/digest/suppress) or 'direct' (push raw events immediately)." })),
+      triagePrompt: opt(str({ maxLength: MAX_TRIAGE_PROMPT_CHARS, description: "Optional custom filter/priority instructions for the triage Sub-agent (e.g. 'Only notify immediately for major releases or security fixes')." })),
     }),
     replay: "unsafe",
     execute: async (args, api) => {
@@ -140,6 +154,7 @@ export function createWatchersExtension(store: WatchRuntimeStore, options: Watch
         if (store.liveCount(chatId) >= config.maxActive) {
           throw new WatchError("WATCH_LIMIT_EXCEEDED", `at most ${config.maxActive} watchers are allowed per conversation`);
         }
+        const deliveryMode: WatchDeliveryMode = args.deliveryMode ?? "triage";
         const created = store.create({
           chatId,
           ...(threadTs === undefined ? {} : { threadTs }),
@@ -149,15 +164,18 @@ export function createWatchersExtension(store: WatchRuntimeStore, options: Watch
           location: plan.location,
           mode: plan.mode,
           intervalSec: plan.intervalSec,
+          deliveryMode,
+          ...(args.triagePrompt === undefined ? {} : { triagePrompt: args.triagePrompt }),
           now: new Date().toISOString(),
         });
         return toolText(
-          `Watcher #${created.watcherId} created for ${plan.target} (${args.kind}). The first check records the current state without sending anything.`,
+          `Watcher #${created.watcherId} created for ${plan.target} (${args.kind}, ${deliveryMode}). The first check records the current state without sending anything.`,
           {
             id: created.watcherId,
             kind: args.kind,
             target: plan.target,
             mode: plan.mode,
+            deliveryMode,
             intervalSec: plan.intervalSec,
           },
         );
@@ -201,5 +219,44 @@ export function createWatchersExtension(store: WatchRuntimeStore, options: Watch
     },
   });
 
-  return defineExtension({ name: "watchers", tools: [create, list, stop] });
+  const digest = defineTool({
+    name: "watch_digest",
+    description:
+      "Inspect or immediately flush monitor updates currently queued for the daily watch digest. "
+      + "Use action='list' (default) to preview queued items without clearing them, or action='flush' to summarize, deliver, and clear them now.",
+    parameters: obj({
+      action: opt(oneOf(["list", "flush"] as const, { description: "'list' (default) or 'flush' to deliver and clear now." })),
+    }),
+    replay: "unsafe",
+    execute: async (args, api, context) => {
+      try {
+        const chatId = fixedChatId ?? String(api.conversationId);
+        const action = args.action ?? "list";
+        if (action === "flush") {
+          if (options.flushDigest === undefined) {
+            return toolText("Digest flushing is not available in this host.", { count: 0, flushed: false });
+          }
+          const flushed = await options.flushDigest(chatId, context.abortSignal);
+          if (flushed.count === 0) {
+            return toolText("No queued watch digest items.", { count: 0, flushed: false });
+          }
+          return toolText(
+            `Flushed ${flushed.count} queued watch digest item(s). Present this digest directly in your reply:\n\n${flushed.text}`,
+            { count: flushed.count, flushed: true },
+          );
+        }
+        const queued = store.queuedDigest(chatId, 50);
+        if (queued.length === 0) return toolText("No queued watch digest items.", { count: 0 });
+        const lines = queued.map((item, idx) => {
+          const reason = item.triageReason ? ` (${item.triageReason})` : "";
+          return `${idx + 1}. [watcher #${item.watcherId}] ${item.text}${reason}`;
+        });
+        return toolText(lines.join("\n"), { count: queued.length });
+      } catch (error) {
+        return toolFailure(error);
+      }
+    },
+  });
+
+  return defineExtension({ name: "watchers", tools: [create, list, stop, digest] });
 }

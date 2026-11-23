@@ -32,11 +32,12 @@ test("schema matches the protocol DDL: every table, column and index", async () 
       const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[])
         .map((row) => row.name)
         .filter((name) => !name.startsWith("sqlite_")));
-      assert.deepEqual([...tables].sort(), ["events", "outbox", "sources", "watchers"]);
+      assert.deepEqual([...tables].sort(), ["events", "outbox", "sources", "watch_meta", "watchers"]);
       const columns = (table: string): string[] => (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
         .map((row) => row.name);
       assert.deepEqual(columns("watchers"),
-        ["id", "chat_id", "thread_ts", "kind", "target", "label", "status", "max_events_per_hour", "created_at", "stopped_at"]);
+        ["id", "chat_id", "thread_ts", "kind", "target", "label", "status", "max_events_per_hour",
+          "delivery_mode", "triage_prompt", "created_at", "stopped_at"]);
       assert.deepEqual(columns("sources"),
         ["id", "watcher_id", "kind", "location", "mode", "status", "interval_sec", "next_check_at", "reconcile_at",
           "etag", "last_modified", "cursor", "failures", "last_error", "last_check_at"]);
@@ -44,11 +45,12 @@ test("schema matches the protocol DDL: every table, column and index", async () 
         ["id", "source_id", "dedup_key", "delivery_id", "kind", "occurred_at", "received_at", "facts"]);
       assert.deepEqual(columns("outbox"),
         ["id", "watcher_id", "event_id", "chat_id", "thread_ts", "text", "status", "attempts", "message_id",
-          "created_at", "sent_at", "failure_code"]);
+          "created_at", "sent_at", "failure_code", "triage_action", "triage_reason", "triage_urgent", "digest_sent_at"]);
+      assert.deepEqual(columns("watch_meta"), ["key", "value"]);
       const indexes = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL").all() as { name: string }[])
         .map((row) => row.name).sort();
       assert.deepEqual(indexes, ["sources_due", "watchers_live"]);
-      assert.equal(WATCH_SCHEMA_SQL.length, 6);
+      assert.equal(WATCH_SCHEMA_SQL.length, 7);
     } finally {
       db.close();
     }

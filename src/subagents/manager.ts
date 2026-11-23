@@ -127,6 +127,8 @@ export type SubagentSpawnInput = {
   readonly mode?: "wait" | "background";
   readonly allowWrite?: boolean;
   readonly timeoutMs?: number;
+  /** Optional model override (e.g. lightweight triage model); defaults to manager's defaultModel. */
+  readonly model?: { readonly provider: string; readonly modelId: string };
 };
 
 export type SubagentManagerOptions = {
@@ -576,6 +578,7 @@ export class SubagentManager {
       holdsWriteLock,
       timeoutMs,
       controller,
+      ...(input.model === undefined ? {} : { model: input.model }),
     });
 
     const record: ActiveSubagent = {
@@ -791,8 +794,10 @@ export class SubagentManager {
     readonly holdsWriteLock: boolean;
     readonly timeoutMs: number;
     readonly controller: AbortController;
+    readonly model?: { readonly provider: string; readonly modelId: string };
   }): Promise<SubagentResult> {
-    const { id, task, systemPrompt, extensions, runCwd, holdsWriteLock, timeoutMs, controller } = params;
+    const { id, task, systemPrompt, extensions, runCwd, holdsWriteLock, timeoutMs, controller, model } = params;
+    const effectiveModel = model ?? this.defaultModel;
     const startedAt = Date.now();
     const dbPath = join(this.subagentsDir, `${id}.sqlite`);
     let storage: Storage | undefined;
@@ -823,7 +828,7 @@ export class SubagentManager {
               conversationId: api.conversationId,
               subagentId: id,
               provider: message.provider,
-              modelId: message.model || message.responseModel || this.defaultModel.modelId,
+              modelId: message.model || message.responseModel || effectiveModel.modelId,
               inputTokens: u.input,
               outputTokens: u.output,
               cacheReadTokens: u.cacheRead,
@@ -878,7 +883,7 @@ export class SubagentManager {
       const conversation = await harness.createConversation({
         ownership: { kind: "ownerless" },
         agent: {
-          model: this.defaultModel,
+          model: effectiveModel,
           cwd: runCwd,
           instructions: systemPrompt,
           maxTurns: MAX_SUBAGENT_TURNS,
