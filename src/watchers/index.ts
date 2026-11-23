@@ -127,7 +127,10 @@ export function createWatchers(options: WatchersOptions): WatchersRuntime {
         config,
         ...(options.chatId === undefined ? {} : { chatId: options.chatId }),
         ...(options.threadTs === undefined ? {} : { threadTs: options.threadTs }),
-        flushDigest: (chatId, flushSignal) => flushDigestForChat(chatId, flushSignal ?? signal),
+        // Called from inside an active chat turn (which already holds WebHost's AgentGate):
+        // summarize & clear queued rows without re-entering `options.deliver`, returning the digest
+        // text straight to the model reply instead of deadlocking on AgentGate.
+        flushDigest: (chatId, flushSignal) => flushDigestForChat(chatId, flushSignal ?? signal, { deliver: false }),
       })
     : undefined;
   const relay = config.relayUrl !== undefined && config.relayToken !== undefined
@@ -313,15 +316,17 @@ export function createWatchers(options: WatchersOptions): WatchersRuntime {
     const metaKey = `last_digest_date:${options.chatId}`;
     const check = isDigestDue(now(), timezone, digestTime, store.meta(metaKey));
     if (!check.due) return 0;
-    const result = await flushDigestForChat(options.chatId, runSignal, check.dateKey);
+    const result = await flushDigestForChat(options.chatId, runSignal, { dailyDateKey: check.dateKey, deliver: true });
     return result.count > 0 ? 1 : 0;
   }
 
   async function flushDigestForChat(
     chatId: string,
     runSignal: AbortSignal,
-    dailyDateKey?: string,
+    opts: { readonly dailyDateKey?: string; readonly deliver?: boolean } = {},
   ): Promise<{ readonly count: number; readonly text: string }> {
+    const dailyDateKey = opts.dailyDateKey;
+    const shouldDeliver = opts.deliver !== false;
     const metaKey = `last_digest_date:${chatId}`;
     const queued = store.queuedDigest(chatId, 50);
     if (queued.length === 0) {
@@ -333,11 +338,16 @@ export function createWatchers(options: WatchersOptions): WatchersRuntime {
     const text = options.triage === undefined
       ? formatFallbackDigest(queued, dateKey)
       : await options.triage.summarizeDigest({ items: queued, now: currentNow, timezone }, runSignal);
-    const deliveryKey = dailyDateKey !== undefined
-      ? `watch-digest:${dailyDateKey}`
-      : `watch-digest-manual:${queued[0]!.id}:${queued[queued.length - 1]!.id}`;
-    const messageId = await options.deliver(chatId, text, options.threadTs, runSignal, deliveryKey);
-    store.markDigestSent(queued.map((row) => row.id), messageId, now().toISOString());
+    const ids = queued.map((row) => row.id);
+    if (shouldDeliver) {
+      const deliveryKey = dailyDateKey !== undefined
+        ? `watch-digest:${dailyDateKey}`
+        : `watch-digest-manual:${ids[0]}:${ids[ids.length - 1]}`;
+      const messageId = await options.deliver(chatId, text, options.threadTs, runSignal, deliveryKey);
+      store.markDigestSent(ids, messageId, now().toISOString());
+    } else {
+      store.markDigestSent(ids, `tool:watch_digest:${ids[0]}-${ids[ids.length - 1]}`, now().toISOString());
+    }
     if (dailyDateKey !== undefined) store.setMeta(metaKey, dailyDateKey);
     return { count: queued.length, text };
   }

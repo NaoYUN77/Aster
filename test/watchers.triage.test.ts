@@ -11,6 +11,7 @@ import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import type { ToolExecutionApi } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { readWatchersConfig } from "../src/config.js";
+import { AgentGate } from "../src/http/agent-gate.js";
 import { SubagentManager } from "../src/subagents/index.js";
 import { personalTools } from "../src/tools.js";
 import { createWebExtension } from "../src/web-tools.js";
@@ -246,13 +247,108 @@ test("Batch Sub-agent triage locks tools to read-only, injects MEMORY.md prefere
       { conversationId: 1, taskId: 2, callId: "d2" } as ToolExecutionApi,
       BACKGROUND_CONTEXT,
     );
-    assert.match((flushOut.output![0] as { text: string }).text, /Delivered watch digest with 1 item/);
-    assert.equal(delivered.length, 2);
-    assert.match(delivered[1]!.text, /监控简报/);
+    const flushText = (flushOut.output![0] as { text: string }).text;
+    assert.match(flushText, /Flushed 1 queued watch digest item/);
+    assert.match(flushText, /监控简报/);
+    // Tool flush returns digest text directly to the active reply without re-entering host delivery.
+    assert.equal(delivered.length, 1);
     assert.equal(store.queuedDigest("owner", 10).length, 0);
   } finally {
     await watchers.stop();
     await manager.close();
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch_digest(flush) inside an active AgentGate turn never deadlocks on host delivery (E2E-03 regression)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-watch-flush-gate-"));
+  const store = new SqliteWatchStore(join(dir, "watchers.sqlite"));
+  const gate = new AgentGate();
+  const hostDelivered: string[] = [];
+
+  const watchers = createWatchers({
+    store,
+    config: testWatchConfig({
+      timezone: "Asia/Shanghai",
+      quietHours: null,
+      digestTime: "08:30",
+    }),
+    chatId: "owner",
+    now: () => new Date("2026-11-24T02:00:00Z"),
+    // Mirrors WebHostDelivery.send(), which acquires AgentGate!
+    deliver: async (_chatId, text) => {
+      return await gate.run(async () => {
+        hostDelivered.push(text);
+        return `msg-${hostDelivered.length}`;
+      });
+    },
+    triage: {
+      async triageBatch({ items }) {
+        return items.map((item) => ({
+          outboxId: item.outboxId,
+          action: "digest",
+          urgent: false,
+          summary: `Queued: ${item.text}`,
+          reason: "non-urgent",
+        }));
+      },
+      async summarizeDigest({ items }) {
+        return `汇总 ${items.length} 条：${items.map((i) => i.text).join("; ")}`;
+      },
+    },
+    log: () => {},
+  });
+
+  try {
+    store.setMeta("last_digest_date:owner", "2026-11-24");
+    const { sourceId } = store.create({
+      chatId: "owner",
+      kind: "feed",
+      target: "https://example.com/gate.xml",
+      label: "Gate",
+      location: "https://example.com/gate.xml",
+      mode: "poll",
+      intervalSec: 600,
+      now: "2026-11-24T01:00:00Z",
+    });
+    store.finish(sourceId, { events: [] }, "2026-11-24T01:00:00Z", "2026-11-24T10:00:00Z");
+    store.ingest(sourceId, {
+      dedupKey: "g1",
+      kind: "feed",
+      occurredAt: "2026-11-24T01:10:00Z",
+      facts: {},
+      text: "Item Alpha",
+    }, "2026-11-24T01:10:00Z");
+    store.ingest(sourceId, {
+      dedupKey: "g2",
+      kind: "feed",
+      occurredAt: "2026-11-24T01:11:00Z",
+      facts: {},
+      text: "Item Beta",
+    }, "2026-11-24T01:11:00Z");
+
+    await watchers.tickOnce(new AbortController().signal);
+    assert.equal(store.queuedDigest("owner", 10).length, 2);
+
+    // Hold AgentGate (exactly as RequestWorker does during an active chat turn) and call watch_digest(flush).
+    const digestTool = watchers.extension!.tools!.find((t) => t.name === "watch_digest")!;
+    const out = await gate.run(async () =>
+      digestTool.execute(
+        { action: "flush" },
+        { conversationId: 1, taskId: 1, callId: "flush-in-turn" } as ToolExecutionApi,
+        BACKGROUND_CONTEXT,
+      ),
+    );
+    const outputText = (out.output![0] as { text: string }).text;
+    assert.match(outputText, /Flushed 2 queued watch digest item/);
+    assert.match(outputText, /汇总 2 条/);
+    assert.match(outputText, /Item Alpha/);
+    assert.match(outputText, /Item Beta/);
+    assert.equal(store.queuedDigest("owner", 10).length, 0);
+    assert.equal(hostDelivered.length, 0);
+  } finally {
+    await watchers.stop();
     store.close();
     await rm(dir, { recursive: true, force: true });
   }

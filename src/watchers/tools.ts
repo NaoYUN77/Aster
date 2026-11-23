@@ -240,7 +240,10 @@ export function createWatchersExtension(store: WatchRuntimeStore, options: Watch
           if (flushed.count === 0) {
             return toolText("No queued watch digest items.", { count: 0, flushed: false });
           }
-          return toolText(`Delivered watch digest with ${flushed.count} item(s).`, { count: flushed.count, flushed: true });
+          return toolText(
+            `Flushed ${flushed.count} queued watch digest item(s). Present this digest directly in your reply:\n\n${flushed.text}`,
+            { count: flushed.count, flushed: true },
+          );
         }
         const queued = store.queuedDigest(chatId, 50);
         if (queued.length === 0) return toolText("No queued watch digest items.", { count: 0 });
