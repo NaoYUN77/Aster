@@ -60,10 +60,6 @@ export function errorBodyOf(value: unknown): ErrorBody | null {
   return body;
 }
 
-export function isErrorBody(value: unknown): value is ErrorBody {
-  return errorBodyOf(value) !== null;
-}
-
 /**
  * 读取错误体里的 `requestStatus`。兼容契约的
  * `{error:{code,message,requestStatus}}` 与扁平 `{code,message,requestStatus}`。
