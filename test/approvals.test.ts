@@ -73,6 +73,18 @@ test("evaluateSensitiveOperation detects all 4 sensitive categories and allows s
   assert.equal(isSafeReadOnlyShellCommand("cd /data/workspace && ls -la"), true);
   assert.equal(isSafeReadOnlyShellCommand("find . -maxdepth 2 2>/dev/null"), true);
   assert.equal(isSafeReadOnlyShellCommand("git status && git log -n 5"), true);
+  assert.equal(isSafeReadOnlyShellCommand("sed -n '250,380p' reminders.ts"), true);
+  assert.equal(isSafeReadOnlyShellCommand("cat -n src/agent.ts | sed -n '1,100p'"), true);
+  assert.equal(isSafeReadOnlyShellCommand("sed -n '/export function/,+20p' src/agent.ts"), true);
+  assert.equal(isSafeReadOnlyShellCommand("sed 's/old/new/g' file.txt"), true);
+  assert.equal(isSafeReadOnlyShellCommand("sed -i 's/old/new/g' file.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("sed -ni '1,10p' file.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("sed --in-place=.bak 's/a/b/' file.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("sed -f script.sed file.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("sed -n '1,10w out.txt' file.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("sed 's/foo/bar/w out.txt' file.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("sed 's/foo/id/e' file.txt"), false);
+  assert.equal(isSafeReadOnlyShellCommand("sed '1e id' file.txt"), false);
   assert.equal(isSafeReadOnlyShellCommand("echo hi > out.txt"), false);
   assert.equal(isSafeReadOnlyShellCommand("touch out.txt"), false);
   assert.equal(isSafeReadOnlyShellCommand("find . -delete"), false);

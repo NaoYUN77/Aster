@@ -266,6 +266,46 @@ export function extractShellWriteTargets(command: string): string[] {
   return targets.map(stripQuotes);
 }
 
+/** True when a single `sed` command segment is strictly read-only (no in-place edit, file write, or command exec). */
+function isSafeReadOnlySed(tokens: readonly string[]): boolean {
+  const expressions: string[] = [];
+  let explicitExpr = false;
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if (tok === "--") break;
+    if (tok === "--in-place" || tok.startsWith("--in-place=")) return false;
+    if (tok === "-f" || tok === "--file" || tok.startsWith("--file=")) return false;
+    if (tok === "-e" || tok === "--expression") {
+      explicitExpr = true;
+      if (tokens[i + 1] !== undefined) expressions.push(tokens[++i]!);
+      continue;
+    }
+    if (tok.startsWith("--expression=")) {
+      explicitExpr = true;
+      expressions.push(tok.slice("--expression=".length));
+      continue;
+    }
+    if (tok.startsWith("-") && !tok.startsWith("--")) {
+      // Short option cluster: reject `-i` (in-place) or `-f` (external script file).
+      if (/[if]/.test(tok.slice(1))) return false;
+      continue;
+    }
+    if (!explicitExpr && expressions.length === 0) {
+      expressions.push(tok);
+    }
+  }
+  for (const expr of expressions) {
+    // Reject GNU sed `w`/`W` (write to file) and `e` (execute shell command) commands and s///e, s///w flags.
+    if (/(?:^|[;\n}])\s*(?:(?:\d+|\$|\/(?:\\.|[^/])*\/)(?:\s*,\s*(?:\d+|\$|\+\d+|\/(?:\\.|[^/])*\/))?\s*!?\s*)?(?:[wW]\s+\S|e(?:\s|$|;))/.test(expr)) {
+      return false;
+    }
+    if (/(?:^|[;\n}])\s*(?:(?:\d+|\$|\/(?:\\.|[^/])*\/)(?:\s*,\s*(?:\d+|\$|\+\d+|\/(?:\\.|[^/])*\/))?\s*!?\s*)?s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[a-zA-Z0-9]*[eEwW]/.test(expr)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** True when a shell command is strictly composed of safe read-only operations (no writes/redirections). */
 export function isSafeReadOnlyShellCommand(command: string): boolean {
   const trimmed = command.trim();
@@ -292,6 +332,11 @@ export function isSafeReadOnlyShellCommand(command: string): boolean {
     if (cmd === "find") {
       const unsafeFindFlags = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"]);
       if (tokens.some((tok) => unsafeFindFlags.has(tok))) return false;
+      continue;
+    }
+
+    if (cmd === "sed") {
+      if (!isSafeReadOnlySed(tokens)) return false;
       continue;
     }
 

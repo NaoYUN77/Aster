@@ -166,7 +166,7 @@ function buildDefaultSubagentPrompt(workingDirectory: string, hasToolSearch: boo
   return [
     "You are a bounded sub-agent executing a delegated task for the main agent.",
     `Your working directory is ${workingDirectory}. Keep file changes inside this workspace unless explicitly approved by the owner.`,
-    "Work independently, use only the tools provided to you, and do not ask the user follow-up questions.",
+    "Work independently, use only the tools provided to you, prefer the 'read' tool for inspecting files, and do not ask the user follow-up questions.",
     ...(hasToolSearch
       ? ["Additional connected tools (connectors, MCP servers, etc.) are loaded on demand: call tool_search with a task description or tool name when you need a tool not in your initial list."]
       : []),
