@@ -294,7 +294,9 @@ export function buildRoutineInstructions(input: {
 
 You are running the standing task "${input.title}", not answering a chat message. The owner is not present, will not answer, and must not be asked anything. Work independently and finish in this run.
 Use your live tools (such as web search, Exa search, web fetch, tool_search for connected services/MCP tools, skills, and workspace tools) to gather current, verified information instead of guessing from memory.
+Never use bash with curl/wget to fetch websites when exa_search, web_search, or web_fetch is available; interactive approval is unavailable during unattended runs and sensitive shell/write calls will be denied immediately.
 When the task spans 2+ independent sources, topics, or heavy research tracks and spawn_subagent is available, delegate them to parallel sub-agents (mode='background' + wait_subagent) before synthesizing your final report.
+If any tool call or sub-agent fails, times out, or is cancelled, NEVER claim that source had "no updates" or "no releases" — explicitly note which source(s) failed or were incomplete in your final report.
 The task instruction is fixed by the host:
 ---
 ${input.brief}
@@ -441,6 +443,12 @@ export async function openAgent(
           workspaceWriteAllowed: true,
         });
         if (!evaluation.sensitive) return { allowed: true };
+        if (routineConversationIds.has(conversationId) || dreamingConversationIds.has(conversationId)) {
+          return {
+            allowed: false,
+            reason: `Unattended background routine cannot wait for interactive owner approval (${evaluation.reason}). Use non-interactive read-only tools such as exa_search, web_search, web_fetch, or read instead.`,
+          };
+        }
         return approvals.requestApproval({
           runScopeId: conversationId,
           caller: { kind: "main", conversationId },
@@ -623,7 +631,10 @@ export async function openAgent(
         ...(options.toolReviewLog === undefined ? {} : { log: options.toolReviewLog }),
       });
       await subagents.cleanupOrphans();
-      registry.install(createSubagentExtension(subagents));
+      registry.install(createSubagentExtension(subagents, {
+        isUnattendedConversation: (conversationId) =>
+          routineConversationIds.has(conversationId) || dreamingConversationIds.has(conversationId),
+      }));
     }
     const rawStorage = storage ?? await openNodeSqliteStorage(join(config.dataDir, "agent.sqlite"));
     try {
