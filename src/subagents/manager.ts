@@ -31,6 +31,8 @@ const DEFAULT_RESIDENT_TOOLS = new Set([
 ]);
 /** Default execution budget for one sub-agent run (15 minutes; paused during approval waits). */
 const DEFAULT_SUBAGENT_TIMEOUT_MS = 900_000;
+/** Tighter default budget for unattended routine sub-agents so a stuck tool cannot block a schedule. */
+const UNATTENDED_SUBAGENT_TIMEOUT_MS = 180_000;
 const MAX_SUBAGENT_TIMEOUT_MS = 1_800_000;
 const MAX_PARTIAL_SUMMARY_CHARS = 8_000;
 const MAX_SUBAGENT_TURNS = 30;
@@ -129,6 +131,11 @@ export type SubagentSpawnInput = {
   readonly timeoutMs?: number;
   /** Optional model override (e.g. lightweight triage model); defaults to manager's defaultModel. */
   readonly model?: { readonly provider: string; readonly modelId: string };
+  /**
+   * True when spawned by an unattended background routine: sensitive tool calls fail fast instead
+   * of suspending for interactive owner approval, and the default timeout is tightly bounded.
+   */
+  readonly unattended?: boolean;
 };
 
 export type SubagentManagerOptions = {
@@ -164,15 +171,22 @@ type ActiveSubagent = {
   readonly promise: Promise<SubagentResult>;
 };
 
-function buildDefaultSubagentPrompt(workingDirectory: string, hasToolSearch: boolean): string {
+function buildDefaultSubagentPrompt(
+  workingDirectory: string,
+  hasToolSearch: boolean,
+  unattended = false,
+): string {
   return [
     "You are a bounded sub-agent executing a delegated task for the main agent.",
     `Your working directory is ${workingDirectory}. Keep file changes inside this workspace unless explicitly approved by the owner.`,
-    "Work independently, use only the tools provided to you, prefer the 'read' tool for inspecting files, and do not ask the user follow-up questions.",
+    "Work independently, use only the tools provided to you, prefer the 'read' tool for inspecting files, prefer web_fetch / exa_search / web_search over running curl/wget via bash, and do not ask the user follow-up questions.",
+    ...(unattended
+      ? ["You are running unattended for a scheduled routine: interactive owner approval is unavailable and any sensitive bash/write call will be denied immediately. Use read-only tools (exa_search, web_search, web_fetch, read, read-only connectors) and never rely on bash curl/wget."]
+      : []),
     ...(hasToolSearch
       ? ["Additional connected tools (connectors, MCP servers, etc.) are loaded on demand: call tool_search with a task description or tool name when you need a tool not in your initial list."]
       : []),
-    "When finished, return a concise, factual summary of what you observed, changed, and verified.",
+    "When finished, return a concise, factual summary of what you observed, changed, and verified. If any source or tool failed, state the failure clearly instead of assuming no updates exist.",
   ].join("\n");
 }
 
@@ -563,20 +577,24 @@ export class SubagentManager {
 
     const controller = new AbortController();
     const startedAt = Date.now();
+    const unattended = input.unattended === true;
     const requestedTimeout = input.timeoutMs;
+    const defaultTimeout = unattended ? UNATTENDED_SUBAGENT_TIMEOUT_MS : DEFAULT_SUBAGENT_TIMEOUT_MS;
+    const timeoutCap = unattended ? UNATTENDED_SUBAGENT_TIMEOUT_MS : MAX_SUBAGENT_TIMEOUT_MS;
     const timeoutMs =
       requestedTimeout !== undefined && Number.isFinite(requestedTimeout) && requestedTimeout > 0
-        ? Math.min(Math.trunc(requestedTimeout), MAX_SUBAGENT_TIMEOUT_MS)
-        : DEFAULT_SUBAGENT_TIMEOUT_MS;
+        ? Math.min(Math.trunc(requestedTimeout), timeoutCap)
+        : defaultTimeout;
 
     const promise = this.runIsolated({
       id,
       task,
-      systemPrompt: input.systemPrompt?.trim() || buildDefaultSubagentPrompt(runCwd, toolPlan.hasToolSearch),
+      systemPrompt: input.systemPrompt?.trim() || buildDefaultSubagentPrompt(runCwd, toolPlan.hasToolSearch, unattended),
       extensions: toolPlan.extensions,
       runCwd,
       holdsWriteLock,
       timeoutMs,
+      unattended,
       controller,
       ...(input.model === undefined ? {} : { model: input.model }),
     });
@@ -793,10 +811,11 @@ export class SubagentManager {
     readonly runCwd: string;
     readonly holdsWriteLock: boolean;
     readonly timeoutMs: number;
+    readonly unattended: boolean;
     readonly controller: AbortController;
     readonly model?: { readonly provider: string; readonly modelId: string };
   }): Promise<SubagentResult> {
-    const { id, task, systemPrompt, extensions, runCwd, holdsWriteLock, timeoutMs, controller, model } = params;
+    const { id, task, systemPrompt, extensions, runCwd, holdsWriteLock, timeoutMs, unattended, controller, model } = params;
     const effectiveModel = model ?? this.defaultModel;
     const startedAt = Date.now();
     const dbPath = join(this.subagentsDir, `${id}.sqlite`);
@@ -844,7 +863,7 @@ export class SubagentManager {
         onToolLifecycle: ({ phase, tool }) => {
           this.updateActiveState(id, { currentTool: phase === "start" ? tool : null });
         },
-        ...(approvals === undefined ? {} : {
+        ...(approvals === undefined && !unattended ? {} : {
           approvals: async ({ tool, args, record, signal }) => {
             const evaluation = evaluateSensitiveOperation(tool, args, record, {
               workspace: this.workspace,
@@ -853,6 +872,12 @@ export class SubagentManager {
               workspaceWriteAllowed: holdsWriteLock,
             });
             if (!evaluation.sensitive) return { allowed: true };
+            if (unattended || approvals === undefined) {
+              return {
+                allowed: false,
+                reason: `Unattended routine sub-agent cannot wait for interactive owner approval (${evaluation.reason}). Use non-interactive tools such as exa_search, web_search, web_fetch, or read instead of bash curl/mutating commands.`,
+              };
+            }
             this.updateActiveState(id, { status: "waiting_approval", currentTool: tool });
             try {
               return await approvals.requestApproval({

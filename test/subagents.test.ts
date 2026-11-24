@@ -819,3 +819,121 @@ test("SubagentManager enforces maxConcurrent cap and returns structured error vi
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("Unattended routine sub-agents fail-fast sensitive bash calls without queuing approvals", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-subagents-unattended-"));
+  const workspace = join(dir, "workspace");
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "m1" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const approvals = new ApprovalService({ dbPath: ":memory:", log: () => {} });
+  const manager = new SubagentManager({
+    dataDir: dir,
+    workspace,
+    models,
+    defaultModel: { provider: "faux", modelId: "m1" },
+    approvals,
+    log: () => {},
+  });
+
+  try {
+    let deniedToolMessage = "";
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("bash", { command: "curl -s https://example.com" })], { stopReason: "toolUse" }),
+      (ctx) => {
+        deniedToolMessage = JSON.stringify(ctx.messages.at(-1));
+        return fauxAssistantMessage("Fallback summary without bash curl.");
+      },
+    ]);
+
+    const ext = createSubagentExtension(manager, {
+      isUnattendedConversation: (conversationId) => conversationId === "99",
+    });
+    const spawnTool = ext.tools!.find((t) => t.name === "spawn_subagent")!;
+    const out = await spawnTool.execute(
+      { task: "Research latest releases", mode: "wait" },
+      { conversationId: 99, taskId: 1, callId: "call-unattended" } as ToolExecutionApi,
+      BACKGROUND_CONTEXT,
+    );
+
+    assert.equal(approvals.listPending().length, 0, "unattended routine sub-agent must never queue interactive approvals");
+    assert.match(deniedToolMessage, /Unattended routine sub-agent cannot wait for interactive owner approval/);
+    const structured = out.structuredOutput as { mode: string; result: { status: string; summary: string } };
+    assert.equal(structured.mode, "wait");
+    assert.equal(structured.result.status, "completed");
+    assert.match(structured.result.summary, /Fallback summary/);
+  } finally {
+    approvals.close();
+    await manager.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("wait_subagent attaches incompleteWarning when any sub-agent fails or is cancelled", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aster-subagents-incomplete-"));
+  const workspace = join(dir, "workspace");
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "m1" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+
+  let releaseSlow: (() => void) | undefined;
+  const slowExt = defineExtension({
+    name: "slow-test",
+    tools: [
+      defineTool({
+        name: "slow_probe",
+        description: "Blocks until cancelled",
+        parameters: obj({}),
+        replay: "safe",
+        execute: async (_args, _api, ctx) => {
+          await new Promise<void>((resolve) => {
+            releaseSlow = resolve;
+            ctx.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          return { output: [{ type: "text", text: "done" }] };
+        },
+      }),
+    ],
+  });
+
+  const manager = new SubagentManager({
+    dataDir: dir,
+    workspace,
+    models,
+    defaultModel: { provider: "faux", modelId: "m1" },
+    extensions: [CodingTools, personalTools, slowExt],
+    log: () => {},
+  });
+
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("slow_probe", {})], { stopReason: "toolUse" }),
+    ]);
+
+    const spawned = await manager.spawn({
+      task: "Check Anthropic news",
+      tools: ["slow_probe"],
+      mode: "background",
+    });
+    assert.equal(spawned.mode, "background");
+    await manager.cancel(spawned.id);
+
+    const ext = createSubagentExtension(manager);
+    const waitTool = ext.tools!.find((t) => t.name === "wait_subagent")!;
+    const out = await waitTool.execute(
+      { ids: [spawned.id] },
+      { conversationId: 1, taskId: 2, callId: "call-wait-cancelled" } as ToolExecutionApi,
+      BACKGROUND_CONTEXT,
+    );
+    const payload = out.structuredOutput as {
+      failedIds?: string[];
+      incompleteWarning?: string;
+    };
+    assert.deepEqual(payload.failedIds, [spawned.id]);
+    assert.match(payload.incompleteWarning ?? "", /Do NOT treat missing results as 'no updates'/);
+  } finally {
+    releaseSlow?.();
+    await manager.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

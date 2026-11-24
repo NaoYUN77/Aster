@@ -1,4 +1,10 @@
-import type { MessageModel, MessageRole, ModelUsage, UiMessage } from "@/api/types";
+import type {
+  HostMessageSource,
+  MessageModel,
+  MessageRole,
+  ModelUsage,
+  UiMessage,
+} from "@/api/types";
 import type { OutgoingMessage, OutgoingStatus, RequestFailure } from "@/store/chat";
 
 export type DisplayStatus = OutgoingStatus | "complete";
@@ -15,6 +21,7 @@ export type DisplayMessage = {
   errorCode: string | null;
   errorMessage: string | null;
   tool: { name: string; status: "done" | "failed" } | null;
+  hostSource?: HostMessageSource | null;
   usage?: ModelUsage;
   local: boolean;
   /** 本轮运行中的插话（steer），用于用户气泡上的「插话 · 本轮」标记。 */
@@ -48,6 +55,7 @@ function mergeMessage(historyMessage: UiMessage, liveMessage: UiMessage): UiMess
     model: historyMessage.model ?? liveMessage.model ?? null,
     tool: historyMessage.tool ?? liveMessage.tool ?? null,
     errorCode: historyMessage.errorCode ?? liveMessage.errorCode ?? null,
+    hostSource: historyMessage.hostSource ?? liveMessage.hostSource ?? null,
   };
 }
 
@@ -146,6 +154,7 @@ export function buildDisplayMessages(
       errorCode,
       errorMessage,
       tool: message.tool ?? null,
+      hostSource: message.hostSource ?? null,
       usage: usageInfo,
       local: false,
       steer: message.requestId?.startsWith("steer:") === true,

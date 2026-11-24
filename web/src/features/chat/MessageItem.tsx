@@ -1,4 +1,4 @@
-import { Clock3, RotateCcw, Square } from "lucide-react";
+import { Bell, CalendarClock, Clock3, Radar, RotateCcw, Square } from "lucide-react";
 import asterIdleUrl from "@/assets/companion/aster-idle.png";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -65,8 +65,38 @@ export function MessageItem({
 
   if (message.role === "system") {
     if (message.text.trim() === "") return null;
+    const sourceMeta =
+      message.hostSource === "routine"
+        ? { label: "定时任务", Icon: CalendarClock }
+        : message.hostSource === "watch"
+          ? { label: "监控动态", Icon: Radar }
+          : { label: "自动提醒", Icon: Bell };
+    const SourceIcon = sourceMeta.Icon;
     return (
-      <p className="my-2 text-center text-xs text-muted-foreground">{message.text}</p>
+      <div className="flex items-start gap-2.5 animate-fade-up sm:gap-3">
+        <img
+          src={asterIdleUrl}
+          alt="Aster"
+          className="mt-0.5 size-7 shrink-0 select-none object-contain sm:size-8"
+          draggable={false}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="max-w-full rounded-2xl border border-border/80 bg-secondary/55 px-3.5 py-2.5 text-foreground sm:max-w-[92%]">
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <Badge variant="outline" className="gap-1 rounded-full bg-card/80 px-2 py-0.5 text-[11px] font-medium text-primary">
+                <SourceIcon className="size-3" />
+                {sourceMeta.label}
+              </Badge>
+            </div>
+            <Markdown text={message.text} />
+          </div>
+          {message.createdAt > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+              <span className="font-mono">{formatTime(message.createdAt)}</span>
+            </div>
+          )}
+        </div>
+      </div>
     );
   }
 

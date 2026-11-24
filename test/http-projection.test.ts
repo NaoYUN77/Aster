@@ -90,6 +90,7 @@ test("host notifications become system rows without a model or request id", () =
     model: null,
     errorCode: null,
     tool: null,
+    hostSource: "reminder",
   });
   assert.equal(projectEntry(entry(11, WEB_HOST_MESSAGE_KIND, { data: { text: "  " } })), undefined);
   assert.equal(projectEntry(entry(12, WEB_HOST_MESSAGE_KIND, { data: {} })), undefined);

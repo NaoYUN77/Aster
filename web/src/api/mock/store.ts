@@ -1614,7 +1614,8 @@ export function mockFlushWatchDigest(): { count: number; text: string } {
   mockAutomations.digestItems = [];
   const msg: UiMessage = {
     id: `host_digest_${Date.now()}`,
-    role: "assistant",
+    role: "system",
+    hostSource: "watch",
     text,
     createdAt: Date.now(),
     status: "complete",

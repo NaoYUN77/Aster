@@ -15,9 +15,9 @@ const SUBAGENT_GOVERNANCE = {
  */
 export function buildSubagentsPromptSection(maxConcurrent: number): string {
   return [
-    "Sub-agent delegation: before executing a complex request yourself, decide whether to delegate to isolated sub-agents via spawn_subagent.",
+    "Sub-agent delegation: before executing a complex request or standing routine yourself, decide whether to delegate to isolated sub-agents via spawn_subagent.",
     "ALWAYS delegate FIRST (before running searches or multi-file reads yourself) when:",
-    "- The user asks to compare, research, or evaluate 2+ distinct frameworks, products, topics, sources, or codebase modules (e.g. comparing A, B, and C, or auditing multiple modules): spawn 2-4 parallel mode='background' sub-agents in your first tool turn rather than running serial searches in the main conversation.",
+    "- The user asks — or a standing routine brief requires — comparing, researching, or evaluating 2+ distinct frameworks, products, topics, sources, or codebase modules (e.g. comparing A, B, and C, gathering news from multiple sources, or auditing multiple modules): spawn 2-4 parallel mode='background' sub-agents in your first tool turn rather than running serial searches in the main conversation.",
     "- Heavy multi-step web research, log inspection, or wide file exploration (4+ tool calls) would bloat the main conversation while you only need a concise synthesized result.",
     "- A well-scoped, self-contained implementation or code review can run independently (set allowWrite=true only when edits are required; keep at most one writer active at a time).",
     "Do NOT delegate when:",
@@ -47,7 +47,18 @@ function buildSpawnDescription(manager: SubagentManager): string {
   );
 }
 
-export function createSubagentExtension(manager: SubagentManager) {
+const INCOMPLETE_SUBAGENT_WARNING =
+  "One or more sub-agents failed, timed out, or were cancelled. Do NOT treat missing results as 'no updates' or 'no releases'; explicitly report which source(s)/subtask(s) failed or were incomplete.";
+
+export type SubagentExtensionOptions = {
+  /** Returns true when the calling conversation is an unattended background routine/dreaming run. */
+  readonly isUnattendedConversation?: (conversationId: string) => boolean;
+};
+
+export function createSubagentExtension(
+  manager: SubagentManager,
+  options: SubagentExtensionOptions = {},
+) {
   const spawnSubagent: GovernedTool = {
     ...defineTool({
       name: "spawn_subagent",
@@ -63,12 +74,20 @@ export function createSubagentExtension(manager: SubagentManager) {
         timeoutMs: opt(num({ description: "Optional execution timeout in milliseconds (defaults to 900000 ms / 15 min, max 1800000 ms; paused while waiting for approval)." })),
       }),
       replay: "unsafe",
-      execute: async (args, _api, context) => {
+      execute: async (args, api, context) => {
         try {
-          const spawned = await manager.spawn(args, context.abortSignal);
+          const unattended = options.isUnattendedConversation?.(String(api.conversationId)) === true;
+          const spawned = await manager.spawn({
+            ...args,
+            ...(unattended ? { unattended: true } : {}),
+          }, context.abortSignal);
+          const payload =
+            spawned.mode === "wait" && spawned.result.status !== "completed"
+              ? { ...spawned, incompleteWarning: INCOMPLETE_SUBAGENT_WARNING }
+              : spawned;
           return {
-            output: [{ type: "text", text: JSON.stringify(spawned, null, 2) }],
-            structuredOutput: spawned,
+            output: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+            structuredOutput: payload,
           };
         } catch (error) {
           if (error instanceof SubagentInvalidToolsError) {
@@ -127,9 +146,15 @@ export function createSubagentExtension(manager: SubagentManager) {
         const pendingIds = results
           .filter((item) => item.status === "running" || item.status === "waiting_approval")
           .map((item) => item.id);
+        const failedIds = results
+          .filter((item) => item.status === "failed" || item.status === "cancelled")
+          .map((item) => item.id);
         const payload = {
           results,
           ...(pendingIds.length > 0 ? { pendingIds, timedOut: true } : {}),
+          ...(failedIds.length > 0
+            ? { failedIds, incompleteWarning: INCOMPLETE_SUBAGENT_WARNING }
+            : {}),
         };
         return {
           output: [{ type: "text", text: JSON.stringify(payload, null, 2) }],

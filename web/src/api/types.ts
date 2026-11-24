@@ -1,11 +1,15 @@
 import type { components } from "./schema";
 
+export type HostMessageSource = "reminder" | "watch" | "routine";
+
 /**
  * 历史/SSE 消息。
- * `clientMessageId` 是契约可选字段：旧服务端不返回，客户端按缺失处理，
+ * `clientMessageId` / `hostSource` 是契约可选字段：旧服务端不返回，客户端按缺失处理，
  * 合并 live/history 与本地乐观消息去重时都要兼容。
  */
-export type UiMessage = components["schemas"]["UiMessage"];
+export type UiMessage = components["schemas"]["UiMessage"] & {
+  hostSource?: HostMessageSource | null;
+};
 export type MessageRole = NonNullable<UiMessage["role"]>;
 export type MessageStatus = NonNullable<UiMessage["status"]>;
 export type MessagePage = components["schemas"]["MessagePage"];
