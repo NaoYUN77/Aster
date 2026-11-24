@@ -53,6 +53,7 @@ const uiMessageSchema = z.object({
   tool: z
     .object({ name: z.string(), status: z.enum(["done", "failed"]) })
     .nullish(),
+  hostSource: z.enum(["reminder", "watch", "routine"]).nullish(),
 });
 
 const queuedRequestSchema = z.object({

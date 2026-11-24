@@ -15,9 +15,9 @@ const SUBAGENT_GOVERNANCE = {
  */
 export function buildSubagentsPromptSection(maxConcurrent: number): string {
   return [
-    "Sub-agent delegation: before executing a complex request yourself, decide whether to delegate to isolated sub-agents via spawn_subagent.",
+    "Sub-agent delegation: before executing a complex request or standing routine yourself, decide whether to delegate to isolated sub-agents via spawn_subagent.",
     "ALWAYS delegate FIRST (before running searches or multi-file reads yourself) when:",
-    "- The user asks to compare, research, or evaluate 2+ distinct frameworks, products, topics, sources, or codebase modules (e.g. comparing A, B, and C, or auditing multiple modules): spawn 2-4 parallel mode='background' sub-agents in your first tool turn rather than running serial searches in the main conversation.",
+    "- The user asks — or a standing routine brief requires — comparing, researching, or evaluating 2+ distinct frameworks, products, topics, sources, or codebase modules (e.g. comparing A, B, and C, gathering news from multiple sources, or auditing multiple modules): spawn 2-4 parallel mode='background' sub-agents in your first tool turn rather than running serial searches in the main conversation.",
     "- Heavy multi-step web research, log inspection, or wide file exploration (4+ tool calls) would bloat the main conversation while you only need a concise synthesized result.",
     "- A well-scoped, self-contained implementation or code review can run independently (set allowWrite=true only when edits are required; keep at most one writer active at a time).",
     "Do NOT delegate when:",

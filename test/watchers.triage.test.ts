@@ -60,6 +60,7 @@ test("Quiet Hours, Digest schedule, model ref, and readWatchersConfig parsing", 
 
   // Model ref parser
   assert.deepEqual(resolveTriageModelRef("openai/gpt-4.1-mini", "deepseek"), { provider: "openai", modelId: "gpt-4.1-mini" });
+  assert.deepEqual(resolveTriageModelRef("openrouter:deepseek/deepseek-chat", "deepseek"), { provider: "openrouter", modelId: "deepseek/deepseek-chat" });
   assert.deepEqual(resolveTriageModelRef("deepseek-chat", "deepseek"), { provider: "deepseek", modelId: "deepseek-chat" });
   assert.equal(resolveTriageModelRef("", "deepseek"), undefined);
 
@@ -214,8 +215,8 @@ test("Batch Sub-agent triage locks tools to read-only, injects MEMORY.md prefere
 
     // All 3 events from the same watcher must be batched into 1 Sub-agent call!
     assert.equal(triageCalls, 1);
-    // Strict read-only lock cage: ONLY web_fetch + current_time (NO read, NO bash, NO write, NO tool_search).
-    assert.deepEqual(seenTools, ["current_time", "web_fetch"]);
+    // Strict read-only lock cage: only granted read-only web/time tools (NO read, NO bash, NO write, NO tool_search).
+    assert.deepEqual(seenTools, ["current_time", "web_fetch", "web_search"]);
     // Owner preferences and custom filter injected safely.
     assert.match(seenPromptText, /<owner-preferences>/);
     assert.match(seenPromptText, /AI Agent architecture and security releases/);

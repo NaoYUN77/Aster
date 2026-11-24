@@ -12,8 +12,8 @@ import { MODEL_INCOMPATIBLE_MESSAGE, MODEL_UNAVAILABLE_MESSAGE } from "../model-
 
 /**
  * A host-initiated notification (reminder, watch event, routine result). It is a durable entry so it
- * appears in history in order and survives a restart; it carries no model messages, so it never
- * enters the model's context.
+ * appears in history in order, survives a restart, and carries a fenced model context message so the
+ * main agent is aware of what was delivered to the owner.
  */
 export const WEB_HOST_MESSAGE_KIND = "web.host-message";
 
@@ -31,6 +31,8 @@ export type UiMessage = {
   readonly model: { readonly id: string; readonly label: string; readonly provider: string } | null;
   readonly errorCode: string | null;
   readonly tool: { readonly name: string; readonly status: "done" | "failed" } | null;
+  /** Present on host-initiated deliveries (`reminder` | `watch` | `routine`) so the UI renders a clear source badge. */
+  readonly hostSource?: HostMessageSource | null;
 };
 
 export type HistoryPage = {
@@ -143,6 +145,10 @@ function projectHostMessage(entry: EntryRecord): UiMessage | undefined {
   const createdAt = typeof data.createdAt === "number" && Number.isFinite(data.createdAt)
     ? data.createdAt
     : 0;
+  const hostSource: HostMessageSource | null =
+    data.source === "reminder" || data.source === "watch" || data.source === "routine"
+      ? data.source
+      : null;
   return {
     id: String(entry.id),
     role: "system",
@@ -154,6 +160,7 @@ function projectHostMessage(entry: EntryRecord): UiMessage | undefined {
     model: null,
     errorCode: null,
     tool: null,
+    ...(hostSource === null ? {} : { hostSource }),
   };
 }
 

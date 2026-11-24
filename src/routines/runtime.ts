@@ -97,8 +97,10 @@ export function createRoutines(options: RoutinesRuntimeOptions): RoutinesRuntime
       ? `【立即运行】${localStamp(instant, routine.timezone)} (${routine.timezone})`
       : `【定时运行】${localStamp(instant, routine.timezone)} (${routine.timezone})`;
     const report = routine.delivery === "report"
-      ? `如果没有需要告知主人的内容，只回复 ${NO_REPORT}，不要写别的内容。`
-      : "把最终结果写成要直接发给主人的一段纯文本。";
+      ? (run.trigger === "manual"
+          ? `如果没有需要告知主人的内容，只回复 ${NO_REPORT}；否则请先调用实时工具（必要时用 spawn_subagent 并行调研）获取最新结果并给出清晰汇报。`
+          : `如果没有需要告知主人的内容，只回复 ${NO_REPORT}，不要写别的内容。`)
+      : "请主动调用可用工具（如联网搜索、Exa、连接器或 spawn_subagent 并行调研）获取最新事实，再把最终结果写成要直接发给主人的一段清晰文本。";
     return `${header}
 这是常驻任务「${routine.title}」的自动执行。主人此刻不在对话中，不会回答你的问题；请独立完成，不要提问。
 ${report}`;

@@ -89,3 +89,37 @@ describe("MessageItem 插话标记", () => {
     expect(html).not.toContain("插话 · 本轮");
   });
 });
+
+describe("MessageItem 后台任务与提醒卡片", () => {
+  it("定时任务与监控动态以清晰卡片和来源标签渲染", () => {
+    const routineHtml = renderToStaticMarkup(
+      <MessageItem
+        message={displayMessage({
+          id: "sys-1",
+          role: "system",
+          hostSource: "routine",
+          text: "今日 AI 简报：Model X 发布",
+          createdAt: 1_760_000_000_000,
+        })}
+        onRetry={() => {}}
+      />,
+    );
+    expect(routineHtml).toContain("定时任务");
+    expect(routineHtml).toContain("今日 AI 简报：Model X 发布");
+
+    const watchHtml = renderToStaticMarkup(
+      <MessageItem
+        message={displayMessage({
+          id: "sys-2",
+          role: "system",
+          hostSource: "watch",
+          text: "GitHub CI 通过",
+          createdAt: 1_760_000_000_000,
+        })}
+        onRetry={() => {}}
+      />,
+    );
+    expect(watchHtml).toContain("监控动态");
+    expect(watchHtml).toContain("GitHub CI 通过");
+  });
+});

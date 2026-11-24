@@ -257,8 +257,12 @@ export function useChatEvents(): void {
         }
 
         case "host.message": {
-          useChatStore.getState().addLiveMessage(event.message);
-          const title = hostMessageTitle(event.source);
+          const source = event.source ?? event.message.hostSource ?? undefined;
+          useChatStore.getState().addLiveMessage({
+            ...event.message,
+            ...(source ? { hostSource: source } : {}),
+          });
+          const title = hostMessageTitle(source);
           const body = event.message.text || "收到一条新提醒";
           if (isAppInForeground()) {
             toast(title, {
